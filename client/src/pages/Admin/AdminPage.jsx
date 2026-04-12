@@ -5,11 +5,11 @@ import toast from 'react-hot-toast'
 const C = { accent:'#4f7ef5', accent2:'#7c5cfc', green:'#22d3a0', red:'#f5534f', amber:'#f5a623', cyan:'#22d3ee', text:'#e8eaf2', text2:'#8b90aa', text3:'#555a72' }
 
 const TABS = [
-  { id:'devices',  label:'Devices',     icon:'??' },
-  { id:'sites',    label:'Sites',       icon:'??' },
-  { id:'users',    label:'Users',       icon:'??' },
-  { id:'alerts',   label:'Alert Rules', icon:'??' },
-  { id:'system',   label:'System',      icon:'??' },
+  { id:'devices',  label:'Devices',     icon:'🖥' },
+  { id:'sites',    label:'Sites',       icon:'🏢' },
+  { id:'users',    label:'Users',       icon:'👥' },
+  { id:'alerts',   label:'Alert Rules', icon:'🔔' },
+  { id:'system',   label:'System',      icon:'⚙️' },
 ]
 
 function Modal({ title, onClose, children }) {
@@ -211,10 +211,10 @@ export default function AdminPage() {
                   <Badge label={s.active ? 'active' : 'inactive'} />
                 </div>
                 <div style={{ padding:'14px 16px', display:'flex', flexDirection:'column', gap:8 }}>
-                  <div style={{ fontSize:12, color:C.text2, fontFamily:'var(--mono)' }}>?? {s.location||'No location set'}</div>
-                  <div style={{ fontSize:11, color:C.text3, fontFamily:'var(--mono)' }}>{s.description||'No description'}</div>
-                  <div style={{ fontSize:11, color:C.text3, fontFamily:'var(--mono)' }}>?? {s.timezone||'UTC'}</div>
-                  {s.ipRanges?.length > 0 && <div style={{ fontSize:11, color:C.accent, fontFamily:'var(--mono)' }}>?? {s.ipRanges.join(', ')}</div>}
+                  <div style={{ fontSize:12, color:C.text2, fontFamily:'var(--mono)' }}>📍 {s.location||'No location set'}</div>
+                  <div style={{ fontSize:11, color:C.text3, fontFamily:'var(--mono)' }}>📝 {s.description||'No description'}</div>
+                  <div style={{ fontSize:11, color:C.text3, fontFamily:'var(--mono)' }}>🕐 {s.timezone||'UTC'}</div>
+                  {s.ipRanges?.length > 0 && <div style={{ fontSize:11, color:C.accent, fontFamily:'var(--mono)' }}>🌐 {s.ipRanges.join(', ')}</div>}
                   <div style={{ display:'flex', gap:6, marginTop:4 }}>
                     <Btn label="Edit" small onClick={()=>openEdit('sites',s)} />
                     <Btn label="Delete" small danger onClick={()=>remove('sites',s._id,s.name)} />
