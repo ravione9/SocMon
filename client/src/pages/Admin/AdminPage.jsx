@@ -5,11 +5,11 @@ import toast from 'react-hot-toast'
 const C = { accent:'#4f7ef5', accent2:'#7c5cfc', green:'#22d3a0', red:'#f5534f', amber:'#f5a623', cyan:'#22d3ee', text:'#e8eaf2', text2:'#8b90aa', text3:'#555a72' }
 
 const TABS = [
-  { id:'devices',  label:'Devices',     icon:'' },
-  { id:'sites',    label:'Sites',       icon:'' },
-  { id:'users',    label:'Users',       icon:'' },
-  { id:'alerts',   label:'Alert Rules', icon:'' },
-  { id:'system',   label:'System',      icon:'' },
+  { id:'devices',  label:'Devices',     icon:'??' },
+  { id:'sites',    label:'Sites',       icon:'??' },
+  { id:'users',    label:'Users',       icon:'??' },
+  { id:'alerts',   label:'Alert Rules', icon:'??' },
+  { id:'system',   label:'System',      icon:'??' },
 ]
 
 function Modal({ title, onClose, children }) {
@@ -488,4 +488,7 @@ export default function AdminPage() {
     </div>
   )
 }
+
+
+
 
