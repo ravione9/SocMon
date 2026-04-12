@@ -12,6 +12,7 @@ import { connectRedis } from './config/redis.js'
 import { initWebSocket } from './services/websocket.js'
 import { startAlertEngine } from './services/alertEngine.js'
 import authRoutes from './routes/auth.js'
+import userRoutes from './routes/users.js'
 import deviceRoutes from './routes/devices.js'
 import siteRoutes from './routes/sites.js'
 import ticketRoutes from './routes/tickets.js'
@@ -35,6 +36,7 @@ app.use(morgan('dev'))
 app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }))
 
 app.use('/api/auth',    authRoutes)
+app.use('/api/users',   userRoutes)
 app.use('/api/devices', deviceRoutes)
 app.use('/api/sites',   siteRoutes)
 app.use('/api/tickets', ticketRoutes)
@@ -58,3 +60,5 @@ async function start() {
 }
 
 start().catch(console.error)
+
+
