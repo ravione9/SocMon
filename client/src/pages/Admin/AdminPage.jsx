@@ -260,7 +260,7 @@ export default function AdminPage() {
                       <TD>{u.email}</TD>
                       <TD><Badge label={u.role} /></TD>
                       <TD><Badge label={u.active ? 'active' : 'inactive'} /></TD>
-                      <TD color={C.text3}>{u.lastLogin ? new Date(u.lastLogin).toLocaleString() : 'Never'}</TD>
+                      <TD color={C.text3}>{u.lastLogin ? new Date(u.lastLogin).toLocaleString('en', { timeZoneName:'short' }) : 'Never'}</TD>
                       <td style={{ padding:'8px 12px', borderBottom:'1px solid rgba(99,120,200,0.07)' }}>
                         <div style={{ display:'flex', gap:6 }}>
                           <Btn label="Edit" small onClick={()=>openEdit('users',u)} />
@@ -296,7 +296,7 @@ export default function AdminPage() {
                       <Badge label={a.source} />
                     </div>
                     <div style={{ fontSize:11, color:C.text3, fontFamily:'var(--mono)' }}>{a.description||'No description'}</div>
-                    {a.lastFired && <div style={{ fontSize:10, color:C.amber, fontFamily:'var(--mono)', marginTop:2 }}>Last fired: {new Date(a.lastFired).toLocaleString()}</div>}
+                    {a.lastFired && <div style={{ fontSize:10, color:C.amber, fontFamily:'var(--mono)', marginTop:2 }}>Last fired: {new Date(a.lastFired).toLocaleString('en', { timeZoneName:'short' })}</div>}
                   </div>
                   <div style={{ display:'flex', gap:6, flexShrink:0 }}>
                     <Btn label={a.enabled ? 'Disable' : 'Enable'} small color={a.enabled ? 'amber' : 'green'}

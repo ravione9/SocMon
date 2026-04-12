@@ -25,7 +25,7 @@ function KPI({ label, value, sub, delta, color }) {
   return (
     <div className={`kpi ${color}`} style={{ minWidth:0 }}>
       <div style={{ fontSize:10, fontWeight:600, color:C.text3, letterSpacing:1, textTransform:'uppercase', marginBottom:6, fontFamily:'var(--mono)' }}>{label}</div>
-      <div style={{ fontSize:24, fontWeight:700, lineHeight:1, marginBottom:4, color: colors[color] || C.accent }}>{value ?? '—'}</div>
+      <div style={{ fontSize:24, fontWeight:700, lineHeight:1, marginBottom:4, color: colors[color] || C.accent }}>{value ?? 'ï¿½'}</div>
       <div style={{ fontSize:10, color:C.text3, fontFamily:'var(--mono)' }}>{sub}</div>
       {delta && <div style={{ fontSize:10, fontFamily:'var(--mono)', color: delta.startsWith('+') ? C.red : C.green }}>{delta}</div>}
     </div>
@@ -73,9 +73,22 @@ function sevClass(s) {
   return m[(s||'').toLowerCase()] || 'blue'
 }
 
+// Normalise raw FortiGate/Cisco syslog severity labels â†’ filter category
+// FortiGate: emergency(0) alert(1) critical(2) error(3) warning(4) notification(5) information(6) debug(7)
+// Cisco:     emergency alert critical error warning notice notification informational debugging
+function getSevCategory(e) {
+  const raw = (e.syslog_severity_label || e.cisco_severity_label || '').toLowerCase()
+  if (!raw) return e['fgt.subtype'] === 'ips' || e.fgt?.subtype === 'ips' ? 'high' : 'info'
+  if (['critical','emergency','alert'].some(x => raw.includes(x))) return 'critical'
+  if (['error'].some(x => raw.includes(x)))                         return 'high'
+  if (['warning','warn'].some(x => raw.includes(x)))                return 'medium'
+  if (['notice','notification'].some(x => raw.includes(x)))         return 'low'
+  return 'info'
+}
+
 export default function SOCPage() {
   const [tab, setTab]           = useState('overview')
-  const [range, setRange]       = useState('24h')
+  const [range, setRange] = useState({ type:'preset', value:'24h', label:'24h' })
   const [stats, setStats]       = useState(null)
   const [timeline, setTimeline] = useState([])
   const [threats, setThreats]   = useState([])
@@ -96,8 +109,8 @@ export default function SOCPage() {
     async function load() {
       try {
         const [s,t,th,d,e,se] = await Promise.all([
-          api.get(`/api/stats/soc?range=${range && range.value ? range.value : range}&from=${range && range.from ? range.from : ''}&to=${range && range.to ? range.to : ''}`),
-          api.get(`/api/logs/traffic/timeline?range=${range && range.value ? range.value : range}&from=${range && range.from ? range.from : ''}&to=${range && range.to ? range.to : ''}`),
+          api.get(`/api/stats/soc?range=${range?.value||''}&from=${range?.from||''}&to=${range?.to||''}`),
+          api.get(`/api/logs/traffic/timeline?range=${range?.value||''}&from=${range?.from||''}&to=${range?.to||''}`),
           api.get('/api/logs/threats/top'),
           api.get('/api/logs/denied'),
           api.get('/api/logs/events/recent?size=50'),
@@ -113,26 +126,32 @@ export default function SOCPage() {
   }, [range])
 
   const allEvents = [...liveEvents,...events].slice(0,100)
-  const filteredEvents = sevFilter === 'all' ? allEvents : allEvents.filter(e => {
-    const s = (e.syslog_severity_label || e.cisco_severity_label || '').toLowerCase()
-    return s === sevFilter
-  })
+  const filteredEvents = sevFilter === 'all' ? allEvents : allEvents.filter(e => getSevCategory(e) === sevFilter)
+
+  const rv = range?.value || '24h'
+  const isShort = rv === '15m' || rv === '1h'
+  const timeFmt = isShort
+    ? { hour:'2-digit', minute:'2-digit' }
+    : rv === '3d' || rv === '7d' || rv === '30d'
+      ? { month:'short', day:'numeric', hour:'2-digit' }
+      : { hour:'2-digit', minute:'2-digit' }
+  const tickLimit = rv === '15m' ? 15 : rv === '1h' ? 12 : rv === '6h' ? 12 : 8
 
   const timelineData = {
-    labels: timeline.map(d => new Date(d.time).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})),
+    labels: timeline.map(d => new Date(d.time).toLocaleTimeString([], timeFmt)),
     datasets: [
-      { label:'Allowed', data:timeline.map(d=>d.allowed), borderColor:C.green, backgroundColor:'rgba(34,211,160,0.08)', fill:true, tension:0.4, borderWidth:1.5, pointRadius:0 },
-      { label:'Denied',  data:timeline.map(d=>d.denied),  borderColor:C.red,   backgroundColor:'rgba(245,83,79,0.08)',   fill:true, tension:0.4, borderWidth:1.5, pointRadius:0 },
+      { label:'Allowed', data:timeline.map(d=>d.allowed), borderColor:C.green, backgroundColor:'rgba(34,211,160,0.08)', fill:true, tension:0.4, borderWidth:1.5, pointRadius: isShort ? 2 : 0 },
+      { label:'Denied',  data:timeline.map(d=>d.denied),  borderColor:C.red,   backgroundColor:'rgba(245,83,79,0.08)',   fill:true, tension:0.4, borderWidth:1.5, pointRadius: isShort ? 2 : 0 },
     ],
   }
 
   const sevData = {
     labels:['Critical','High','Medium','Low'],
     datasets:[{ data:[
-      allEvents.filter(e=>(e.syslog_severity_label||e.cisco_severity_label||'').toLowerCase()==='critical').length,
-      allEvents.filter(e=>(e.syslog_severity_label||e.cisco_severity_label||'').toLowerCase()==='high').length,
-      allEvents.filter(e=>['medium','notice'].includes((e.syslog_severity_label||e.cisco_severity_label||'').toLowerCase())).length,
-      allEvents.filter(e=>['low','info','informational'].includes((e.syslog_severity_label||e.cisco_severity_label||'').toLowerCase())).length,
+      allEvents.filter(e=>getSevCategory(e)==='critical').length,
+      allEvents.filter(e=>getSevCategory(e)==='high').length,
+      allEvents.filter(e=>getSevCategory(e)==='medium').length,
+      allEvents.filter(e=>getSevCategory(e)==='low').length,
     ], backgroundColor:[C.red,C.amber,C.accent,C.green], borderWidth:0, hoverOffset:4 }]
   }
 
@@ -161,33 +180,24 @@ export default function SOCPage() {
             }}>{t.label}</button>
           ))}
         </div>
-        <div style={{ display:'flex', gap:4 }}>
-          {['1h','6h','24h','7d'].map(r => (
-            <button key={r} onClick={()=>setRange(r)} style={{
-              padding:'4px 10px', borderRadius:6, fontSize:11, fontFamily:'var(--mono)',
-              border:'1px solid var(--border)', cursor:'pointer',
-              background: range===r ? C.accent : 'var(--bg3)',
-              color: range===r ? '#fff' : C.text2,
-            }}>{r}</button>
-          ))}
-        </div>
+        <RangePicker range={range} onChange={setRange} />
       </div>
 
       {/* -- OVERVIEW -- */}
       {tab==='overview' && (
         <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:10 }}>
-            <KPI label="Total Events"     value={stats?.total?.toLocaleString()}   sub={`last ${range}`}           color="blue"   delta={null} />
+            <KPI label="Total Events"     value={stats?.total?.toLocaleString()}   sub={`last ${range?.label||range?.value||'24h'}`}           color="blue"   delta={null} />
             <KPI label="Blocked Sessions" value={stats?.denied?.toLocaleString()}  sub="firewall denied"           color="red"    delta={null} />
             <KPI label="IPS Alerts"       value={stats?.ips?.toLocaleString()}     sub="intrusion attempts"        color="amber"  delta={null} />
-            <KPI label="Allowed Sessions" value={stats ? (stats.total-stats.denied)?.toLocaleString() : '—'} sub="policy permitted" color="green" delta={null} />
+            <KPI label="Allowed Sessions" value={stats ? (stats.total-stats.denied)?.toLocaleString() : 'ï¿½'} sub="policy permitted" color="green" delta={null} />
             <KPI label="UTM Events"       value={stats?.utm?.toLocaleString()}     sub="web/av/dlp/app"            color="cyan"   delta={null} />
             <KPI label="VPN Events"       value={stats?.vpn?.toLocaleString()}     sub="tunnel events"             color="purple" delta={null} />
           </div>
 
           <div style={{ display:'grid', gridTemplateColumns:'2fr 1fr', gap:12 }}>
-            <Card title="SESSION VOLUME TREND" badge={(range && range.label ? range.label : range || '24h').toUpperCase()} height={200}>
-              <Line data={timelineData} options={{ ...co, plugins:{ legend:{ display:true, labels:{ color:C.text2, font:{ size:10 }, boxWidth:10 } } } }} />
+            <Card title="SESSION VOLUME TREND" badge={(range?.label||range?.value||'24h').toUpperCase()} height={200}>
+              <Line data={timelineData} options={{ ...co, plugins:{ legend:{ display:true, labels:{ color:C.text2, font:{ size:10 }, boxWidth:10 } } }, scales:{ ...co.scales, x:{ ...co.scales.x, ticks:{ ...co.scales.x.ticks, maxTicksLimit:tickLimit } } } }} />
             </Card>
             <Card title="SEVERITY BREAKDOWN" badge="ALERTS" badgeClass="red" height={200}>
               <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8, height:200 }}>
@@ -237,7 +247,7 @@ export default function SOCPage() {
                       <div style={{ width:6, height:36, borderRadius:3, flexShrink:0, background: sev==='critical' ? C.red : sev==='high' ? C.amber : C.accent }} />
                       <div style={{ flex:1, minWidth:0 }}>
                         <div style={{ fontSize:12, fontWeight:600, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{msg?.slice(0,50)}</div>
-                        <div style={{ fontSize:10, color:C.text3, fontFamily:'var(--mono)', marginTop:2 }}>{e.site_name} · {e['fgt.subtype']||e.cisco_mnemonic||'event'}</div>
+                        <div style={{ fontSize:10, color:C.text3, fontFamily:'var(--mono)', marginTop:2 }}>{e.site_name} ï¿½ {e['fgt.subtype']||e.cisco_mnemonic||'event'}</div>
                       </div>
                       <div style={{ textAlign:'right', flexShrink:0 }}>
                         <div style={{ fontSize:10, color:C.text3, fontFamily:'var(--mono)' }}>{e['@timestamp'] ? new Date(e['@timestamp']).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : ''}</div>
@@ -258,15 +268,15 @@ export default function SOCPage() {
       {tab==='traffic' && (
         <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:10 }}>
-            <KPI label="Total Sessions" value={stats?.total?.toLocaleString()} sub={`last ${range}`} color="blue" />
+            <KPI label="Total Sessions" value={stats?.total?.toLocaleString()} sub={`last ${range?.label||range?.value||'24h'}`} color="blue" />
             <KPI label="Denied"         value={stats?.denied?.toLocaleString()} sub="blocked" color="red" />
             <KPI label="Allowed"        value={stats ? (stats.total-stats.denied)?.toLocaleString():null} sub="permitted" color="green" />
-            <KPI label="Bytes Out"      value={sessions.length ? (sessions.reduce((a,s)=>(a+(s.fgt?.sentbyte||s['fgt.sentbyte']||0)),0)/1024/1024/1024).toFixed(2)+'GB' : '—'} sub="outbound" color="cyan" />
-            <KPI label="Bytes In"       value={sessions.length ? (sessions.reduce((a,s)=>(a+(s.fgt?.rcvdbyte||s['fgt.rcvdbyte']||0)),0)/1024/1024/1024).toFixed(2)+'GB' : '—'} sub="inbound" color="purple" />
-            <KPI label="Unique Apps"    value={new Set(sessions.map(s=>s.fgt?.app||s['fgt.app'])).size||'—'} sub="applications" color="amber" />
+            <KPI label="Bytes Out"      value={sessions.length ? (sessions.reduce((a,s)=>(a+(s.fgt?.sentbyte||s['fgt.sentbyte']||0)),0)/1024/1024/1024).toFixed(2)+'GB' : 'ï¿½'} sub="outbound" color="cyan" />
+            <KPI label="Bytes In"       value={sessions.length ? (sessions.reduce((a,s)=>(a+(s.fgt?.rcvdbyte||s['fgt.rcvdbyte']||0)),0)/1024/1024/1024).toFixed(2)+'GB' : 'ï¿½'} sub="inbound" color="purple" />
+            <KPI label="Unique Apps"    value={new Set(sessions.map(s=>s.fgt?.app||s['fgt.app'])).size||'ï¿½'} sub="applications" color="amber" />
           </div>
 
-          <Card title="TRAFFIC TIMELINE" badge={(range && range.label ? range.label : range || '24h').toUpperCase()} height={220}>
+          <Card title="TRAFFIC TIMELINE" badge={(range?.label||range?.value||'24h').toUpperCase()} height={220}>
             <Line data={timelineData} options={{ ...co, plugins:{ legend:{ display:true, labels:{ color:C.text2, font:{ size:10 }, boxWidth:10 } } } }} />
           </Card>
 
@@ -312,18 +322,18 @@ export default function SOCPage() {
                       <tr key={i} style={{ borderBottom:'1px solid rgba(99,120,200,0.07)' }}
                         onMouseEnter={el=>el.currentTarget.style.background='var(--bg3)'}
                         onMouseLeave={el=>el.currentTarget.style.background='transparent'}>
-                        <td style={{ padding:'5px 8px', color:C.text3, whiteSpace:'nowrap' }}>{s['@timestamp'] ? new Date(s['@timestamp']).toLocaleTimeString() : '—'}</td>
-                        <td style={{ padding:'5px 8px', color:C.cyan }}>{f('srcip')||'—'}</td>
-                        <td style={{ padding:'5px 8px', color:C.text3 }}>{f('srcport')||'—'}</td>
-                        <td style={{ padding:'5px 8px', color:C.text2 }}>{f('dstip')||'—'}</td>
-                        <td style={{ padding:'5px 8px', color:C.text3 }}>{f('dstport')||'—'}</td>
-                        <td style={{ padding:'5px 8px' }}><span style={{ background:'rgba(79,126,245,0.15)', color:C.accent, padding:'1px 5px', borderRadius:4, fontSize:9 }}>{proto===6?'TCP':proto===17?'UDP':proto===1?'ICMP':proto||'—'}</span></td>
-                        <td style={{ padding:'5px 8px', color:ac, fontWeight:600 }}>{f('action')||'—'}</td>
-                        <td style={{ padding:'5px 8px', color:C.text2 }}>{f('app')||'—'}</td>
-                        <td style={{ padding:'5px 8px', color:C.text3 }}>{f('sentbyte') ? (f('sentbyte')/1024).toFixed(1)+'KB' : '—'}</td>
-                        <td style={{ padding:'5px 8px', color:C.text3 }}>{f('rcvdbyte') ? (f('rcvdbyte')/1024).toFixed(1)+'KB' : '—'}</td>
-                        <td style={{ padding:'5px 8px', color:C.text3 }}>{f('srccountry')||'—'}</td>
-                        <td style={{ padding:'5px 8px', color:C.text3 }}>{s.site_name||'—'}</td>
+                        <td style={{ padding:'5px 8px', color:C.text3, whiteSpace:'nowrap' }}>{s['@timestamp'] ? new Date(s['@timestamp']).toLocaleTimeString() : 'ï¿½'}</td>
+                        <td style={{ padding:'5px 8px', color:C.cyan }}>{f('srcip')||'ï¿½'}</td>
+                        <td style={{ padding:'5px 8px', color:C.text3 }}>{f('srcport')||'ï¿½'}</td>
+                        <td style={{ padding:'5px 8px', color:C.text2 }}>{f('dstip')||'ï¿½'}</td>
+                        <td style={{ padding:'5px 8px', color:C.text3 }}>{f('dstport')||'ï¿½'}</td>
+                        <td style={{ padding:'5px 8px' }}><span style={{ background:'rgba(79,126,245,0.15)', color:C.accent, padding:'1px 5px', borderRadius:4, fontSize:9 }}>{proto===6?'TCP':proto===17?'UDP':proto===1?'ICMP':proto||'ï¿½'}</span></td>
+                        <td style={{ padding:'5px 8px', color:ac, fontWeight:600 }}>{f('action')||'ï¿½'}</td>
+                        <td style={{ padding:'5px 8px', color:C.text2 }}>{f('app')||'ï¿½'}</td>
+                        <td style={{ padding:'5px 8px', color:C.text3 }}>{f('sentbyte') ? (f('sentbyte')/1024).toFixed(1)+'KB' : 'ï¿½'}</td>
+                        <td style={{ padding:'5px 8px', color:C.text3 }}>{f('rcvdbyte') ? (f('rcvdbyte')/1024).toFixed(1)+'KB' : 'ï¿½'}</td>
+                        <td style={{ padding:'5px 8px', color:C.text3 }}>{f('srccountry')||'ï¿½'}</td>
+                        <td style={{ padding:'5px 8px', color:C.text3 }}>{s.site_name||'ï¿½'}</td>
                       </tr>
                     )
                   })}
@@ -342,7 +352,7 @@ export default function SOCPage() {
             <KPI label="IPS Alerts"    value={stats?.ips?.toLocaleString()}  sub="intrusion attempts" color="red"    />
             <KPI label="UTM Events"    value={stats?.utm?.toLocaleString()}  sub="total UTM"          color="amber"  />
             <KPI label="Attack Types"  value={threats.length}                sub="unique attacks"     color="blue"   />
-            <KPI label="Top Attack"    value={threats[0]?.name?.slice(0,12)||'—'} sub="most frequent" color="red"    />
+            <KPI label="Top Attack"    value={threats[0]?.name?.slice(0,12)||'ï¿½'} sub="most frequent" color="red"    />
             <KPI label="Blocked IPs"   value={denied.by_src.length}         sub="unique sources"     color="purple" />
             <KPI label="Countries"     value={denied.by_country.length}      sub="threat origins"     color="cyan"   />
           </div>
@@ -355,7 +365,7 @@ export default function SOCPage() {
               }
             </Card>
             <Card title="THREAT SEVERITY TIMELINE" badge="24H" badgeClass="amber" height={220}>
-              <Line data={timelineData} options={{ ...co, plugins:{ legend:{ display:true, labels:{ color:C.text2, font:{ size:10 }, boxWidth:10 } } } }} />
+              <Line data={timelineData} options={{ ...co, plugins:{ legend:{ display:true, labels:{ color:C.text2, font:{ size:10 }, boxWidth:10 } } }, scales:{ ...co.scales, x:{ ...co.scales.x, ticks:{ ...co.scales.x.ticks, maxTicksLimit:tickLimit } } } }} />
             </Card>
           </div>
 
@@ -388,7 +398,7 @@ export default function SOCPage() {
 
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
             <Card title="AUTH EVENTS TIMELINE" badge="24H" height={220}>
-              <Line data={timelineData} options={{ ...co, plugins:{ legend:{ display:true, labels:{ color:C.text2, font:{ size:10 }, boxWidth:10 } } } }} />
+              <Line data={timelineData} options={{ ...co, plugins:{ legend:{ display:true, labels:{ color:C.text2, font:{ size:10 }, boxWidth:10 } } }, scales:{ ...co.scales, x:{ ...co.scales.x, ticks:{ ...co.scales.x.ticks, maxTicksLimit:tickLimit } } } }} />
             </Card>
             <Card title="AUTH EVENT BREAKDOWN" badge="CISCO" height={220}>
               <Doughnut data={{
@@ -410,7 +420,7 @@ export default function SOCPage() {
                 <div key={i} style={{ display:'flex', gap:10, padding:'8px 14px', borderBottom:'1px solid rgba(99,120,200,0.06)', fontFamily:'var(--mono)', fontSize:11, cursor:'default' }}>
                   <span style={{ color:C.text3, width:70, flexShrink:0 }}>{e['@timestamp'] ? new Date(e['@timestamp']).toLocaleTimeString() : ''}</span>
                   <span className={`badge badge-${sevClass(e.cisco_severity_label)}`} style={{ flexShrink:0 }}>{e.cisco_mnemonic}</span>
-                  <span style={{ color:C.text2, flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{e.cisco_message||'—'}</span>
+                  <span style={{ color:C.text2, flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{e.cisco_message||'ï¿½'}</span>
                   <span style={{ color:C.text3, flexShrink:0 }}>{e.device_name||''}</span>
                 </div>
               ))}
@@ -427,9 +437,9 @@ export default function SOCPage() {
         <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:10 }}>
             <KPI label="Threat Countries" value={denied.by_country.length}                      sub="unique origins"      color="red"    />
-            <KPI label="Top Threat Origin" value={denied.by_country[0]?.country?.slice(0,10)||'—'} sub="highest volume"   color="amber"  />
-            <KPI label="Internal Traffic"  value={denied.by_country.find(c=>c.country==='Reserved')?.count?.toLocaleString()||'0'} sub="RFC1918 reserved" color="blue" />
-            <KPI label="Top Blocked"       value={denied.by_src[0]?.ip||'—'}                    sub="most blocked IP"     color="red"    />
+            <KPI label="Top Threat Origin" value={denied.by_country[0]?.country?.slice(0,10)||'ï¿½'} sub="highest volume"   color="amber"  />
+            <KPI label="Internal Denied"  value={denied.reserved_count?.toLocaleString()||'0'} sub="RFC1918 / private IPs" color="blue" />
+            <KPI label="Top Blocked"       value={denied.by_src[0]?.ip||'ï¿½'}                    sub="most blocked IP"     color="red"    />
             <KPI label="Total Denied"      value={stats?.denied?.toLocaleString()}               sub="blocked sessions"    color="purple" />
             <KPI label="Unique Sources"    value={denied.by_src.length}                          sub="source IPs"          color="cyan"   />
           </div>
@@ -456,7 +466,7 @@ export default function SOCPage() {
             </Card>
           </div>
 
-          <Card title="TOP BLOCKED SOURCE IPs — DETAILED" badge="FIREWALL DENY" badgeClass="red" noPad>
+          <Card title="TOP BLOCKED SOURCE IPs ï¿½ DETAILED" badge="FIREWALL DENY" badgeClass="red" noPad>
             <div style={{ overflowX:'auto' }}>
               <table style={{ width:'100%', borderCollapse:'collapse', fontSize:10, fontFamily:'var(--mono)' }}>
                 <thead>

@@ -13,6 +13,13 @@ const PRESETS = [
   { label:'30d', value:'30d' },
 ]
 
+// datetime-local inputs hold a naive string (no TZ). We must fill them with
+// local-time strings so that new Date(val).toISOString() round-trips correctly.
+function toLocalDT(date) {
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+    .toISOString().slice(0, 16)
+}
+
 export default function RangePicker({ range, onChange, accentColor }) {
   const accent = accentColor || C.accent
   const [open, setOpen]       = useState(false)
@@ -101,11 +108,11 @@ export default function RangePicker({ range, onChange, accentColor }) {
                   style={{ width:'100%', padding:'8px 10px', background:C.bg3, border:'1px solid '+C.border, borderRadius:7, color:C.text, fontSize:12, fontFamily:'var(--mono)', outline:'none', colorScheme:'dark' }} />
               </div>
               <div style={{ display:'flex', gap:6 }}>
-                <button onClick={()=>{ const n=new Date(); setToVal(n.toISOString().slice(0,16)); setFromVal(new Date(n-3600000).toISOString().slice(0,16)) }}
+                <button onClick={()=>{ const n=new Date(); setToVal(toLocalDT(n)); setFromVal(toLocalDT(new Date(n-3600000))) }}
                   style={{ flex:1, padding:'6px', borderRadius:6, border:'1px solid '+C.border, background:C.bg3, color:C.text3, fontSize:10, fontFamily:'var(--mono)', cursor:'pointer' }}>Last 1h</button>
-                <button onClick={()=>{ const n=new Date(); setToVal(n.toISOString().slice(0,16)); setFromVal(new Date(n-86400000).toISOString().slice(0,16)) }}
+                <button onClick={()=>{ const n=new Date(); setToVal(toLocalDT(n)); setFromVal(toLocalDT(new Date(n-86400000))) }}
                   style={{ flex:1, padding:'6px', borderRadius:6, border:'1px solid '+C.border, background:C.bg3, color:C.text3, fontSize:10, fontFamily:'var(--mono)', cursor:'pointer' }}>Last 24h</button>
-                <button onClick={()=>{ const n=new Date(); setToVal(n.toISOString().slice(0,16)); setFromVal(new Date(n-604800000).toISOString().slice(0,16)) }}
+                <button onClick={()=>{ const n=new Date(); setToVal(toLocalDT(n)); setFromVal(toLocalDT(new Date(n-604800000))) }}
                   style={{ flex:1, padding:'6px', borderRadius:6, border:'1px solid '+C.border, background:C.bg3, color:C.text3, fontSize:10, fontFamily:'var(--mono)', cursor:'pointer' }}>Last 7d</button>
               </div>
               <button onClick={applyCustom} style={{

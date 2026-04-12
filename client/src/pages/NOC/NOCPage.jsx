@@ -25,7 +25,7 @@ function KPI({ label, value, sub, color }) {
   return (
     <div className={`kpi ${color}`}>
       <div style={{ fontSize:10, fontWeight:600, color:C.text3, letterSpacing:1, textTransform:'uppercase', marginBottom:6, fontFamily:'var(--mono)' }}>{label}</div>
-      <div style={{ fontSize:24, fontWeight:700, lineHeight:1, marginBottom:4, color: colors[color]||C.accent }}>{value??'—'}</div>
+      <div style={{ fontSize:24, fontWeight:700, lineHeight:1, marginBottom:4, color: colors[color]||C.accent }}>{value??'ï¿½'}</div>
       <div style={{ fontSize:10, color:C.text3, fontFamily:'var(--mono)' }}>{sub}</div>
     </div>
   )
@@ -52,7 +52,7 @@ function BarRows({ items, colorFn }) {
         const color = colorFn ? colorFn(i) : [C.red,C.amber,C.accent,C.cyan,C.green,C.accent2][i%6]
         return (
           <div key={i} style={{ display:'flex', alignItems:'center', gap:8 }}>
-            <span style={{ fontSize:11, fontFamily:'var(--mono)', color:C.text2, width:130, flexShrink:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{item.label||item.key||'—'}</span>
+            <span style={{ fontSize:11, fontFamily:'var(--mono)', color:C.text2, width:130, flexShrink:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{item.label||item.key||'ï¿½'}</span>
             <div style={{ flex:1, height:6, background:'var(--bg4)', borderRadius:3, overflow:'hidden' }}>
               <div style={{ width:`${(val/max*100).toFixed(0)}%`, height:'100%', background:color, borderRadius:3 }} />
             </div>
@@ -66,7 +66,7 @@ function BarRows({ items, colorFn }) {
 
 export default function NOCPage() {
   const [tab, setTab]         = useState('overview')
-  const [range, setRange]     = useState('24h')
+  const [range, setRange] = useState({ type:'preset', value:'24h', label:'24h' })
   const [stats, setStats]     = useState(null)
   const [events, setEvents]   = useState([])
   const [ifaceData, setIfaceData] = useState({ timeline:[], top_interfaces:[], top_devices:[] })
@@ -87,10 +87,10 @@ export default function NOCPage() {
     async function load() {
       try {
         const [s, e, iface, mac] = await Promise.all([
-          api.get(`/api/stats/noc?range=${range && range.value ? range.value : range}&from=${range && range.from ? range.from : ''}&to=${range && range.to ? range.to : ''}`),
+          api.get(`/api/stats/noc?range=${range?.value||''}&from=${range?.from||''}&to=${range?.to||''}`),
           api.get(`/api/logs/events/recent?size=100&type=cisco`),
-          api.get(`/api/logs/interfaces?range=${range && range.value ? range.value : range}&from=${range && range.from ? range.from : ''}&to=${range && range.to ? range.to : ''}`),
-          api.get(`/api/logs/macflap?range=${range && range.value ? range.value : range}&from=${range && range.from ? range.from : ''}&to=${range && range.to ? range.to : ''}`),
+          api.get(`/api/logs/interfaces?range=${range?.value||''}&from=${range?.from||''}&to=${range?.to||''}`),
+          api.get(`/api/logs/macflap?range=${range?.value||''}&from=${range?.from||''}&to=${range?.to||''}`),
         ])
         setStats(s.data)
         setEvents(e.data)
@@ -155,7 +155,7 @@ export default function NOCPage() {
       {tab==='overview' && (
         <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:10 }}>
-            <KPI label="Total Events"     value={stats?.total?.toLocaleString()}         sub={`last ${range}`}       color="blue"   />
+            <KPI label="Total Events"     value={stats?.total?.toLocaleString()}         sub={`last ${range?.label||range?.value||'24h'}`}       color="blue"   />
             <KPI label="Interface Events" value={stats?.updown?.toLocaleString()}        sub="up/down changes"       color="cyan"   />
             <KPI label="MAC Flapping"     value={stats?.macflap?.toLocaleString()}       sub="flap events"           color="red"    />
             <KPI label="VLAN Mismatches"  value={stats?.vlanmismatch?.toLocaleString()}  sub="native vlan issues"    color="amber"  />
@@ -182,7 +182,7 @@ export default function NOCPage() {
                 <BarRows items={topDevices.slice(0,6)} colorFn={i=>[C.accent,C.cyan,C.accent2,C.green,C.amber,C.red][i%6]} />
               </div>
             </Card>
-            <Card title="MAC FLAPPING — TOP DEVICES" badge={macData.by_device.length} badgeClass="red" noPad>
+            <Card title="MAC FLAPPING ï¿½ TOP DEVICES" badge={macData.by_device.length} badgeClass="red" noPad>
               <div style={{ padding:'12px 14px' }}>
                 {macData.by_device.length > 0
                   ? <BarRows items={macData.by_device.map(b=>({ label:b.key, count:b.doc_count }))} colorFn={()=>C.red} />
@@ -190,7 +190,7 @@ export default function NOCPage() {
                 }
               </div>
             </Card>
-            <Card title="VLAN MISMATCHES — TOP DEVICES" badge={vlanEvents.length} badgeClass="amber" noPad>
+            <Card title="VLAN MISMATCHES ï¿½ TOP DEVICES" badge={vlanEvents.length} badgeClass="amber" noPad>
               <div style={{ padding:'12px 14px' }}>
                 {(() => {
                   const v = vlanEvents.reduce((acc,e)=>{ const d=e.device_name||'Unknown'; acc[d]=(acc[d]||0)+1; return acc },{})
@@ -250,8 +250,8 @@ export default function NOCPage() {
                   <div key={i} style={{ display:'flex', gap:10, padding:'7px 14px', borderBottom:'1px solid rgba(99,120,200,0.06)', fontFamily:'var(--mono)', fontSize:11 }}>
                     <span style={{ color:C.text3, width:70, flexShrink:0 }}>{e['@timestamp'] ? new Date(e['@timestamp']).toLocaleTimeString() : ''}</span>
                     <span style={{ color:stateColor, width:40, flexShrink:0, fontWeight:600 }}>{state}</span>
-                    <span style={{ color:C.cyan, width:160, flexShrink:0, overflow:'hidden', textOverflow:'ellipsis' }}>{e.cisco_interface_full||'—'}</span>
-                    <span style={{ color:C.text2, flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{e.cisco_message||'—'}</span>
+                    <span style={{ color:C.cyan, width:160, flexShrink:0, overflow:'hidden', textOverflow:'ellipsis' }}>{e.cisco_interface_full||'ï¿½'}</span>
+                    <span style={{ color:C.text2, flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{e.cisco_message||'ï¿½'}</span>
                     <span style={{ color:C.text3, flexShrink:0 }}>{e.device_name||''}</span>
                     <span style={{ color:C.text3, flexShrink:0, fontSize:10 }}>{e.site_name||''}</span>
                   </div>
@@ -267,7 +267,7 @@ export default function NOCPage() {
         <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:10 }}>
             <KPI label="Total Switches"  value={Object.keys(deviceCounts).length}  sub="reporting devices"  color="blue"   />
-            <KPI label="Total Events"    value={stats?.total?.toLocaleString()}     sub={`last ${range}`}    color="cyan"   />
+            <KPI label="Total Events"    value={stats?.total?.toLocaleString()}     sub={`last ${range?.label||range?.value||'24h'}`}    color="cyan"   />
             <KPI label="Config Changes"  value={configEvents.length}               sub="switch configs"     color="amber"  />
             <KPI label="Auth Events"     value={authEvents.length}                 sub="login/ssh"          color="green"  />
             <KPI label="MAC Flaps"       value={macData.total||0}                  sub="flap events"        color="red"    />
@@ -285,7 +285,7 @@ export default function NOCPage() {
                 </thead>
                 <tbody>
                   {Object.entries(deviceCounts).sort((a,b)=>b[1]-a[1]).map(([device,total],i) => {
-                    const site  = (allEvents.find(e=>e.device_name===device)||{}).site_name||'—'
+                    const site  = (allEvents.find(e=>e.device_name===device)||{}).site_name||'ï¿½'
                     const iface = updownEvents.filter(e=>e.device_name===device).length
                     const macf  = macData.by_device.find(b=>b.key===device)?.doc_count||0
                     const vlan  = vlanEvents.filter(e=>e.device_name===device).length
@@ -327,8 +327,8 @@ export default function NOCPage() {
             <KPI label="Affected MACs"   value={new Set(macData.events.map(e=>e.cisco_mac_address)).size} sub="unique MACs" color="amber" />
             <KPI label="Affected VLANs"  value={macData.by_vlan.length}                    sub="VLANs affected"    color="blue"   />
             <KPI label="Switches"        value={macData.by_device.length}                  sub="reporting devices" color="cyan"   />
-            <KPI label="Top VLAN"        value={macData.by_vlan[0]?.key ? `VLAN ${macData.by_vlan[0].key}` : '—'} sub="most affected" color="purple" />
-            <KPI label="Top Switch"      value={macData.by_device[0]?.key?.slice(0,12)||'—'} sub="most flaps"     color="red"    />
+            <KPI label="Top VLAN"        value={macData.by_vlan[0]?.key ? `VLAN ${macData.by_vlan[0].key}` : 'ï¿½'} sub="most affected" color="purple" />
+            <KPI label="Top Switch"      value={macData.by_device[0]?.key?.slice(0,12)||'ï¿½'} sub="most flaps"     color="red"    />
           </div>
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
             <Card title="MAC FLAPPING PER SWITCH" badge={macData.by_device.length} badgeClass="red" noPad>
@@ -348,7 +348,7 @@ export default function NOCPage() {
               </div>
             </Card>
           </div>
-          <Card title="MAC FLAPPING EVENTS — DETAILED" badge="LIVE" badgeClass="red" noPad>
+          <Card title="MAC FLAPPING EVENTS ï¿½ DETAILED" badge="LIVE" badgeClass="red" noPad>
             <div style={{ overflowY:'auto', maxHeight:350 }}>
               <table style={{ width:'100%', borderCollapse:'collapse', fontSize:10, fontFamily:'var(--mono)' }}>
                 <thead>
@@ -361,13 +361,13 @@ export default function NOCPage() {
                 <tbody>
                   {macData.events.map((e,i) => (
                     <tr key={i} style={{ borderBottom:'1px solid rgba(99,120,200,0.07)' }}>
-                      <td style={{ padding:'5px 10px', color:C.text3, whiteSpace:'nowrap' }}>{e['@timestamp'] ? new Date(e['@timestamp']).toLocaleTimeString() : '—'}</td>
-                      <td style={{ padding:'5px 10px', color:C.cyan }}>{e.cisco_mac_address||'—'}</td>
-                      <td style={{ padding:'5px 10px', color:C.amber }}>{e.cisco_vlan_id ? `VLAN ${e.cisco_vlan_id}` : '—'}</td>
-                      <td style={{ padding:'5px 10px', color:C.text2 }}>{e.cisco_port_from||'—'}</td>
-                      <td style={{ padding:'5px 10px', color:C.text2 }}>{e.cisco_port_to||'—'}</td>
-                      <td style={{ padding:'5px 10px', color:C.accent }}>{e.device_name||'—'}</td>
-                      <td style={{ padding:'5px 10px', color:C.text3 }}>{e.site_name||'—'}</td>
+                      <td style={{ padding:'5px 10px', color:C.text3, whiteSpace:'nowrap' }}>{e['@timestamp'] ? new Date(e['@timestamp']).toLocaleTimeString() : 'ï¿½'}</td>
+                      <td style={{ padding:'5px 10px', color:C.cyan }}>{e.cisco_mac_address||'ï¿½'}</td>
+                      <td style={{ padding:'5px 10px', color:C.amber }}>{e.cisco_vlan_id ? `VLAN ${e.cisco_vlan_id}` : 'ï¿½'}</td>
+                      <td style={{ padding:'5px 10px', color:C.text2 }}>{e.cisco_port_from||'ï¿½'}</td>
+                      <td style={{ padding:'5px 10px', color:C.text2 }}>{e.cisco_port_to||'ï¿½'}</td>
+                      <td style={{ padding:'5px 10px', color:C.accent }}>{e.device_name||'ï¿½'}</td>
+                      <td style={{ padding:'5px 10px', color:C.text3 }}>{e.site_name||'ï¿½'}</td>
                     </tr>
                   ))}
                   {macData.events.length===0 && <tr><td colSpan={7} style={{ padding:30, textAlign:'center', color:C.text3 }}>No MAC flapping events</td></tr>}
@@ -394,7 +394,7 @@ export default function NOCPage() {
           </Card>
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
             {Object.keys(siteCounts).slice(0,4).map((site,si) => (
-              <Card key={site} title={`${site} — EVENT BREAKDOWN`} badge={siteCounts[site]?.toLocaleString()} badgeClass={['blue','cyan','green','amber'][si%4]} noPad>
+              <Card key={site} title={`${site} ï¿½ EVENT BREAKDOWN`} badge={siteCounts[site]?.toLocaleString()} badgeClass={['blue','cyan','green','amber'][si%4]} noPad>
                 <div style={{ padding:'12px 14px', display:'flex', flexDirection:'column', gap:10 }}>
                   {[
                     { label:'Interface Events', count:updownEvents.filter(e=>e.site_name===site).length, color:C.cyan },
@@ -438,8 +438,8 @@ export default function NOCPage() {
                     onMouseLeave={el=>el.currentTarget.style.background='transparent'}>
                     <span style={{ color:C.text3, width:70, flexShrink:0 }}>{e['@timestamp'] ? new Date(e['@timestamp']).toLocaleTimeString() : ''}</span>
                     <span style={{ color:sevColor, width:52, flexShrink:0, fontWeight:600, textTransform:'uppercase', fontSize:10 }}>{sev?.slice(0,4)}</span>
-                    <span style={{ color:mnemonicColor, width:130, flexShrink:0, overflow:'hidden', textOverflow:'ellipsis' }}>{e.cisco_mnemonic||'—'}</span>
-                    <span style={{ color:C.text2, flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{e.cisco_message||e.message||'—'}</span>
+                    <span style={{ color:mnemonicColor, width:130, flexShrink:0, overflow:'hidden', textOverflow:'ellipsis' }}>{e.cisco_mnemonic||'ï¿½'}</span>
+                    <span style={{ color:C.text2, flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{e.cisco_message||e.message||'ï¿½'}</span>
                     <span style={{ color:C.accent, flexShrink:0, width:100, textAlign:'right', overflow:'hidden', textOverflow:'ellipsis' }}>{e.device_name||''}</span>
                     <span style={{ color:C.text3, flexShrink:0, width:80, textAlign:'right', fontSize:10 }}>{e.site_name||''}</span>
                   </div>

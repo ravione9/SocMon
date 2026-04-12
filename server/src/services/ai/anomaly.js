@@ -11,7 +11,7 @@ export async function detectAnomalies(site = null) {
       query: { bool: { must } },
       aggs: {
         denied_per_min: {
-          date_histogram: { field: '@timestamp', fixed_interval: '1m' },
+          date_histogram: { field: '@timestamp', fixed_interval: '1m', time_zone: process.env.TZ || 'UTC' },
           aggs: { denied: { filter: { term: { 'fgt.action.keyword': 'deny' } } } },
         },
         top_src: { terms: { field: 'fgt.srcip.keyword', size: 10 } },

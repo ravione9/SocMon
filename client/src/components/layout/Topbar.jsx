@@ -18,7 +18,9 @@ export default function Topbar() {
           <div style={{ width:6, height:6, background:'var(--green)', borderRadius:'50%', animation:'pulse 2s infinite' }} />
           LIVE
         </div>
-        <div style={{ fontFamily:'var(--mono)', fontSize:11, color:'var(--text3)' }}>{time.toUTCString().slice(0,25)}</div>
+        <div style={{ fontFamily:'var(--mono)', fontSize:11, color:'var(--text3)' }}>
+          {time.toLocaleString('en', { weekday:'short', year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', timeZoneName:'short' })}
+        </div>
         <div style={{ width:30, height:30, borderRadius:8, background:'var(--bg4)', border:'1px solid var(--border)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, color:'var(--accent)', fontFamily:'var(--mono)', fontWeight:600 }}>
           {user?.name?.charAt(0).toUpperCase() || 'U'}
         </div>
