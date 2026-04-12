@@ -3,6 +3,73 @@ import { getESClient } from '../config/elasticsearch.js'
 
 const router = Router()
 
+router.get('/interfaces', async (req, res) => {
+  try {
+    const es = getESClient()
+    const range = req.query.range || '24h'
+    const result = await es.search({
+      index: 'cisco-*',
+      body: {
+        size: 0,
+        query: { bool: { must: [
+          { range: { '@timestamp': { gte: `now-${range}` } } },
+          { term: { 'cisco_mnemonic.keyword': 'UPDOWN' } }
+        ] } },
+        aggs: {
+          timeline: {
+            date_histogram: { field: '@timestamp', fixed_interval: '5m' },
+            aggs: {
+              up:   { filter: { match: { cisco_message: 'changed state to up' } } },
+              down: { filter: { match: { cisco_message: 'changed state to down' } } },
+            }
+          },
+          top_interfaces: { terms: { field: 'cisco_interface_full.keyword', size: 10 } },
+          top_devices:    { terms: { field: 'device_name.keyword', size: 10 } },
+        }
+      }
+    })
+    res.json({
+      timeline: result.aggregations.timeline.buckets.map(b => ({
+        time: b.key_as_string,
+        up:   b.up.doc_count,
+        down: b.down.doc_count,
+        total: b.doc_count,
+      })),
+      top_interfaces: result.aggregations.top_interfaces.buckets,
+      top_devices:    result.aggregations.top_devices.buckets,
+    })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.get('/macflap', async (req, res) => {
+  try {
+    const es = getESClient()
+    const range = req.query.range || '24h'
+    const result = await es.search({
+      index: 'cisco-*',
+      body: {
+        size: 50,
+        sort: [{ '@timestamp': { order: 'desc' } }],
+        query: { bool: { must: [
+          { range: { '@timestamp': { gte: `now-${range}` } } },
+          { term: { 'cisco_mnemonic.keyword': 'MACFLAP_NOTIF' } }
+        ] } },
+        _source: ['@timestamp','cisco_mac_address','cisco_vlan_id','cisco_port_from','cisco_port_to','device_name','site_name','cisco_message'],
+        aggs: {
+          by_device: { terms: { field: 'device_name.keyword', size: 10 } },
+          by_vlan:   { terms: { field: 'cisco_vlan_id.keyword', size: 10 } },
+        }
+      }
+    })
+    res.json({
+      events:     result.hits.hits.map(h => h._source),
+      by_device:  result.aggregations.by_device.buckets,
+      by_vlan:    result.aggregations.by_vlan.buckets,
+      total:      result.hits.total.value,
+    })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
 router.get('/traffic/timeline', async (req, res) => {
   try {
     const es = getESClient()
@@ -40,7 +107,10 @@ router.get('/threats/top', async (req, res) => {
       index: 'firewall-*',
       body: {
         size: 0,
-        query: { bool: { must: [{ range: { '@timestamp': { gte: 'now-24h' } } }, { term: { 'fgt.subtype.keyword': 'ips' } }] } },
+        query: { bool: { must: [
+          { range: { '@timestamp': { gte: 'now-24h' } } },
+          { term: { 'fgt.subtype.keyword': 'ips' } }
+        ] } },
         aggs: { attacks: { terms: { field: 'fgt.attack.keyword', size: 10 } } },
       },
     })
@@ -55,10 +125,13 @@ router.get('/denied', async (req, res) => {
       index: 'firewall-*',
       body: {
         size: 0,
-        query: { bool: { must: [{ range: { '@timestamp': { gte: 'now-24h' } } }, { term: { 'fgt.action.keyword': 'deny' } }] } },
+        query: { bool: { must: [
+          { range: { '@timestamp': { gte: 'now-24h' } } },
+          { term: { 'fgt.action.keyword': 'deny' } }
+        ] } },
         aggs: {
-          by_src: { terms: { field: 'fgt.srcip.keyword', size: 10 } },
-          by_country: { terms: { field: 'fgt.srccountry.keyword', size: 10 } },
+          by_src:     { terms: { field: 'fgt.srcip.keyword', size: 15 } },
+          by_country: { terms: { field: 'fgt.srccountry.keyword', size: 15 } },
         },
       },
     })
@@ -78,26 +151,10 @@ router.get('/events/recent', async (req, res) => {
       body: {
         size: req.query.size || 50,
         sort: [{ '@timestamp': { order: 'desc' } }],
-        query: { range: { '@timestamp': { gte: 'now-1h' } } },
-        _source: ['@timestamp','fgt.srcip','fgt.dstip','fgt.action','fgt.app','fgt.attack','fgt.subtype','fgt.type','cisco_mnemonic','cisco_message','cisco_facility','site_name','device_name','cisco_severity_label','syslog_severity_label'],
+        query: { range: { '@timestamp': { gte: 'now-24h' } } },
       },
     })
     res.json(result.hits.hits.map(h => ({ ...h._source, _index: h._index })))
-  } catch (err) { res.status(500).json({ error: err.message }) }
-})
-
-router.get('/geo', async (req, res) => {
-  try {
-    const es = getESClient()
-    const result = await es.search({
-      index: 'firewall-*',
-      body: {
-        size: 0,
-        query: { bool: { must: [{ range: { '@timestamp': { gte: 'now-24h' } } }, { term: { 'fgt.action.keyword': 'deny' } }], must_not: [{ term: { 'fgt.srccountry.keyword': 'Reserved' } }] } },
-        aggs: { by_country: { terms: { field: 'fgt.srccountry.keyword', size: 20 } } },
-      },
-    })
-    res.json(result.aggregations.by_country.buckets.map(b => ({ country: b.key, count: b.doc_count })))
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
@@ -109,8 +166,10 @@ router.get('/sessions', async (req, res) => {
       body: {
         size: 100,
         sort: [{ '@timestamp': { order: 'desc' } }],
-        query: { bool: { must: [{ range: { '@timestamp': { gte: 'now-1h' } } }, { term: { 'fgt.type.keyword': 'traffic' } }] } },
-        _source: ['@timestamp','@timestamp','fgt','site_name','device_name'],
+        query: { bool: { must: [
+          { range: { '@timestamp': { gte: 'now-1h' } } },
+          { term: { 'fgt.type.keyword': 'traffic' } }
+        ] } },
       },
     })
     res.json(result.hits.hits.map(h => h._source))
@@ -118,4 +177,3 @@ router.get('/sessions', async (req, res) => {
 })
 
 export default router
-
