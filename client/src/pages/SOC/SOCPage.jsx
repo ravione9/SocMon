@@ -329,7 +329,9 @@ export default function SOCPage() {
   }
 
   useEffect(() => {
-    socketRef.current = io(import.meta.env.VITE_WS_URL || 'http://localhost:5000')
+    const ws = import.meta.env.VITE_WS_URL
+    socketRef.current =
+      ws != null && String(ws).trim() !== '' ? io(String(ws)) : io()
     socketRef.current.on('live:events', evs =>
       setLiveEvents(p => [...(Array.isArray(evs) ? evs.filter(isFirewallEvent) : []), ...p].slice(0, 100)),
     )

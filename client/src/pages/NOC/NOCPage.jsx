@@ -154,7 +154,9 @@ export default function NOCPage() {
   }
 
   useEffect(() => {
-    socketRef.current = io(import.meta.env.VITE_WS_URL || 'http://localhost:5000')
+    const ws = import.meta.env.VITE_WS_URL
+    socketRef.current =
+      ws != null && String(ws).trim() !== '' ? io(String(ws)) : io()
     socketRef.current.on('live:events', evs => {
       const cisco = evs.filter(e => e._index?.includes('cisco') || e.cisco_mnemonic)
       if (cisco.length) setLiveEvents(p => [...cisco,...p].slice(0,100))
