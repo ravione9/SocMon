@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 
-const C = { accent:'#4f7ef5', text:'#e8eaf2', text2:'#8b90aa', text3:'#555a72', bg2:'#0f1117', bg3:'#151821', bg4:'#1c2030', border:'rgba(99,120,200,0.18)', border2:'rgba(99,120,200,0.32)' }
+const C = { accent:'#4f7ef5', text:'var(--text)', text2:'var(--text2)', text3:'var(--text3)', bg2:'var(--bg2)', bg3:'var(--bg3)', bg4:'var(--bg4)', border:'var(--border)', border2:'var(--border2)' }
 
 const PRESETS = [
   { label:'15m', value:'15m' },
@@ -36,6 +36,16 @@ export default function RangePicker({ range, onChange, accentColor }) {
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
+  // When opening the popover, sync custom datetime fields from the active range
+  useEffect(() => {
+    if (!open) return
+    if (range?.type === 'custom' && range.from && range.to) {
+      setMode('custom')
+      setFromVal(toLocalDT(new Date(range.from)))
+      setToVal(toLocalDT(new Date(range.to)))
+    }
+  }, [open, range])
+
   function applyCustom() {
     if (!fromVal || !toVal) return
     const from = new Date(fromVal).toISOString()
@@ -45,7 +55,13 @@ export default function RangePicker({ range, onChange, accentColor }) {
   }
 
   const isCustom = range && range.type === 'custom'
-  const displayLabel = isCustom ? range.label.slice(0,22)+'...' : (range && range.label) || range || '24h'
+  const displayLabel = (() => {
+    if (isCustom) {
+      const lb = range.label || 'Custom range'
+      return lb.length > 30 ? `${lb.slice(0, 30)}…` : lb
+    }
+    return (range && range.label) || range?.value || '24h'
+  })()
 
   return (
     <div ref={ref} style={{ position:'relative' }}>
@@ -58,7 +74,7 @@ export default function RangePicker({ range, onChange, accentColor }) {
         fontSize:11, fontFamily:'var(--mono)', cursor:'pointer',
         transition:'all 0.15s', whiteSpace:'nowrap',
       }}>
-        {displayLabel} v
+        {displayLabel} ▾
       </button>
 
       {open && (
@@ -69,13 +85,13 @@ export default function RangePicker({ range, onChange, accentColor }) {
           width:300, boxShadow:'0 8px 32px rgba(0,0,0,0.4)',
         }}>
           <div style={{ display:'flex', gap:4, marginBottom:14, background:C.bg3, borderRadius:8, padding:3 }}>
-            {['preset','custom'].map(m => (
-              <button key={m} onClick={()=>setMode(m)} style={{
+            {[{ id:'preset', label:'Presets' }, { id:'custom', label:'Custom' }].map(m => (
+              <button key={m.id} type="button" onClick={()=>setMode(m.id)} style={{
                 flex:1, padding:'5px 0', borderRadius:6, border:'none',
-                background: mode===m ? accent : 'transparent',
-                color: mode===m ? '#fff' : C.text3,
+                background: mode===m.id ? accent : 'transparent',
+                color: mode===m.id ? '#fff' : C.text3,
                 fontSize:11, fontFamily:'var(--mono)', cursor:'pointer', fontWeight:600,
-              }}>{m}</button>
+              }}>{m.label}</button>
             ))}
           </div>
 

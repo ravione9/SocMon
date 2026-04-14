@@ -7,7 +7,7 @@ export const ollamaProvider = {
       body: JSON.stringify({
         model: process.env.OLLAMA_MODEL || 'llama3',
         messages: [
-          { role: 'system', content: options.system || 'You are NetPulse AI.' },
+          { role: 'system', content: options.system || 'You are Lenskart AI.' },
           ...messages,
         ],
         stream: false,

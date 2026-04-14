@@ -1,7 +1,7 @@
 {
   "name": "netpulse-server",
   "version": "1.0.0",
-  "description": "NetPulse backend - Node.js + Express + Socket.io",
+  "description": "Lenskart backend - Node.js + Express + Socket.io",
   "main": "src/index.js",
   "type": "module",
   "scripts": {

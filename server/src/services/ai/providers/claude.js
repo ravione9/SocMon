@@ -12,7 +12,7 @@ export const claudeProvider = {
     const res = await getClient().messages.create({
       model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514',
       max_tokens: options.maxTokens || 1024,
-      system: options.system || 'You are NetPulse AI, an assistant for network and security operations.',
+      system: options.system || 'You are Lenskart AI, an assistant for network and security operations.',
       messages,
     })
     return res.content[0].text

@@ -1,7 +1,8 @@
 import { useLocation } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import { useAuthStore } from '../../store/authStore'
-const titles = { '/soc':'Security Operations Center', '/noc':'Network Operations Center', '/tickets':'Ticket Management', '/ai':'AI Assistant', '/reports':'Reports & Analytics', '/admin':'Administration' }
+import ThemePreferences from './ThemePreferences'
+const titles = { '/soc':'Security Operations Center', '/noc':'Network Operations Center', '/sentinel':'Sentinel XDR', '/infra':'Infra Monitoring', '/tickets':'Ticket Management', '/ai':'AI Assistant', '/reports':'Reports & Analytics', '/admin':'Administration' }
 export default function Topbar() {
   const { pathname } = useLocation()
   const { user } = useAuthStore()
@@ -9,12 +10,10 @@ export default function Topbar() {
   useEffect(() => { const t = setInterval(() => setTime(new Date()), 1000); return () => clearInterval(t) }, [])
   return (
     <header style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'10px 20px', background:'var(--bg2)', borderBottom:'1px solid var(--border)', flexShrink:0 }}>
-      <div>
-        <div style={{ fontSize:15, fontWeight:700, color:'var(--text)' }}>{titles[pathname] || 'NetPulse'}</div>
-        <div style={{ fontSize:11, color:'var(--text3)', fontFamily:'var(--mono)' }}>netpulse.local</div>
-      </div>
+      <div style={{ fontSize:15, fontWeight:700, color:'var(--text)' }}>{titles[pathname] || 'Lenskart'}</div>
       <div style={{ display:'flex', alignItems:'center', gap:16 }}>
-        <div style={{ display:'flex', alignItems:'center', gap:6, fontFamily:'var(--mono)', fontSize:11, color:'var(--green)', background:'rgba(34,211,160,0.08)', border:'1px solid rgba(34,211,160,0.2)', padding:'4px 10px', borderRadius:20 }}>
+        <ThemePreferences />
+        <div style={{ display:'flex', alignItems:'center', gap:6, fontFamily:'var(--mono)', fontSize:11, color:'var(--green)', background:'color-mix(in srgb, var(--green) 10%, transparent)', border:'1px solid color-mix(in srgb, var(--green) 28%, transparent)', padding:'4px 10px', borderRadius:20 }}>
           <div style={{ width:6, height:6, background:'var(--green)', borderRadius:'50%', animation:'pulse 2s infinite' }} />
           LIVE
         </div>

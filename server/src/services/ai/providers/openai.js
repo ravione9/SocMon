@@ -13,7 +13,7 @@ export const openaiProvider = {
       model: process.env.OPENAI_MODEL || 'gpt-4o',
       max_tokens: options.maxTokens || 1024,
       messages: [
-        { role: 'system', content: options.system || 'You are NetPulse AI, an assistant for network and security operations.' },
+        { role: 'system', content: options.system || 'You are Lenskart AI, an assistant for network and security operations.' },
         ...messages,
       ],
     })

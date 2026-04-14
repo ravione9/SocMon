@@ -17,6 +17,13 @@ export function startAlertEngine(io) {
 
 async function evaluateRule(rule, io) {
   try {
+    const cooldownSec = Number(rule.cooldown)
+    const cooldownMs = (Number.isFinite(cooldownSec) && cooldownSec > 0 ? cooldownSec : 300) * 1000
+    if (rule.lastFired) {
+      const elapsed = Date.now() - new Date(rule.lastFired).getTime()
+      if (elapsed < cooldownMs) return
+    }
+
     const es = getESClient()
     const { condition } = rule
     const result = await es.count({

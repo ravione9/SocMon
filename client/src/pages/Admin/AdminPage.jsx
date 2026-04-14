@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
+import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../components/ui/ResizableTable.jsx'
 import api from '../../api/client'
 import toast from 'react-hot-toast'
+import { APP_PAGE_KEYS, APP_PAGES } from '../../config/appPages'
+import { getEffectiveAllowedPages } from '../../utils/pageAccess'
 
 const C = { accent:'#4f7ef5', accent2:'#7c5cfc', green:'#22d3a0', red:'#f5534f', amber:'#f5a623', cyan:'#22d3ee', text:'#e8eaf2', text2:'#8b90aa', text3:'#555a72' }
 
@@ -70,6 +73,23 @@ export default function AdminPage() {
 
   const f = key => val => setForm(p => ({ ...p, [key]: val }))
 
+  const ADMIN_DEVICE_COLS = [160, 130, 100, 140, 88, 200, 128]
+  const ADMIN_USER_COLS = [200, 220, 88, 220, 88, 180, 128]
+  const deviceResize = useResizableColumns('admin-devices', ADMIN_DEVICE_COLS)
+  const userResize = useResizableColumns('admin-users', ADMIN_USER_COLS)
+  const adminTh = {
+    padding: '8px 12px',
+    textAlign: 'left',
+    borderBottom: '1px solid var(--border)',
+    color: C.text3,
+    fontSize: 10,
+    fontWeight: 600,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    fontFamily: 'var(--mono)',
+    whiteSpace: 'nowrap',
+  }
+
   async function loadAll() {
     try {
       const [d, s, u, a] = await Promise.all([
@@ -91,11 +111,22 @@ export default function AdminPage() {
     setLoading(true)
     try {
       const { _type, _id, ...data } = form
+      let payload = data
+      if (_type === 'users') {
+        payload = {
+          name: data.name,
+          email: data.email,
+          role: data.role,
+          active: data.active,
+        }
+        if (data.password) payload.password = data.password
+        if (data.role !== 'admin' && Array.isArray(data.allowedPages)) payload.allowedPages = data.allowedPages
+      }
       if (_id) {
-        await api.put(`/api/${_type}/${_id}`, data)
+        await api.put(`/api/${_type}/${_id}`, payload)
         toast.success('Updated successfully')
       } else {
-        await api.post(`/api/${_type}`, data)
+        await api.post(`/api/${_type}`, payload)
         toast.success('Created successfully')
       }
       setModal(null)
@@ -118,7 +149,7 @@ export default function AdminPage() {
     const defaults = {
       devices: { _type:'devices', name:'', ip:'', type:'cisco-switch', site: sites[0]?._id||'', notes:'', tags:'' },
       sites:   { _type:'sites', name:'', location:'', description:'', timezone:'Asia/Kolkata' },
-      users:   { _type:'users', name:'', email:'', password:'', role:'viewer' },
+      users:   { _type:'users', name:'', email:'', password:'', role:'viewer', allowedPages: [...APP_PAGE_KEYS] },
       alerts:  { _type:'alerts', name:'', description:'', type:'threshold', source:'all', severity:'medium', enabled:true },
     }
     setForm(defaults[type])
@@ -126,15 +157,35 @@ export default function AdminPage() {
   }
 
   function openEdit(type, item) {
-    setForm({ _type:type, _id:item._id, ...item, site: item.site?._id||item.site||'' })
+    const base = { _type:type, _id:item._id, ...item, site: item.site?._id||item.site||'' }
+    if (type === 'users') {
+      const pages =
+        item.role === 'admin'
+          ? [...APP_PAGE_KEYS]
+          : Array.isArray(item.allowedPages)
+            ? item.allowedPages
+            : [...APP_PAGE_KEYS]
+      base.allowedPages = pages
+    }
+    setForm(base)
     setModal(`edit-${type}`)
   }
 
-  const TH = ({ children }) => (
-    <th style={{ padding:'8px 12px', textAlign:'left', borderBottom:'1px solid var(--border)', color:C.text3, fontSize:10, fontWeight:600, textTransform:'uppercase', letterSpacing:0.5, fontFamily:'var(--mono)', whiteSpace:'nowrap' }}>{children}</th>
-  )
+  const toggleUserPage = (key) => {
+    setForm((f) => {
+      if (f._type !== 'users') return f
+      const cur = Array.isArray(f.allowedPages) ? f.allowedPages : [...APP_PAGE_KEYS]
+      const allowedPages = cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key]
+      return { ...f, allowedPages }
+    })
+  }
+
+  const setAllUserPages = (all) => {
+    setForm((f) => (f._type === 'users' ? { ...f, allowedPages: all ? [...APP_PAGE_KEYS] : [] } : f))
+  }
+
   const TD = ({ children, color }) => (
-    <td style={{ padding:'10px 12px', borderBottom:'1px solid rgba(99,120,200,0.07)', color:color||C.text2, fontSize:12, fontFamily:'var(--mono)' }}>{children}</td>
+    <td style={{ padding:'10px 12px', borderBottom:'1px solid rgba(99,120,200,0.07)', color:color||C.text2, fontSize:12, fontFamily:'var(--mono)', overflow:'hidden', textOverflow:'ellipsis' }}>{children}</td>
   )
 
   return (
@@ -167,9 +218,16 @@ export default function AdminPage() {
               <span className="badge badge-blue">{devices.length} devices</span>
             </div>
             <div style={{ overflowX:'auto' }}>
-              <table style={{ width:'100%', borderCollapse:'collapse' }}>
+              <table style={{ width:'100%', borderCollapse:'collapse', tableLayout:'fixed', minWidth: deviceResize.sumWidth }}>
+                <ResizableColGroup widths={deviceResize.widths} />
                 <thead>
-                  <tr><TH>Device Name</TH><TH>IP Address</TH><TH>Type</TH><TH>Site</TH><TH>Status</TH><TH>Notes</TH><TH>Actions</TH></tr>
+                  <tr>
+                    {['Device Name', 'IP Address', 'Type', 'Site', 'Status', 'Notes', 'Actions'].map((label, i) => (
+                      <ResizableTh key={label} columnIndex={i} columnCount={7} startResize={deviceResize.startResize} style={adminTh}>
+                        {label}
+                      </ResizableTh>
+                    ))}
+                  </tr>
                 </thead>
                 <tbody>
                   {devices.map((d,i) => (
@@ -242,9 +300,16 @@ export default function AdminPage() {
               <span className="badge badge-purple">{users.length} users</span>
             </div>
             <div style={{ overflowX:'auto' }}>
-              <table style={{ width:'100%', borderCollapse:'collapse' }}>
+              <table style={{ width:'100%', borderCollapse:'collapse', tableLayout:'fixed', minWidth: userResize.sumWidth }}>
+                <ResizableColGroup widths={userResize.widths} />
                 <thead>
-                  <tr><TH>Name</TH><TH>Email</TH><TH>Role</TH><TH>Status</TH><TH>Last Login</TH><TH>Actions</TH></tr>
+                  <tr>
+                    {['Name', 'Email', 'Role', 'Pages', 'Status', 'Last Login', 'Actions'].map((label, i) => (
+                      <ResizableTh key={label} columnIndex={i} columnCount={7} startResize={userResize.startResize} style={adminTh}>
+                        {label}
+                      </ResizableTh>
+                    ))}
+                  </tr>
                 </thead>
                 <tbody>
                   {users.map((u,i) => (
@@ -259,6 +324,15 @@ export default function AdminPage() {
                       </TD>
                       <TD>{u.email}</TD>
                       <TD><Badge label={u.role} /></TD>
+                      <TD color={C.text3}>
+                        {u.role === 'admin'
+                          ? 'All'
+                          : !Array.isArray(u.allowedPages)
+                            ? 'All (default)'
+                            : u.allowedPages.length === 0
+                              ? 'None'
+                              : `${u.allowedPages.length}: ${u.allowedPages.join(', ')}`}
+                      </TD>
                       <TD><Badge label={u.active ? 'active' : 'inactive'} /></TD>
                       <TD color={C.text3}>{u.lastLogin ? new Date(u.lastLogin).toLocaleString('en', { timeZoneName:'short' }) : 'Never'}</TD>
                       <td style={{ padding:'8px 12px', borderBottom:'1px solid rgba(99,120,200,0.07)' }}>
@@ -372,11 +446,11 @@ export default function AdminPage() {
           </div>
 
           <div className="card">
-            <div className="card-header"><span className="card-title">NETPULSE INFO</span><span className="badge badge-blue">v1.0.0</span></div>
+            <div className="card-header"><span className="card-title">LENSKART INFO</span><span className="badge badge-blue">v1.0.0</span></div>
             <div style={{ padding:'16px', display:'flex', flexDirection:'column', gap:10 }}>
               {[
                 { label:'Version', value:'1.0.0' },
-                { label:'License', value:'MIT Open Source' },
+                { label:'License', value:'Lenskart Security Team' },
                 { label:'GitHub', value:'Sunil123456789/netpulse' },
                 { label:'Node.js', value:'22.x' },
                 { label:'React', value:'18.x' },
@@ -444,11 +518,43 @@ export default function AdminPage() {
           <Field label="Full Name" value={form.name||''} onChange={f('name')} required />
           <Field label="Email" value={form.email||''} onChange={f('email')} type="email" required />
           {modal.includes('create') && <Field label="Password" value={form.password||''} onChange={f('password')} type="password" required />}
-          <Field label="Role" value={form.role||'viewer'} onChange={f('role')} options={[
-            {value:'admin',label:'Admin � full access'},
-            {value:'analyst',label:'Analyst � can create tickets'},
-            {value:'viewer',label:'Viewer � read only'},
+          <Field label="Role" value={form.role||'viewer'} onChange={(v) => {
+            f('role')(v)
+            if (v === 'admin') setForm((p) => ({ ...p, role: v, allowedPages: [...APP_PAGE_KEYS] }))
+          }} options={[
+            {value:'admin',label:'Admin — full access'},
+            {value:'analyst',label:'Analyst — can create tickets'},
+            {value:'viewer',label:'Viewer — read only'},
           ]} />
+          {form.role === 'admin' ? (
+            <div style={{ marginBottom: 14, padding: '12px 14px', background: 'var(--bg3)', borderRadius: 8, border: '1px solid var(--border)', fontSize: 12, color: C.text2 }}>
+              Admin accounts always have access to every page. Page checklists do not apply.
+            </div>
+          ) : (
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ fontSize: 10, fontWeight: 600, color: C.text3, letterSpacing: 1, textTransform: 'uppercase', fontFamily: 'var(--mono)', display: 'block', marginBottom: 8 }}>Page access</label>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                <Btn label="Select all" small onClick={() => setAllUserPages(true)} />
+                <Btn label="Clear all" small onClick={() => setAllUserPages(false)} />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                {APP_PAGES.map((p) => (
+                  <label key={p.key} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: C.text2, cursor: 'pointer', fontFamily: 'var(--mono)' }}>
+                    <input
+                      type="checkbox"
+                      checked={Array.isArray(form.allowedPages) && form.allowedPages.includes(p.key)}
+                      onChange={() => toggleUserPage(p.key)}
+                      style={{ accentColor: C.accent }}
+                    />
+                    {p.label}
+                  </label>
+                ))}
+              </div>
+              <div style={{ fontSize: 10, color: C.text3, fontFamily: 'var(--mono)', marginTop: 8 }}>
+                Effective access: {getEffectiveAllowedPages({ role: form.role, allowedPages: form.allowedPages }).length} page(s)
+              </div>
+            </div>
+          )}
           <Field label="Active" value={form.active?.toString()||'true'} onChange={v=>f('active')(v==='true')} options={[{value:'true',label:'Active'},{value:'false',label:'Inactive'}]} />
           <div style={{ display:'flex', gap:8, justifyContent:'flex-end', marginTop:8 }}>
             <button onClick={()=>setModal(null)} style={{ padding:'8px 16px', borderRadius:7, border:'1px solid var(--border)', background:'transparent', color:C.text2, cursor:'pointer', fontSize:12 }}>Cancel</button>

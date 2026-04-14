@@ -1,7 +1,25 @@
 import { Router } from 'express'
 import User from '../models/User.js'
+import { sanitizeAllowedPages } from '../constants/appPages.js'
 
 const router = Router()
+
+function pickUserPayload(body) {
+  const {
+    name,
+    email,
+    password,
+    role,
+    active,
+    allowedPages: rawPages,
+    avatar,
+  } = body
+  const out = { name, email, role, active, avatar }
+  if (password) out.password = password
+  const pages = sanitizeAllowedPages(rawPages)
+  if (pages !== undefined && role !== 'admin') out.allowedPages = pages
+  return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined))
+}
 
 router.get('/', async (req, res) => {
   try {
@@ -12,15 +30,21 @@ router.get('/', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const user = await User.create(req.body)
-    res.status(201).json({ id: user._id, name: user.name, email: user.email, role: user.role })
+    const user = await User.create(pickUserPayload(req.body))
+    res.status(201).json({
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      allowedPages: user.allowedPages,
+    })
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
 router.put('/:id', async (req, res) => {
   try {
-    const { password, ...rest } = req.body
-    const user = await User.findByIdAndUpdate(req.params.id, rest, { new: true })
+    const payload = pickUserPayload(req.body)
+    const user = await User.findByIdAndUpdate(req.params.id, payload, { new: true })
     res.json(user)
   } catch (err) { res.status(500).json({ error: err.message }) }
 })

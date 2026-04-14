@@ -17,4 +17,4 @@ db.sites.insertMany([
   { name: 'Bhiwadi-WH', location: 'Bhiwadi, Rajasthan', active: true, createdAt: new Date(), updatedAt: new Date() },
   { name: 'Gurgaon-WH', location: 'Gurgaon, Haryana',  active: true, createdAt: new Date(), updatedAt: new Date() },
 ])
-print('NetPulse DB initialized — admin@netpulse.local / Admin@123')
+print('Lenskart DB initialized — admin@netpulse.local / Admin@123')
