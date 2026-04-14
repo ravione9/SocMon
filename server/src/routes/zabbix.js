@@ -249,28 +249,46 @@ function downsamplePoints(points, maxPoints) {
   return out
 }
 
+/** Single latest row from `item.get` metadata (enabled item with a last value). */
+function latestRowFromMeta(meta, colorByItem = {}) {
+  if (!meta) return null
+  if (String(meta.status) !== '0') return null
+  const itemid = String(meta.itemid)
+  const raw = meta.lastvalue
+  if (raw === undefined || raw === null || String(raw).trim() === '') return null
+  const num = parseLooseNumber(raw)
+  return {
+    itemid,
+    name: meta.name || meta.key_ || itemid,
+    key: meta.key_,
+    units: meta.units || '',
+    lastclock: meta.lastclock != null && meta.lastclock !== '' ? Number(meta.lastclock) : null,
+    value: Number.isFinite(num) ? num : null,
+    rawValue: String(raw),
+    numeric: Number.isFinite(num),
+    valueType: Number(meta.value_type),
+    color: colorByItem[itemid] || null,
+  }
+}
+
 /** One row per graph item using Zabbix `lastvalue` (VMware / thin history / pie graphs). */
 function buildLatestRows(itemids, itemMap, colorByItem) {
   const latest = []
   for (const itemid of itemids) {
-    const meta = itemMap[String(itemid)]
-    if (!meta || String(meta.status) !== '0') continue
-    const raw = meta.lastvalue
-    if (raw === undefined || raw === null || String(raw).trim() === '') continue
-    const num = parseLooseNumber(raw)
-    latest.push({
-      itemid,
-      name: meta.name || meta.key_ || itemid,
-      key: meta.key_,
-      units: meta.units || '',
-      lastclock: meta.lastclock != null && meta.lastclock !== '' ? Number(meta.lastclock) : null,
-      value: Number.isFinite(num) ? num : null,
-      rawValue: String(raw),
-      numeric: Number.isFinite(num),
-      valueType: Number(meta.value_type),
-      color: colorByItem[String(itemid)] || null,
-    })
+    const row = latestRowFromMeta(itemMap[String(itemid)], colorByItem)
+    if (row) latest.push(row)
   }
+  return latest
+}
+
+/** Latest rows for all matching items on a host (no Zabbix graph required). */
+function buildLatestRowsFromHostItems(metas) {
+  const latest = []
+  for (const meta of metas || []) {
+    const row = latestRowFromMeta(meta, {})
+    if (row) latest.push(row)
+  }
+  latest.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }))
   return latest
 }
 
@@ -308,6 +326,44 @@ async function graphItemsForGraph(graphId) {
   }
   return { graph: g, gitems }
 }
+
+/**
+ * Monitored items with lastvalue for hosts that have no graphs (e.g. VMware integration).
+ * GET /api/zabbix/hosts/:hostId/items/latest?limit=60
+ */
+router.get('/hosts/:hostId/items/latest', async (req, res) => {
+  try {
+    if (!isZabbixConfigured()) {
+      return res.status(503).json({ error: 'Zabbix not configured' })
+    }
+    const hostId = String(req.params.hostId || '').trim()
+    if (!hostId) return res.status(400).json({ error: 'hostId required' })
+
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || '80'), 10) || 80, 1), 250)
+
+    const rows = await zabbixRpc('item.get', {
+      hostids: [hostId],
+      monitored: true,
+      filter: { status: 0 },
+      output: ['itemid', 'name', 'key_', 'value_type', 'units', 'status', 'lastvalue', 'lastclock'],
+      sortfield: 'name',
+      limit,
+    })
+
+    const latest = buildLatestRowsFromHostItems(rows || [])
+    res.json({
+      hostid: hostId,
+      latest,
+      totalItems: (rows || []).length,
+      withValue: latest.length,
+      displayMode: 'latest',
+      note:
+        'Built from monitored item last values — no Zabbix graph on this host (typical for some VMware / discovery hosts).',
+    })
+  } catch (e) {
+    return sendZabbixError(res, e)
+  }
+})
 
 router.get('/hosts/:hostId/graphs', async (req, res) => {
   try {

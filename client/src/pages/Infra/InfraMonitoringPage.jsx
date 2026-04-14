@@ -399,6 +399,9 @@ export default function InfraMonitoringPage() {
   const [graphSeriesBusy, setGraphSeriesBusy] = useState(false)
   /** `auto` = history/trends then fallback to last values; `latest` = VMware-friendly, no history API calls */
   const [graphDataMode, setGraphDataMode] = useState('auto')
+  /** VMware / no-graph hosts: latest metrics from item.get */
+  const [hostItemsLatest, setHostItemsLatest] = useState(null)
+  const [itemsLatestBusy, setItemsLatestBusy] = useState(false)
 
   const parseErr = useCallback((e) => {
     const d = e.response?.data
@@ -430,8 +433,32 @@ export default function InfraMonitoringPage() {
 
   const loadHostGraphs = useCallback(async (hostid) => {
     const { data } = await api.get(`/api/zabbix/hosts/${encodeURIComponent(hostid)}/graphs`)
-    setHostGraphs(data.graphs || [])
+    const graphs = data.graphs || []
+    setHostGraphs(graphs)
+    return graphs
   }, [])
+
+  const loadHostItemsLatest = useCallback(
+    async (hostid) => {
+      setItemsLatestBusy(true)
+      setError(null)
+      setErrorHint(null)
+      try {
+        const { data } = await api.get(
+          `/api/zabbix/hosts/${encodeURIComponent(hostid)}/items/latest?limit=100`,
+        )
+        setHostItemsLatest(data)
+      } catch (e) {
+        const { message, hint } = parseErr(e)
+        setError(message)
+        setErrorHint(hint)
+        setHostItemsLatest(null)
+      } finally {
+        setItemsLatestBusy(false)
+      }
+    },
+    [parseErr],
+  )
 
   const fetchGraphSeriesPayload = useCallback(async (graphId, rangeKey, dataMode) => {
     const sec = RANGE_SEC[rangeKey] || RANGE_SEC['6h']
@@ -599,6 +626,24 @@ export default function InfraMonitoringPage() {
     return graphSeries.latest.filter((r) => !r.numeric && r.rawValue != null)
   }, [graphSeries])
 
+  const noGraphHostView = Boolean(
+    selectedHost &&
+      hostGraphs != null &&
+      Array.isArray(hostGraphs) &&
+      hostGraphs.length === 0 &&
+      !graphsBusy,
+  )
+
+  const hostItemsBarData = useMemo(() => {
+    if (!noGraphHostView || !hostItemsLatest?.latest?.length) return null
+    return buildLatestBarChart(hostItemsLatest.latest)
+  }, [noGraphHostView, hostItemsLatest])
+
+  const hostItemsNonNumeric = useMemo(() => {
+    if (!noGraphHostView || !hostItemsLatest?.latest?.length) return []
+    return hostItemsLatest.latest.filter((r) => !r.numeric && r.rawValue != null)
+  }, [noGraphHostView, hostItemsLatest])
+
   const overviewProblemsFiltered = useMemo(() => {
     const list = overview?.problems || []
     if (severityFilter == null) return list
@@ -698,7 +743,12 @@ export default function InfraMonitoringPage() {
       if (tab === 'hostGraphs') {
         await searchHosts(hostSearch)
         if (selectedHost?.hostid) {
-          await loadHostGraphs(selectedHost.hostid)
+          const gr = await loadHostGraphs(selectedHost.hostid)
+          if (!gr.length) {
+            await loadHostItemsLatest(selectedHost.hostid)
+          } else {
+            setHostItemsLatest(null)
+          }
           if (selectedGraphId) {
             const data = await fetchGraphSeriesPayload(selectedGraphId, graphRange, graphDataMode)
             setGraphSeries(data)
@@ -726,6 +776,7 @@ export default function InfraMonitoringPage() {
     graphDataMode,
     searchHosts,
     loadHostGraphs,
+    loadHostItemsLatest,
     fetchGraphSeriesPayload,
   ])
 
@@ -798,21 +849,26 @@ export default function InfraMonitoringPage() {
       setGraphDataMode('auto')
       setSelectedGraphId(null)
       setGraphSeries(null)
+      setHostItemsLatest(null)
       setGraphsBusy(true)
       setError(null)
       setErrorHint(null)
       try {
-        await loadHostGraphs(h.hostid)
+        const graphs = await loadHostGraphs(h.hostid)
+        if (!graphs.length) {
+          await loadHostItemsLatest(h.hostid)
+        }
       } catch (e) {
         const { message, hint } = parseErr(e)
         setError(message)
         setErrorHint(hint)
         setHostGraphs(null)
+        setHostItemsLatest(null)
       } finally {
         setGraphsBusy(false)
       }
     },
-    [loadHostGraphs, parseErr],
+    [loadHostGraphs, loadHostItemsLatest, parseErr],
   )
 
   const pickGraph = useCallback((graphid) => {
@@ -1232,7 +1288,13 @@ export default function InfraMonitoringPage() {
                         ))
                       )}
                       {!graphsBusy && selectedHost && (hostGraphs || []).length === 0 && (
-                        <div style={{ padding: 12, color: C.text3, fontSize: 12 }}>No graphs on this host.</div>
+                        <div style={{ padding: 12, color: C.text3, fontSize: 12, lineHeight: 1.45 }}>
+                          <div style={{ fontWeight: 600, color: 'var(--text)', marginBottom: 6 }}>No graphs on this host</div>
+                          <div style={{ fontSize: 11, fontFamily: 'var(--mono)' }}>
+                            Latest metrics load automatically from monitored items (e.g. VMware). Use the chart panel →
+                            Refresh metrics if needed.
+                          </div>
+                        </div>
                       )}
                     </div>
 
@@ -1246,9 +1308,121 @@ export default function InfraMonitoringPage() {
                         background: 'var(--bg2)',
                       }}
                     >
-                      {graphSeriesBusy && (
-                        <div style={{ color: C.text3, fontSize: 12, fontFamily: 'var(--mono)' }}>Loading series…</div>
+                      {((selectedGraphId && graphSeriesBusy) || (noGraphHostView && itemsLatestBusy)) && (
+                        <div style={{ color: C.text3, fontSize: 12, fontFamily: 'var(--mono)' }}>
+                          {noGraphHostView && itemsLatestBusy ? 'Loading latest metrics…' : 'Loading series…'}
+                        </div>
                       )}
+                      {!graphSeriesBusy &&
+                        noGraphHostView &&
+                        !itemsLatestBusy &&
+                        hostItemsLatest &&
+                        (hostItemsBarData || hostItemsNonNumeric.length > 0) && (
+                          <>
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                flexWrap: 'wrap',
+                                gap: 8,
+                                marginBottom: 8,
+                              }}
+                            >
+                              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>
+                                Latest metrics
+                                <span style={{ fontWeight: 400, fontSize: 10, color: C.text3, marginLeft: 8 }}>
+                                  No Zabbix graph on this host — from item last values
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => selectedHost?.hostid && loadHostItemsLatest(selectedHost.hostid)}
+                                style={{
+                                  padding: '5px 12px',
+                                  borderRadius: 7,
+                                  border: '1px solid var(--border)',
+                                  background: 'var(--bg4)',
+                                  color: C.text2,
+                                  fontSize: 11,
+                                  fontFamily: 'var(--mono)',
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                Refresh metrics
+                              </button>
+                            </div>
+                            {hostItemsLatest.note && (
+                              <p
+                                style={{
+                                  margin: '0 0 10px',
+                                  fontSize: 11,
+                                  color: C.text3,
+                                  fontFamily: 'var(--mono)',
+                                }}
+                              >
+                                {hostItemsLatest.note}
+                              </p>
+                            )}
+                            {hostItemsBarData && (
+                              <div
+                                style={{
+                                  height: Math.min(520, 48 + hostItemsBarData.labels.length * 30),
+                                  position: 'relative',
+                                  marginBottom: hostItemsNonNumeric.length ? 14 : 0,
+                                }}
+                              >
+                                <Bar data={hostItemsBarData} options={latestBarOptions} />
+                              </div>
+                            )}
+                            {hostItemsNonNumeric.length > 0 && (
+                              <div style={{ fontSize: 11, fontFamily: 'var(--mono)', color: C.text2 }}>
+                                <div style={{ fontWeight: 600, marginBottom: 6, color: 'var(--text)' }}>
+                                  Text / state items
+                                </div>
+                                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                  <tbody>
+                                    {hostItemsNonNumeric.map((r) => (
+                                      <tr key={r.itemid}>
+                                        <td
+                                          style={{
+                                            padding: '4px 10px 4px 0',
+                                            color: C.text3,
+                                            verticalAlign: 'top',
+                                            maxWidth: 200,
+                                          }}
+                                        >
+                                          {r.name || r.key}
+                                        </td>
+                                        <td style={{ padding: '4px 0', color: 'var(--text)' }}>{r.rawValue}</td>
+                                        <td
+                                          style={{
+                                            padding: '4px 0 4px 10px',
+                                            color: C.text3,
+                                            whiteSpace: 'nowrap',
+                                          }}
+                                        >
+                                          {fmtClock(r.lastclock)}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </>
+                        )}
+                      {!graphSeriesBusy &&
+                        noGraphHostView &&
+                        !itemsLatestBusy &&
+                        hostItemsLatest &&
+                        !hostItemsBarData &&
+                        hostItemsNonNumeric.length === 0 && (
+                          <p style={{ margin: 0, fontSize: 13, color: C.text3 }}>
+                            No monitored items with a last value yet for this host (check VMware sync / item status in
+                            Zabbix).
+                          </p>
+                        )}
                       {!graphSeriesBusy && graphSeries?.unsupported && (
                         <p style={{ margin: 0, fontSize: 13, color: C.amber }}>{graphSeries.unsupported}</p>
                       )}

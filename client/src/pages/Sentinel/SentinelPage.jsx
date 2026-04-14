@@ -449,29 +449,42 @@ export default function SentinelPage() {
   const showDashPanel = showOverviewDash || showUsbDash || showBluetoothDash
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
-        <div>
-          <div style={{ fontSize: 11, fontWeight: 600, color: C.accent, fontFamily: 'var(--mono)', letterSpacing: 1, marginBottom: 4 }}>
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 12,
+        width: '100%',
+        maxWidth: 1680,
+        margin: '0 auto',
+        boxSizing: 'border-box',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'flex-end',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: 12,
+          rowGap: 14,
+        }}
+      >
+        <div style={{ flex: '1 1 200px', minWidth: 0 }}>
+          <div
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              color: C.accent,
+              fontFamily: 'var(--mono)',
+              letterSpacing: 1,
+              lineHeight: 1.35,
+            }}
+          >
             SENTINELONE XDR
           </div>
-          {(tab === 'usb' || tab === 'bluetooth') && (
-            <p style={{ margin: 0, fontSize: 12, color: C.text2, maxWidth: 820 }}>
-              {tab === 'usb' ? (
-                <>
-                  USB device connection dashboard — <span style={{ fontFamily: 'var(--mono)', color: C.text }}>{dash?.index || 'sentinel-*'}</span>.
-                  Peripheral / device-control events only. Charts and the log below use the same time range; filters match Custom log (event.action, message, hostname, USB device).
-                </>
-              ) : (
-                <>
-                  Bluetooth device connection dashboard — <span style={{ fontFamily: 'var(--mono)', color: C.text }}>{dash?.index || 'sentinel-*'}</span>.
-                  Bluetooth radio / pairing / connect style events only. Charts and the log below use the same time range; filters match Custom log (event.action, message, hostname, Bluetooth device).
-                </>
-              )}
-            </p>
-          )}
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap', justifyContent: 'flex-end', flex: '0 1 auto' }}>
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 9, fontWeight: 600, color: C.text3, fontFamily: 'var(--mono)', letterSpacing: 0.5 }}>
             HOST GROUP
             <input
