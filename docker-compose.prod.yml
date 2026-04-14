@@ -1,12 +1,15 @@
 # Production stack: nginx (static UI + /api + /socket.io) → Node API → Mongo + Redis.
 #
-# 1) Build the SPA (from repo root):
+# 1) Build the SPA (from repo root) — required; an empty client/dist often shows as HTTP 403 from nginx:
 #      cd client && npm ci && npm run build
-# 2) Set CORS_ORIGIN in ../.env to the URL users open in the browser (e.g. http://localhost for :80).
-# 3) Start:
+# 2) Set CORS_ORIGIN in ../.env to the URL users open in the browser (scheme + host + port), e.g. http://YOUR_SERVER
+# 3) If you still get 403 after building: host paths must be readable/traversable by the container (nginx user ~101).
+#      chmod -R a+rX client/dist && chmod a+x . client client/dist
+#    SELinux (RHEL/CentOS): append ,Z to the dist volume line (e.g. :ro,Z) or use the baked nginx image below.
+# 4) Start:
 #      docker compose -f docker-compose.prod.yml up -d --build
 #
-# UI: http://localhost/  (port 80). The API is only reachable via nginx, not published directly.
+# UI: port 80. The API is only reachable via nginx, not published directly.
 #
 # Optional — bake the UI into an image instead of ./client/dist:
 #   docker build -f docker/nginx/Dockerfile -t netpulse-nginx .
