@@ -89,7 +89,7 @@ export default function RangePicker({ range, onChange, accentColor }) {
               <button key={m.id} type="button" onClick={()=>setMode(m.id)} style={{
                 flex:1, padding:'5px 0', borderRadius:6, border:'none',
                 background: mode===m.id ? accent : 'transparent',
-                color: mode===m.id ? '#fff' : C.text3,
+                color: mode===m.id ? 'var(--on-accent)' : C.text3,
                 fontSize:11, fontFamily:'var(--mono)', cursor:'pointer', fontWeight:600,
               }}>{m.label}</button>
             ))}
@@ -133,7 +133,7 @@ export default function RangePicker({ range, onChange, accentColor }) {
               </div>
               <button onClick={applyCustom} style={{
                 padding:'8px', borderRadius:7, border:'none',
-                background:accent, color:'#fff',
+                background:accent, color:'var(--on-accent)',
                 fontSize:12, fontFamily:'var(--mono)', cursor:'pointer', fontWeight:600,
               }}>Apply Range</button>
             </div>

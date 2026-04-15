@@ -12,8 +12,9 @@ services:
       - ./client:/app
       - /app/node_modules
     environment:
-      - VITE_API_URL=http://localhost:5000
-      - VITE_WS_URL=ws://localhost:5000
+      # Use 127.0.0.1 — on Windows, localhost (::1) often hits Docker port-forward bugs (connection reset).
+      - VITE_API_URL=http://127.0.0.1:5000
+      - VITE_WS_URL=ws://127.0.0.1:5000
     depends_on:
       - server
     networks:

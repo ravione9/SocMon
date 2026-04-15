@@ -1,9 +1,8 @@
 import axios from 'axios'
 import { useAuthStore } from '../store/authStore'
-const apiBase =
-  import.meta.env.VITE_API_URL != null && String(import.meta.env.VITE_API_URL).trim() !== ''
-    ? String(import.meta.env.VITE_API_URL)
-    : ''
+import { resolvedApiBase } from '../utils/backendOrigin.js'
+
+const apiBase = resolvedApiBase()
 const api = axios.create({ baseURL: apiBase, timeout: 30000 })
 api.interceptors.request.use(config => {
   const token = useAuthStore.getState().token

@@ -6,6 +6,9 @@ import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement
 import api from '../../api/client'
 import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../components/ui/ResizableTable.jsx'
 import { io } from 'socket.io-client'
+import { resolvedWsUrl } from '../../utils/backendOrigin.js'
+import { useThemeStore } from '../../store/themeStore.js'
+import { getThemeCssColors } from '../../utils/themeCssColors.js'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, ArcElement, Tooltip, Legend, Filler)
 
@@ -21,8 +24,6 @@ const TABS = [
   { id:'events',     label:'Event Feed' },
   { id:'search',     label:'Custom log search' },
 ]
-
-const co = { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:false } }, scales:{ x:{ ticks:{ color:C.text3, font:{ size:9 }, maxTicksLimit:8 }, grid:{ color:'rgba(99,120,200,0.07)' } }, y:{ ticks:{ color:C.text3, font:{ size:9 } }, grid:{ color:'rgba(99,120,200,0.07)' } } } }
 
 const DEFAULT_NOC_FILTERS = { q:'', device:'', site:'', mnemonic:'all', logtype:'all', severity:'all', iface:'', vlan:'' }
 
@@ -154,9 +155,9 @@ export default function NOCPage() {
   }
 
   useEffect(() => {
-    const ws = import.meta.env.VITE_WS_URL
+    const ws = resolvedWsUrl()
     socketRef.current =
-      ws != null && String(ws).trim() !== '' ? io(String(ws)) : io()
+      ws !== '' ? io(ws) : io()
     socketRef.current.on('live:events', evs => {
       const cisco = evs.filter(e => e._index?.includes('cisco') || e.cisco_mnemonic)
       if (cisco.length) setLiveEvents(p => [...cisco,...p].slice(0,100))
@@ -219,6 +220,27 @@ export default function NOCPage() {
     letterSpacing: 0.5,
   }
   const nocMacTh = { ...nocDeviceTh, padding: '7px 10px', fontSize: 10 }
+
+  const theme = useThemeStore((s) => s.theme)
+  const tc = useMemo(() => getThemeCssColors(), [theme])
+  const co = useMemo(
+    () => ({
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: {
+          ticks: { color: tc.text3, font: { size: 9 }, maxTicksLimit: 8 },
+          grid: { color: 'rgba(128,128,160,0.08)' },
+        },
+        y: {
+          ticks: { color: tc.text3, font: { size: 9 } },
+          grid: { color: 'rgba(128,128,160,0.08)' },
+        },
+      },
+    }),
+    [tc],
+  )
 
   const rawMerged = useMemo(() => [...liveEvents, ...events].slice(0, 500), [liveEvents, events])
   const filteredEvents = useMemo(() => rawMerged.filter(e => eventMatchesNocFilters(e, nocFilters)), [rawMerged, nocFilters])
@@ -307,8 +329,8 @@ export default function NOCPage() {
             <button key={t.id} onClick={() => { if (t.id === 'search') setNocLogSearchSeed(null); setTab(t.id) }} style={{
               padding:'6px 14px', fontSize:12, fontWeight:600, borderRadius:7,
               cursor:'pointer', border:'none', fontFamily:'var(--sans)', letterSpacing:0.3,
-              background: tab===t.id ? C.cyan : 'transparent',
-              color: tab===t.id ? '#0a0c10' : C.text2,
+              background: tab===t.id ? 'var(--cyan)' : 'transparent',
+              color: tab===t.id ? 'var(--on-cyan)' : C.text2,
               transition:'all 0.15s',
             }}>{t.label}</button>
           ))}
@@ -392,7 +414,7 @@ export default function NOCPage() {
           <option value="low">Low</option>
           <option value="info">Info</option>
         </select>
-        <button type="button" onClick={() => goToNocSearch(nocFilters)} style={{ padding:'5px 12px', borderRadius:7, border:'none', background:C.cyan, color:'#0a0c10', fontSize:10, fontFamily:'var(--mono)', cursor:'pointer', fontWeight:600 }}>Search in Custom log search</button>
+        <button type="button" onClick={() => goToNocSearch(nocFilters)} style={{ padding:'5px 12px', borderRadius:7, border:'none', background:'var(--cyan)', color:'var(--on-cyan)', fontSize:10, fontFamily:'var(--mono)', cursor:'pointer', fontWeight:600 }}>Search in Custom log search</button>
         {nocFiltersActive && (
           <span style={{ fontSize:10, color:C.cyan, fontFamily:'var(--mono)' }}>{filteredEvents.length} / {rawMerged.length} events</span>
         )}
@@ -421,13 +443,13 @@ export default function NOCPage() {
           <div style={{ display:'grid', gridTemplateColumns:'2fr 1fr', gap:12 }}>
             <Card title="INTERFACE UP/DOWN TIMELINE" badge={(range && range.label ? range.label : range || '24h').toUpperCase()} badgeClass="cyan" height={200}>
               {ifaceData.timeline.length > 0
-                ? <Line data={interfaceTimeline} options={{ ...co, onClick: (_, els) => { if (els.length) goToNocSearch({ mnemonic: 'UPDOWN' }) }, plugins:{ legend:{ display:true, labels:{ color:C.text2, font:{ size:10 }, boxWidth:10 } } } }} />
+                ? <Line data={interfaceTimeline} options={{ ...co, onClick: (_, els) => { if (els.length) goToNocSearch({ mnemonic: 'UPDOWN' }) }, plugins:{ legend:{ display:true, labels:{ color:tc.text2, font:{ size:10 }, boxWidth:10 } } } }} />
                 : <div style={{ color:C.text3, fontSize:11, fontFamily:'var(--mono)', textAlign:'center', paddingTop:80 }}>No interface events</div>
               }
             </Card>
             <Card title="EVENT TYPE BREAKDOWN" badge="CISCO" height={200}>
               {Object.keys(mnemonicCounts).length > 0
-                ? <Doughnut data={eventTypeData} options={{ responsive:true, maintainAspectRatio:false, cutout:'55%', plugins:{ legend:{ display:true, position:'right', labels:{ color:C.text2, font:{ size:9 }, boxWidth:8 } } }, onClick: (_, els) => { if (!els.length) return; const m = doughnutMnemonicKeys[els[0].index]; if (m) goToNocSearch({ mnemonic: m }) } }} />
+                ? <Doughnut data={eventTypeData} options={{ responsive:true, maintainAspectRatio:false, cutout:'55%', plugins:{ legend:{ display:true, position:'right', labels:{ color:tc.text2, font:{ size:9 }, boxWidth:8 } } }, onClick: (_, els) => { if (!els.length) return; const m = doughnutMnemonicKeys[els[0].index]; if (m) goToNocSearch({ mnemonic: m }) } }} />
                 : <div style={{ color:C.text3, fontSize:11, fontFamily:'var(--mono)', textAlign:'center', paddingTop:80 }}>No data</div>
               }
             </Card>
@@ -474,7 +496,7 @@ export default function NOCPage() {
           </div>
           <Card title="INTERFACE UP/DOWN TIMELINE" badge={(range && range.label ? range.label : range || '24h').toUpperCase()} badgeClass="cyan" height={220}>
             {ifaceData.timeline.length > 0
-              ? <Line data={interfaceTimeline} options={{ ...co, onClick: (_, els) => { if (els.length) goToNocSearch({ mnemonic: 'UPDOWN' }) }, plugins:{ legend:{ display:true, labels:{ color:C.text2, font:{ size:10 }, boxWidth:10 } } } }} />
+              ? <Line data={interfaceTimeline} options={{ ...co, onClick: (_, els) => { if (els.length) goToNocSearch({ mnemonic: 'UPDOWN' }) }, plugins:{ legend:{ display:true, labels:{ color:tc.text2, font:{ size:10 }, boxWidth:10 } } } }} />
               : <div style={{ color:C.text3, fontSize:11, fontFamily:'var(--mono)', textAlign:'center', paddingTop:90 }}>No interface events</div>
             }
           </Card>

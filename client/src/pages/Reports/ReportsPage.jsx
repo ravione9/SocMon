@@ -38,16 +38,16 @@ function eventTypeLabel(value) {
 }
 
 const C = {
-  accent: '#4f7ef5',
+  accent: 'var(--accent)',
   text: 'var(--text)',
   text2: 'var(--text2)',
   text3: 'var(--text3)',
   bg2: 'var(--bg2)',
   bg3: 'var(--bg3)',
   border: 'var(--border)',
-  green: '#22d3a0',
-  red: '#f5534f',
-  amber: '#f5a623',
+  green: 'var(--green)',
+  red: 'var(--red)',
+  amber: 'var(--amber)',
 }
 
 function toLocalDT(date) {
@@ -76,7 +76,7 @@ function Td({ children, mono, right }) {
         padding: '8px 10px',
         fontSize: 12,
         color: C.text2,
-        borderBottom: '1px solid rgba(99,120,200,0.08)',
+        borderBottom: '1px solid var(--border)',
         fontFamily: mono ? 'var(--mono)' : 'inherit',
         textAlign: right ? 'right' : 'left',
       }}
@@ -95,7 +95,7 @@ function Section({ title, children }) {
           fontWeight: 700,
           letterSpacing: 1.2,
           textTransform: 'uppercase',
-          color: C.accent,
+          color: 'var(--accent)',
           margin: '0 0 12px',
           fontFamily: 'var(--mono)',
           borderBottom: `1px solid ${C.border}`,
@@ -298,8 +298,8 @@ export default function ReportsPage() {
             style={{
               padding: '6px 14px',
               borderRadius: 8,
-              border: mode === id ? `1px solid ${C.accent}` : `1px solid ${C.border}`,
-              background: mode === id ? `${C.accent}22` : C.bg3,
+              border: mode === id ? '1px solid var(--accent)' : `1px solid ${C.border}`,
+              background: mode === id ? 'var(--bg4)' : C.bg3,
               color: mode === id ? C.text : C.text2,
               fontSize: 11,
               fontFamily: 'var(--mono)',
@@ -361,7 +361,7 @@ export default function ReportsPage() {
             borderRadius: 8,
             border: 'none',
             background: C.accent,
-            color: '#fff',
+            color: 'var(--on-accent)',
             fontSize: 11,
             fontFamily: 'var(--mono)',
             fontWeight: 600,
@@ -400,8 +400,8 @@ export default function ReportsPage() {
             style={{
               padding: '6px 14px',
               borderRadius: 8,
-              border: reportTab === id ? `1px solid ${C.accent}` : `1px solid ${C.border}`,
-              background: reportTab === id ? `${C.accent}22` : C.bg3,
+              border: reportTab === id ? '1px solid var(--accent)' : `1px solid ${C.border}`,
+              background: reportTab === id ? 'var(--bg4)' : C.bg3,
               color: reportTab === id ? C.text : C.text2,
               fontSize: 11,
               fontFamily: 'var(--mono)',
@@ -495,9 +495,9 @@ export default function ReportsPage() {
           style={{
             padding: 12,
             borderRadius: 8,
-            background: `${C.red}18`,
-            border: `1px solid ${C.red}55`,
-            color: C.red,
+            background: 'color-mix(in srgb, var(--red) 14%, transparent)',
+            border: '1px solid color-mix(in srgb, var(--red) 40%, transparent)',
+            color: 'var(--red)',
             fontFamily: 'var(--mono)',
             fontSize: 12,
             marginBottom: 16,
@@ -524,13 +524,13 @@ export default function ReportsPage() {
           <div style={{ textAlign: 'center', color: C.text3, fontFamily: 'var(--mono)', padding: 48 }}>Generating report…</div>
         ) : data ? (
           <>
-            <header style={{ borderBottom: `2px solid ${C.accent}`, paddingBottom: 16, marginBottom: 24 }}>
-              <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: 2, color: C.accent, fontFamily: 'var(--mono)', marginBottom: 6 }}>
+            <header style={{ borderBottom: '2px solid var(--accent)', paddingBottom: 16, marginBottom: 24 }}>
+              <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: 2, color: 'var(--accent)', fontFamily: 'var(--mono)', marginBottom: 6 }}>
                 LENSKART
               </div>
               <h1 style={{ fontSize: 22, fontWeight: 700, margin: '0 0 8px', letterSpacing: -0.3 }}>{meta.title}</h1>
               {reportTab !== 'overall' && (
-                <div style={{ fontSize: 12, color: C.accent, fontFamily: 'var(--mono)', marginBottom: 8 }}>
+                <div style={{ fontSize: 12, color: 'var(--accent)', fontFamily: 'var(--mono)', marginBottom: 8 }}>
                   {reportTab === 'soc' && 'Scope: SOC — firewall & security'}
                   {reportTab === 'noc' && 'Scope: NOC — Cisco & network'}
                   {reportTab === 'xdr' && 'Scope: XDR — Sentinel / endpoint'}
@@ -566,12 +566,12 @@ export default function ReportsPage() {
                   <strong style={{ color: C.text }}>Active filters</strong>
                   {meta.filters.device ? (
                     <div>
-                      Device: <span style={{ color: C.accent }}>{meta.filters.device}</span> (firewall-* and cisco-* where applicable)
+                      Device: <span style={{ color: 'var(--accent)' }}>{meta.filters.device}</span> (firewall-* and cisco-* where applicable)
                     </div>
                   ) : null}
                   {meta.filters.eventType ? (
                     <div>
-                      Event type: <span style={{ color: C.accent }}>{eventTypeLabel(meta.filters.eventType) || meta.filters.eventType}</span>
+                      Event type: <span style={{ color: 'var(--accent)' }}>{eventTypeLabel(meta.filters.eventType) || meta.filters.eventType}</span>
                     </div>
                   ) : null}
                 </div>
@@ -586,7 +586,7 @@ export default function ReportsPage() {
                       Loading XDR summary…
                     </p>
                   ) : xdrError ? (
-                    <p style={{ color: C.red, fontSize: 13, fontFamily: 'var(--mono)' }}>{xdrError}</p>
+                    <p style={{ color: 'var(--red)', fontSize: 13, fontFamily: 'var(--mono)' }}>{xdrError}</p>
                   ) : xdrSummaryLines.length ? (
                     <ul style={{ margin: 0, paddingLeft: 20, color: C.text2, fontSize: 13, lineHeight: 1.65 }}>
                       {xdrSummaryLines.map((line, i) => (

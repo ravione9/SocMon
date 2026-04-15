@@ -65,6 +65,65 @@ function appendHostGroup(must, hostGroup) {
   if (c) must.push(c)
 }
 
+/** Time range + Sentinel scope only (no host group / text filters) — used for host-group discovery from logs. */
+function buildSentinelScopeAndTimeMust(req) {
+  const tr = getTimeRange(req)
+  const rangeQ = { range: { '@timestamp': tr } }
+  const scopeRaw = String(req.query.scope || 'all').toLowerCase()
+  const scope = scopeRaw === 'bluetooth_only' ? 'bt_only' : scopeRaw
+  const scopeMust =
+    scope === 'no_usb'
+      ? sentinelScopeClause('no_usb')
+      : scope === 'usb_only'
+        ? sentinelScopeClause('usb_only')
+        : scope === 'bt_only'
+          ? sentinelScopeClause('bt_only')
+          : sentinelScopeClause('all')
+  return [rangeQ, scopeMust]
+}
+
+/** Same keyword paths as hostGroupMustClause / pickHostGroup — merge terms across fields (parallel aggs). */
+const HOST_GROUP_AGG_FIELDS = [
+  'group.name.keyword',
+  'site.name.keyword',
+  'groupName.keyword',
+  'site_name.keyword',
+  'agentRealtimeInfo.groupName.keyword',
+  'agent_realtime_info.groupName.keyword',
+  'agent_realtime_info.group_name.keyword',
+  'related.group.name.keyword',
+]
+
+async function aggregateDistinctHostGroupsFromLogs(es, index, must) {
+  const set = new Set()
+  await Promise.all(
+    HOST_GROUP_AGG_FIELDS.map(async field => {
+      try {
+        const r = await es.search({
+          index,
+          body: {
+            size: 0,
+            query: { bool: { must } },
+            aggs: {
+              by_hg: { terms: { field, size: 500, missing: '__missing__' } },
+            },
+          },
+        })
+        const buckets = r.aggregations?.by_hg?.buckets ?? []
+        for (const b of buckets) {
+          const k = b.key
+          if (k == null || k === '__missing__') continue
+          const s = String(k).trim()
+          if (s && s !== '—') set.add(s)
+        }
+      } catch {
+        /* field may be unmapped */
+      }
+    }),
+  )
+  return [...set].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+}
+
 function strVal(v) {
   if (v == null) return ''
   if (typeof v === 'string') return v.trim()
@@ -873,20 +932,9 @@ router.get('/dashboard', async (req, res) => {
 
 /** Shared bool `must` clauses for sentinel event search + CSV export. */
 function buildSentinelEventsMust(req) {
-  const tr = getTimeRange(req)
-  const rangeQ = { range: { '@timestamp': tr } }
+  const must = [...buildSentinelScopeAndTimeMust(req)]
   const scopeRaw = String(req.query.scope || 'all').toLowerCase()
   const scope = scopeRaw === 'bluetooth_only' ? 'bt_only' : scopeRaw
-  const scopeMust =
-    scope === 'no_usb'
-      ? sentinelScopeClause('no_usb')
-      : scope === 'usb_only'
-        ? sentinelScopeClause('usb_only')
-        : scope === 'bt_only'
-          ? sentinelScopeClause('bt_only')
-          : sentinelScopeClause('all')
-
-  const must = [rangeQ, scopeMust]
   appendHostGroup(must, req.query.hostGroup)
 
   const endpoint = String(req.query.endpoint || '').trim()
@@ -1048,6 +1096,19 @@ async function handleSentinelEventsExport(req, res) {
 
 router.get('/events/export', handleSentinelEventsExport)
 router.post('/events/export', handleSentinelEventsExport)
+
+/** GET /api/sentinel/host-groups — distinct host group names from logs (same fields as dashboard filter). */
+router.get('/host-groups', async (req, res) => {
+  try {
+    const es = getESClient()
+    const ix = getSentinelIndex()
+    const must = buildSentinelScopeAndTimeMust(req)
+    const groups = await aggregateDistinctHostGroupsFromLogs(es, ix, must)
+    res.json({ groups })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
 
 /** GET /api/sentinel/events — paginated raw events + drill filters */
 router.get('/events', async (req, res) => {

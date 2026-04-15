@@ -32,15 +32,36 @@ import sentinelRoutes from './routes/sentinel.js'
 import zabbixRoutes from './routes/zabbix.js'
 import { errorHandler } from './middleware/errorHandler.js'
 
+/** CORS: localhost and 127.0.0.1 are different browser origins; allow both when either is configured. */
+function resolveCorsOrigins() {
+  const parsed = process.env.CORS_ORIGIN
+    ? String(process.env.CORS_ORIGIN)
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+    : []
+  if (!parsed.length) {
+    return ['http://localhost:3000', 'http://127.0.0.1:3000']
+  }
+  const extra = []
+  for (const o of parsed) {
+    if (o === 'http://localhost:3000') extra.push('http://127.0.0.1:3000')
+    if (o === 'http://127.0.0.1:3000') extra.push('http://localhost:3000')
+  }
+  return [...new Set([...parsed, ...extra])]
+}
+
+const corsOrigins = resolveCorsOrigins()
+
 const app = express()
 const httpServer = createServer(app)
 const io = new Server(httpServer, {
-  cors: { origin: process.env.CORS_ORIGIN || 'http://localhost:3000', methods: ['GET', 'POST'] },
+  cors: { origin: corsOrigins, methods: ['GET', 'POST'] },
 })
 
 app.use(helmet())
 app.use(compression())
-app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:3000' }))
+app.use(cors({ origin: corsOrigins }))
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 app.use(morgan('dev'))

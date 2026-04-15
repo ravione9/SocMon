@@ -14,6 +14,8 @@ import {
 } from 'chart.js'
 import api from '../../api/client'
 import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../components/ui/ResizableTable.jsx'
+import { useThemeStore } from '../../store/themeStore.js'
+import { getThemeCssColors } from '../../utils/themeCssColors.js'
 
 ChartJS.register(
   CategoryScale,
@@ -28,15 +30,15 @@ ChartJS.register(
 )
 
 const C = {
-  accent: '#4f7ef5',
-  accent2: '#7c5cfc',
-  green: '#22d3a0',
-  red: '#f5534f',
-  amber: '#f5a623',
-  cyan: '#22d3ee',
-  text: '#e8eaf2',
-  text2: '#8b90aa',
-  text3: '#555a72',
+  accent: 'var(--accent)',
+  accent2: 'var(--accent2)',
+  green: 'var(--green)',
+  red: 'var(--red)',
+  amber: 'var(--amber)',
+  cyan: 'var(--cyan)',
+  text: 'var(--text)',
+  text2: 'var(--text2)',
+  text3: 'var(--text3)',
 }
 
 const TABS = [
@@ -174,7 +176,7 @@ function sevColor(sev) {
   if (n === 4) return '#f97316'
   if (n === 3) return C.amber
   if (n === 2) return C.cyan
-  return C.text2
+  return 'var(--text2)'
 }
 
 function Card({ title, badge, badgeClass = 'blue', children, noPad }) {
@@ -654,6 +656,9 @@ export default function InfraMonitoringPage() {
     setSeverityFilter((prev) => (prev === key ? null : key))
   }, [])
 
+  const theme = useThemeStore((s) => s.theme)
+  const tc = useMemo(() => getThemeCssColors(), [theme])
+
   const chartOptions = useMemo(
     () => ({
       responsive: true,
@@ -662,11 +667,11 @@ export default function InfraMonitoringPage() {
       plugins: {
         legend: {
           position: 'bottom',
-          labels: { color: C.text2, font: { size: 10 }, boxWidth: 12 },
+          labels: { color: tc.text2, font: { size: 10 }, boxWidth: 12 },
         },
         tooltip: {
-          titleColor: C.text,
-          bodyColor: C.text2,
+          titleColor: tc.text,
+          bodyColor: tc.text2,
           backgroundColor: 'rgba(20,22,30,0.95)',
           borderColor: 'rgba(99,120,200,0.25)',
           borderWidth: 1,
@@ -674,18 +679,18 @@ export default function InfraMonitoringPage() {
       },
       scales: {
         x: {
-          ticks: { color: C.text3, maxRotation: 50, font: { size: 9 }, maxTicksLimit: 12 },
-          grid: { color: 'rgba(99,120,200,0.07)' },
+          ticks: { color: tc.text3, maxRotation: 50, font: { size: 9 }, maxTicksLimit: 12 },
+          grid: { color: 'rgba(128,128,160,0.08)' },
         },
         y: {
-          ticks: { color: C.text3, font: { size: 9 } },
-          grid: { color: 'rgba(99,120,200,0.07)' },
+          ticks: { color: tc.text3, font: { size: 9 } },
+          grid: { color: 'rgba(128,128,160,0.08)' },
           beginAtZero: false,
           grace: '12%',
         },
       },
     }),
-    [],
+    [tc],
   )
 
   const latestBarOptions = useMemo(
@@ -696,8 +701,8 @@ export default function InfraMonitoringPage() {
       plugins: {
         legend: { display: false },
         tooltip: {
-          titleColor: C.text,
-          bodyColor: C.text2,
+          titleColor: tc.text,
+          bodyColor: tc.text2,
           backgroundColor: 'rgba(20,22,30,0.95)',
           borderColor: 'rgba(99,120,200,0.25)',
           borderWidth: 1,
@@ -705,16 +710,16 @@ export default function InfraMonitoringPage() {
       },
       scales: {
         x: {
-          ticks: { color: C.text3, font: { size: 10 } },
-          grid: { color: 'rgba(99,120,200,0.07)' },
+          ticks: { color: tc.text3, font: { size: 10 } },
+          grid: { color: 'rgba(128,128,160,0.08)' },
         },
         y: {
-          ticks: { color: C.text2, font: { size: 9 }, autoSkip: false },
+          ticks: { color: tc.text2, font: { size: 9 }, autoSkip: false },
           grid: { display: false },
         },
       },
     }),
-    [],
+    [tc],
   )
 
   const configured = config?.configured
@@ -962,7 +967,7 @@ export default function InfraMonitoringPage() {
                 fontFamily: 'var(--sans)',
                 letterSpacing: 0.3,
                 background: tab === t.id ? C.accent : 'transparent',
-                color: tab === t.id ? '#fff' : C.text2,
+                color: tab === t.id ? 'var(--on-accent)' : C.text2,
                 transition: 'all 0.15s',
               }}
             >
@@ -1043,7 +1048,7 @@ export default function InfraMonitoringPage() {
                   borderRadius: 6,
                   border: 'none',
                   background: C.accent,
-                  color: '#fff',
+                  color: 'var(--on-accent)',
                   cursor: 'pointer',
                   fontSize: 11,
                   fontFamily: 'var(--mono)',

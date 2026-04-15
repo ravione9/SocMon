@@ -15,6 +15,7 @@ import {
   Filler,
 } from 'chart.js'
 import api from '../../api/client'
+import { useSentinelHostGroups } from '../../hooks/useSentinelHostGroups.js'
 import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../components/ui/ResizableTable.jsx'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, ArcElement, Tooltip, Legend, Filler)
@@ -185,6 +186,8 @@ export default function SentinelPage() {
   const [sentinelDrill, setSentinelDrill] = useState(null)
   const [usbDrill, setUsbDrill] = useState(null)
   const [bluetoothDrill, setBluetoothDrill] = useState(null)
+
+  const { groups: hostGroupOptions, loading: hostGroupsLoading } = useSentinelHostGroups(range, scopeForTab(tab))
 
   const drillForLog = useMemo(() => {
     if (!sentinelDrill) return null
@@ -487,14 +490,17 @@ export default function SentinelPage() {
         <div style={{ display: 'flex', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap', justifyContent: 'flex-end', flex: '0 1 auto' }}>
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 9, fontWeight: 600, color: C.text3, fontFamily: 'var(--mono)', letterSpacing: 0.5 }}>
             HOST GROUP
-            <input
-              type="text"
+            <select
               value={hostGroupFilter}
               onChange={e => setHostGroupFilter(e.target.value)}
-              placeholder="Host group (optional)"
-              title="Filter dashboard metrics and the Custom log to this Sentinel host group when set"
+              title={
+                hostGroupsLoading
+                  ? 'Loading host groups from logs…'
+                  : 'Filter dashboard metrics and the Custom log to this Sentinel host group (values from logs in the selected range)'
+              }
               style={{
-                minWidth: 160,
+                minWidth: 200,
+                maxWidth: 320,
                 padding: '6px 10px',
                 borderRadius: 8,
                 border: '1px solid var(--border)',
@@ -503,8 +509,16 @@ export default function SentinelPage() {
                 fontSize: 11,
                 fontFamily: 'var(--mono)',
                 outline: 'none',
+                cursor: 'pointer',
               }}
-            />
+            >
+              <option value="">All groups</option>
+              {hostGroupOptions.map(g => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+            </select>
           </label>
           {showDashPanel && <RangePicker range={range} onChange={setRange} accentColor={C.accent} />}
         </div>
@@ -540,8 +554,8 @@ export default function SentinelPage() {
               cursor: 'pointer',
               border: 'none',
               fontFamily: 'var(--sans)',
-              background: tab === t.id ? C.accent : 'transparent',
-              color: tab === t.id ? '#0a0c10' : C.text2,
+              background: tab === t.id ? 'var(--accent)' : 'transparent',
+              color: tab === t.id ? 'var(--on-accent)' : C.text2,
               transition: 'all 0.15s',
             }}
           >

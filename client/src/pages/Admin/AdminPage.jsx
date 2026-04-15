@@ -4,6 +4,7 @@ import api from '../../api/client'
 import toast from 'react-hot-toast'
 import { APP_PAGE_KEYS, APP_PAGES } from '../../config/appPages'
 import { getEffectiveAllowedPages } from '../../utils/pageAccess'
+import { resolvedApiBase } from '../../utils/backendOrigin.js'
 
 const C = {
   accent: 'var(--accent)',
@@ -93,10 +94,11 @@ function Btn({ label, color='accent', onClick, small, danger, title, variant }) 
     )
   }
   const bg = danger ? C.red : color==='green' ? C.green : color==='amber' ? C.amber : `linear-gradient(135deg, ${C.accent}, ${C.accent2})`
+  const solidFg = danger || color === 'accent' || color === 'green' || color === 'amber' ? 'var(--on-accent)' : 'var(--text)'
   return (
     <button type="button" title={title} onClick={onClick} style={{
       padding: small ? '6px 12px' : '10px 18px',
-      borderRadius:10, border:'none', background:bg, color: danger||color==='accent' ? '#fff' : '#0a0c10',
+      borderRadius:10, border:'none', background:bg, color: solidFg,
       fontSize: small ? 11 : 13, fontWeight:600, fontFamily:'var(--sans)', cursor:'pointer',
       boxShadow: danger ? 'none' : color==='accent' ? '0 4px 20px rgba(79,126,245,0.25)' : 'none',
     }}>{label}</button>
@@ -298,7 +300,7 @@ export default function AdminPage() {
                   display:'flex', alignItems:'center', gap:10, padding:'10px 16px', borderRadius:10, cursor:'pointer', border:'1px solid',
                   borderColor: on ? 'transparent' : 'transparent', fontFamily:'var(--sans)', textAlign:'left',
                   background: on ? `linear-gradient(135deg, ${C.accent}, ${C.accent2})` : 'var(--bg3)',
-                  color: on ? '#fff' : 'var(--text2)',
+                  color: on ? 'var(--on-accent)' : 'var(--text2)',
                   boxShadow: on ? '0 6px 28px rgba(79,126,245,0.28)' : 'none',
                   transition:'all 0.18s ease',
                 }}
@@ -473,7 +475,7 @@ export default function AdminPage() {
                           <div style={{
                             width:36, height:36, borderRadius:10,
                             background:`linear-gradient(135deg, ${C.accent}, ${C.accent2})`,
-                            display:'flex', alignItems:'center', justifyContent:'center', fontSize:14, color:'#fff', fontWeight:700, flexShrink:0,
+                            display:'flex', alignItems:'center', justifyContent:'center', fontSize:14, color:'var(--on-accent)', fontWeight:700, flexShrink:0,
                           }}>
                             {u.name?.charAt(0).toUpperCase()}
                           </div>
@@ -634,7 +636,7 @@ export default function AdminPage() {
             <div className="card-header" style={{ background:'var(--bg3)' }}><span className="card-title">Elasticsearch</span><span className="badge badge-green">Connection</span></div>
             <div style={{ padding:18, display:'flex', flexDirection:'column', gap:4 }}>
               {[
-                { label:'API / host', value: import.meta.env.VITE_API_URL || 'http://localhost:5000' },
+                { label:'API / host', value: resolvedApiBase() || 'same-origin (Vite / nginx proxy)' },
                 { label:'Firewall index', value:'firewall-*' },
                 { label:'Cisco index', value:'cisco-*' },
                 { label:'Status', value:'Connected' },

@@ -3,6 +3,13 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Text on filled accent buttons / tabs (themes with very light accents need dark --on-accent) */
+:root {
+  --on-accent: #ffffff;
+  /* Dark text on bright cyan chips (NOC tabs, etc.) */
+  --on-cyan: #0a1620;
+}
+
 :root, [data-theme="midnight"] {
   --bg: #0a0c10; --bg2: #0f1117; --bg3: #151821; --bg4: #1c2030;
   --border: rgba(99,120,200,0.18); --border2: rgba(99,120,200,0.32);
@@ -17,6 +24,7 @@
   --accent: #22d3ee; --accent2: #06b6d4;
   --green: #2dd4bf; --red: #fb7185; --amber: #fbbf24; --cyan: #67e8f9;
   --text: #e0f2fe; --text2: #7dd3fc; --text3: #4a6f82;
+  --on-accent: #041a20;
 }
 [data-theme="forest"] {
   --bg: #07110c; --bg2: #0c1812; --bg3: #12241c; --bg4: #183228;
@@ -40,6 +48,8 @@
   --green: #059669; --red: #dc2626; --amber: #d97706; --cyan: #0891b2;
   --text: #0a0a0a; --text2: #1e293b; --text3: #475569;
   --placeholder: #64748b;
+  --on-accent: #ffffff;
+  --on-cyan: #0a1620;
 }
 [data-theme="ember"] {
   --bg: #10090a; --bg2: #1a0f0e; --bg3: #241612; --bg4: #301c18;
@@ -54,6 +64,7 @@
   --accent: #93c5fd; --accent2: #60a5fa;
   --green: #6ee7b7; --red: #fca5a5; --amber: #fde68a; --cyan: #a5f3fc;
   --text: #eff6ff; --text2: #93c5fd; --text3: #4b5e78;
+  --on-accent: #070b12;
 }
 [data-theme="rose"] {
   --bg: #0f0a10; --bg2: #181018; --bg3: #221620; --bg4: #2d1d2a;
@@ -68,6 +79,7 @@
   --accent: #94a3b8; --accent2: #cbd5e1;
   --green: #86efac; --red: #f87171; --amber: #fcd34d; --cyan: #7dd3fc;
   --text: #f1f5f9; --text2: #94a3b8; --text3: #5c6570;
+  --on-accent: #0c0e12;
 }
 [data-theme="nebula"] {
   --bg: #080616; --bg2: #100c22; --bg3: #18122e; --bg4: #221a3c;
@@ -82,6 +94,7 @@
   --accent: #e5e5e5; --accent2: #a3a3a3;
   --green: #a3e635; --red: #f87171; --amber: #fbbf24; --cyan: #d4d4d4;
   --text: #fafafa; --text2: #a3a3a3; --text3: #525252;
+  --on-accent: #0a0a0a;
 }
 [data-theme="sand"] {
   color-scheme: light;
@@ -91,6 +104,8 @@
   --green: #15803d; --red: #b91c1c; --amber: #ca8a04; --cyan: #0e7490;
   --text: #0a0a0a; --text2: #1c1917; --text3: #44403c;
   --placeholder: #64748b;
+  --on-accent: #ffffff;
+  --on-cyan: #0a1620;
 }
 [data-theme="ruby"] {
   --bg: #0a0608; --bg2: #140a0e; --bg3: #1e0f16; --bg4: #2a1420;
@@ -112,6 +127,14 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: var(--bg); color: var(--text); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+
+input, textarea, select {
+  color: var(--text);
+}
+:is([data-theme="paper"], [data-theme="sand"]) select option {
+  color: #0a0a0a;
+  background: #ffffff;
+}
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg2); }
 ::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }

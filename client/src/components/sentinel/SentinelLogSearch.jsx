@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useState, useMemo, useCallback } from 'react'
 import toast from 'react-hot-toast'
 import api from '../../api/client'
+import { useSentinelHostGroups } from '../../hooks/useSentinelHostGroups.js'
 import RangePicker from '../ui/RangePicker.jsx'
 import { useResizableColumns, ResizableColGroup, ResizableTh } from '../ui/ResizableTable.jsx'
 
@@ -106,6 +107,16 @@ export default function SentinelLogSearch({
     if (s === 'no_usb' || s === 'usb_only' || s === 'bt_only') return s
     return 'all'
   }, [scope])
+
+  const { groups: hostGroupsFromLog, loading: hostGroupsLoading } = useSentinelHostGroups(range, scope)
+
+  const hostGroupSelectOptions = useMemo(() => {
+    const set = new Set(hostGroupsFromLog)
+    for (const x of [draft.hostGroup, applied.hostGroup].map(s => String(s || '').trim()).filter(Boolean)) {
+      set.add(x)
+    }
+    return [...set].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+  }, [hostGroupsFromLog, draft.hostGroup, applied.hostGroup])
 
   /**
    * One URLSearchParams for range + filters (proper encoding for ISO dates with + / :).
@@ -353,7 +364,47 @@ export default function SentinelLogSearch({
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
             <Input label="Search (message)" value={draft.q} onChange={v => setD('q', v)} placeholder="Text…" />
             <Input label="Endpoint / hostname" value={draft.endpoint} onChange={v => setD('endpoint', v)} />
-            <Input label="Host group" value={draft.hostGroup} onChange={v => setD('hostGroup', v)} placeholder="Host group name" />
+            <div style={{ marginBottom: 10 }}>
+              <div
+                style={{
+                  fontSize: 9,
+                  fontWeight: 600,
+                  color: C.text3,
+                  fontFamily: 'var(--mono)',
+                  marginBottom: 4,
+                  letterSpacing: 0.5,
+                }}
+              >
+                Host group
+              </div>
+              <select
+                value={draft.hostGroup}
+                onChange={e => setD('hostGroup', e.target.value)}
+                title={
+                  hostGroupsLoading
+                    ? 'Loading host groups from logs…'
+                    : 'Distinct host groups seen in logs for this time range and scope'
+                }
+                style={{
+                  width: '100%',
+                  padding: '6px 10px',
+                  background: C.bg3,
+                  border: `1px solid ${C.border}`,
+                  borderRadius: 7,
+                  color: C.text,
+                  fontSize: 11,
+                  fontFamily: 'var(--mono)',
+                  cursor: 'pointer',
+                }}
+              >
+                <option value="">Any</option>
+                {hostGroupSelectOptions.map(g => (
+                  <option key={g} value={g}>
+                    {g}
+                  </option>
+                ))}
+              </select>
+            </div>
             <Input label="User" value={draft.user} onChange={v => setD('user', v)} />
             {scopeParam === 'usb_only' && (
               <Input label="USB device" value={draft.usbDevice} onChange={v => setD('usbDevice', v)} />
@@ -418,7 +469,7 @@ export default function SentinelLogSearch({
               borderRadius: 7,
               border: 'none',
               background: accent,
-              color: '#0a0c10',
+              color: 'var(--on-accent)',
               fontSize: 11,
               fontWeight: 600,
               fontFamily: 'var(--mono)',

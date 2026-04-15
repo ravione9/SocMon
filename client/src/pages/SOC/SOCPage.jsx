@@ -6,6 +6,9 @@ import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement
 import api from '../../api/client'
 import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../components/ui/ResizableTable.jsx'
 import { io } from 'socket.io-client'
+import { resolvedWsUrl } from '../../utils/backendOrigin.js'
+import { useThemeStore } from '../../store/themeStore.js'
+import { getThemeCssColors } from '../../utils/themeCssColors.js'
 import { getSevCategory } from '../../utils/logSeverity.js'
 import { firewallIdentityFromEvent, fortigateVpnUserLabel, logSearchDeviceLabel } from '../../utils/firewallIdentity.js'
 
@@ -23,8 +26,6 @@ const TABS = [
   { id:'events',    label:'Event Log' },
   { id:'search',    label:'Custom log search' },
 ]
-
-const co = { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:false } }, scales:{ x:{ ticks:{ color:C.text3, font:{ size:9 }, maxTicksLimit:8 }, grid:{ color:'rgba(99,120,200,0.07)' } }, y:{ ticks:{ color:C.text3, font:{ size:9 } }, grid:{ color:'rgba(99,120,200,0.07)' } } } }
 
 function KPI({ label, value, sub, delta, color, onClick, title }) {
   const colors = { blue:C.accent, red:C.red, green:C.green, amber:C.amber, cyan:C.cyan, purple:C.accent2 }
@@ -329,9 +330,9 @@ export default function SOCPage() {
   }
 
   useEffect(() => {
-    const ws = import.meta.env.VITE_WS_URL
+    const ws = resolvedWsUrl()
     socketRef.current =
-      ws != null && String(ws).trim() !== '' ? io(String(ws)) : io()
+      ws !== '' ? io(ws) : io()
     socketRef.current.on('live:events', evs =>
       setLiveEvents(p => [...(Array.isArray(evs) ? evs.filter(isFirewallEvent) : []), ...p].slice(0, 100)),
     )
@@ -397,6 +398,27 @@ export default function SOCPage() {
     fontSize: 10,
   }
   const socDeniedTh = { ...socSessTh, padding: '7px 10px' }
+
+  const theme = useThemeStore((s) => s.theme)
+  const tc = useMemo(() => getThemeCssColors(), [theme])
+  const co = useMemo(
+    () => ({
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: {
+          ticks: { color: tc.text3, font: { size: 9 }, maxTicksLimit: 8 },
+          grid: { color: 'rgba(128,128,160,0.08)' },
+        },
+        y: {
+          ticks: { color: tc.text3, font: { size: 9 } },
+          grid: { color: 'rgba(128,128,160,0.08)' },
+        },
+      },
+    }),
+    [tc],
+  )
 
   const { socConfigRows, socConfigSlaOmitted, socConfigKindCounts } = useMemo(() => {
     const hits = configChanges?.firewall?.hits
@@ -513,8 +535,8 @@ export default function SOCPage() {
             <button key={t.id} onClick={() => { if (t.id === 'search') setSocLogSearchSeed(null); setTab(t.id) }} style={{
               padding:'6px 14px', fontSize:12, fontWeight:600, borderRadius:7,
               cursor:'pointer', border:'none', fontFamily:'var(--sans)', letterSpacing:0.3,
-              background: tab===t.id ? C.accent : 'transparent',
-              color: tab===t.id ? '#fff' : C.text2,
+              background: tab===t.id ? 'var(--accent)' : 'transparent',
+              color: tab===t.id ? 'var(--on-accent)' : C.text2,
               transition:'all 0.15s',
             }}>{t.label}</button>
           ))}
@@ -551,7 +573,7 @@ export default function SOCPage() {
           <option value="low">Low</option>
           <option value="info">Info</option>
         </select>
-        <button type="button" onClick={() => goToSocSearch(socFilters)} style={{ padding:'5px 12px', borderRadius:7, border:'none', background:C.accent, color:'#fff', fontSize:10, fontFamily:'var(--mono)', cursor:'pointer', fontWeight:600 }}>Search in Custom log search</button>
+        <button type="button" onClick={() => goToSocSearch(socFilters)} style={{ padding:'5px 12px', borderRadius:7, border:'none', background:'var(--accent)', color:'var(--on-accent)', fontSize:10, fontFamily:'var(--mono)', cursor:'pointer', fontWeight:600 }}>Search in Custom log search</button>
         {socViewFiltersActive && (
           <span style={{ fontSize:10, color:C.cyan, fontFamily:'var(--mono)' }}>{filteredEvents.length} / {allEvents.length} in Event Log</span>
         )}
@@ -574,7 +596,7 @@ export default function SOCPage() {
 
           <div style={{ display:'grid', gridTemplateColumns:'2fr 1fr', gap:12 }}>
             <Card title="SESSION VOLUME TREND" badge={(range?.label||range?.value||'24h').toUpperCase()} height={200}>
-              <Line data={timelineData} options={{ ...co, onClick: (_, els) => { if (els.length) goToSocSearch({ logtype: 'traffic' }) }, plugins:{ legend:{ display:true, labels:{ color:C.text2, font:{ size:10 }, boxWidth:10 } } }, scales:{ ...co.scales, x:{ ...co.scales.x, ticks:{ ...co.scales.x.ticks, maxTicksLimit:tickLimit } } } }} />
+              <Line data={timelineData} options={{ ...co, onClick: (_, els) => { if (els.length) goToSocSearch({ logtype: 'traffic' }) }, plugins:{ legend:{ display:true, labels:{ color:tc.text2, font:{ size:10 }, boxWidth:10 } } }, scales:{ ...co.scales, x:{ ...co.scales.x, ticks:{ ...co.scales.x.ticks, maxTicksLimit:tickLimit } } } }} />
             </Card>
             <Card title="SEVERITY BREAKDOWN" badge="ALERTS" badgeClass="red" height={200}>
               <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8, height:200 }}>
@@ -668,7 +690,7 @@ export default function SOCPage() {
           </div>
 
           <Card title="TRAFFIC TIMELINE" badge={(range?.label||range?.value||'24h').toUpperCase()} height={220}>
-            <Line data={timelineData} options={{ ...co, onClick: (_, els) => { if (els.length) goToSocSearch({ logtype: 'traffic' }) }, plugins:{ legend:{ display:true, labels:{ color:C.text2, font:{ size:10 }, boxWidth:10 } } }, scales:{ ...co.scales, x:{ ...co.scales.x, ticks:{ ...co.scales.x.ticks, maxTicksLimit:tickLimit } } } }} />
+            <Line data={timelineData} options={{ ...co, onClick: (_, els) => { if (els.length) goToSocSearch({ logtype: 'traffic' }) }, plugins:{ legend:{ display:true, labels:{ color:tc.text2, font:{ size:10 }, boxWidth:10 } } }, scales:{ ...co.scales, x:{ ...co.scales.x, ticks:{ ...co.scales.x.ticks, maxTicksLimit:tickLimit } } } }} />
           </Card>
 
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
@@ -681,7 +703,7 @@ export default function SOCPage() {
                   sessions.filter(s=>(s.fgt?.proto||s['fgt.proto'])===1).length,
                   sessions.filter(s=>![1,6,17].includes(s.fgt?.proto||s['fgt.proto'])).length,
                 ], backgroundColor:[C.accent,C.cyan,C.accent2,C.text3], borderWidth:0 }]
-              }} options={{ responsive:true, maintainAspectRatio:false, cutout:'60%', plugins:{ legend:{ display:true, position:'right', labels:{ color:C.text2, font:{ size:10 }, boxWidth:10 } } }, onClick: (_, els) => { if (!els.length) return; const labels = ['TCP','UDP','ICMP','Other']; const q = labels[els[0].index]; if (q) goToSocSearch({ logtype: 'traffic', q }) } }} />
+              }} options={{ responsive:true, maintainAspectRatio:false, cutout:'60%', plugins:{ legend:{ display:true, position:'right', labels:{ color:tc.text2, font:{ size:10 }, boxWidth:10 } } }, onClick: (_, els) => { if (!els.length) return; const labels = ['TCP','UDP','ICMP','Other']; const q = labels[els[0].index]; if (q) goToSocSearch({ logtype: 'traffic', q }) } }} />
             </Card>
             <Card title="TOP APPLICATIONS" badge="APP CTRL" noPad>
               <div style={{ padding:'12px 14px' }}>
@@ -763,7 +785,7 @@ export default function SOCPage() {
               }
             </Card>
             <Card title="THREAT SEVERITY TIMELINE" badge="24H" badgeClass="amber" height={220}>
-              <Line data={timelineData} options={{ ...co, onClick: (_, els) => { if (els.length) goToSocSearch({ logtype: 'ips' }) }, plugins:{ legend:{ display:true, labels:{ color:C.text2, font:{ size:10 }, boxWidth:10 } } }, scales:{ ...co.scales, x:{ ...co.scales.x, ticks:{ ...co.scales.x.ticks, maxTicksLimit:tickLimit } } } }} />
+              <Line data={timelineData} options={{ ...co, onClick: (_, els) => { if (els.length) goToSocSearch({ logtype: 'ips' }) }, plugins:{ legend:{ display:true, labels:{ color:tc.text2, font:{ size:10 }, boxWidth:10 } } }, scales:{ ...co.scales, x:{ ...co.scales.x, ticks:{ ...co.scales.x.ticks, maxTicksLimit:tickLimit } } } }} />
             </Card>
           </div>
 
@@ -819,7 +841,7 @@ export default function SOCPage() {
 
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
             <Card title="SESSION TIMELINE" badge={(range?.label || range?.value || '24h').toUpperCase()} height={220}>
-              <Line data={timelineData} options={{ ...co, onClick: (_, els) => { if (els.length) goToSocSearch({ logtype: 'traffic' }) }, plugins:{ legend:{ display:true, labels:{ color:C.text2, font:{ size:10 }, boxWidth:10 } } }, scales:{ ...co.scales, x:{ ...co.scales.x, ticks:{ ...co.scales.x.ticks, maxTicksLimit:tickLimit } } } }} />
+              <Line data={timelineData} options={{ ...co, onClick: (_, els) => { if (els.length) goToSocSearch({ logtype: 'traffic' }) }, plugins:{ legend:{ display:true, labels:{ color:tc.text2, font:{ size:10 }, boxWidth:10 } } }, scales:{ ...co.scales, x:{ ...co.scales.x, ticks:{ ...co.scales.x.ticks, maxTicksLimit:tickLimit } } } }} />
             </Card>
             <Card title="VPN MIX (SAMPLE)" badge="FORTIGATE" height={220}>
               <Doughnut
@@ -853,7 +875,7 @@ export default function SOCPage() {
                   maintainAspectRatio: false,
                   cutout: '55%',
                   plugins: {
-                    legend: { display: true, position: 'right', labels: { color: C.text2, font: { size: 10 }, boxWidth: 10 } },
+                    legend: { display: true, position: 'right', labels: { color: tc.text2, font: { size: 10 }, boxWidth: 10 } },
                   },
                   onClick: (_, els) => {
                     if (!els.length) return
@@ -939,7 +961,7 @@ export default function SOCPage() {
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
             <Card title="TOP THREAT COUNTRIES" badge="GEO INTEL" badgeClass="red" height={300}>
               {denied.by_country.length > 0
-                ? <Doughnut data={countryData} options={{ responsive:true, maintainAspectRatio:false, cutout:'50%', plugins:{ legend:{ display:true, position:'right', labels:{ color:C.text2, font:{ size:10 }, boxWidth:10 } } }, onClick: (_, els) => { if (!els.length) return; const c = denied.by_country[els[0].index]?.country; if (c) goToSocSearch({ country: c, action: 'deny' }) } }} />
+                ? <Doughnut data={countryData} options={{ responsive:true, maintainAspectRatio:false, cutout:'50%', plugins:{ legend:{ display:true, position:'right', labels:{ color:tc.text2, font:{ size:10 }, boxWidth:10 } } }, onClick: (_, els) => { if (!els.length) return; const c = denied.by_country[els[0].index]?.country; if (c) goToSocSearch({ country: c, action: 'deny' }) } }} />
                 : <div style={{ color:C.text3, fontSize:11, fontFamily:'var(--mono)', textAlign:'center', paddingTop:120 }}>No geo data</div>
               }
             </Card>
