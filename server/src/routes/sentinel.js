@@ -573,6 +573,26 @@ async function tryCardinality(es, index, must, fields) {
 }
 
 async function tryTopTerms(es, index, must, fields, size = 8) {
+  // Fast path: try all fields in a single multi-agg query
+  try {
+    const aggs = {}
+    for (let i = 0; i < fields.length; i++) {
+      aggs[`f${i}`] = { terms: { field: fields[i], size, missing: '__missing__' } }
+    }
+    const r = await es.search({
+      index,
+      body: { size: 0, query: { bool: { must } }, aggs },
+    })
+    for (let i = 0; i < fields.length; i++) {
+      const buckets = (r.aggregations?.[`f${i}`]?.buckets || []).filter(b => b.key !== '__missing__' && b.key !== '')
+      if (buckets.length) {
+        return buckets.map(b => ({ key: String(b.key), count: b.doc_count }))
+      }
+    }
+    return []
+  } catch {
+    /* multi-agg can fail if any field is mapped as text; fall back to sequential */
+  }
   for (const field of fields) {
     try {
       const r = await es.search({
@@ -868,10 +888,34 @@ router.get('/dashboard', async (req, res) => {
     })()
 
     const deviceTermFields = [
-      'device.product.keyword',
-      'device.name.keyword',
-      'event.device.name.keyword',
+      // SentinelOne Elastic integration — activity data (camelCase)
+      'sentinel_one.activity.data.deviceName.keyword',
+      'sentinel_one.activity.data.productName.keyword',
+      'sentinel_one.activity.data.vendorName.keyword',
+      'sentinel_one.activity.data.externalDeviceType.keyword',
+      'sentinel_one.activity.data.deviceClass.keyword',
+      // SentinelOne Elastic integration — activity data (snake_case)
+      'sentinel_one.activity.data.device_name.keyword',
+      'sentinel_one.activity.data.product_name.keyword',
+      'sentinel_one.activity.data.vendor_name.keyword',
+      'sentinel_one.activity.data.external_device_type.keyword',
+      'sentinel_one.activity.data.device_class.keyword',
+      // SentinelOne — other namespaces
       'sentinel_one.device.name.keyword',
+      'sentinel_one.alert.info.device_name.keyword',
+      // ECS standard
+      'device.name.keyword',
+      'device.product.keyword',
+      'device.model.name.keyword',
+      'device.type.keyword',
+      // Flat dot-notation / custom pipelines
+      'data.deviceName.keyword',
+      'data.productName.keyword',
+      'data.device_name.keyword',
+      'data.product_name.keyword',
+      'event.device.name.keyword',
+      'device_name.keyword',
+      'observer.product.keyword',
     ]
 
     const hostTermFields = [
@@ -973,6 +1017,17 @@ function buildSentinelEventsMust(req) {
           { wildcard: { message: `*${esc}*` } },
           { term: { 'device.name.keyword': peripheralDevice } },
           { term: { 'device.product.keyword': peripheralDevice } },
+          { term: { 'sentinel_one.activity.data.deviceName.keyword': peripheralDevice } },
+          { term: { 'sentinel_one.activity.data.productName.keyword': peripheralDevice } },
+          { term: { 'sentinel_one.activity.data.device_name.keyword': peripheralDevice } },
+          { term: { 'sentinel_one.activity.data.product_name.keyword': peripheralDevice } },
+          { term: { 'sentinel_one.activity.data.externalDeviceType.keyword': peripheralDevice } },
+          { term: { 'sentinel_one.activity.data.external_device_type.keyword': peripheralDevice } },
+          { term: { 'sentinel_one.activity.data.deviceClass.keyword': peripheralDevice } },
+          { term: { 'sentinel_one.activity.data.device_class.keyword': peripheralDevice } },
+          { term: { 'data.deviceName.keyword': peripheralDevice } },
+          { term: { 'data.device_name.keyword': peripheralDevice } },
+          { term: { 'device_name.keyword': peripheralDevice } },
         ],
         minimum_should_match: 1,
       },
