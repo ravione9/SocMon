@@ -44,10 +44,10 @@ function Field({ label, value, onChange, type='text', options, required }) {
   )
 }
 
-function Btn({ label, color='accent', onClick, small, danger }) {
+function Btn({ label, color='accent', onClick, small, danger, title }) {
   const bg = danger ? C.red : color==='green' ? C.green : color==='amber' ? C.amber : C.accent
   return (
-    <button onClick={onClick} style={{
+    <button type="button" title={title} onClick={onClick} style={{
       padding: small ? '4px 10px' : '8px 16px',
       borderRadius:7, border:'none', background:bg, color: danger||color==='accent' ? '#fff' : '#0a0c10',
       fontSize: small ? 11 : 12, fontWeight:600, fontFamily:'var(--sans)', cursor:'pointer',
@@ -74,7 +74,7 @@ export default function AdminPage() {
   const f = key => val => setForm(p => ({ ...p, [key]: val }))
 
   const ADMIN_DEVICE_COLS = [160, 130, 100, 140, 88, 200, 128]
-  const ADMIN_USER_COLS = [200, 220, 88, 220, 88, 180, 128]
+  const ADMIN_USER_COLS = [200, 220, 88, 220, 88, 180, 220]
   const deviceResize = useResizableColumns('admin-devices', ADMIN_DEVICE_COLS)
   const userResize = useResizableColumns('admin-users', ADMIN_USER_COLS)
   const adminTh = {
@@ -143,6 +143,42 @@ export default function AdminPage() {
       toast.success('Deleted')
       loadAll()
     } catch(err) { toast.error('Delete failed') }
+  }
+
+  function openResetPassword(user) {
+    setForm({
+      _pwdResetFor: user._id,
+      _pwdResetName: user.name || '',
+      _pwdResetEmail: user.email || '',
+      newPassword: '',
+      confirmPassword: '',
+    })
+    setModal('reset-password')
+  }
+
+  async function savePasswordReset() {
+    const pw = (form.newPassword || '').trim()
+    const cf = (form.confirmPassword || '').trim()
+    if (pw.length < 8) {
+      toast.error('Password must be at least 8 characters')
+      return
+    }
+    if (pw !== cf) {
+      toast.error('Passwords do not match')
+      return
+    }
+    setLoading(true)
+    try {
+      await api.put(`/api/users/${form._pwdResetFor}`, { password: pw })
+      toast.success('Password updated')
+      setModal(null)
+      setForm({})
+      loadAll()
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to reset password')
+    } finally {
+      setLoading(false)
+    }
   }
 
   function openCreate(type) {
@@ -336,8 +372,9 @@ export default function AdminPage() {
                       <TD><Badge label={u.active ? 'active' : 'inactive'} /></TD>
                       <TD color={C.text3}>{u.lastLogin ? new Date(u.lastLogin).toLocaleString('en', { timeZoneName:'short' }) : 'Never'}</TD>
                       <td style={{ padding:'8px 12px', borderBottom:'1px solid rgba(99,120,200,0.07)' }}>
-                        <div style={{ display:'flex', gap:6 }}>
+                        <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
                           <Btn label="Edit" small onClick={()=>openEdit('users',u)} />
+                          <Btn label="Password" small color="amber" title="Set a new password for this user" onClick={()=>openResetPassword(u)} />
                           <Btn label="Delete" small danger onClick={()=>remove('users',u._id,u.name)} />
                         </div>
                       </td>
@@ -559,6 +596,42 @@ export default function AdminPage() {
           <div style={{ display:'flex', gap:8, justifyContent:'flex-end', marginTop:8 }}>
             <button onClick={()=>setModal(null)} style={{ padding:'8px 16px', borderRadius:7, border:'1px solid var(--border)', background:'transparent', color:C.text2, cursor:'pointer', fontSize:12 }}>Cancel</button>
             <Btn label={loading ? 'Saving...' : 'Save User'} onClick={save} />
+          </div>
+        </Modal>
+      )}
+
+      {modal === 'reset-password' && (
+        <Modal title="Reset password" onClose={() => { setModal(null); setForm({}) }}>
+          <div style={{ fontSize: 12, color: C.text2, marginBottom: 12, fontFamily: 'var(--mono)' }}>
+            User: <strong style={{ color: C.text }}>{form._pwdResetName}</strong>
+            <br />
+            <span style={{ fontSize: 11, color: C.text3 }}>{form._pwdResetEmail}</span>
+          </div>
+          <Field label="New password" value={form.newPassword || ''} onChange={f('newPassword')} type="password" required />
+          <Field label="Confirm new password" value={form.confirmPassword || ''} onChange={f('confirmPassword')} type="password" required />
+          <div style={{ fontSize: 10, color: C.text3, fontFamily: 'var(--mono)', marginBottom: 14 }}>
+            Minimum 8 characters. The user can sign in immediately with the new password.
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 8 }}>
+            <button
+              type="button"
+              onClick={() => {
+                setModal(null)
+                setForm({})
+              }}
+              style={{
+                padding: '8px 16px',
+                borderRadius: 7,
+                border: '1px solid var(--border)',
+                background: 'transparent',
+                color: C.text2,
+                cursor: 'pointer',
+                fontSize: 12,
+              }}
+            >
+              Cancel
+            </button>
+            <Btn label={loading ? 'Saving...' : 'Update password'} onClick={savePasswordReset} color="green" />
           </div>
         </Modal>
       )}

@@ -30,12 +30,22 @@ export default function LoginPage() {
           <div style={{ fontSize:20, fontWeight:700 }}>Lenskart</div>
           <div style={{ fontSize:12, color:'var(--text3)', fontFamily:'var(--mono)', marginTop:4 }}>NOC / SOC PLATFORM</div>
         </div>
-        <form onSubmit={handleLogin} style={{ display:'flex', flexDirection:'column', gap:14 }}>
-          {[['Email','email',email,setEmail,'admin@netpulse.local'],['Password','password',password,setPassword,'••••••••']].map(([label,type,val,setter,ph]) => (
-            <div key={label}>
-              <label style={{ fontSize:11, color:'var(--text3)', fontFamily:'var(--mono)', letterSpacing:1, textTransform:'uppercase' }}>{label}</label>
-              <input type={type} value={val} onChange={e=>setter(e.target.value)} required placeholder={ph}
-                style={{ width:'100%', marginTop:6, padding:'10px 12px', background:'var(--bg3)', border:'1px solid var(--border)', borderRadius:8, color:'var(--text)', fontSize:13, fontFamily:'var(--mono)', outline:'none' }} />
+        <form onSubmit={handleLogin} style={{ display:'flex', flexDirection:'column', gap:14 }} autoComplete="on">
+          {[
+            { label: 'Email', type: 'email', value: email, set: setEmail, autoComplete: 'email' },
+            { label: 'Password', type: 'password', value: password, set: setPassword, autoComplete: 'current-password' },
+          ].map((f) => (
+            <div key={f.label}>
+              <label style={{ fontSize:11, color:'var(--text3)', fontFamily:'var(--mono)', letterSpacing:1, textTransform:'uppercase' }}>{f.label}</label>
+              <input
+                name={f.label === 'Email' ? 'email' : 'password'}
+                type={f.type}
+                value={f.value}
+                onChange={(e) => f.set(e.target.value)}
+                required
+                autoComplete={f.autoComplete}
+                style={{ width:'100%', marginTop:6, padding:'10px 12px', background:'var(--bg3)', border:'1px solid var(--border)', borderRadius:8, color:'var(--text)', fontSize:13, fontFamily:'var(--mono)', outline:'none' }}
+              />
             </div>
           ))}
           <button type="submit" disabled={loading}

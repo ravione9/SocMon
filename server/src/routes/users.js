@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import bcrypt from 'bcryptjs'
 import User from '../models/User.js'
 import { sanitizeAllowedPages } from '../constants/appPages.js'
 
@@ -44,9 +45,17 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const payload = pickUserPayload(req.body)
-    const user = await User.findByIdAndUpdate(req.params.id, payload, { new: true })
+    // findByIdAndUpdate does not run User pre('save') — hash password here
+    if (payload.password) {
+      payload.password = await bcrypt.hash(payload.password, 12)
+    }
+    const user = await User.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true }).select(
+      '-password',
+    )
     res.json(user)
-  } catch (err) { res.status(500).json({ error: err.message }) }
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
 })
 
 router.delete('/:id', async (req, res) => {
