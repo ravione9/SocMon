@@ -469,7 +469,7 @@ export default function SentinelLogSearch({
               borderRadius: 7,
               border: 'none',
               background: accent,
-              color: 'var(--on-accent)',
+              color: '#ffffff',
               fontSize: 11,
               fontWeight: 600,
               fontFamily: 'var(--mono)',

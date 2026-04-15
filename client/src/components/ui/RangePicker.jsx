@@ -20,8 +20,14 @@ function toLocalDT(date) {
     .toISOString().slice(0, 16)
 }
 
+/** White on hex fills; theme token when fill uses var(--accent) (light accents need --on-accent). */
+function fillTextOnAccent(accent) {
+  return typeof accent === 'string' && accent.includes('var(') ? 'var(--on-accent)' : '#ffffff'
+}
+
 export default function RangePicker({ range, onChange, accentColor }) {
   const accent = accentColor || C.accent
+  const fillFg = fillTextOnAccent(accent)
   const [open, setOpen]       = useState(false)
   const [mode, setMode]       = useState('preset')
   const [fromVal, setFromVal] = useState('')
@@ -89,7 +95,7 @@ export default function RangePicker({ range, onChange, accentColor }) {
               <button key={m.id} type="button" onClick={()=>setMode(m.id)} style={{
                 flex:1, padding:'5px 0', borderRadius:6, border:'none',
                 background: mode===m.id ? accent : 'transparent',
-                color: mode===m.id ? 'var(--on-accent)' : C.text3,
+                color: mode===m.id ? fillFg : C.text3,
                 fontSize:11, fontFamily:'var(--mono)', cursor:'pointer', fontWeight:600,
               }}>{m.label}</button>
             ))}
@@ -133,7 +139,7 @@ export default function RangePicker({ range, onChange, accentColor }) {
               </div>
               <button onClick={applyCustom} style={{
                 padding:'8px', borderRadius:7, border:'none',
-                background:accent, color:'var(--on-accent)',
+                background:accent, color:fillFg,
                 fontSize:12, fontFamily:'var(--mono)', cursor:'pointer', fontWeight:600,
               }}>Apply Range</button>
             </div>

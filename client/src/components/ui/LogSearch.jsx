@@ -68,7 +68,8 @@ function Btn({ label, onClick, color=C.accent, small, disabled }) {
     <button onClick={onClick} disabled={disabled} style={{
       padding: small ? '4px 10px' : '5px 14px',
       borderRadius:7, border:'none', background: disabled ? C.bg4 : color,
-      color: disabled ? C.text3 : 'var(--on-accent)', fontSize: small ? 10 : 11,
+      color: disabled ? C.text3 : '#ffffff',
+      fontSize: small ? 10 : 11,
       fontWeight:600, fontFamily:'var(--mono)', cursor: disabled ? 'default' : 'pointer',
       opacity: disabled ? 0.5 : 1, transition:'all 0.15s', whiteSpace:'nowrap',
     }}>{label}</button>
@@ -80,6 +81,10 @@ const LIVE_SIZES = [50, 100, 200, 500]
 
 const SOC_FILTERS = { q:'', srcip:'', dstip:'', srccountry:'', dstcountry:'', action:'all', severity:'all', logtype:'all' }
 const NOC_FILTERS = { q:'', device:'', mnemonic:'all', logtype:'all', severity:'all', site:'', iface:'', vlan:'' }
+
+function fillTextOnAccent(accent) {
+  return typeof accent === 'string' && accent.includes('var(') ? 'var(--on-accent)' : '#ffffff'
+}
 
 function drillActive(isFw, f) {
   if (!f || typeof f !== 'object') return false
@@ -482,7 +487,7 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
               padding:'5px 14px', fontSize:11, fontWeight:600, borderRadius:6,
               border:'none', cursor:'pointer', fontFamily:'var(--mono)', textTransform:'uppercase',
               background: mode===m ? accent : 'transparent',
-              color: mode===m ? 'var(--on-accent)' : C.text3, transition:'all 0.15s',
+              color: mode===m ? '#ffffff' : C.text3, transition:'all 0.15s',
             }}>{m === 'live' ? '⬤ Live' : '⏱ Time Range'}</button>
           ))}
         </div>

@@ -126,7 +126,15 @@
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
+html {
+  background: var(--bg);
+  color: var(--text);
+}
 body { background: var(--bg); color: var(--text); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+
+#root {
+  color: var(--text);
+}
 
 input, textarea, select {
   color: var(--text);
@@ -134,6 +142,11 @@ input, textarea, select {
 :is([data-theme="paper"], [data-theme="sand"]) select option {
   color: #0a0a0a;
   background: #ffffff;
+}
+/* Dark themes: native option list (where browsers allow) */
+html:not([data-theme="paper"]):not([data-theme="sand"]) select option {
+  color: var(--text);
+  background: var(--bg2);
 }
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg2); }
