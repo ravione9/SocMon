@@ -68,7 +68,7 @@ function Btn({ label, onClick, color=C.accent, small, disabled }) {
     <button onClick={onClick} disabled={disabled} style={{
       padding: small ? '4px 10px' : '5px 14px',
       borderRadius:7, border:'none', background: disabled ? C.bg4 : color,
-      color: disabled ? C.text3 : '#ffffff',
+      color: disabled ? C.text3 : fillTextOnAccent(color),
       fontSize: small ? 10 : 11,
       fontWeight:600, fontFamily:'var(--mono)', cursor: disabled ? 'default' : 'pointer',
       opacity: disabled ? 0.5 : 1, transition:'all 0.15s', whiteSpace:'nowrap',
@@ -98,6 +98,7 @@ function drillActive(isFw, f) {
 
 export default function LogSearch({ type, accentColor, dashboardRange, initialFilters }) {
   const accent = accentColor || C.accent
+  const modeFillFg = fillTextOnAccent(accent)
   const isFirewall = type === 'firewall'
   const baseF = isFirewall ? SOC_FILTERS : NOC_FILTERS
   const mergedInit = { ...baseF, ...(initialFilters || {}) }
@@ -487,7 +488,7 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
               padding:'5px 14px', fontSize:11, fontWeight:600, borderRadius:6,
               border:'none', cursor:'pointer', fontFamily:'var(--mono)', textTransform:'uppercase',
               background: mode===m ? accent : 'transparent',
-              color: mode===m ? '#ffffff' : C.text3, transition:'all 0.15s',
+              color: mode===m ? modeFillFg : C.text3, transition:'all 0.15s',
             }}>{m === 'live' ? '⬤ Live' : '⏱ Time Range'}</button>
           ))}
         </div>

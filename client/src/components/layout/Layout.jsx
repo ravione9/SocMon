@@ -30,7 +30,7 @@ export default function Layout() {
       <Sidebar />
       <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
         <Topbar />
-        <main style={{ flex:1, overflowY:'auto', padding:'16px 20px' }}>
+        <main style={{ flex:1, overflowY:'auto', padding:'16px 20px', color:'var(--text)' }}>
           <Outlet />
         </main>
       </div>

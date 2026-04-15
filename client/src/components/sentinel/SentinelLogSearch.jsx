@@ -57,6 +57,7 @@ export default function SentinelLogSearch({
   onDrillClear,
 }) {
   const accent = accentColor || C.accent
+  const accentFillFg = typeof accent === 'string' && accent.includes('var(') ? 'var(--on-accent)' : '#ffffff'
   const [draft, setDraft] = useState({
     q: '',
     endpoint: '',
@@ -469,7 +470,7 @@ export default function SentinelLogSearch({
               borderRadius: 7,
               border: 'none',
               background: accent,
-              color: '#ffffff',
+              color: accentFillFg,
               fontSize: 11,
               fontWeight: 600,
               fontFamily: 'var(--mono)',

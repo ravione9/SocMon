@@ -733,7 +733,7 @@ export default function SOCPage() {
                     const ac = action==='allow' ? C.green : action==='deny' ? C.red : C.amber
                     const proto = f('proto')
                     return (
-                      <tr key={i} style={{ borderBottom:'1px solid rgba(99,120,200,0.07)', cursor:'pointer' }}
+                      <tr key={i} style={{ borderBottom:'1px solid var(--border)', cursor:'pointer' }}
                         onClick={() => goToSocSearch({
                           ...(f('srcip') ? { srcip: f('srcip') } : {}),
                           ...(f('dstip') ? { dstip: f('dstip') } : {}),
@@ -896,7 +896,7 @@ export default function SOCPage() {
                   display:'flex',
                   gap:10,
                   padding:'6px 14px',
-                  borderBottom:'1px solid rgba(99,120,200,0.12)',
+                  borderBottom:'1px solid var(--border)',
                   fontFamily:'var(--mono)',
                   fontSize:9,
                   fontWeight:600,
@@ -916,7 +916,7 @@ export default function SOCPage() {
                 return (
                 <div
                   key={i}
-                  style={{ display:'flex', gap:10, padding:'8px 14px', borderBottom:'1px solid rgba(99,120,200,0.06)', fontFamily:'var(--mono)', fontSize:11, cursor:'pointer', alignItems:'center' }}
+                  style={{ display:'flex', gap:10, padding:'8px 14px', borderBottom:'1px solid var(--border)', fontFamily:'var(--mono)', fontSize:11, cursor:'pointer', alignItems:'center' }}
                   onClick={() =>
                     goToSocSearch({
                       logtype: 'vpn',
@@ -993,7 +993,7 @@ export default function SOCPage() {
                 </thead>
                 <tbody>
                   {denied.by_src.slice(0,15).map((s,i) => (
-                    <tr key={i} style={{ borderBottom:'1px solid rgba(99,120,200,0.07)', cursor:'pointer' }} onClick={() => s.ip && goToSocSearch({ srcip: s.ip, action: 'deny' })} title="Open in Custom log search">
+                    <tr key={i} style={{ borderBottom:'1px solid var(--border)', cursor:'pointer' }} onClick={() => s.ip && goToSocSearch({ srcip: s.ip, action: 'deny' })} title="Open in Custom log search">
                       <td style={{ padding:'5px 10px', color:C.text3 }}>#{i+1}</td>
                       <td style={{ padding:'5px 10px', color:C.cyan }}>{s.ip}</td>
                       <td style={{ padding:'5px 10px', color: i===0 ? C.red : i<3 ? C.amber : C.text2, fontWeight: i<3 ? 600 : 400 }}>{s.count?.toLocaleString()}</td>
@@ -1054,7 +1054,7 @@ export default function SOCPage() {
             </Card>
             <Card title="FIREWALL CONFIGURATION LOG" badge="FORTIGATE" badgeClass="amber" noPad>
               <div style={{ overflowX:'auto', overflowY:'auto', maxHeight:480 }}>
-                <div style={{ display:'grid', gridTemplateColumns:'minmax(72px,0.7fr) minmax(72px,0.55fr) minmax(88px,0.65fr) minmax(140px,1.4fr) minmax(100px,0.9fr)', gap:6, padding:'6px 12px', borderBottom:'1px solid rgba(99,120,200,0.12)', fontFamily:'var(--mono)', fontSize:9, fontWeight:600, color:C.text3, textTransform:'uppercase', letterSpacing:0.4 }}>
+                <div style={{ display:'grid', gridTemplateColumns:'minmax(72px,0.7fr) minmax(72px,0.55fr) minmax(88px,0.65fr) minmax(140px,1.4fr) minmax(100px,0.9fr)', gap:6, padding:'6px 12px', borderBottom:'1px solid var(--border)', fontFamily:'var(--mono)', fontSize:9, fontWeight:600, color:C.text3, textTransform:'uppercase', letterSpacing:0.4 }}>
                   <span>Time</span>
                   <span>Area</span>
                   <span>Changed by</span>
@@ -1083,7 +1083,7 @@ export default function SOCPage() {
                           gap:6,
                           alignItems:'center',
                           padding:'8px 12px',
-                          borderBottom:'1px solid rgba(99,120,200,0.06)',
+                          borderBottom:'1px solid var(--border)',
                           fontFamily:'var(--mono)',
                           fontSize:10,
                           cursor:'pointer',
@@ -1149,7 +1149,7 @@ export default function SOCPage() {
                 return (
                   <div
                     key={e._id || i}
-                    style={{ display:'flex', gap:10, padding:'8px 14px', borderBottom:'1px solid rgba(99,120,200,0.06)', fontFamily:'var(--mono)', fontSize:11, cursor:'default' }}
+                    style={{ display:'flex', gap:10, padding:'8px 14px', borderBottom:'1px solid var(--border)', fontFamily:'var(--mono)', fontSize:11, cursor:'default' }}
                     onMouseEnter={el => { el.currentTarget.style.background = 'var(--bg3)' }}
                     onMouseLeave={el => { el.currentTarget.style.background = 'transparent' }}
                   >

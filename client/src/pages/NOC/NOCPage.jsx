@@ -525,7 +525,7 @@ export default function NOCPage() {
                 const stateColor = isUp ? C.green : C.red
                 const state = isUp ? 'UP' : 'DOWN'
                 return (
-                  <div key={i} style={{ display:'flex', gap:10, padding:'7px 14px', borderBottom:'1px solid rgba(99,120,200,0.06)', fontFamily:'var(--mono)', fontSize:11, cursor:'pointer' }} onClick={() => goToNocSearch({ device: e.device_name || '', site: e.site_name || '', mnemonic: 'UPDOWN', iface: e.cisco_interface_full || '' })} title="Open in Custom log search">
+                  <div key={i} style={{ display:'flex', gap:10, padding:'7px 14px', borderBottom:'1px solid var(--border)', fontFamily:'var(--mono)', fontSize:11, cursor:'pointer' }} onClick={() => goToNocSearch({ device: e.device_name || '', site: e.site_name || '', mnemonic: 'UPDOWN', iface: e.cisco_interface_full || '' })} title="Open in Custom log search">
                     <span style={{ color:C.text3, width:70, flexShrink:0 }}>{e['@timestamp'] ? new Date(e['@timestamp']).toLocaleTimeString() : ''}</span>
                     <span style={{ color:stateColor, width:40, flexShrink:0, fontWeight:600 }}>{state}</span>
                     <span style={{ color:C.cyan, width:160, flexShrink:0, overflow:'hidden', textOverflow:'ellipsis' }}>{e.cisco_interface_full||'�'}</span>
@@ -571,7 +571,7 @@ export default function NOCPage() {
                     const auth  = authEvents.filter(e=>e.device_name===device).length
                     const conf  = configEvents.filter(e=>e.device_name===device).length
                     return (
-                      <tr key={i} style={{ borderBottom:'1px solid rgba(99,120,200,0.07)', cursor:'pointer' }}
+                      <tr key={i} style={{ borderBottom:'1px solid var(--border)', cursor:'pointer' }}
                         onClick={() => goToNocSearch({ device })}
                         onMouseEnter={el=>el.currentTarget.style.background='var(--bg3)'}
                         onMouseLeave={el=>el.currentTarget.style.background='transparent'}>
@@ -641,7 +641,7 @@ export default function NOCPage() {
                 </thead>
                 <tbody>
                   {filteredMacEvents.map((e,i) => (
-                    <tr key={i} style={{ borderBottom:'1px solid rgba(99,120,200,0.07)', cursor:'pointer' }} onClick={() => goToNocSearch({ device: e.device_name || '', site: e.site_name || '', mnemonic: 'MACFLAP_NOTIF', q: e.cisco_mac_address || String(e.cisco_vlan_id || '') })} title="Open in Custom log search">
+                    <tr key={i} style={{ borderBottom:'1px solid var(--border)', cursor:'pointer' }} onClick={() => goToNocSearch({ device: e.device_name || '', site: e.site_name || '', mnemonic: 'MACFLAP_NOTIF', q: e.cisco_mac_address || String(e.cisco_vlan_id || '') })} title="Open in Custom log search">
                       <td style={{ padding:'5px 10px', color:C.text3, whiteSpace:'nowrap' }}>{e['@timestamp'] ? new Date(e['@timestamp']).toLocaleTimeString() : '�'}</td>
                       <td style={{ padding:'5px 10px', color:C.cyan }}>{e.cisco_mac_address||'�'}</td>
                       <td style={{ padding:'5px 10px', color:C.amber }}>{e.cisco_vlan_id ? `VLAN ${e.cisco_vlan_id}` : '�'}</td>
@@ -684,7 +684,7 @@ export default function NOCPage() {
                     { label:'Auth Events',      count:authEvents.filter(e=>e.site_name===site).length, color:C.green },
                     { label:'Config Changes',   count:configEvents.filter(e=>e.site_name===site).length, color:C.accent2 },
                   ].map((item,i) => (
-                    <div key={i} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'4px 0', borderBottom:'1px solid rgba(99,120,200,0.07)', cursor:'pointer' }} onClick={() => {
+                    <div key={i} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'4px 0', borderBottom:'1px solid var(--border)', cursor:'pointer' }} onClick={() => {
                       const base = { site }
                       if (item.label.startsWith('Interface')) goToNocSearch({ ...base, mnemonic: 'UPDOWN' })
                       else if (item.label.startsWith('MAC')) goToNocSearch({ ...base, mnemonic: 'MACFLAP_NOTIF' })
@@ -734,13 +734,13 @@ export default function NOCPage() {
             </Card>
             <Card title="SWITCH CONFIGURATION LOG" badge="CISCO" badgeClass="amber" noPad>
               <div style={{ overflowX:'auto', overflowY:'auto', maxHeight:480 }}>
-                <div style={{ display:'grid', gridTemplateColumns:'minmax(72px,0.7fr) minmax(72px,0.55fr) minmax(88px,0.65fr) minmax(140px,1.4fr) minmax(100px,0.9fr) minmax(56px,0.5fr)', gap:6, padding:'6px 12px', borderBottom:'1px solid rgba(99,120,200,0.12)', fontFamily:'var(--mono)', fontSize:9, fontWeight:600, color:C.text3, textTransform:'uppercase', letterSpacing:0.4 }}>
+                <div style={{ display:'grid', gridTemplateColumns:'minmax(72px,0.7fr) minmax(72px,0.55fr) minmax(88px,0.65fr) minmax(140px,1.4fr) minmax(100px,0.9fr) minmax(56px,0.5fr)', gap:6, padding:'6px 12px', borderBottom:'1px solid var(--border)', fontFamily:'var(--mono)', fontSize:9, fontWeight:600, color:C.text3, textTransform:'uppercase', letterSpacing:0.4 }}>
                   <span>Time</span><span>Mnemonic</span><span>Changed by</span><span>What changed</span><span>Switch</span><span>Site</span>
                 </div>
                 {(configChanges?.cisco?.hits || []).length > 0 ? configChanges.cisco.hits.map((e, i) => (
                   <div
                     key={e._id || i}
-                    style={{ display:'grid', gridTemplateColumns:'minmax(72px,0.7fr) minmax(72px,0.55fr) minmax(88px,0.65fr) minmax(140px,1.4fr) minmax(100px,0.9fr) minmax(56px,0.5fr)', gap:6, alignItems:'center', padding:'8px 12px', borderBottom:'1px solid rgba(99,120,200,0.06)', fontFamily:'var(--mono)', fontSize:10, cursor:'pointer' }}
+                    style={{ display:'grid', gridTemplateColumns:'minmax(72px,0.7fr) minmax(72px,0.55fr) minmax(88px,0.65fr) minmax(140px,1.4fr) minmax(100px,0.9fr) minmax(56px,0.5fr)', gap:6, alignItems:'center', padding:'8px 12px', borderBottom:'1px solid var(--border)', fontFamily:'var(--mono)', fontSize:10, cursor:'pointer' }}
                     onClick={() => goToNocSearch({
                       device: e.device_name || '',
                       site: e.site_name || '',
@@ -785,7 +785,7 @@ export default function NOCPage() {
                 const sevColor = ['critical','error','emergency'].includes(sev) ? C.red : ['warning','high'].includes(sev) ? C.amber : C.text3
                 const mnemonicColor = e.cisco_mnemonic==='MACFLAP_NOTIF'?C.red : e.cisco_mnemonic==='UPDOWN'?C.cyan : e.cisco_mnemonic==='NATIVE_VLAN_MISMATCH'?C.amber : e.cisco_mnemonic==='CONFIG_I'?C.accent2 : e.cisco_mnemonic?.startsWith('SSH')?C.green : C.text2
                 return (
-                  <div key={i} style={{ display:'flex', gap:10, padding:'8px 14px', borderBottom:'1px solid rgba(99,120,200,0.06)', fontFamily:'var(--mono)', fontSize:11, cursor:'pointer' }}
+                  <div key={i} style={{ display:'flex', gap:10, padding:'8px 14px', borderBottom:'1px solid var(--border)', fontFamily:'var(--mono)', fontSize:11, cursor:'pointer' }}
                     onClick={() => goToNocSearch({
                       device: e.device_name || '',
                       site: e.site_name || '',

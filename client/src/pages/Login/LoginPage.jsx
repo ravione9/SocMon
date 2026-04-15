@@ -26,8 +26,8 @@ export default function LoginPage() {
     <div style={{ minHeight:'100vh', background:'var(--bg)', display:'flex', alignItems:'center', justifyContent:'center' }}>
       <div style={{ width:380, background:'var(--bg2)', border:'1px solid var(--border)', borderRadius:16, padding:40 }}>
         <div style={{ textAlign:'center', marginBottom:32 }}>
-          <div style={{ width:48, height:48, margin:'0 auto 12px', background:'linear-gradient(135deg,#4f7ef5,#7c5cfc)', borderRadius:12, display:'flex', alignItems:'center', justifyContent:'center', fontSize:20, fontWeight:800, color:'#fff', fontFamily:'var(--mono)' }}>LK</div>
-          <div style={{ fontSize:20, fontWeight:700 }}>Lenskart</div>
+          <div style={{ width:48, height:48, margin:'0 auto 12px', background:'linear-gradient(135deg, var(--accent), var(--accent2))', borderRadius:12, display:'flex', alignItems:'center', justifyContent:'center', fontSize:20, fontWeight:800, color:'var(--on-accent)', fontFamily:'var(--mono)' }}>LK</div>
+          <div style={{ fontSize:20, fontWeight:700, color:'var(--text)' }}>Lenskart</div>
           <div style={{ fontSize:12, color:'var(--text3)', fontFamily:'var(--mono)', marginTop:4 }}>NOC / SOC PLATFORM</div>
         </div>
         <form onSubmit={handleLogin} style={{ display:'flex', flexDirection:'column', gap:14 }} autoComplete="on">
@@ -49,7 +49,7 @@ export default function LoginPage() {
             </div>
           ))}
           <button type="submit" disabled={loading}
-            style={{ marginTop:8, padding:11, borderRadius:8, background: loading ? 'var(--bg4)' : 'var(--accent)', border:'none', color:'#fff', fontSize:13, fontWeight:600, fontFamily:'var(--sans)', cursor: loading ? 'not-allowed' : 'pointer' }}>
+            style={{ marginTop:8, padding:11, borderRadius:8, background: loading ? 'var(--bg4)' : 'var(--accent)', border:'none', color:'var(--on-accent)', fontSize:13, fontWeight:600, fontFamily:'var(--sans)', cursor: loading ? 'not-allowed' : 'pointer' }}>
             {loading ? 'Signing in...' : 'Sign in'}
           </button>
         </form>
