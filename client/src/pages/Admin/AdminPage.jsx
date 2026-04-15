@@ -352,9 +352,9 @@ export default function AdminPage() {
                   {devices.map((d,i) => (
                     <tr
                       key={i}
-                      style={{ background: i % 2 ? 'rgba(99,120,200,0.04)' : 'transparent', transition:'background 0.15s' }}
+                      style={{ background: i % 2 ? 'var(--bg3)' : 'transparent', transition:'background 0.15s' }}
                       onMouseEnter={el => { el.currentTarget.style.background = 'var(--bg3)' }}
-                      onMouseLeave={el => { el.currentTarget.style.background = i % 2 ? 'rgba(99,120,200,0.04)' : 'transparent' }}
+                      onMouseLeave={el => { el.currentTarget.style.background = i % 2 ? 'var(--bg3)' : 'transparent' }}
                     >
                       <TD color="var(--cyan)"><strong style={{ color:'var(--text)' }}>{d.name}</strong></TD>
                       <TD>{d.ip}</TD>
@@ -466,9 +466,9 @@ export default function AdminPage() {
                   {users.map((u,i) => (
                     <tr
                       key={i}
-                      style={{ background: i % 2 ? 'rgba(99,120,200,0.04)' : 'transparent', transition:'background 0.15s' }}
+                      style={{ background: i % 2 ? 'var(--bg3)' : 'transparent', transition:'background 0.15s' }}
                       onMouseEnter={el => { el.currentTarget.style.background = 'var(--bg3)' }}
-                      onMouseLeave={el => { el.currentTarget.style.background = i % 2 ? 'rgba(99,120,200,0.04)' : 'transparent' }}
+                      onMouseLeave={el => { el.currentTarget.style.background = i % 2 ? 'var(--bg3)' : 'transparent' }}
                     >
                       <TD color="var(--text)">
                         <div style={{ display:'flex', alignItems:'center', gap:10 }}>

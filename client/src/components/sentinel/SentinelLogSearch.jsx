@@ -578,16 +578,16 @@ export default function SentinelLogSearch({
           <tbody>
             {rows.map(row => (
               <tr key={row._id} style={{ color: C.text2 }}>
-                <td style={{ padding: '8px 10px', borderBottom: '1px solid rgba(99,120,200,0.06)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {row['@timestamp'] ? new Date(row['@timestamp']).toLocaleString() : '—'}
                 </td>
-                <td style={{ padding: '8px 10px', borderBottom: '1px solid rgba(99,120,200,0.06)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.hostGroup ?? '—'}</td>
-                <td style={{ padding: '8px 10px', borderBottom: '1px solid rgba(99,120,200,0.06)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.host}</td>
-                <td style={{ padding: '8px 10px', borderBottom: '1px solid rgba(99,120,200,0.06)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.user}</td>
-                <td style={{ padding: '8px 10px', borderBottom: '1px solid rgba(99,120,200,0.06)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.severity}</td>
-                <td style={{ padding: '8px 10px', borderBottom: '1px solid rgba(99,120,200,0.06)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.category}</td>
-                <td style={{ padding: '8px 10px', borderBottom: '1px solid rgba(99,120,200,0.06)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.eventAction ?? '—'}</td>
-                <td style={{ padding: '8px 10px', borderBottom: '1px solid rgba(99,120,200,0.06)', wordBreak: 'break-word' }}>{row.message}</td>
+                <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.hostGroup ?? '—'}</td>
+                <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.host}</td>
+                <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.user}</td>
+                <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.severity}</td>
+                <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.category}</td>
+                <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.eventAction ?? '—'}</td>
+                <td style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', wordBreak: 'break-word' }}>{row.message}</td>
               </tr>
             ))}
           </tbody>

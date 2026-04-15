@@ -461,7 +461,7 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
     <td
       style={{
         padding: '6px 10px',
-        borderBottom: '1px solid rgba(99,120,200,0.06)',
+        borderBottom: '1px solid var(--border)',
         color,
         fontSize: 11,
         fontFamily: 'var(--mono)',
@@ -725,14 +725,14 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
                     onMouseEnter={el => el.currentTarget.style.background = 'var(--bg3)'}
                     onMouseLeave={el => el.currentTarget.style.background = 'transparent'}>
                     {td(fmt(e['@timestamp']), C.text3)}
-                    <td style={{ padding:'6px 10px', borderBottom:`1px solid rgba(99,120,200,0.06)` }}>
+                    <td style={{ padding:'6px 10px', borderBottom:`1px solid var(--border)` }}>
                       <SevBadge e={e} />
                     </td>
                     {isFirewall ? (
                       <>
                         {td(deviceCell(e) || '—', C.accent2)}
                         {showFwAuthUserCol ? td(fwUser || '—', C.cyan) : null}
-                        <td style={{ padding:'6px 10px', borderBottom:`1px solid rgba(99,120,200,0.06)` }}>
+                        <td style={{ padding:'6px 10px', borderBottom:`1px solid var(--border)` }}>
                           <span style={{ fontSize:9, padding:'2px 6px', borderRadius:4, fontFamily:'var(--mono)',
                             fontWeight:600,
                             color: action==='deny' ? C.red : C.green,

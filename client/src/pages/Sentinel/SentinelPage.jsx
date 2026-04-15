@@ -17,6 +17,8 @@ import {
 import api from '../../api/client'
 import { useSentinelHostGroups } from '../../hooks/useSentinelHostGroups.js'
 import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../components/ui/ResizableTable.jsx'
+import { useThemeStore } from '../../store/themeStore.js'
+import { getThemeCssColors } from '../../utils/themeCssColors.js'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, ArcElement, Tooltip, Legend, Filler)
 
@@ -45,20 +47,22 @@ const TABS = [
   { id: 'custom', label: 'Custom log' },
 ]
 
-const co = {
-  responsive: true,
-  maintainAspectRatio: false,
-  plugins: { legend: { display: false } },
-  scales: {
-    x: {
-      ticks: { color: C.text3, font: { size: 9 }, maxTicksLimit: 10 },
-      grid: { color: 'rgba(99,120,200,0.07)' },
+function buildChartOpts(tc) {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: {
+        ticks: { color: tc.text3, font: { size: 9 }, maxTicksLimit: 10 },
+        grid: { color: 'rgba(128,128,160,0.1)' },
+      },
+      y: {
+        ticks: { color: tc.text3, font: { size: 9 } },
+        grid: { color: 'rgba(128,128,160,0.1)' },
+      },
     },
-    y: {
-      ticks: { color: C.text3, font: { size: 9 } },
-      grid: { color: 'rgba(99,120,200,0.07)' },
-    },
-  },
+  }
 }
 
 function scopeForTab(tab) {
@@ -135,9 +139,10 @@ function Card({ title, badge, children, noPad, onClick, titleHint }) {
   )
 }
 
-function HBarChart({ rows, color, onBarClick }) {
+function HBarChart({ rows, color, onBarClick, tc }) {
   const labels = (rows || []).map(r => String(r.key).slice(0, 32))
   const data = (rows || []).map(r => r.count)
+  const t = tc || {}
   return (
     <div style={{ height: Math.max(180, rows?.length * 28 || 0) }}>
       <Bar
@@ -154,8 +159,8 @@ function HBarChart({ rows, color, onBarClick }) {
             tooltip: { enabled: true },
           },
           scales: {
-            x: { ticks: { color: C.text3, font: { size: 9 } }, grid: { color: 'rgba(99,120,200,0.07)' } },
-            y: { ticks: { color: C.text2, font: { size: 9 } }, grid: { display: false } },
+            x: { ticks: { color: t.text3 || '#555a72', font: { size: 9 } }, grid: { color: 'rgba(128,128,160,0.1)' } },
+            y: { ticks: { color: t.text2 || '#8b90aa', font: { size: 9 } }, grid: { display: false } },
           },
           interaction: { mode: 'nearest', intersect: false },
           onClick: (evt, els) => {
@@ -188,6 +193,10 @@ export default function SentinelPage() {
   const [bluetoothDrill, setBluetoothDrill] = useState(null)
 
   const { groups: hostGroupOptions, loading: hostGroupsLoading } = useSentinelHostGroups(range, scopeForTab(tab))
+
+  const theme = useThemeStore((s) => s.theme)
+  const tc = useMemo(() => getThemeCssColors(), [theme])
+  const co = useMemo(() => buildChartOpts(tc), [tc])
 
   const drillForLog = useMemo(() => {
     if (!sentinelDrill) return null
@@ -304,7 +313,7 @@ export default function SentinelPage() {
   const sentResolvedTbl = useResizableColumns('sentinel-resolved-threats', [160, 260, 120, 100])
   const sentTableTh = {
     padding: '8px 12px',
-    borderBottom: '1px solid rgba(99,120,200,0.15)',
+    borderBottom: '1px solid var(--border)',
     textAlign: 'left',
     color: C.text3,
     fontFamily: 'var(--mono)',
@@ -637,7 +646,7 @@ export default function SentinelPage() {
                     options={{
                       ...co,
                       plugins: {
-                        legend: { display: true, position: 'top', labels: { color: C.text2, font: { size: 10 }, boxWidth: 10 } },
+                        legend: { display: true, position: 'top', labels: { color: tc.text2, font: { size: 10 }, boxWidth: 10 } },
                       },
                       scales: { ...co.scales, x: { ...co.scales.x, ticks: { ...co.scales.x.ticks, maxTicksLimit: 10 } } },
                     }}
@@ -658,7 +667,7 @@ export default function SentinelPage() {
                     maintainAspectRatio: false,
                     cutout: '58%',
                     plugins: {
-                      legend: { display: true, position: 'bottom', labels: { color: C.text2, font: { size: 10 }, boxWidth: 10 } },
+                      legend: { display: true, position: 'bottom', labels: { color: tc.text2, font: { size: 10 }, boxWidth: 10 } },
                     },
                     onClick: (evt, els) => {
                       evt?.stopPropagation?.()
@@ -680,6 +689,7 @@ export default function SentinelPage() {
                   rows={dash?.topEndpoints}
                   color={C.blue}
                   onBarClick={row => goDrill({ endpoint: row.key })}
+                  tc={tc}
                 />
                 {!loading && !(dash?.topEndpoints?.length > 0) && (
                   <div style={{ color: C.text3, fontSize: 11, fontFamily: 'var(--mono)', textAlign: 'center', padding: 24 }}>No data</div>
@@ -692,6 +702,7 @@ export default function SentinelPage() {
                   rows={dash?.topUsb}
                   color={C.orange}
                   onBarClick={row => goDrill({ usbDevice: row.key })}
+                  tc={tc}
                 />
                 {!loading && !(dash?.topUsb?.length > 0) && (
                   <div style={{ color: C.text3, fontSize: 11, fontFamily: 'var(--mono)', textAlign: 'center', padding: 24 }}>No USB aggregation</div>
@@ -764,7 +775,7 @@ export default function SentinelPage() {
                     options={{
                       ...co,
                       plugins: {
-                        legend: { display: true, position: 'top', labels: { color: C.text2, font: { size: 10 }, boxWidth: 10 } },
+                        legend: { display: true, position: 'top', labels: { color: tc.text2, font: { size: 10 }, boxWidth: 10 } },
                       },
                       scales: { ...co.scales, x: { ...co.scales.x, ticks: { ...co.scales.x.ticks, maxTicksLimit: 10 } } },
                     }}
@@ -790,7 +801,7 @@ export default function SentinelPage() {
                     maintainAspectRatio: false,
                     cutout: '58%',
                     plugins: {
-                      legend: { display: true, position: 'bottom', labels: { color: C.text2, font: { size: 10 }, boxWidth: 10 } },
+                      legend: { display: true, position: 'bottom', labels: { color: tc.text2, font: { size: 10 }, boxWidth: 10 } },
                     },
                     onClick: (evt, els) => {
                       evt?.stopPropagation?.()
@@ -814,6 +825,7 @@ export default function SentinelPage() {
                   rows={dash?.topEndpoints}
                   color={C.blue}
                   onBarClick={row => usbGoDrill({ endpoint: row.key })}
+                  tc={tc}
                 />
                 {!loading && !(dash?.topEndpoints?.length > 0) && (
                   <div style={{ color: C.text3, fontSize: 11, fontFamily: 'var(--mono)', textAlign: 'center', padding: 24 }}>No data</div>
@@ -826,6 +838,7 @@ export default function SentinelPage() {
                   rows={dash?.topUsb}
                   color={C.orange}
                   onBarClick={row => usbGoDrill({ usbDevice: row.key })}
+                  tc={tc}
                 />
                 {!loading && !(dash?.topUsb?.length > 0) && (
                   <div style={{ color: C.text3, fontSize: 11, fontFamily: 'var(--mono)', textAlign: 'center', padding: 24 }}>No USB aggregation</div>
@@ -844,6 +857,7 @@ export default function SentinelPage() {
                   rows={dash?.topUsbDisconnectHosts}
                   color={C.cyan}
                   onBarClick={row => usbGoDrill({ endpoint: row.key, eventAction: 'disconnected' })}
+                  tc={tc}
                 />
                 {!loading && !(dash?.topUsbDisconnectHosts?.length > 0) && (
                   <div style={{ color: C.text3, fontSize: 11, fontFamily: 'var(--mono)', textAlign: 'center', padding: 24 }}>No disconnect data</div>
@@ -937,7 +951,7 @@ export default function SentinelPage() {
                     options={{
                       ...co,
                       plugins: {
-                        legend: { display: true, position: 'top', labels: { color: C.text2, font: { size: 10 }, boxWidth: 10 } },
+                        legend: { display: true, position: 'top', labels: { color: tc.text2, font: { size: 10 }, boxWidth: 10 } },
                       },
                       scales: { ...co.scales, x: { ...co.scales.x, ticks: { ...co.scales.x.ticks, maxTicksLimit: 10 } } },
                     }}
@@ -963,7 +977,7 @@ export default function SentinelPage() {
                     maintainAspectRatio: false,
                     cutout: '58%',
                     plugins: {
-                      legend: { display: true, position: 'bottom', labels: { color: C.text2, font: { size: 10 }, boxWidth: 10 } },
+                      legend: { display: true, position: 'bottom', labels: { color: tc.text2, font: { size: 10 }, boxWidth: 10 } },
                     },
                     onClick: (evt, els) => {
                       evt?.stopPropagation?.()
@@ -987,6 +1001,7 @@ export default function SentinelPage() {
                   rows={dash?.topEndpoints}
                   color={C.blue}
                   onBarClick={row => bluetoothGoDrill({ endpoint: row.key })}
+                  tc={tc}
                 />
                 {!loading && !(dash?.topEndpoints?.length > 0) && (
                   <div style={{ color: C.text3, fontSize: 11, fontFamily: 'var(--mono)', textAlign: 'center', padding: 24 }}>No data</div>
@@ -999,6 +1014,7 @@ export default function SentinelPage() {
                   rows={dash?.topBluetooth}
                   color={C.indigo}
                   onBarClick={row => bluetoothGoDrill({ bluetoothDevice: row.key })}
+                  tc={tc}
                 />
                 {!loading && !(dash?.topBluetooth?.length > 0) && (
                   <div style={{ color: C.text3, fontSize: 11, fontFamily: 'var(--mono)', textAlign: 'center', padding: 24 }}>No Bluetooth aggregation</div>
@@ -1084,13 +1100,13 @@ export default function SentinelPage() {
                       style={{ color: C.text2, cursor: 'pointer' }}
                       onClick={() => goDrill({ q: row.threatName, endpoint: row.agent !== '—' ? row.agent : undefined })}
                     >
-                      <td style={{ padding: '8px 12px', borderBottom: '1px solid rgba(99,120,200,0.06)', whiteSpace: 'nowrap' }}>
+                      <td style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' }}>
                         {row['@timestamp'] ? new Date(row['@timestamp']).toLocaleString() : '—'}
                       </td>
-                      <td style={{ padding: '8px 12px', borderBottom: '1px solid rgba(99,120,200,0.06)', maxWidth: 260 }}>{row.threatName}</td>
-                      <td style={{ padding: '8px 12px', borderBottom: '1px solid rgba(99,120,200,0.06)' }}>{row.agent}</td>
-                      <td style={{ padding: '8px 12px', borderBottom: '1px solid rgba(99,120,200,0.06)', color: C.red }}>{row.state}</td>
-                      <td style={{ padding: '8px 12px', borderBottom: '1px solid rgba(99,120,200,0.06)' }}>{row.severity}</td>
+                      <td style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', maxWidth: 260 }}>{row.threatName}</td>
+                      <td style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)' }}>{row.agent}</td>
+                      <td style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', color: C.red }}>{row.state}</td>
+                      <td style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)' }}>{row.severity}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1133,12 +1149,12 @@ export default function SentinelPage() {
                       style={{ color: C.text2, cursor: 'pointer' }}
                       onClick={() => goDrill({ q: row.threatName, endpoint: row.agent !== '—' ? row.agent : undefined })}
                     >
-                      <td style={{ padding: '8px 12px', borderBottom: '1px solid rgba(99,120,200,0.06)', whiteSpace: 'nowrap' }}>
+                      <td style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' }}>
                         {row['@timestamp'] ? new Date(row['@timestamp']).toLocaleString() : '—'}
                       </td>
-                      <td style={{ padding: '8px 12px', borderBottom: '1px solid rgba(99,120,200,0.06)', maxWidth: 260 }}>{row.threatName}</td>
-                      <td style={{ padding: '8px 12px', borderBottom: '1px solid rgba(99,120,200,0.06)' }}>{row.agent}</td>
-                      <td style={{ padding: '8px 12px', borderBottom: '1px solid rgba(99,120,200,0.06)', color: C.green }}>{row.state}</td>
+                      <td style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', maxWidth: 260 }}>{row.threatName}</td>
+                      <td style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)' }}>{row.agent}</td>
+                      <td style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', color: C.green }}>{row.state}</td>
                     </tr>
                   ))}
                 </tbody>
