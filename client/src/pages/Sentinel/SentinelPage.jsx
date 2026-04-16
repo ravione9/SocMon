@@ -1,6 +1,6 @@
 import RangePicker from '../../components/ui/RangePicker.jsx'
 import SentinelLogSearch from '../../components/sentinel/SentinelLogSearch.jsx'
-import { useEffect, useState, useMemo, useCallback } from 'react'
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { Line, Bar, Doughnut } from 'react-chartjs-2'
 import {
   Chart as ChartJS,
@@ -65,6 +65,35 @@ function buildChartOpts(tc) {
   }
 }
 
+/** Chart.js canvas ignores CSS — set explicit legend/tooltip colors (fixes black text on dark themes). */
+function dashChartPlugins(tc, legendPosition) {
+  return {
+    legend: {
+      display: true,
+      position: legendPosition,
+      labels: {
+        color: tc.text2,
+        font: { size: 10 },
+        boxWidth: 10,
+        padding: 10,
+      },
+    },
+    tooltip: {
+      titleColor: tc.text,
+      bodyColor: tc.text2,
+      backgroundColor: tc.bg2,
+      borderColor: 'rgba(128,128,160,0.22)',
+      borderWidth: 1,
+    },
+  }
+}
+
+/** Non-empty filter keys (excluding internal _*) so empty {} drills can clear the log. */
+function drillPatchHasFilters(patch) {
+  if (!patch || typeof patch !== 'object') return false
+  return Object.entries(patch).some(([k, v]) => !k.startsWith('_') && String(v ?? '').trim() !== '')
+}
+
 function scopeForTab(tab) {
   if (tab === 'overview') return 'all'
   if (tab === 'active') return 'no_usb'
@@ -76,10 +105,22 @@ function scopeForTab(tab) {
 function KPI({ label, value, sub, color, onClick, title }) {
   return (
     <div
-      className={`kpi ${color}`}
-      style={{ minWidth: 0, cursor: onClick ? 'pointer' : undefined }}
+      className={`kpi ${color}${onClick ? ' kpi-clickable' : ''}`}
+      style={{ minWidth: 0 }}
       onClick={onClick}
       title={title || (onClick ? 'Open in Custom log' : undefined)}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={
+        onClick
+          ? e => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onClick()
+              }
+            }
+          : undefined
+      }
     >
       <div
         style={{
@@ -151,12 +192,20 @@ function HBarChart({ rows, color, onBarClick, tc }) {
           datasets: [{ data, backgroundColor: color || C.accent, borderWidth: 0, borderRadius: 4 }],
         }}
         options={{
+          color: t.text2,
           indexAxis: 'y',
           responsive: true,
           maintainAspectRatio: false,
           plugins: {
             legend: { display: false },
-            tooltip: { enabled: true },
+            tooltip: {
+              enabled: true,
+              titleColor: t.text,
+              bodyColor: t.text2,
+              backgroundColor: t.bg2,
+              borderColor: 'rgba(128,128,160,0.22)',
+              borderWidth: 1,
+            },
           },
           scales: {
             x: { ticks: { color: t.text3 || '#555a72', font: { size: 9 } }, grid: { color: 'rgba(128,128,160,0.1)' } },
@@ -191,6 +240,8 @@ export default function SentinelPage() {
   const [sentinelDrill, setSentinelDrill] = useState(null)
   const [usbDrill, setUsbDrill] = useState(null)
   const [bluetoothDrill, setBluetoothDrill] = useState(null)
+  const usbLogAnchorRef = useRef(null)
+  const bluetoothLogAnchorRef = useRef(null)
 
   const { groups: hostGroupOptions, loading: hostGroupsLoading } = useSentinelHostGroups(range, scopeForTab(tab))
 
@@ -217,12 +268,31 @@ export default function SentinelPage() {
   }, [bluetoothDrill])
 
   const usbGoDrill = useCallback(patch => {
-    setUsbDrill({ ...patch, _ts: Date.now() })
+    const p = patch && typeof patch === 'object' ? patch : {}
+    if (!drillPatchHasFilters(p)) setUsbDrill({ _clear: true, _ts: Date.now() })
+    else setUsbDrill({ ...p, _ts: Date.now() })
   }, [])
 
   const bluetoothGoDrill = useCallback(patch => {
-    setBluetoothDrill({ ...patch, _ts: Date.now() })
+    const p = patch && typeof patch === 'object' ? patch : {}
+    if (!drillPatchHasFilters(p)) setBluetoothDrill({ _clear: true, _ts: Date.now() })
+    else setBluetoothDrill({ ...p, _ts: Date.now() })
   }, [])
+
+  /** After a drill, scroll the embedded log into view so KPI / chart clicks feel connected. */
+  useEffect(() => {
+    if (tab !== 'usb' || !usbDrill) return
+    const { _ts, ...rest } = usbDrill
+    if (!Object.keys(rest).length) return
+    requestAnimationFrame(() => usbLogAnchorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }))
+  }, [tab, usbDrill])
+
+  useEffect(() => {
+    if (tab !== 'bluetooth' || !bluetoothDrill) return
+    const { _ts, ...rest } = bluetoothDrill
+    if (!Object.keys(rest).length) return
+    requestAnimationFrame(() => bluetoothLogAnchorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }))
+  }, [tab, bluetoothDrill])
 
   useEffect(() => {
     if (tab !== 'usb') setUsbDrill(null)
@@ -637,17 +707,24 @@ export default function SentinelPage() {
               title="Activity timeline"
               badge={(range?.label || range?.value || '24h').toUpperCase()}
               onClick={() => goDrill({})}
-              titleHint="Open Custom log for this scope"
+              titleHint="Click chart or card to open Custom log"
             >
-              <div style={{ height: 240 }} onClick={e => e.stopPropagation()}>
+              <div
+                style={{ height: 240, cursor: 'pointer' }}
+                onClick={e => {
+                  e.stopPropagation()
+                  goDrill({})
+                }}
+                title="Click to open Custom log (this scope and range)"
+              >
                 {dash?.timeline?.length ? (
                   <Line
                     data={lineDual}
                     options={{
-                      ...co,
-                      plugins: {
-                        legend: { display: true, position: 'top', labels: { color: tc.text2, font: { size: 10 }, boxWidth: 10 } },
-                      },
+                      color: tc.text2,
+                      responsive: true,
+                      maintainAspectRatio: false,
+                      plugins: dashChartPlugins(tc, 'top'),
                       scales: { ...co.scales, x: { ...co.scales.x, ticks: { ...co.scales.x.ticks, maxTicksLimit: 10 } } },
                     }}
                   />
@@ -658,17 +735,16 @@ export default function SentinelPage() {
                 )}
               </div>
             </Card>
-            <Card title="Event types" badge="breakdown" onClick={() => goDrill({})} titleHint="Open Custom log">
-              <div style={{ height: 220, position: 'relative' }} onClick={e => e.stopPropagation()}>
+            <Card title="Event types" badge="breakdown" onClick={() => goDrill({})} titleHint="Click a slice for event kind, or card for all events">
+              <div style={{ height: 220, position: 'relative', cursor: 'pointer' }}>
                 <Doughnut
                   data={eventTypeDonut}
                   options={{
+                    color: tc.text2,
                     responsive: true,
                     maintainAspectRatio: false,
                     cutout: '58%',
-                    plugins: {
-                      legend: { display: true, position: 'bottom', labels: { color: tc.text2, font: { size: 10 }, boxWidth: 10 } },
-                    },
+                    plugins: dashChartPlugins(tc, 'bottom'),
                     onClick: (evt, els) => {
                       evt?.stopPropagation?.()
                       if (!els.length) return
@@ -684,7 +760,7 @@ export default function SentinelPage() {
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
             <Card title="Top hostname" badge="HOSTNAME" noPad onClick={() => goDrill({})} titleHint="Click a bar to filter">
-              <div style={{ padding: '12px 14px' }} onClick={e => e.stopPropagation()}>
+              <div style={{ padding: '12px 14px' }}>
                 <HBarChart
                   rows={dash?.topEndpoints}
                   color={C.blue}
@@ -697,7 +773,7 @@ export default function SentinelPage() {
               </div>
             </Card>
             <Card title="Top USB devices" badge="USB" noPad onClick={() => goDrill({})} titleHint="Click a bar to filter">
-              <div style={{ padding: '12px 14px' }} onClick={e => e.stopPropagation()}>
+              <div style={{ padding: '12px 14px' }}>
                 <HBarChart
                   rows={dash?.topUsb}
                   color={C.orange}
@@ -766,17 +842,24 @@ export default function SentinelPage() {
               title="USB activity timeline"
               badge={(range?.label || range?.value || '24h').toUpperCase()}
               onClick={() => usbGoDrill({})}
-              titleHint="Filter log below"
+              titleHint="Click chart or card to filter the USB log below"
             >
-              <div style={{ height: 240 }} onClick={e => e.stopPropagation()}>
+              <div
+                style={{ height: 240, cursor: 'pointer' }}
+                onClick={e => {
+                  e.stopPropagation()
+                  usbGoDrill({})
+                }}
+                title="Click to filter the USB activity log below"
+              >
                 {dash?.timeline?.length ? (
                   <Line
                     data={usbLineData}
                     options={{
-                      ...co,
-                      plugins: {
-                        legend: { display: true, position: 'top', labels: { color: tc.text2, font: { size: 10 }, boxWidth: 10 } },
-                      },
+                      color: tc.text2,
+                      responsive: true,
+                      maintainAspectRatio: false,
+                      plugins: dashChartPlugins(tc, 'top'),
                       scales: { ...co.scales, x: { ...co.scales.x, ticks: { ...co.scales.x.ticks, maxTicksLimit: 10 } } },
                     }}
                   />
@@ -791,18 +874,17 @@ export default function SentinelPage() {
               title="USB event.action"
               badge="split"
               onClick={() => usbGoDrill({})}
-              titleHint="Click a slice to filter log by event.action"
+              titleHint="Click a slice for event.action, or card for all USB events"
             >
-              <div style={{ height: 220, position: 'relative' }} onClick={e => e.stopPropagation()}>
+              <div style={{ height: 220, position: 'relative', cursor: 'pointer' }}>
                 <Doughnut
                   data={usbActionDonut}
                   options={{
+                    color: tc.text2,
                     responsive: true,
                     maintainAspectRatio: false,
                     cutout: '58%',
-                    plugins: {
-                      legend: { display: true, position: 'bottom', labels: { color: tc.text2, font: { size: 10 }, boxWidth: 10 } },
-                    },
+                    plugins: dashChartPlugins(tc, 'bottom'),
                     onClick: (evt, els) => {
                       evt?.stopPropagation?.()
                       if (!els.length) return
@@ -820,7 +902,7 @@ export default function SentinelPage() {
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 12 }}>
             <Card title="Top hostname" badge="HOSTNAME" noPad onClick={() => usbGoDrill({})} titleHint="Click a bar">
-              <div style={{ padding: '12px 14px' }} onClick={e => e.stopPropagation()}>
+              <div style={{ padding: '12px 14px' }}>
                 <HBarChart
                   rows={dash?.topEndpoints}
                   color={C.blue}
@@ -833,7 +915,7 @@ export default function SentinelPage() {
               </div>
             </Card>
             <Card title="Top USB devices" badge="USB" noPad onClick={() => usbGoDrill({})} titleHint="Click a bar">
-              <div style={{ padding: '12px 14px' }} onClick={e => e.stopPropagation()}>
+              <div style={{ padding: '12px 14px' }}>
                 <HBarChart
                   rows={dash?.topUsb}
                   color={C.orange}
@@ -852,7 +934,7 @@ export default function SentinelPage() {
               onClick={() => usbGoDrill({})}
               titleHint="Top 10 hosts by USB disconnect-style events — click a bar"
             >
-              <div style={{ padding: '12px 14px' }} onClick={e => e.stopPropagation()}>
+              <div style={{ padding: '12px 14px' }}>
                 <HBarChart
                   rows={dash?.topUsbDisconnectHosts}
                   color={C.cyan}
@@ -866,7 +948,7 @@ export default function SentinelPage() {
             </Card>
           </div>
 
-          <div className="card" style={{ overflow: 'hidden' }}>
+          <div ref={usbLogAnchorRef} className="card" style={{ overflow: 'hidden', scrollMarginTop: 12 }}>
             <div className="card-header">
               <span className="card-title">USB activity log</span>
               <span className="badge badge-teal">CUSTOM LOG</span>
@@ -942,17 +1024,24 @@ export default function SentinelPage() {
               title="Bluetooth activity timeline"
               badge={(range?.label || range?.value || '24h').toUpperCase()}
               onClick={() => bluetoothGoDrill({})}
-              titleHint="Filter log below"
+              titleHint="Click chart or card to filter the Bluetooth log below"
             >
-              <div style={{ height: 240 }} onClick={e => e.stopPropagation()}>
+              <div
+                style={{ height: 240, cursor: 'pointer' }}
+                onClick={e => {
+                  e.stopPropagation()
+                  bluetoothGoDrill({})
+                }}
+                title="Click to filter the Bluetooth activity log below"
+              >
                 {dash?.timeline?.length ? (
                   <Line
                     data={bluetoothLineData}
                     options={{
-                      ...co,
-                      plugins: {
-                        legend: { display: true, position: 'top', labels: { color: tc.text2, font: { size: 10 }, boxWidth: 10 } },
-                      },
+                      color: tc.text2,
+                      responsive: true,
+                      maintainAspectRatio: false,
+                      plugins: dashChartPlugins(tc, 'top'),
                       scales: { ...co.scales, x: { ...co.scales.x, ticks: { ...co.scales.x.ticks, maxTicksLimit: 10 } } },
                     }}
                   />
@@ -967,18 +1056,17 @@ export default function SentinelPage() {
               title="Bluetooth event.action"
               badge="split"
               onClick={() => bluetoothGoDrill({})}
-              titleHint="Click a slice to filter log by event.action"
+              titleHint="Click a slice for event.action, or card for all Bluetooth events"
             >
-              <div style={{ height: 220, position: 'relative' }} onClick={e => e.stopPropagation()}>
+              <div style={{ height: 220, position: 'relative', cursor: 'pointer' }}>
                 <Doughnut
                   data={bluetoothActionDonut}
                   options={{
+                    color: tc.text2,
                     responsive: true,
                     maintainAspectRatio: false,
                     cutout: '58%',
-                    plugins: {
-                      legend: { display: true, position: 'bottom', labels: { color: tc.text2, font: { size: 10 }, boxWidth: 10 } },
-                    },
+                    plugins: dashChartPlugins(tc, 'bottom'),
                     onClick: (evt, els) => {
                       evt?.stopPropagation?.()
                       if (!els.length) return
@@ -996,7 +1084,7 @@ export default function SentinelPage() {
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
             <Card title="Top hostname" badge="HOSTNAME" noPad onClick={() => bluetoothGoDrill({})} titleHint="Click a bar">
-              <div style={{ padding: '12px 14px' }} onClick={e => e.stopPropagation()}>
+              <div style={{ padding: '12px 14px' }}>
                 <HBarChart
                   rows={dash?.topEndpoints}
                   color={C.blue}
@@ -1009,7 +1097,7 @@ export default function SentinelPage() {
               </div>
             </Card>
             <Card title="Top Bluetooth devices" badge="BT" noPad onClick={() => bluetoothGoDrill({})} titleHint="Click a bar">
-              <div style={{ padding: '12px 14px' }} onClick={e => e.stopPropagation()}>
+              <div style={{ padding: '12px 14px' }}>
                 <HBarChart
                   rows={dash?.topBluetooth}
                   color={C.indigo}
@@ -1023,7 +1111,7 @@ export default function SentinelPage() {
             </Card>
           </div>
 
-          <div className="card" style={{ overflow: 'hidden' }}>
+          <div ref={bluetoothLogAnchorRef} className="card" style={{ overflow: 'hidden', scrollMarginTop: 12 }}>
             <div className="card-header">
               <span className="card-title">Bluetooth activity log</span>
               <span className="badge badge-teal">CUSTOM LOG</span>

@@ -96,7 +96,24 @@ export default function SentinelLogSearch({
   /** Layout effect so drill merges into filters before the fetch effect runs (avoids one stale request). */
   useLayoutEffect(() => {
     if (!drill) return
+    if (drill._clear) {
+      const empty = {
+        q: '',
+        endpoint: '',
+        hostGroup: '',
+        user: '',
+        usbDevice: '',
+        bluetoothDevice: '',
+        eventKind: '',
+        eventAction: '',
+      }
+      setDraft(empty)
+      setApplied(empty)
+      setPage(0)
+      return
+    }
     const next = { ...drill }
+    delete next._clear
     setDraft(d => ({ ...d, ...next }))
     setApplied(d => ({ ...d, ...next }))
     setPage(0)
