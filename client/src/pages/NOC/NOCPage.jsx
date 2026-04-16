@@ -8,6 +8,7 @@ import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../compo
 import { io } from 'socket.io-client'
 import { resolvedWsUrl } from '../../utils/backendOrigin.js'
 import { useThemeStore } from '../../store/themeStore.js'
+import { DEFAULT_RANGE_PRESET, DEFAULT_RANGE_VALUE } from '../../constants/timeRange.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, ArcElement, Tooltip, Legend, Filler)
@@ -135,7 +136,7 @@ function BarRows({ items, colorFn, onRowClick }) {
 
 export default function NOCPage() {
   const [tab, setTab]         = useState('overview')
-  const [range, setRange] = useState({ type:'preset', value:'24h', label:'24h' })
+  const [range, setRange] = useState(() => ({ ...DEFAULT_RANGE_PRESET }))
   const [stats, setStats]     = useState(null)
   const [events, setEvents]   = useState([])
   const [ifaceData, setIfaceData] = useState({ timeline:[], top_interfaces:[], top_devices:[] })
@@ -432,7 +433,7 @@ export default function NOCPage() {
       {tab==='overview' && (
         <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(118px, 1fr))', gap:10 }}>
-            <KPI label="Total Events"     value={stats?.total?.toLocaleString()}         sub={`last ${range?.label||range?.value||'24h'}`}       color="blue"   onClick={() => goToNocSearch({})} />
+            <KPI label="Total Events"     value={stats?.total?.toLocaleString()}         sub={`last ${range?.label||range?.value||DEFAULT_RANGE_VALUE}`}       color="blue"   onClick={() => goToNocSearch({})} />
             <KPI label="Interface Events" value={stats?.updown?.toLocaleString()}        sub="up/down changes"       color="cyan"   onClick={() => goToNocSearch({ mnemonic: 'UPDOWN' })} />
             <KPI label="MAC Flapping"     value={stats?.macflap?.toLocaleString()}       sub="flap events"           color="red"    onClick={() => goToNocSearch({ mnemonic: 'MACFLAP_NOTIF' })} />
             <KPI label="VLAN Mismatches"  value={stats?.vlanmismatch?.toLocaleString()}  sub="native vlan issues"    color="amber"  onClick={() => goToNocSearch({ mnemonic: 'NATIVE_VLAN_MISMATCH' })} />
@@ -441,7 +442,7 @@ export default function NOCPage() {
             <KPI label="Sites"            value={stats?.sites?.length||0}                sub="active locations"      color="purple" onClick={() => goToNocSearch({})} />
           </div>
           <div style={{ display:'grid', gridTemplateColumns:'2fr 1fr', gap:12 }}>
-            <Card title="INTERFACE UP/DOWN TIMELINE" badge={(range && range.label ? range.label : range || '24h').toUpperCase()} badgeClass="cyan" height={200}>
+            <Card title="INTERFACE UP/DOWN TIMELINE" badge={(range && range.label ? range.label : range || DEFAULT_RANGE_VALUE).toUpperCase()} badgeClass="cyan" height={200}>
               {ifaceData.timeline.length > 0
                 ? <Line data={interfaceTimeline} options={{ ...co, onClick: (_, els) => { if (els.length) goToNocSearch({ mnemonic: 'UPDOWN' }) }, plugins:{ legend:{ display:true, labels:{ color:tc.text2, font:{ size:10 }, boxWidth:10 } } } }} />
                 : <div style={{ color:C.text3, fontSize:11, fontFamily:'var(--mono)', textAlign:'center', paddingTop:80 }}>No interface events</div>
@@ -494,7 +495,7 @@ export default function NOCPage() {
             <KPI label="Affected Switches" value={ifaceData.top_devices.length}                                     sub="devices"            color="cyan"   onClick={() => goToNocSearch({ mnemonic: 'UPDOWN' })} />
             <KPI label="Line Protocol"     value={updownEvents.filter(e=>e.cisco_facility==='%LINEPROTO').length}   sub="proto changes"      color="purple" onClick={() => goToNocSearch({ mnemonic: 'UPDOWN', q: 'LINEPROTO' })} />
           </div>
-          <Card title="INTERFACE UP/DOWN TIMELINE" badge={(range && range.label ? range.label : range || '24h').toUpperCase()} badgeClass="cyan" height={220}>
+          <Card title="INTERFACE UP/DOWN TIMELINE" badge={(range && range.label ? range.label : range || DEFAULT_RANGE_VALUE).toUpperCase()} badgeClass="cyan" height={220}>
             {ifaceData.timeline.length > 0
               ? <Line data={interfaceTimeline} options={{ ...co, onClick: (_, els) => { if (els.length) goToNocSearch({ mnemonic: 'UPDOWN' }) }, plugins:{ legend:{ display:true, labels:{ color:tc.text2, font:{ size:10 }, boxWidth:10 } } } }} />
               : <div style={{ color:C.text3, fontSize:11, fontFamily:'var(--mono)', textAlign:'center', paddingTop:90 }}>No interface events</div>
@@ -545,7 +546,7 @@ export default function NOCPage() {
         <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:10 }}>
             <KPI label="Total Switches"  value={Object.keys(deviceCounts).length}  sub="reporting devices"  color="blue"   onClick={() => goToNocSearch({})} />
-            <KPI label="Total Events"    value={stats?.total?.toLocaleString()}     sub={`last ${range?.label||range?.value||'24h'}`}    color="cyan"   onClick={() => goToNocSearch({})} />
+            <KPI label="Total Events"    value={stats?.total?.toLocaleString()}     sub={`last ${range?.label||range?.value||DEFAULT_RANGE_VALUE}`}    color="cyan"   onClick={() => goToNocSearch({})} />
             <KPI label="Config Changes"  value={configEvents.length}               sub="switch configs"     color="amber"  onClick={() => setTab('config')} title="Open Switch config tab" />
             <KPI label="Auth Events"     value={authEvents.length}                 sub="login/ssh"          color="green"  onClick={() => goToNocSearch({ q: 'SSH' })} />
             <KPI label="MAC Flaps"       value={filteredMacEvents.length}                  sub={nocFiltersActive ? 'after filters' : 'flap events'}        color="red"    onClick={() => goToNocSearch({ mnemonic: 'MACFLAP_NOTIF' })} />

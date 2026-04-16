@@ -17,7 +17,7 @@ import {
 const router = Router()
 
 function getTimeRange(req) {
-  const range = req.query.range || '24h'
+  const range = req.query.range || '15m'
   const dateFrom = req.query.from
   const dateTo = req.query.to
   return dateFrom && dateTo ? { gte: dateFrom, lte: dateTo } : { gte: 'now-' + range }

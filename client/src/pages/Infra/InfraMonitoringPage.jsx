@@ -49,7 +49,7 @@ const TABS = [
   { id: 'events', label: 'Events' },
 ]
 
-const RANGE_SEC = { '1h': 3600, '6h': 6 * 3600, '24h': 86400, '7d': 7 * 86400 }
+const RANGE_SEC = { '15m': 900, '1h': 3600, '6h': 6 * 3600, '24h': 86400, '7d': 7 * 86400 }
 
 const DATASET_COLORS = ['#4f7ef5', '#22d3a0', '#f5a623', '#f5534f', '#7c5cfc', '#22d3ee', '#f97316']
 
@@ -396,7 +396,7 @@ export default function InfraMonitoringPage() {
   const [graphsBusy, setGraphsBusy] = useState(false)
   const [selectedGraphId, setSelectedGraphId] = useState(null)
   const [graphSeries, setGraphSeries] = useState(null)
-  const [graphRange, setGraphRange] = useState('24h')
+  const [graphRange, setGraphRange] = useState('15m')
   const [severityFilter, setSeverityFilter] = useState(null)
   const [graphSeriesBusy, setGraphSeriesBusy] = useState(false)
   /** `auto` = history/trends then fallback to last values; `latest` = VMware-friendly, no history API calls */
@@ -463,7 +463,7 @@ export default function InfraMonitoringPage() {
   )
 
   const fetchGraphSeriesPayload = useCallback(async (graphId, rangeKey, dataMode) => {
-    const sec = RANGE_SEC[rangeKey] || RANGE_SEC['6h']
+    const sec = RANGE_SEC[rangeKey] || RANGE_SEC['15m']
     const now = Math.floor(Date.now() / 1000)
     const from = now - sec
     const qs = new URLSearchParams({ from: String(from), to: String(now) })
@@ -1188,7 +1188,7 @@ export default function InfraMonitoringPage() {
                       <span style={{ color: C.text3 }}> ({selectedHost.host})</span>
                     </div>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
-                      {(['1h', '6h', '24h', '7d']).map((r) => (
+                      {(['15m', '1h', '6h', '24h', '7d']).map((r) => (
                         <button
                           key={r}
                           type="button"

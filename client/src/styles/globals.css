@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Syne:wght@400;500;600;700;800&display=swap");
+/* Fonts loaded once in index.html (avoid duplicate @import blocking CSS parse) */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -156,6 +156,15 @@ html:not([data-theme="paper"]):not([data-theme="sand"]) select option {
 ::-webkit-scrollbar-track { background: var(--bg2); }
 ::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+@keyframes np-spin { to { transform: rotate(360deg); } }
+.np-page-loading-dot {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: np-spin 0.65s linear infinite;
+}
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
 @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
 .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }

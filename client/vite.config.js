@@ -10,6 +10,17 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     resolve: { alias: { '@': path.resolve(__dirname, './src') } },
+    build: {
+      rollupOptions: {
+        output: {
+          /** Isolate Chart.js (~180k) so non-Sentinel routes skip downloading it. */
+          manualChunks(id) {
+            if (!id.includes('node_modules')) return
+            if (id.includes('chart.js') || id.includes('react-chartjs-2')) return 'chart'
+          },
+        },
+      },
+    },
     server: {
       host: '0.0.0.0',
       port: 3000,

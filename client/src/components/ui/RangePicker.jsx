@@ -1,3 +1,4 @@
+import { DEFAULT_RANGE_VALUE } from '../../constants/timeRange.js'
 import { useState, useRef, useEffect } from 'react'
 
 const C = { accent:'#4f7ef5', text:'var(--text)', text2:'var(--text2)', text3:'var(--text3)', bg2:'var(--bg2)', bg3:'var(--bg3)', bg4:'var(--bg4)', border:'var(--border)', border2:'var(--border2)' }
@@ -66,7 +67,7 @@ export default function RangePicker({ range, onChange, accentColor }) {
       const lb = range.label || 'Custom range'
       return lb.length > 30 ? `${lb.slice(0, 30)}…` : lb
     }
-    return (range && range.label) || range?.value || '24h'
+    return (range && range.label) || range?.value || DEFAULT_RANGE_VALUE
   })()
 
   return (

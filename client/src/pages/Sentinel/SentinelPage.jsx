@@ -15,6 +15,7 @@ import {
   Filler,
 } from 'chart.js'
 import api from '../../api/client'
+import { DEFAULT_RANGE_PRESET, DEFAULT_RANGE_VALUE } from '../../constants/timeRange.js'
 import { useSentinelHostGroups } from '../../hooks/useSentinelHostGroups.js'
 import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../components/ui/ResizableTable.jsx'
 import { useThemeStore } from '../../store/themeStore.js'
@@ -227,7 +228,7 @@ function HBarChart({ rows, color, onBarClick, tc }) {
 
 export default function SentinelPage() {
   const [tab, setTab] = useState('overview')
-  const [range, setRange] = useState({ type: 'preset', value: '24h', label: '24h' })
+  const [range, setRange] = useState(() => ({ ...DEFAULT_RANGE_PRESET }))
   const [hostGroupFilter, setHostGroupFilter] = useState('')
   const [dash, setDash] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -705,7 +706,7 @@ export default function SentinelPage() {
           <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12 }}>
             <Card
               title="Activity timeline"
-              badge={(range?.label || range?.value || '24h').toUpperCase()}
+              badge={(range?.label || range?.value || DEFAULT_RANGE_VALUE).toUpperCase()}
               onClick={() => goDrill({})}
               titleHint="Click chart or card to open Custom log"
             >
@@ -840,7 +841,7 @@ export default function SentinelPage() {
           <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12 }}>
             <Card
               title="USB activity timeline"
-              badge={(range?.label || range?.value || '24h').toUpperCase()}
+              badge={(range?.label || range?.value || DEFAULT_RANGE_VALUE).toUpperCase()}
               onClick={() => usbGoDrill({})}
               titleHint="Click chart or card to filter the USB log below"
             >
@@ -1022,7 +1023,7 @@ export default function SentinelPage() {
           <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12 }}>
             <Card
               title="Bluetooth activity timeline"
-              badge={(range?.label || range?.value || '24h').toUpperCase()}
+              badge={(range?.label || range?.value || DEFAULT_RANGE_VALUE).toUpperCase()}
               onClick={() => bluetoothGoDrill({})}
               titleHint="Click chart or card to filter the Bluetooth log below"
             >

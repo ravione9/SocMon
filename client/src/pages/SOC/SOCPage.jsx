@@ -9,6 +9,7 @@ import { io } from 'socket.io-client'
 import { resolvedWsUrl } from '../../utils/backendOrigin.js'
 import { useThemeStore } from '../../store/themeStore.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
+import { DEFAULT_RANGE_PRESET, DEFAULT_RANGE_VALUE } from '../../constants/timeRange.js'
 import { getSevCategory } from '../../utils/logSeverity.js'
 import { firewallIdentityFromEvent, fortigateVpnUserLabel, logSearchDeviceLabel } from '../../utils/firewallIdentity.js'
 
@@ -298,7 +299,7 @@ function socRangeMeta(range) {
     const long = ms > 7 * 86400000
     return { isShort, long, tickLimit: long ? 8 : isShort ? 14 : 10 }
   }
-  const rv = range?.value || '24h'
+  const rv = range?.value || DEFAULT_RANGE_VALUE
   const isShort = rv === '15m' || rv === '1h'
   const long = rv === '3d' || rv === '7d' || rv === '30d'
   const tickLimit = rv === '15m' ? 15 : rv === '1h' ? 12 : rv === '6h' ? 12 : 8
@@ -307,7 +308,7 @@ function socRangeMeta(range) {
 
 export default function SOCPage() {
   const [tab, setTab]           = useState('overview')
-  const [range, setRange] = useState({ type:'preset', value:'24h', label:'24h' })
+  const [range, setRange] = useState(() => ({ ...DEFAULT_RANGE_PRESET }))
   const [stats, setStats]       = useState(null)
   const [timeline, setTimeline] = useState([])
   const [threats, setThreats]   = useState([])
@@ -585,7 +586,7 @@ export default function SOCPage() {
       {tab==='overview' && (
         <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(118px, 1fr))', gap:10 }}>
-            <KPI label="Total Events"     value={stats?.total?.toLocaleString()}   sub={`last ${range?.label||range?.value||'24h'}`}           color="blue"   delta={null} onClick={() => goToSocSearch({})} />
+            <KPI label="Total Events"     value={stats?.total?.toLocaleString()}   sub={`last ${range?.label||range?.value||DEFAULT_RANGE_VALUE}`}           color="blue"   delta={null} onClick={() => goToSocSearch({})} />
             <KPI label="Blocked Sessions" value={stats?.denied?.toLocaleString()}  sub="firewall denied"           color="red"    delta={null} onClick={() => goToSocSearch({ action: 'deny' })} />
             <KPI label="IPS Alerts"       value={stats?.ips?.toLocaleString()}     sub="intrusion attempts"        color="amber"  delta={null} onClick={() => goToSocSearch({ logtype: 'ips' })} />
             <KPI label="Allowed Sessions" value={stats ? (stats.total-stats.denied)?.toLocaleString() : '—'} sub="policy permitted" color="green" delta={null} onClick={() => goToSocSearch({ action: 'allow' })} />
@@ -595,7 +596,7 @@ export default function SOCPage() {
           </div>
 
           <div style={{ display:'grid', gridTemplateColumns:'2fr 1fr', gap:12 }}>
-            <Card title="SESSION VOLUME TREND" badge={(range?.label||range?.value||'24h').toUpperCase()} height={200}>
+            <Card title="SESSION VOLUME TREND" badge={(range?.label||range?.value||DEFAULT_RANGE_VALUE).toUpperCase()} height={200}>
               <Line data={timelineData} options={{ ...co, onClick: (_, els) => { if (els.length) goToSocSearch({ logtype: 'traffic' }) }, plugins:{ legend:{ display:true, labels:{ color:tc.text2, font:{ size:10 }, boxWidth:10 } } }, scales:{ ...co.scales, x:{ ...co.scales.x, ticks:{ ...co.scales.x.ticks, maxTicksLimit:tickLimit } } } }} />
             </Card>
             <Card title="SEVERITY BREAKDOWN" badge="ALERTS" badgeClass="red" height={200}>
@@ -681,7 +682,7 @@ export default function SOCPage() {
       {tab==='traffic' && (
         <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
           <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:10 }}>
-            <KPI label="Total Sessions" value={stats?.total?.toLocaleString()} sub={`last ${range?.label||range?.value||'24h'}`} color="blue" onClick={() => goToSocSearch({ logtype: 'traffic' })} />
+            <KPI label="Total Sessions" value={stats?.total?.toLocaleString()} sub={`last ${range?.label||range?.value||DEFAULT_RANGE_VALUE}`} color="blue" onClick={() => goToSocSearch({ logtype: 'traffic' })} />
             <KPI label="Denied"         value={stats?.denied?.toLocaleString()} sub="blocked" color="red" onClick={() => goToSocSearch({ action: 'deny' })} />
             <KPI label="Allowed"        value={stats ? (stats.total-stats.denied)?.toLocaleString():null} sub="permitted" color="green" onClick={() => goToSocSearch({ action: 'allow' })} />
             <KPI label="Bytes Out"      value={sessions.length ? (sessions.reduce((a,s)=>(a+(s.fgt?.sentbyte||s['fgt.sentbyte']||0)),0)/1024/1024/1024).toFixed(2)+'GB' : '�'} sub="outbound" color="cyan" onClick={() => goToSocSearch({ logtype: 'traffic' })} />
@@ -689,7 +690,7 @@ export default function SOCPage() {
             <KPI label="Unique Apps"    value={new Set(sessions.map(s=>s.fgt?.app||s['fgt.app'])).size||'�'} sub="applications" color="amber" onClick={() => goToSocSearch({ logtype: 'traffic' })} />
           </div>
 
-          <Card title="TRAFFIC TIMELINE" badge={(range?.label||range?.value||'24h').toUpperCase()} height={220}>
+          <Card title="TRAFFIC TIMELINE" badge={(range?.label||range?.value||DEFAULT_RANGE_VALUE).toUpperCase()} height={220}>
             <Line data={timelineData} options={{ ...co, onClick: (_, els) => { if (els.length) goToSocSearch({ logtype: 'traffic' }) }, plugins:{ legend:{ display:true, labels:{ color:tc.text2, font:{ size:10 }, boxWidth:10 } } }, scales:{ ...co.scales, x:{ ...co.scales.x, ticks:{ ...co.scales.x.ticks, maxTicksLimit:tickLimit } } } }} />
           </Card>
 
@@ -840,7 +841,7 @@ export default function SOCPage() {
           </div>
 
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
-            <Card title="SESSION TIMELINE" badge={(range?.label || range?.value || '24h').toUpperCase()} height={220}>
+            <Card title="SESSION TIMELINE" badge={(range?.label || range?.value || DEFAULT_RANGE_VALUE).toUpperCase()} height={220}>
               <Line data={timelineData} options={{ ...co, onClick: (_, els) => { if (els.length) goToSocSearch({ logtype: 'traffic' }) }, plugins:{ legend:{ display:true, labels:{ color:tc.text2, font:{ size:10 }, boxWidth:10 } } }, scales:{ ...co.scales, x:{ ...co.scales.x, ticks:{ ...co.scales.x.ticks, maxTicksLimit:tickLimit } } } }} />
             </Card>
             <Card title="VPN MIX (SAMPLE)" badge="FORTIGATE" height={220}>

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import toast from 'react-hot-toast'
+import { DEFAULT_RANGE_PRESET } from '../../constants/timeRange.js'
 import api from '../../api/client'
 import RangePicker from './RangePicker.jsx'
 import { getSevCategory } from '../../utils/logSeverity.js'
@@ -108,7 +109,7 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
   const [range,      setRange]      = useState(() =>
     dashboardRange && (dashboardRange.value || (dashboardRange.from && dashboardRange.to))
       ? { ...dashboardRange }
-      : { type:'preset', value:'1h', label:'1h' },
+      : { ...DEFAULT_RANGE_PRESET },
   )
   const [filters,    setFilters]    = useState(mergedInit)
   const [pageSize,   setPageSize]   = useState(50)
