@@ -55,6 +55,7 @@ export default function SentinelLogSearch({
   accentColor,
   hostGroupSync = '',
   endpointsSync = '',
+  usbDevicesSync = '',
   onDrillClear,
 }) {
   const accent = accentColor || C.accent
@@ -155,14 +156,19 @@ export default function SentinelLogSearch({
       if (a.endpoint.trim()) p.set('endpoint', a.endpoint.trim())
       if (effectiveHostGroup) p.set('hostGroup', effectiveHostGroup)
       if (a.user.trim()) p.set('user', a.user.trim())
-      if (scopeParam === 'usb_only' && a.usbDevice.trim()) p.set('usbDevice', a.usbDevice.trim())
+      if (scopeParam === 'usb_only') {
+        const fromDash = (usbDevicesSync || '').split(',').map(s => s.trim()).filter(Boolean)
+        const fromAnalyze = (a.usbDevice || '').split(',').map(s => s.trim()).filter(Boolean)
+        const usbMerged = [...new Set([...fromDash, ...fromAnalyze])].join(',')
+        if (usbMerged) p.set('usbDevice', usbMerged)
+      }
       if (scopeParam === 'bt_only' && a.bluetoothDevice.trim()) p.set('bluetoothDevice', a.bluetoothDevice.trim())
       if (a.eventKind) p.set('eventKind', a.eventKind)
       if (a.eventAction?.trim()) p.set('eventAction', a.eventAction.trim())
       if (endpointsSync) p.set('endpoints', endpointsSync)
       return p.toString()
     },
-    [range, scopeParam, applied, hostGroupSync, endpointsSync],
+    [range, scopeParam, applied, hostGroupSync, endpointsSync, usbDevicesSync],
   )
 
   const fetchLogs = useCallback(async () => {

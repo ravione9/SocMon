@@ -248,6 +248,11 @@ export default function SentinelPage() {
   const [usbDashSearchText, setUsbDashSearchText] = useState('')
   const [usbDashSearchResults, setUsbDashSearchResults] = useState([])
   const [usbDashSearching, setUsbDashSearching] = useState(false)
+  const [usbDashSelectedDevices, setUsbDashSelectedDevices] = useState([])
+  const [usbDashUsbSearchText, setUsbDashUsbSearchText] = useState('')
+  const [usbDashUsbPasteText, setUsbDashUsbPasteText] = useState('')
+  const [usbDashUsbSearchResults, setUsbDashUsbSearchResults] = useState([])
+  const [usbDashUsbSearching, setUsbDashUsbSearching] = useState(false)
   const usbDashLogAnchorRef = useRef(null)
   const usbLogAnchorRef = useRef(null)
   const bluetoothLogAnchorRef = useRef(null)
@@ -287,6 +292,11 @@ export default function SentinelPage() {
     [usbDashSelectedHosts],
   )
 
+  const usbDashUsbDevicesParam = useMemo(
+    () => usbDashSelectedDevices.join(','),
+    [usbDashSelectedDevices],
+  )
+
   const usbGoDrill = useCallback(patch => {
     const p = patch && typeof patch === 'object' ? patch : {}
     if (!drillPatchHasFilters(p)) setUsbDrill({ _clear: true, _ts: Date.now() })
@@ -319,6 +329,20 @@ export default function SentinelPage() {
     setUsbDashPasteText('')
   }, [usbDashPasteText])
 
+  const usbDashAddUsbPasted = useCallback(() => {
+    const parsed = usbDashUsbPasteText
+      .split(/[\n\r,;\t]+/)
+      .map(s => s.trim())
+      .filter(Boolean)
+    if (!parsed.length) return
+    setUsbDashSelectedDevices(prev => {
+      const set = new Set(prev)
+      for (const d of parsed) set.add(d)
+      return [...set]
+    })
+    setUsbDashUsbPasteText('')
+  }, [usbDashUsbPasteText])
+
   const hostGroupQuery = useMemo(() => {
     const h = hostGroupFilter.trim()
     return h ? `&hostGroup=${encodeURIComponent(h)}` : ''
@@ -345,6 +369,29 @@ export default function SentinelPage() {
     }, 300)
     return () => { cancelled = true; clearTimeout(timer) }
   }, [usbDashSearchText, tab, range, hostGroupQuery])
+
+  useEffect(() => {
+    if (tab !== 'usb_dash') return
+    const q = usbDashUsbSearchText.trim()
+    if (q.length < 2) { setUsbDashUsbSearchResults([]); return }
+    let cancelled = false
+    const timer = setTimeout(async () => {
+      setUsbDashUsbSearching(true)
+      try {
+        const rp = `range=${range?.value || ''}&from=${range?.from || ''}&to=${range?.to || ''}`
+        const ep = usbDashEndpointsParam ? `&endpoints=${encodeURIComponent(usbDashEndpointsParam)}` : ''
+        const { data } = await api.get(
+          `/api/sentinel/usb-device-search?${rp}&scope=usb_only&prefix=${encodeURIComponent(q)}${hostGroupQuery}${ep}`,
+        )
+        if (!cancelled) setUsbDashUsbSearchResults(data.devices || [])
+      } catch {
+        if (!cancelled) setUsbDashUsbSearchResults([])
+      } finally {
+        if (!cancelled) setUsbDashUsbSearching(false)
+      }
+    }, 300)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [usbDashUsbSearchText, tab, range, hostGroupQuery, usbDashEndpointsParam])
 
   /** After a drill, scroll the embedded log into view so KPI / chart clicks feel connected. */
   useEffect(() => {
@@ -393,9 +440,14 @@ export default function SentinelPage() {
     return `&endpoints=${encodeURIComponent(usbDashEndpointsParam)}`
   }, [tab, usbDashEndpointsParam])
 
+  const usbDashUsbDevicesQuery = useMemo(() => {
+    if (tab !== 'usb_dash' || !usbDashUsbDevicesParam) return ''
+    return `&usbDevices=${encodeURIComponent(usbDashUsbDevicesParam)}`
+  }, [tab, usbDashUsbDevicesParam])
+
   useEffect(() => {
     if (!['overview', 'active', 'usb', 'usb_dash', 'bluetooth'].includes(tab)) return
-    if (tab === 'usb_dash' && usbDashSelectedHosts.length === 0) {
+    if (tab === 'usb_dash' && usbDashSelectedHosts.length === 0 && usbDashSelectedDevices.length === 0) {
       setDash(null)
       setLoading(false)
       return
@@ -407,7 +459,7 @@ export default function SentinelPage() {
       try {
         const rp = `range=${range?.value || ''}&from=${range?.from || ''}&to=${range?.to || ''}`
         const sc = scopeForTab(tab)
-        const { data } = await api.get(`/api/sentinel/dashboard?${rp}&scope=${sc}${hostGroupQuery}${usbDashEndpointsQuery}`)
+        const { data } = await api.get(`/api/sentinel/dashboard?${rp}&scope=${sc}${hostGroupQuery}${usbDashEndpointsQuery}${usbDashUsbDevicesQuery}`)
         if (!cancelled) setDash(data)
       } catch (e) {
         if (!cancelled) {
@@ -424,7 +476,7 @@ export default function SentinelPage() {
       cancelled = true
       clearInterval(iv)
     }
-  }, [range, tab, hostGroupQuery, usbDashEndpointsQuery, usbDashSelectedHosts.length])
+  }, [range, tab, hostGroupQuery, usbDashEndpointsQuery, usbDashUsbDevicesQuery, usbDashSelectedHosts.length, usbDashSelectedDevices.length])
 
   useEffect(() => {
     if (tab !== 'active') return
@@ -1199,13 +1251,154 @@ export default function SentinelPage() {
             )}
           </div>
 
-          {usbDashSelectedHosts.length === 0 && (
+          <div className="card" style={{ padding: '14px 16px', marginTop: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+              <span style={{ fontSize: 10, fontWeight: 700, color: C.orange, fontFamily: 'var(--mono)', letterSpacing: 1 }}>
+                USB DEVICES ({usbDashSelectedDevices.length} selected)
+              </span>
+              {usbDashSelectedDevices.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setUsbDashSelectedDevices([])}
+                  style={{
+                    fontSize: 10, fontFamily: 'var(--mono)', padding: '4px 10px', borderRadius: 6,
+                    border: '1px solid var(--border)', background: 'transparent', color: C.text2, cursor: 'pointer',
+                  }}
+                >
+                  Remove all
+                </button>
+              )}
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+              <div>
+                <div style={{ fontSize: 9, fontWeight: 600, color: C.text3, fontFamily: 'var(--mono)', marginBottom: 4, letterSpacing: 0.5 }}>
+                  SEARCH USB DEVICE
+                </div>
+                <div style={{ position: 'relative' }}>
+                  <input
+                    value={usbDashUsbSearchText}
+                    onChange={e => setUsbDashUsbSearchText(e.target.value)}
+                    placeholder="Type at least 2 characters to search…"
+                    style={{
+                      width: '100%', padding: '8px 10px', background: 'var(--bg3)',
+                      border: '1px solid var(--border)', borderRadius: 7, color: C.text,
+                      fontSize: 11, fontFamily: 'var(--mono)', outline: 'none',
+                    }}
+                  />
+                  {usbDashUsbSearchText.trim().length >= 2 && (
+                    <div style={{
+                      position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 20,
+                      background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 7,
+                      marginTop: 4, maxHeight: 220, overflowY: 'auto', boxShadow: '0 6px 20px rgba(0,0,0,0.25)',
+                    }}>
+                      {usbDashUsbSearching && (
+                        <div style={{ padding: '8px 12px', fontSize: 10, color: C.text3, fontFamily: 'var(--mono)' }}>
+                          Searching…
+                        </div>
+                      )}
+                      {!usbDashUsbSearching && usbDashUsbSearchResults.length === 0 && (
+                        <div style={{ padding: '8px 12px', fontSize: 10, color: C.text3, fontFamily: 'var(--mono)' }}>
+                          No USB devices found
+                        </div>
+                      )}
+                      {!usbDashUsbSearching && usbDashUsbSearchResults.map(d => {
+                        const already = usbDashSelectedDevices.includes(d)
+                        return (
+                          <div
+                            key={d}
+                            onClick={() => {
+                              if (!already) setUsbDashSelectedDevices(prev => [...prev, d])
+                              setUsbDashUsbSearchText('')
+                              setUsbDashUsbSearchResults([])
+                            }}
+                            style={{
+                              padding: '6px 12px', fontSize: 11, fontFamily: 'var(--mono)',
+                              cursor: already ? 'default' : 'pointer',
+                              color: already ? C.text3 : C.text,
+                              borderBottom: '1px solid var(--border)',
+                            }}
+                            onMouseEnter={e => { if (!already) e.currentTarget.style.background = `${C.orange}18` }}
+                            onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
+                          >
+                            {already ? `✓ ${d}` : d}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 9, fontWeight: 600, color: C.text3, fontFamily: 'var(--mono)', marginBottom: 4, letterSpacing: 0.5 }}>
+                  PASTE USB DEVICES (one per line, comma / semicolon / tab separated)
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <textarea
+                    value={usbDashUsbPasteText}
+                    onChange={e => setUsbDashUsbPasteText(e.target.value)}
+                    placeholder="Device name from logs (paste multiple lines)"
+                    rows={2}
+                    style={{
+                      flex: 1, padding: '8px 10px', background: 'var(--bg3)',
+                      border: '1px solid var(--border)', borderRadius: 7, color: C.text,
+                      fontSize: 11, fontFamily: 'var(--mono)', outline: 'none', resize: 'vertical',
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={usbDashAddUsbPasted}
+                    disabled={!usbDashUsbPasteText.trim()}
+                    style={{
+                      padding: '8px 14px', borderRadius: 7, border: 'none', whiteSpace: 'nowrap',
+                      background: usbDashUsbPasteText.trim() ? C.orange : 'var(--bg4)',
+                      color: usbDashUsbPasteText.trim() ? '#000' : C.text3,
+                      fontSize: 11, fontWeight: 600, fontFamily: 'var(--mono)',
+                      cursor: usbDashUsbPasteText.trim() ? 'pointer' : 'default',
+                    }}
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {usbDashSelectedDevices.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {usbDashSelectedDevices.map(d => (
+                  <span
+                    key={d}
+                    style={{
+                      fontSize: 10, fontFamily: 'var(--mono)', padding: '4px 10px', borderRadius: 6,
+                      border: `1px solid ${C.orange}`, background: `${C.orange}22`, color: C.orange,
+                      fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 6,
+                    }}
+                  >
+                    {d}
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setUsbDashSelectedDevices(prev => prev.filter(x => x !== d))}
+                      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setUsbDashSelectedDevices(prev => prev.filter(x => x !== d)) } }}
+                      style={{ cursor: 'pointer', opacity: 0.7, fontWeight: 400, fontSize: 12, lineHeight: 1 }}
+                      title={`Remove ${d}`}
+                    >
+                      ✕
+                    </span>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {usbDashSelectedHosts.length === 0 && usbDashSelectedDevices.length === 0 && (
             <div style={{ textAlign: 'center', padding: 40, color: C.text3, fontFamily: 'var(--mono)', fontSize: 12 }}>
-              Search or paste hostnames above to view the dashboard
+              Select at least one hostname and/or USB device above to view the dashboard
             </div>
           )}
 
-          {usbDashSelectedHosts.length > 0 && (
+          {(usbDashSelectedHosts.length > 0 || usbDashSelectedDevices.length > 0) && (
             <>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
                 <KPI
@@ -1381,6 +1574,7 @@ export default function SentinelPage() {
                     accentColor={C.amber}
                     hostGroupSync={hostGroupFilter.trim()}
                     endpointsSync={usbDashEndpointsParam}
+                    usbDevicesSync={usbDashUsbDevicesParam}
                     onDrillClear={() => setUsbDashDrill(null)}
                   />
                 </div>

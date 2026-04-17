@@ -90,6 +90,51 @@ function appendEndpoints(must, endpoints) {
   if (c) must.push(c)
 }
 
+/** One USB / peripheral device — same field paths as event search. */
+function peripheralDeviceMatchClause(peripheralDevice) {
+  const esc = String(peripheralDevice).replace(/[\\*]/g, '')
+  return {
+    bool: {
+      should: [
+        { wildcard: { message: `*${esc}*` } },
+        { term: { 'device.name.keyword': peripheralDevice } },
+        { term: { 'device.product.keyword': peripheralDevice } },
+        { term: { 'sentinel_one.activity.data.deviceName.keyword': peripheralDevice } },
+        { term: { 'sentinel_one.activity.data.productName.keyword': peripheralDevice } },
+        { term: { 'sentinel_one.activity.data.device_name.keyword': peripheralDevice } },
+        { term: { 'sentinel_one.activity.data.product_name.keyword': peripheralDevice } },
+        { term: { 'sentinel_one.activity.data.externalDeviceType.keyword': peripheralDevice } },
+        { term: { 'sentinel_one.activity.data.external_device_type.keyword': peripheralDevice } },
+        { term: { 'sentinel_one.activity.data.deviceClass.keyword': peripheralDevice } },
+        { term: { 'sentinel_one.activity.data.device_class.keyword': peripheralDevice } },
+        { term: { 'data.deviceName.keyword': peripheralDevice } },
+        { term: { 'data.device_name.keyword': peripheralDevice } },
+        { term: { 'device_name.keyword': peripheralDevice } },
+      ],
+      minimum_should_match: 1,
+    },
+  }
+}
+
+/** Comma-separated USB device names (OR). Used by dashboard + dashboard-scoped search. */
+function appendUsbDevicesFilter(must, usbDevicesRaw) {
+  const list = String(usbDevicesRaw || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+  if (!list.length) return
+  if (list.length === 1) {
+    must.push(peripheralDeviceMatchClause(list[0]))
+  } else {
+    must.push({
+      bool: {
+        should: list.map(peripheralDeviceMatchClause),
+        minimum_should_match: 1,
+      },
+    })
+  }
+}
+
 /** Time range + Sentinel scope only (no host group / text filters) — used for host-group discovery from logs. */
 function buildSentinelScopeAndTimeMust(req) {
   const tr = getTimeRange(req)
@@ -639,10 +684,11 @@ async function tryTopTerms(es, index, must, fields, size = 8) {
   return []
 }
 
-async function usbPeripheralActionSplit(es, index, rangeQ, hostGroup, endpoints) {
+async function usbPeripheralActionSplit(es, index, rangeQ, hostGroup, endpoints, usbDevices) {
   const must = [rangeQ, USB_PERIPHERAL_EVENT_BOOL]
   appendHostGroup(must, hostGroup)
   appendEndpoints(must, endpoints)
+  appendUsbDevicesFilter(must, usbDevices)
   const run = field =>
     es.search({
       index,
@@ -764,9 +810,11 @@ router.get('/dashboard', async (req, res) => {
 
     const hostGroup = String(req.query.hostGroup || '').trim()
     const endpoints = String(req.query.endpoints || '').trim()
+    const usbDevices = String(req.query.usbDevices || '').trim()
     const mustBase = [rangeQ, scopeMust]
     appendHostGroup(mustBase, hostGroup)
     appendEndpoints(mustBase, endpoints)
+    appendUsbDevicesFilter(mustBase, usbDevices)
 
     const [
       total,
@@ -822,6 +870,7 @@ router.get('/dashboard', async (req, res) => {
             const m = [rangeQ, USB_PERIPHERAL_EVENT_BOOL]
             appendHostGroup(m, hostGroup)
             appendEndpoints(m, endpoints)
+            appendUsbDevicesFilter(m, usbDevices)
             return safeCount(es, ix, m)
           })(),
       scope === 'no_usb' || scope === 'usb_only'
@@ -881,6 +930,7 @@ router.get('/dashboard', async (req, res) => {
             const m = [rangeQ, USB_PERIPHERAL_EVENT_BOOL]
             appendHostGroup(m, hostGroup)
             appendEndpoints(m, endpoints)
+            appendUsbDevicesFilter(m, usbDevices)
             return m
           })()
         : scope === 'bt_only'
@@ -908,6 +958,7 @@ router.get('/dashboard', async (req, res) => {
       const m = [rangeQ, USB_PERIPHERAL_EVENT_BOOL]
       appendHostGroup(m, hostGroup)
       appendEndpoints(m, endpoints)
+      appendUsbDevicesFilter(m, usbDevices)
       return m
     })()
 
@@ -915,6 +966,7 @@ router.get('/dashboard', async (req, res) => {
       const m = [rangeQ, USB_PERIPHERAL_EVENT_BOOL, USB_PERIPHERAL_DISCONNECT_FILTER]
       appendHostGroup(m, hostGroup)
       appendEndpoints(m, endpoints)
+      appendUsbDevicesFilter(m, usbDevices)
       return m
     })()
 
@@ -977,7 +1029,7 @@ router.get('/dashboard', async (req, res) => {
       scope === 'no_usb' || scope === 'usb_only'
         ? Promise.resolve([])
         : tryTopTerms(es, ix, topBluetoothMust, deviceTermFields, 8),
-      scope === 'usb_only' ? usbPeripheralActionSplit(es, ix, rangeQ, hostGroup, endpoints) : Promise.resolve(null),
+      scope === 'usb_only' ? usbPeripheralActionSplit(es, ix, rangeQ, hostGroup, endpoints, usbDevices) : Promise.resolve(null),
       scope === 'bt_only' ? bluetoothPeripheralActionSplit(es, ix, rangeQ, hostGroup, endpoints) : Promise.resolve(null),
       scope === 'usb_only'
         ? tryTopTerms(es, ix, topUsbDisconnectHostsMust, hostTermFields, 10)
@@ -1048,27 +1100,23 @@ function buildSentinelEventsMust(req) {
     })
   }
 
-  const peripheralDevice = String(req.query.usbDevice || req.query.bluetoothDevice || '').trim()
-  if (peripheralDevice) {
-    const esc = peripheralDevice.replace(/[\\*]/g, '')
+  const qUsb = req.query.usbDevice
+  const qBt = req.query.bluetoothDevice
+  let rawPeripheral = ''
+  if (qUsb != null && qUsb !== '') {
+    rawPeripheral = Array.isArray(qUsb) ? qUsb.map(String).join(',') : String(qUsb).trim()
+  } else if (qBt != null && qBt !== '') {
+    rawPeripheral = Array.isArray(qBt) ? qBt.map(String).join(',') : String(qBt).trim()
+  }
+  const peripheralDevices = rawPeripheral
+    ? rawPeripheral.split(',').map(s => s.trim()).filter(Boolean)
+    : []
+  if (peripheralDevices.length === 1) {
+    must.push(peripheralDeviceMatchClause(peripheralDevices[0]))
+  } else if (peripheralDevices.length > 1) {
     must.push({
       bool: {
-        should: [
-          { wildcard: { message: `*${esc}*` } },
-          { term: { 'device.name.keyword': peripheralDevice } },
-          { term: { 'device.product.keyword': peripheralDevice } },
-          { term: { 'sentinel_one.activity.data.deviceName.keyword': peripheralDevice } },
-          { term: { 'sentinel_one.activity.data.productName.keyword': peripheralDevice } },
-          { term: { 'sentinel_one.activity.data.device_name.keyword': peripheralDevice } },
-          { term: { 'sentinel_one.activity.data.product_name.keyword': peripheralDevice } },
-          { term: { 'sentinel_one.activity.data.externalDeviceType.keyword': peripheralDevice } },
-          { term: { 'sentinel_one.activity.data.external_device_type.keyword': peripheralDevice } },
-          { term: { 'sentinel_one.activity.data.deviceClass.keyword': peripheralDevice } },
-          { term: { 'sentinel_one.activity.data.device_class.keyword': peripheralDevice } },
-          { term: { 'data.deviceName.keyword': peripheralDevice } },
-          { term: { 'data.device_name.keyword': peripheralDevice } },
-          { term: { 'device_name.keyword': peripheralDevice } },
-        ],
+        should: peripheralDevices.map(peripheralDeviceMatchClause),
         minimum_should_match: 1,
       },
     })
@@ -1345,6 +1393,59 @@ router.get('/hostname-search', async (req, res) => {
 
     const hostnames = [...set].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
     res.json({ hostnames })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+const USB_DEVICE_SEARCH_FIELDS = [
+  'sentinel_one.activity.data.deviceName.keyword',
+  'sentinel_one.activity.data.productName.keyword',
+  'device.name.keyword',
+  'device.product.keyword',
+  'data.deviceName.keyword',
+  'data.device_name.keyword',
+  'device_name.keyword',
+]
+
+/** GET /api/sentinel/usb-device-search?prefix=San&scope=usb_only — distinct USB device names from logs (substring match). */
+router.get('/usb-device-search', async (req, res) => {
+  try {
+    const es = getESClient()
+    const ix = getSentinelIndex()
+    const qRaw = String(req.query.prefix ?? req.query.q ?? '').trim()
+    if (qRaw.length < 2) return res.json({ devices: [] })
+
+    const must = [...buildSentinelScopeAndTimeMust(req)]
+    appendHostGroup(must, req.query.hostGroup)
+    appendEndpoints(must, req.query.endpoints)
+
+    const set = new Set()
+    const qLower = qRaw.toLowerCase()
+    await Promise.all(
+      USB_DEVICE_SEARCH_FIELDS.map(async field => {
+        try {
+          const r = await es.search({
+            index: ix,
+            body: {
+              size: 0,
+              track_total_hits: false,
+              query: { bool: { must } },
+              aggs: { by_dev: { terms: { field, size: 200, missing: '__missing__' } } },
+            },
+          })
+          for (const b of r.aggregations?.by_dev?.buckets || []) {
+            const k = String(b.key).trim()
+            if (k && k !== '__missing__' && k.toLowerCase().includes(qLower)) set.add(k)
+          }
+        } catch {
+          /* field may be unmapped */
+        }
+      }),
+    )
+
+    const devices = [...set].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+    res.json({ devices })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
