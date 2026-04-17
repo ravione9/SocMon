@@ -54,6 +54,7 @@ export default function SentinelLogSearch({
   hideRangePicker = false,
   accentColor,
   hostGroupSync = '',
+  endpointsSync = '',
   onDrillClear,
 }) {
   const accent = accentColor || C.accent
@@ -158,9 +159,10 @@ export default function SentinelLogSearch({
       if (scopeParam === 'bt_only' && a.bluetoothDevice.trim()) p.set('bluetoothDevice', a.bluetoothDevice.trim())
       if (a.eventKind) p.set('eventKind', a.eventKind)
       if (a.eventAction?.trim()) p.set('eventAction', a.eventAction.trim())
+      if (endpointsSync) p.set('endpoints', endpointsSync)
       return p.toString()
     },
-    [range, scopeParam, applied, hostGroupSync],
+    [range, scopeParam, applied, hostGroupSync, endpointsSync],
   )
 
   const fetchLogs = useCallback(async () => {

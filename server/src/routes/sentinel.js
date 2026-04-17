@@ -65,6 +65,31 @@ function appendHostGroup(must, hostGroup) {
   if (c) must.push(c)
 }
 
+function multiEndpointMustClause(endpoints) {
+  const raw = String(endpoints || '').trim()
+  if (!raw) return null
+  const list = raw.split(',').map(s => s.trim()).filter(Boolean)
+  if (!list.length) return null
+  const hostFields = [
+    'agentRealtimeInfo.agentComputerName.keyword',
+    'host.name.keyword',
+    'host.hostname.keyword',
+  ]
+  return {
+    bool: {
+      should: list.flatMap(ep =>
+        hostFields.map(f => ({ term: { [f]: ep } }))
+      ),
+      minimum_should_match: 1,
+    },
+  }
+}
+
+function appendEndpoints(must, endpoints) {
+  const c = multiEndpointMustClause(endpoints)
+  if (c) must.push(c)
+}
+
 /** Time range + Sentinel scope only (no host group / text filters) — used for host-group discovery from logs. */
 function buildSentinelScopeAndTimeMust(req) {
   const tr = getTimeRange(req)
@@ -614,9 +639,10 @@ async function tryTopTerms(es, index, must, fields, size = 8) {
   return []
 }
 
-async function usbPeripheralActionSplit(es, index, rangeQ, hostGroup) {
+async function usbPeripheralActionSplit(es, index, rangeQ, hostGroup, endpoints) {
   const must = [rangeQ, USB_PERIPHERAL_EVENT_BOOL]
   appendHostGroup(must, hostGroup)
+  appendEndpoints(must, endpoints)
   const run = field =>
     es.search({
       index,
@@ -655,9 +681,10 @@ async function usbPeripheralActionSplit(es, index, rangeQ, hostGroup) {
   return { connected, disconnected, other }
 }
 
-async function bluetoothPeripheralActionSplit(es, index, rangeQ, hostGroup) {
+async function bluetoothPeripheralActionSplit(es, index, rangeQ, hostGroup, endpoints) {
   const must = [rangeQ, BLUETOOTH_DEVICE_EVENT_BOOL]
   appendHostGroup(must, hostGroup)
+  appendEndpoints(must, endpoints)
   const run = field =>
     es.search({
       index,
@@ -736,8 +763,10 @@ router.get('/dashboard', async (req, res) => {
             : sentinelScopeClause('all')
 
     const hostGroup = String(req.query.hostGroup || '').trim()
+    const endpoints = String(req.query.endpoints || '').trim()
     const mustBase = [rangeQ, scopeMust]
     appendHostGroup(mustBase, hostGroup)
+    appendEndpoints(mustBase, endpoints)
 
     const [
       total,
@@ -792,6 +821,7 @@ router.get('/dashboard', async (req, res) => {
         : (() => {
             const m = [rangeQ, USB_PERIPHERAL_EVENT_BOOL]
             appendHostGroup(m, hostGroup)
+            appendEndpoints(m, endpoints)
             return safeCount(es, ix, m)
           })(),
       scope === 'no_usb' || scope === 'usb_only'
@@ -799,6 +829,7 @@ router.get('/dashboard', async (req, res) => {
         : (() => {
             const m = [rangeQ, BLUETOOTH_DEVICE_EVENT_BOOL]
             appendHostGroup(m, hostGroup)
+            appendEndpoints(m, endpoints)
             return safeCount(es, ix, m)
           })(),
     ])
@@ -849,41 +880,48 @@ router.get('/dashboard', async (req, res) => {
         ? (() => {
             const m = [rangeQ, USB_PERIPHERAL_EVENT_BOOL]
             appendHostGroup(m, hostGroup)
+            appendEndpoints(m, endpoints)
             return m
           })()
         : scope === 'bt_only'
           ? (() => {
               const m = [rangeQ, BLUETOOTH_DEVICE_EVENT_BOOL]
               appendHostGroup(m, hostGroup)
+              appendEndpoints(m, endpoints)
               return m
             })()
           : scope === 'no_usb'
             ? (() => {
                 const m = [rangeQ, sentinelScopeClause('no_usb')]
                 appendHostGroup(m, hostGroup)
+                appendEndpoints(m, endpoints)
                 return m
               })()
             : (() => {
                 const m = [rangeQ]
                 appendHostGroup(m, hostGroup)
+                appendEndpoints(m, endpoints)
                 return m
               })()
 
     const topUsbMust = (() => {
       const m = [rangeQ, USB_PERIPHERAL_EVENT_BOOL]
       appendHostGroup(m, hostGroup)
+      appendEndpoints(m, endpoints)
       return m
     })()
 
     const topUsbDisconnectHostsMust = (() => {
       const m = [rangeQ, USB_PERIPHERAL_EVENT_BOOL, USB_PERIPHERAL_DISCONNECT_FILTER]
       appendHostGroup(m, hostGroup)
+      appendEndpoints(m, endpoints)
       return m
     })()
 
     const topBluetoothMust = (() => {
       const m = [rangeQ, BLUETOOTH_DEVICE_EVENT_BOOL]
       appendHostGroup(m, hostGroup)
+      appendEndpoints(m, endpoints)
       return m
     })()
 
@@ -939,8 +977,8 @@ router.get('/dashboard', async (req, res) => {
       scope === 'no_usb' || scope === 'usb_only'
         ? Promise.resolve([])
         : tryTopTerms(es, ix, topBluetoothMust, deviceTermFields, 8),
-      scope === 'usb_only' ? usbPeripheralActionSplit(es, ix, rangeQ, hostGroup) : Promise.resolve(null),
-      scope === 'bt_only' ? bluetoothPeripheralActionSplit(es, ix, rangeQ, hostGroup) : Promise.resolve(null),
+      scope === 'usb_only' ? usbPeripheralActionSplit(es, ix, rangeQ, hostGroup, endpoints) : Promise.resolve(null),
+      scope === 'bt_only' ? bluetoothPeripheralActionSplit(es, ix, rangeQ, hostGroup, endpoints) : Promise.resolve(null),
       scope === 'usb_only'
         ? tryTopTerms(es, ix, topUsbDisconnectHostsMust, hostTermFields, 10)
         : Promise.resolve([]),
@@ -994,6 +1032,8 @@ function buildSentinelEventsMust(req) {
       },
     })
   }
+
+  appendEndpoints(must, req.query.endpoints)
 
   const user = String(req.query.user || '').trim()
   if (user) {
@@ -1151,6 +1191,164 @@ async function handleSentinelEventsExport(req, res) {
 
 router.get('/events/export', handleSentinelEventsExport)
 router.post('/events/export', handleSentinelEventsExport)
+
+/** Escape user input for Elasticsearch wildcard `value` (inside *...*). */
+function escapeEsWildcardFragment(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/\*/g, '\\*').replace(/\?/g, '\\?')
+}
+
+/** Escape reserved characters for `query_string` query text. */
+function escapeEsQueryString(s) {
+  return String(s).replace(/([+\-=&|><!(){}[\]^"~*?:\\\/])/g, '\\$1')
+}
+
+/** GET /api/sentinel/hostname-search?q=...&scope=usb_only — substring search; not limited to top-N terms by volume. */
+router.get('/hostname-search', async (req, res) => {
+  try {
+    const es = getESClient()
+    const ix = getSentinelIndex()
+    const qRaw = String(req.query.prefix ?? req.query.q ?? '').trim()
+    if (qRaw.length < 2) return res.json({ hostnames: [] })
+
+    const pat = `*${escapeEsWildcardFragment(qRaw)}*`
+    const keywordFields = [
+      'agentRealtimeInfo.agentComputerName.keyword',
+      'host.name.keyword',
+      'host.hostname.keyword',
+      'agent.name.keyword',
+      'related.host.name.keyword',
+    ]
+
+    const must = [...buildSentinelScopeAndTimeMust(req)]
+    appendHostGroup(must, req.query.hostGroup)
+    must.push({
+      bool: {
+        should: keywordFields.map(field => ({
+          wildcard: { [field]: { value: pat, case_insensitive: true } },
+        })),
+        minimum_should_match: 1,
+      },
+    })
+
+    const aggs = {}
+    keywordFields.forEach((field, i) => {
+      aggs[`h${i}`] = { terms: { field, size: 80, missing: '__missing__' } }
+    })
+
+    const r = await es.search({
+      index: ix,
+      body: {
+        size: 0,
+        track_total_hits: false,
+        query: { bool: { must } },
+        aggs,
+      },
+    })
+
+    const set = new Set()
+    const qLower = qRaw.toLowerCase()
+    for (let i = 0; i < keywordFields.length; i++) {
+      for (const b of r.aggregations?.[`h${i}`]?.buckets || []) {
+        const k = String(b.key).trim()
+        if (k && k !== '__missing__' && k.toLowerCase().includes(qLower)) set.add(k)
+      }
+    }
+
+    if (set.size === 0) {
+      const hitsR = await es.search({
+        index: ix,
+        body: {
+          size: 80,
+          track_total_hits: false,
+          query: { bool: { must } },
+          _source: [
+            'host.name',
+            'host.hostname',
+            'agentRealtimeInfo',
+            'agent_realtime_info',
+            'agent',
+          ],
+        },
+      })
+      for (const h of hitsR.hits?.hits || []) {
+        const src = h._source || {}
+        const ar = src.agentRealtimeInfo || src.agent_realtime_info || {}
+        const candidates = [
+          ar.agentComputerName,
+          src.host?.name,
+          src.host?.hostname,
+          src.agent?.name,
+          src['host.name'],
+          src['host.hostname'],
+        ]
+          .map(x => String(x || '').trim())
+          .filter(Boolean)
+        for (const c of candidates) {
+          if (c.toLowerCase().includes(qLower)) set.add(c)
+        }
+      }
+    }
+
+    if (set.size === 0) {
+      const looseMust = [...buildSentinelScopeAndTimeMust(req)]
+      appendHostGroup(looseMust, req.query.hostGroup)
+      looseMust.push({
+        query_string: {
+          query: `*${escapeEsQueryString(qRaw)}*`,
+          fields: [
+            'host.name^3',
+            'host.hostname^2',
+            'agentRealtimeInfo.agentComputerName^2',
+            'message',
+            'event_message',
+            'log.message',
+          ],
+          analyze_wildcard: true,
+          default_operator: 'OR',
+        },
+      })
+      const wide = await es.search({
+        index: ix,
+        body: {
+          size: 120,
+          track_total_hits: false,
+          query: { bool: { must: looseMust } },
+          _source: [
+            'host.name',
+            'host.hostname',
+            'agentRealtimeInfo',
+            'agent_realtime_info',
+            'agent',
+            'message',
+            'event_message',
+          ],
+        },
+      })
+      for (const h of wide.hits?.hits || []) {
+        const src = h._source || {}
+        const ar = src.agentRealtimeInfo || src.agent_realtime_info || {}
+        const candidates = [
+          ar.agentComputerName,
+          src.host?.name,
+          src.host?.hostname,
+          src.agent?.name,
+          src['host.name'],
+          src['host.hostname'],
+        ]
+          .map(x => String(x || '').trim())
+          .filter(Boolean)
+        for (const c of candidates) {
+          if (c.toLowerCase().includes(qLower)) set.add(c)
+        }
+      }
+    }
+
+    const hostnames = [...set].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+    res.json({ hostnames })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
 
 /** GET /api/sentinel/host-groups — distinct host group names from logs (same fields as dashboard filter). */
 router.get('/host-groups', async (req, res) => {

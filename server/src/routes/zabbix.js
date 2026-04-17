@@ -29,12 +29,23 @@ function mapProblems(problems) {
 }
 
 async function problemGet(params) {
-  try {
-    return await zabbixRpc('problem.get', { recent: true, ...params })
-  } catch (e) {
-    if (e.code !== 'ZABBIX_API_ERROR') throw e
-    return zabbixRpc('problem.get', { ...params })
+  const attempts = [
+    { recent: true, ...params },
+    { ...params },
+  ]
+  const { selectHosts, selectAcknowledges, ...rest } = params
+  if (selectHosts || selectAcknowledges) {
+    attempts.push({ recent: true, ...rest })
+    attempts.push({ ...rest })
   }
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      return await zabbixRpc('problem.get', attempts[i])
+    } catch (e) {
+      if (e.code !== 'ZABBIX_API_ERROR' || i === attempts.length - 1) throw e
+    }
+  }
+  return []
 }
 
 async function problemCountParams() {
@@ -97,6 +108,70 @@ router.get('/diagnostic', async (req, res) => {
   })
 })
 
+/**
+ * Zabbix 6.0+ removed `host.available` — availability lives on interfaces.
+ * If host has `interfaces` array, derive from that; else fall back to `host.available`.
+ */
+function deriveHostAvail(h) {
+  const ifaces = h.interfaces
+  if (Array.isArray(ifaces) && ifaces.length > 0) {
+    let any1 = false
+    let any2 = false
+    for (const iface of ifaces) {
+      const a = String(iface.available ?? '')
+      if (a === '1') any1 = true
+      if (a === '2') any2 = true
+    }
+    if (any1) return '1'
+    if (any2) return '2'
+    return '0'
+  }
+  const a = String(h.available ?? '')
+  if (a === '1' || a === '2') return a
+  return '0'
+}
+
+function hostAvailability(hosts) {
+  const out = { available: 0, unavailable: 0, unknown: 0, total: 0 }
+  for (const h of hosts || []) {
+    out.total++
+    const a = deriveHostAvail(h)
+    if (a === '1') out.available++
+    else if (a === '2') out.unavailable++
+    else out.unknown++
+  }
+  return out
+}
+
+function topProblemHosts(problems, max = 8) {
+  const counts = {}
+  for (const p of problems || []) {
+    for (const h of p.hosts || []) {
+      const key = h.hostid || h.host
+      if (!key) continue
+      if (!counts[key]) counts[key] = { hostid: h.hostid, host: h.host, name: h.name, count: 0, maxSeverity: 0 }
+      counts[key].count++
+      const s = Number(p.severity)
+      if (s > counts[key].maxSeverity) counts[key].maxSeverity = s
+    }
+  }
+  return Object.values(counts)
+    .sort((a, b) => b.count - a.count || b.maxSeverity - a.maxSeverity)
+    .slice(0, max)
+}
+
+function hostGroupSummary(hosts) {
+  const groups = {}
+  for (const h of hosts || []) {
+    for (const g of h.groups || []) {
+      const name = g.name || g.groupid || 'Ungrouped'
+      if (!groups[name]) groups[name] = { name, count: 0 }
+      groups[name].count++
+    }
+  }
+  return Object.values(groups).sort((a, b) => b.count - a.count).slice(0, 15)
+}
+
 router.get('/overview', async (req, res) => {
   try {
     if (!isZabbixConfigured()) {
@@ -106,14 +181,28 @@ router.get('/overview', async (req, res) => {
       })
     }
 
-    const [version, hostCount, problemCount, problems, sevRows] = await Promise.all([
+    let selectGroupsParam
+    try {
+      await zabbixRpc('hostgroup.get', { output: ['groupid'], limit: 1 })
+      selectGroupsParam = { selectHostGroups: ['groupid', 'name'] }
+    } catch {
+      selectGroupsParam = { selectGroups: ['groupid', 'name'] }
+    }
+
+    const [version, hostRows, problemCount, problems, sevRows] = await Promise.all([
       zabbixRpc('apiinfo.version', {}),
-      zabbixRpc('host.get', { monitored_hosts: true, countOutput: true }),
+      zabbixRpc('host.get', {
+        monitored_hosts: true,
+        output: ['hostid', 'host', 'name', 'status', 'available'],
+        selectInterfaces: ['interfaceid', 'available', 'type'],
+        ...selectGroupsParam,
+        limit: 500,
+      }),
       problemCountParams(),
       problemGet({
         sortfield: ['eventid'],
         sortorder: 'DESC',
-        limit: 12,
+        limit: 500,
         output: ['eventid', 'name', 'severity', 'clock', 'r_clock', 'objectid'],
         selectHosts: ['hostid', 'host', 'name'],
       }),
@@ -125,12 +214,26 @@ router.get('/overview', async (req, res) => {
       }),
     ])
 
+    const hostsForGroups = (hostRows || []).map((h) => ({
+      ...h,
+      groups: h.hostgroups || h.groups || [],
+    }))
+    const avail = hostAvailability(hostRows)
+    const topHosts = topProblemHosts(problems)
+    const groupStats = hostGroupSummary(hostsForGroups)
+    const healthPct = avail.total > 0 ? Math.round((avail.available / avail.total) * 1000) / 10 : 0
+    const latestProblems = problems.slice(0, 50)
+
     res.json({
       version: String(version || ''),
-      monitoredHosts: Number(hostCount) || 0,
+      monitoredHosts: avail.total,
       activeProblems: Number(problemCount) || 0,
       severityCounts: aggregateSeverity(sevRows),
-      problems: mapProblems(problems),
+      problems: mapProblems(latestProblems),
+      availability: avail,
+      healthPercent: healthPct,
+      topProblemHosts: topHosts,
+      hostGroups: groupStats,
     })
   } catch (e) {
     return sendZabbixError(res, e)
@@ -624,37 +727,72 @@ router.get('/events', async (req, res) => {
     if (!isZabbixConfigured()) {
       return res.status(503).json({ error: 'Zabbix not configured' })
     }
-    const limit = Math.min(Math.max(parseInt(String(req.query.limit || '120'), 10) || 120, 1), 500)
-    const base = {
-      output: ['eventid', 'source', 'object', 'clock', 'name', 'severity', 'r_eventid'],
-      selectHosts: ['hostid', 'host', 'name'],
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || '500'), 10) || 500, 1), 10000)
+
+    const timeFrom = (() => {
+      const raw = req.query.time_from
+      if (raw != null && String(raw).trim()) {
+        const n = parseInt(String(raw), 10)
+        if (Number.isFinite(n) && n > 0) return n
+      }
+      return undefined
+    })()
+
+    const baseOutput = ['eventid', 'source', 'object', 'clock', 'name', 'severity', 'value', 'acknowledged', 'r_eventid']
+    const baseParams = {
+      output: baseOutput,
       sortfield: ['clock'],
       sortorder: 'DESC',
       limit,
+      ...(timeFrom ? { time_from: timeFrom } : {}),
     }
-    let rows
-    try {
-      rows = await zabbixRpc('event.get', { source: 0, ...base })
-    } catch (e) {
-      if (e.code !== 'ZABBIX_API_ERROR') throw e
-      rows = await zabbixRpc('event.get', base)
+
+    const attempts = [
+      { ...baseParams, source: 0, object: 0, selectHosts: ['hostid', 'host', 'name'], selectAcknowledges: ['alias', 'message', 'clock'] },
+      { ...baseParams, source: 0, object: 0, selectHosts: ['hostid', 'host', 'name'] },
+      { ...baseParams, source: 0, selectHosts: ['hostid', 'host', 'name'] },
+      { ...baseParams, selectHosts: ['hostid', 'host', 'name'] },
+      { ...baseParams },
+      { output: 'extend', sortfield: ['clock'], sortorder: 'DESC', limit, ...(timeFrom ? { time_from: timeFrom } : {}) },
+    ]
+
+    let rows = null
+    let attemptUsed = -1
+    for (let i = 0; i < attempts.length; i++) {
+      try {
+        rows = await zabbixRpc('event.get', attempts[i])
+        attemptUsed = i
+        break
+      } catch (e) {
+        if (e.code !== 'ZABBIX_API_ERROR') throw e
+      }
     }
+    if (rows == null) rows = []
+
     const events = (rows || []).map((ev) => ({
       eventid: ev.eventid,
       clock: ev.clock,
-      name: ev.name,
+      name: ev.name || '',
       severity: ev.severity,
       severityLabel: SEVERITY_LABEL[ev.severity] || 'Unknown',
       source: ev.source,
       object: ev.object,
+      value: ev.value,
+      status: String(ev.value) === '1' ? 'PROBLEM' : 'RESOLVED',
+      acknowledged: String(ev.acknowledged) === '1',
       rEventid: ev.r_eventid,
       hosts: (ev.hosts || []).map((h) => ({
         hostid: h.hostid,
         host: h.host,
         name: h.name,
       })),
+      acks: (ev.acknowledges || []).slice(0, 3).map((a) => ({
+        user: a.alias || a.username || '',
+        message: a.message || '',
+        clock: a.clock,
+      })),
     }))
-    res.json({ events, totalReturned: events.length })
+    res.json({ events, totalReturned: events.length, attemptUsed })
   } catch (e) {
     return sendZabbixError(res, e)
   }

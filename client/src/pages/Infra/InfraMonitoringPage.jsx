@@ -179,6 +179,72 @@ function sevColor(sev) {
   return 'var(--text2)'
 }
 
+function relativeAge(ts) {
+  if (ts == null || ts === '') return ''
+  const n = Number(ts)
+  if (!Number.isFinite(n)) return ''
+  const diff = Math.floor(Date.now() / 1000) - n
+  if (diff < 60) return `${diff}s`
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ${Math.floor((diff % 3600) / 60)}m`
+  return `${Math.floor(diff / 86400)}d ${Math.floor((diff % 86400) / 3600)}h`
+}
+
+function HealthDonut({ pct, size = 90 }) {
+  const r = (size - 10) / 2
+  const circ = 2 * Math.PI * r
+  const fill = (pct / 100) * circ
+  const gap = circ - fill
+  const color = pct >= 95 ? 'var(--green)' : pct >= 80 ? 'var(--amber)' : 'var(--red)'
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ display: 'block' }}>
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--bg4)" strokeWidth={8} />
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        fill="none"
+        stroke={color}
+        strokeWidth={8}
+        strokeDasharray={`${fill} ${gap}`}
+        strokeDashoffset={circ / 4}
+        strokeLinecap="round"
+        style={{ transition: 'stroke-dasharray 0.4s' }}
+      />
+      <text x="50%" y="50%" textAnchor="middle" dominantBaseline="central" fill={color} fontSize={18} fontWeight={700} fontFamily="var(--mono)">
+        {pct}%
+      </text>
+    </svg>
+  )
+}
+
+function MiniBar({ items, maxVal }) {
+  const max = maxVal || Math.max(...items.map((i) => i.value), 1)
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+      {items.map((item) => (
+        <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, fontFamily: 'var(--mono)' }}>
+          <span style={{ width: 120, flexShrink: 0, color: C.text2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {item.label}
+          </span>
+          <div style={{ flex: 1, height: 7, borderRadius: 4, background: 'var(--bg4)', overflow: 'hidden' }}>
+            <div
+              style={{
+                width: `${Math.max((item.value / max) * 100, item.value > 0 ? 2 : 0)}%`,
+                height: '100%',
+                borderRadius: 4,
+                background: item.color || C.accent,
+                transition: 'width 0.3s',
+              }}
+            />
+          </div>
+          <span style={{ width: 36, textAlign: 'right', color: C.text3, flexShrink: 0 }}>{item.value}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function Card({ title, badge, badgeClass = 'blue', children, noPad }) {
   return (
     <div className="card">
@@ -474,10 +540,12 @@ export default function InfraMonitoringPage() {
     return data
   }, [])
 
-  const loadEvents = useCallback(async () => {
-    const { data } = await api.get('/api/zabbix/events?limit=150')
+  const [eventLimit, setEventLimit] = useState(500)
+
+  const loadEvents = useCallback(async (lim) => {
+    const { data } = await api.get(`/api/zabbix/events?limit=${lim || eventLimit}`)
     setEvents(data.events || [])
-  }, [])
+  }, [eventLimit])
 
   const loadConfigAndOverview = useCallback(async () => {
     setError(null)
@@ -539,8 +607,33 @@ export default function InfraMonitoringPage() {
     if (!config?.configured || tab === 'overview') return
     if (tab === 'hosts' && hosts === null) loadTabData('hosts')
     if (tab === 'hostGraphs' && hostsExplorer === null) loadTabData('hostGraphs')
-    if (tab === 'events' && events === null) loadTabData('events')
-  }, [tab, config?.configured, hosts, hostsExplorer, events, loadTabData])
+  }, [tab, config?.configured, hosts, hostsExplorer, loadTabData])
+
+  useEffect(() => {
+    if (!config?.configured || tab !== 'events') return
+    let cancelled = false
+    setTabBusy(true)
+    setError(null)
+    setErrorHint(null)
+    api
+      .get(`/api/zabbix/events?limit=${eventLimit}`)
+      .then(({ data }) => {
+        if (!cancelled) setEvents(data.events || [])
+      })
+      .catch((e) => {
+        if (cancelled) return
+        const { message, hint } = parseErr(e)
+        setError(message)
+        setErrorHint(hint)
+        setEvents([])
+      })
+      .finally(() => {
+        if (!cancelled) setTabBusy(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [tab, config?.configured, eventLimit, parseErr])
 
   useEffect(() => {
     if (!config?.configured || tab !== 'problems') return
@@ -744,7 +837,7 @@ export default function InfraMonitoringPage() {
         const { data } = await api.get(`/api/zabbix/problems?${qs}`)
         setProblemsFull(data.problems || [])
       }
-      if (tab === 'events') await loadEvents()
+      if (tab === 'events') await loadEvents(eventLimit)
       if (tab === 'hostGraphs') {
         await searchHosts(hostSearch)
         if (selectedHost?.hostid) {
@@ -772,6 +865,7 @@ export default function InfraMonitoringPage() {
     loadOverview,
     loadHosts,
     loadEvents,
+    eventLimit,
     severityFilter,
     parseErr,
     hostSearch,
@@ -802,6 +896,11 @@ export default function InfraMonitoringPage() {
       render: (p) => (
         <span style={{ color: C.text2, fontSize: 11 }}>{(p.hosts || []).map((h) => h.name || h.host).join(', ') || '—'}</span>
       ),
+    },
+    {
+      key: 'age',
+      label: 'Duration',
+      render: (p) => <span style={{ color: C.text3, whiteSpace: 'nowrap', fontSize: 11 }}>{relativeAge(p.clock)}</span>,
     },
     {
       key: 'since',
@@ -883,6 +982,18 @@ export default function InfraMonitoringPage() {
 
   const eventColumns = [
     {
+      key: 'status',
+      label: 'Status',
+      render: (ev) => {
+        const isProblem = ev.status === 'PROBLEM'
+        return (
+          <span style={{ color: isProblem ? C.red : C.green, fontWeight: 600, whiteSpace: 'nowrap', fontSize: 11 }}>
+            {isProblem ? 'PROBLEM' : 'RESOLVED'}
+          </span>
+        )
+      },
+    },
+    {
       key: 'sev',
       label: 'Severity',
       render: (ev) => (
@@ -892,7 +1003,7 @@ export default function InfraMonitoringPage() {
     {
       key: 'name',
       label: 'Event',
-      render: (ev) => <span style={{ color: 'var(--text)', maxWidth: 400 }}>{ev.name}</span>,
+      render: (ev) => <span style={{ color: 'var(--text)', maxWidth: 400 }}>{ev.name || '(unnamed event)'}</span>,
     },
     {
       key: 'hosts',
@@ -904,14 +1015,31 @@ export default function InfraMonitoringPage() {
       ),
     },
     {
+      key: 'age',
+      label: 'Age',
+      render: (ev) => <span style={{ color: C.text3, whiteSpace: 'nowrap', fontSize: 11 }}>{relativeAge(ev.clock)}</span>,
+    },
+    {
       key: 'time',
       label: 'Time',
       render: (ev) => <span style={{ color: C.text3, whiteSpace: 'nowrap' }}>{fmtClock(ev.clock)}</span>,
     },
     {
-      key: 'src',
-      label: 'Src',
-      render: (ev) => <span style={{ color: C.text3, fontSize: 10 }}>{ev.source}</span>,
+      key: 'ack',
+      label: 'Ack',
+      render: (ev) => (
+        <span
+          style={{
+            display: 'inline-block',
+            width: 8,
+            height: 8,
+            borderRadius: '50%',
+            background: ev.acknowledged ? C.green : 'var(--bg4)',
+            border: ev.acknowledged ? 'none' : '1px solid var(--border)',
+          }}
+          title={ev.acknowledged ? 'Acknowledged' : 'Not acknowledged'}
+        />
+      ),
     },
   ]
 
@@ -1059,7 +1187,8 @@ export default function InfraMonitoringPage() {
             </div>
           )}
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
+          {/* Row 1: KPIs */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(145px, 1fr))', gap: 12 }}>
             <KPI label="Zabbix version" value={overview.version || '—'} sub="API" color="blue" />
             <KPI
               label="Monitored hosts"
@@ -1080,9 +1209,42 @@ export default function InfraMonitoringPage() {
               }}
               title="Show all problems"
             />
+            <KPI
+              label="Available"
+              value={overview.availability?.available ?? '—'}
+              sub={`of ${overview.availability?.total ?? 0} hosts`}
+              color="green"
+            />
+            <KPI
+              label="Unavailable"
+              value={overview.availability?.unavailable ?? 0}
+              sub={overview.availability?.unavailable > 0 ? 'Needs attention' : 'All clear'}
+              color={overview.availability?.unavailable > 0 ? 'red' : 'green'}
+            />
+            <KPI
+              label="Unknown"
+              value={overview.availability?.unknown ?? 0}
+              sub="Agent not checked"
+              color="cyan"
+            />
           </div>
 
+          {/* Row 2: Health donut + severity + top problem hosts */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12, alignItems: 'start' }}>
+            <Card title="Infrastructure health" badgeClass="green">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
+                <HealthDonut pct={overview.healthPercent ?? 0} />
+                <div style={{ fontSize: 11, fontFamily: 'var(--mono)', color: C.text2, lineHeight: 1.6 }}>
+                  <div><span style={{ color: C.green, fontWeight: 600 }}>{overview.availability?.available ?? 0}</span> Available</div>
+                  <div><span style={{ color: C.red, fontWeight: 600 }}>{overview.availability?.unavailable ?? 0}</span> Unavailable</div>
+                  <div><span style={{ color: C.text3, fontWeight: 600 }}>{overview.availability?.unknown ?? 0}</span> Unknown</div>
+                  <div style={{ marginTop: 8, color: C.text3 }}>
+                    {overview.activeProblems} active problem{overview.activeProblems !== 1 ? 's' : ''}
+                  </div>
+                </div>
+              </div>
+            </Card>
+
             <Card title="Severity distribution" badgeClass="blue">
               <SeverityDistribution
                 counts={overview.severityCounts}
@@ -1090,6 +1252,38 @@ export default function InfraMonitoringPage() {
                 onSelect={onSeverityBarClick}
               />
             </Card>
+
+            <Card title="Top problem hosts" badge={overview.topProblemHosts?.length ?? 0} badgeClass="amber">
+              {(overview.topProblemHosts || []).length === 0 ? (
+                <div style={{ color: C.text3, fontSize: 12, fontFamily: 'var(--mono)' }}>No problem hosts.</div>
+              ) : (
+                <MiniBar
+                  items={(overview.topProblemHosts || []).map((h) => ({
+                    label: h.name || h.host,
+                    value: h.count,
+                    color: sevColor(h.maxSeverity),
+                  }))}
+                />
+              )}
+            </Card>
+          </div>
+
+          {/* Row 3: Host groups + latest problems */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12, alignItems: 'start' }}>
+            <Card title="Host groups" badge={overview.hostGroups?.length ?? 0} badgeClass="blue">
+              {(overview.hostGroups || []).length === 0 ? (
+                <div style={{ color: C.text3, fontSize: 12, fontFamily: 'var(--mono)' }}>No host groups returned.</div>
+              ) : (
+                <MiniBar
+                  items={(overview.hostGroups || []).map((g) => ({
+                    label: g.name,
+                    value: g.count,
+                    color: C.accent,
+                  }))}
+                />
+              )}
+            </Card>
+
             <Card
               title="Latest problems"
               badge={
@@ -1097,7 +1291,7 @@ export default function InfraMonitoringPage() {
                   ? `${overviewProblemsFiltered.length} / ${(overview.problems || []).length}`
                   : (overview.problems || []).length
               }
-              badgeClass="blue"
+              badgeClass="amber"
               noPad
             >
               <DataTable
@@ -1658,18 +1852,73 @@ export default function InfraMonitoringPage() {
       )}
 
       {configured && tab === 'events' && (
-        <Card title="Recent events" badge={events?.length ?? '…'} badgeClass="blue" noPad>
-          {events === null || tabBusy ? (
-            <div style={{ padding: 20, color: C.text3, fontFamily: 'var(--mono)', fontSize: 13 }}>Loading events…</div>
-          ) : (
-            <DataTable
-              columns={eventColumns}
-              rows={events}
-              empty="No events returned (check API token permissions for event.get)."
-              rowKey={(ev) => ev.eventid}
-            />
-          )}
-        </Card>
+        <>
+          {events && events.length > 0 && !tabBusy && (() => {
+            const problems = events.filter((e) => e.status === 'PROBLEM').length
+            const resolved = events.filter((e) => e.status === 'RESOLVED').length
+            const acked = events.filter((e) => e.acknowledged).length
+            return (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 12 }}>
+                <KPI label="Total events" value={events.length} sub="Returned from Zabbix" color="blue" />
+                <KPI label="Problems" value={problems} sub="Active triggers" color="red" />
+                <KPI label="Resolved" value={resolved} sub="Recovery events" color="green" />
+                <KPI label="Acknowledged" value={acked} sub={`of ${events.length} events`} color="cyan" />
+              </div>
+            )
+          })()}
+          <Card
+            title="Events"
+            badge={events?.length ?? '…'}
+            badgeClass="blue"
+            noPad
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                flexWrap: 'wrap',
+                padding: '10px 14px',
+                borderBottom: '1px solid var(--border)',
+                fontSize: 12,
+                fontFamily: 'var(--mono)',
+                color: C.text2,
+              }}
+            >
+              <span style={{ color: C.text3 }}>Show:</span>
+              {[500, 1000, 2000, 5000].map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => setEventLimit(n)}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: 6,
+                    border: eventLimit === n ? `1px solid var(--accent)` : '1px solid var(--border)',
+                    background: eventLimit === n ? 'rgba(79,126,245,0.15)' : 'var(--bg4)',
+                    color: eventLimit === n ? C.accent : C.text2,
+                    cursor: 'pointer',
+                    fontSize: 11,
+                    fontFamily: 'var(--mono)',
+                  }}
+                >
+                  {n}
+                </button>
+              ))}
+              <span style={{ color: C.text3, fontSize: 10 }}>events (no time limit — newest first)</span>
+            </div>
+            {tabBusy ? (
+              <div style={{ padding: 20, color: C.text3, fontFamily: 'var(--mono)', fontSize: 13 }}>Loading events…</div>
+            ) : (
+              <DataTable
+                columns={eventColumns}
+                rows={events || []}
+                empty="No events returned. Check API token permissions — the Zabbix user must have read access to event.get and trigger events."
+                rowKey={(ev) => ev.eventid}
+              />
+            )}
+          </Card>
+        </>
       )}
 
       {loading && !overview && configured && (
