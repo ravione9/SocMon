@@ -7,7 +7,7 @@ import { fortigateUserLoginFailedBool, ciscoUserLoginFailedBool } from '../utils
 const router = Router()
 
 function getTimeRange(req) {
-  const range = req.query.range || '15m'
+  const range = req.query.range || '12h'
   const dateFrom = req.query.from
   const dateTo = req.query.to
   return dateFrom && dateTo ? { gte: dateFrom, lte: dateTo } : { gte: 'now-' + range }
