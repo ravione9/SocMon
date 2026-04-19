@@ -112,6 +112,18 @@ router.get('/diagnostic', async (req, res) => {
  * Zabbix 6.0+ removed `host.available` — availability lives on interfaces.
  * If host has `interfaces` array, derive from that; else fall back to `host.available`.
  */
+/**
+ * Derive availability for a host:
+ *   '1' = Available, '2' = Unavailable, '0' = Unknown.
+ *
+ * Order of signals:
+ *   1. Any interface explicitly Available (1) → Available.
+ *   2. Any interface explicitly Unavailable (2) → Unavailable.
+ *   3. Legacy host.available (Zabbix < 6.0) → use as-is when 1/2.
+ *   4. Host enabled (status === '0') → Available (covers VMware/agentless hosts
+ *      polled by the Zabbix server where no interface ever turns "1").
+ *   5. Else Unknown.
+ */
 function deriveHostAvail(h) {
   const ifaces = h.interfaces
   if (Array.isArray(ifaces) && ifaces.length > 0) {
@@ -124,10 +136,13 @@ function deriveHostAvail(h) {
     }
     if (any1) return '1'
     if (any2) return '2'
-    return '0'
   }
-  const a = String(h.available ?? '')
-  if (a === '1' || a === '2') return a
+  const legacy = String(h.available ?? '')
+  if (legacy === '1' || legacy === '2') return legacy
+  // VMware / agentless hosts: no interface ever flips to "1", but Zabbix is
+  // still polling them via vCenter/scripts. Trust the host's enabled state.
+  if (String(h.status ?? '') === '0') return '1'
+  if (String(h.status ?? '') === '1') return '2'
   return '0'
 }
 
@@ -743,24 +758,50 @@ router.get('/items/:itemId/history', async (req, res) => {
     })
 
     const span = to - from
-    const useTrend = span > 2 * 86400 && hk.trends
+    /**
+     * Source priority:
+     *   - Long span (> 2d): try trends first, then history.
+     *   - Short span: try history first, then trends (trends are kept ~1 yr,
+     *     history often only 24h-7d, so old short windows must fall back to trends).
+     */
+    const preferTrend = span > 2 * 86400 && hk.trends
     let points = []
+    let usedSource = null
 
-    if (useTrend) {
+    async function fetchTrends() {
+      if (!hk.trends) return []
       const tr = await zabbixRpc('trend.get', {
         itemids: [itemId], time_from: from, time_till: to,
         output: ['itemid', 'clock', 'value_avg', 'value_min', 'value_max'],
         sortfield: 'clock', sortorder: 'ASC', limit: 5000,
       })
-      points = (tr || []).map((r) => ({ clock: Number(r.clock), value: Number(r.value_avg) })).filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+      return (tr || []).map((r) => ({ clock: Number(r.clock), value: Number(r.value_avg) }))
+        .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
     }
 
-    if (!points.length) {
+    async function fetchHistory() {
       const hist = await zabbixRpc('history.get', {
         history: hk.history, itemids: [itemId], time_from: from, time_till: to,
         output: ['clock', 'value'], sortfield: 'clock', sortorder: 'ASC', limit: 15000,
       })
-      points = (hist || []).map((r) => ({ clock: Number(r.clock), value: hk.parse(r.value) })).filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+      return (hist || []).map((r) => ({ clock: Number(r.clock), value: hk.parse(r.value) }))
+        .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+    }
+
+    if (preferTrend) {
+      points = await fetchTrends()
+      if (points.length) usedSource = 'trend'
+      if (!points.length) {
+        points = await fetchHistory()
+        if (points.length) usedSource = 'history'
+      }
+    } else {
+      points = await fetchHistory()
+      if (points.length) usedSource = 'history'
+      if (!points.length && hk.trends) {
+        points = await fetchTrends()
+        if (points.length) usedSource = 'trend'
+      }
     }
 
     points = downsamplePoints(points, maxPoints)
@@ -769,11 +810,14 @@ router.get('/items/:itemId/history', async (req, res) => {
       item: { itemid: meta.itemid, name: meta.name, key: meta.key_, units: meta.units || '', valueType: Number(meta.value_type) },
       points,
       from, to,
-      aggregated: useTrend && points.length > 0,
+      aggregated: usedSource === 'trend',
+      source: usedSource,
       displayMode: points.length > 0 ? 'timeseries' : 'empty',
       lastvalue: meta.lastvalue,
       lastclock: meta.lastclock,
-      note: points.length === 0 ? 'No history data in this range. Try a shorter range or check item retention settings in Zabbix.' : undefined,
+      note: points.length === 0
+        ? 'No history or trend data in this range. Item may not have been collected during this window, or retention has expired.'
+        : undefined,
     })
   } catch (e) {
     return sendZabbixError(res, e)
@@ -875,6 +919,227 @@ router.get('/events', async (req, res) => {
       })),
     }))
     res.json({ events, totalReturned: events.length, attemptUsed })
+  } catch (e) {
+    return sendZabbixError(res, e)
+  }
+})
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Top utilization (CPU / Memory / Disk)
+ * GET /api/zabbix/top-utilization?limit=10
+ * Returns the top-N monitored hosts for each metric, sorted desc by % used.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Item key patterns for each metric. Order = priority (first match wins per host).
+ * IMPORTANT: We additionally require the item's `units` to be `%` (or contain `%`)
+ * so we never include items reporting Hz/bytes/MB and accidentally treat them as a percentage.
+ */
+const TOP_METRIC_KEYS = {
+  cpu: [
+    // Linux / Windows agent + SNMP — these report units `%`
+    /^system\.cpu\.util(\b|\[)/i,
+    /^system\.cpu\.utilization(\b|\[)/i,
+    /^perf_counter\[.*Processor.*Time/i,
+    // VMware — only `.perf` variants are %; raw `vmware.*.cpu.usage` is in Hz
+    /^vmware\.vm\.cpu\.usage\.perf/i,
+    /^vmware\.hv\.cpu\.usage\.perf/i,
+    /^vmware\.vm\.cpu\.utilization/i,
+    /^vmware\.hv\.cpu\.utilization/i,
+  ],
+  memory: [
+    // Direct utilization (already %)
+    /^vm\.memory\.utilization(\b|\[)/i,
+    /^vm\.memory\.size\[pused/i,
+    /^vmware\.vm\.memory\.usage/i,           // returns %
+    /^vmware\.hv\.memory\.usage/i,
+    /^vmware\.vm\.memory\.utilization/i,
+    /^vmware\.hv\.memory\.utilization/i,
+    // Inverted (free / available %)
+    /^vm\.memory\.size\[pavailable/i,
+  ],
+  disk: [
+    /^vfs\.fs\.size\[.*pused/i,
+    /^vfs\.fs\.dependent\.size\[.*pused/i,
+    // Inverted
+    /^vfs\.fs\.size\[.*pfree/i,
+    /^vfs\.fs\.dependent\.size\[.*pfree/i,
+  ],
+}
+
+const INVERT_KEY_RE = /pavailable|pfree/i
+
+/** True if Zabbix item units indicate a percentage. */
+function isPercentUnits(units) {
+  if (units == null) return false
+  const u = String(units).trim()
+  return u === '%' || /(^|[^a-z])%([^a-z]|$)/i.test(u)
+}
+
+/** Convert lastvalue → number in 0..100, ASSUMING the item is already a percentage. */
+function readPercent(it) {
+  const v = parseLooseNumber(it.lastvalue)
+  if (!Number.isFinite(v)) return null
+  // Trust Zabbix: item is in `%`. Just clamp.
+  if (v < 0) return 0
+  if (v > 100) return 100
+  return Math.round(v * 10) / 10
+}
+
+router.get('/top-utilization', async (req, res) => {
+  try {
+    if (!isZabbixConfigured()) {
+      return res.status(503).json({ error: 'Zabbix not configured' })
+    }
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || '10'), 10) || 10, 1), 50)
+
+    const hostRows = await zabbixRpc('host.get', {
+      monitored_hosts: true,
+      output: ['hostid', 'host', 'name'],
+      limit: 1000,
+    })
+    const hostMap = {}
+    for (const h of hostRows || []) {
+      hostMap[String(h.hostid)] = { hostid: String(h.hostid), host: h.host, name: h.name || h.host }
+    }
+
+    const itemRows = await zabbixRpc('item.get', {
+      monitored: true,
+      filter: { status: 0, value_type: [0, 3] },
+      output: ['itemid', 'hostid', 'name', 'key_', 'value_type', 'units', 'lastvalue', 'lastclock'],
+      limit: 20000,
+    })
+
+    function extractMount(key) {
+      const m = key.match(/\[\s*([^,\]]+)/)
+      return m ? m[1].replace(/^"|"$/g, '') : ''
+    }
+
+    /** Extract the mode argument of vfs.fs.size[mount,MODE] (or `dependent.size`). Returns lowercased mode or ''. */
+    function extractFsMode(key) {
+      const m = key.match(/\[[^,]*,\s*([^\]]+)\]/)
+      return m ? m[1].trim().replace(/^"|"$/g, '').toLowerCase() : ''
+    }
+
+    /** Convert a Zabbix item lastvalue + units into bytes when possible. */
+    function readBytes(it) {
+      const v = parseLooseNumber(it.lastvalue)
+      if (!Number.isFinite(v) || v < 0) return null
+      const u = String(it.units || '').trim().toUpperCase()
+      const mul = ({ B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4, PB: 1024 ** 5 })[u]
+      if (mul) return v * mul
+      // Default to bytes when units is empty or unrecognized.
+      return v
+    }
+
+    /**
+     * Build per-host map of filesystem byte items keyed by `${mount}|${mode}`,
+     * where mode ∈ { used, total, free }. Used to enrich disk rows with real space.
+     */
+    const fsByteIndex = {}
+    for (const it of itemRows || []) {
+      const key = String(it.key_ || '')
+      if (!/^vfs\.fs(?:\.dependent)?\.size\[/i.test(key)) continue
+      const mode = extractFsMode(key)
+      if (!['used', 'total', 'free'].includes(mode)) continue
+      // Only items that report bytes (units B/KB/MB/GB/TB/PB or empty).
+      const u = String(it.units || '').trim().toUpperCase()
+      if (u && !['B', 'KB', 'MB', 'GB', 'TB', 'PB'].includes(u)) continue
+      const hostid = String(it.hostid)
+      const mount = extractMount(key)
+      if (!hostid || !mount) continue
+      const k = `${hostid}|${mount}|${mode}`
+      // Prefer items with a non-empty lastvalue.
+      if (!fsByteIndex[k] || (it.lastvalue !== '' && it.lastvalue != null)) {
+        fsByteIndex[k] = it
+      }
+    }
+
+    function lookupFsBytes(hostid, mount, mode) {
+      const it = fsByteIndex[`${hostid}|${mount}|${mode}`]
+      return it ? readBytes(it) : null
+    }
+
+    /** For each metric, pick the best item per host (must report `%` units). */
+    function pickPerHost(metric) {
+      const patterns = TOP_METRIC_KEYS[metric]
+      const perHost = {}
+      for (const it of itemRows || []) {
+        const key = String(it.key_ || '')
+        const idx = patterns.findIndex((re) => re.test(key))
+        if (idx === -1) continue
+        // Strict: only accept items whose units = `%`. Avoids Hz / bytes mis-reads.
+        if (!isPercentUnits(it.units)) continue
+        const hostid = String(it.hostid)
+        if (!hostMap[hostid]) continue
+        const pct = readPercent(it)
+        if (pct == null) continue
+        const inverted = INVERT_KEY_RE.test(key)
+        const valuePct = inverted ? Math.max(0, Math.round((100 - pct) * 10) / 10) : pct
+
+        if (metric === 'disk') {
+          // Disk: keep the highest-utilized filesystem per host.
+          const cur = perHost[hostid]
+          if (!cur || valuePct > cur.valuePct) {
+            perHost[hostid] = { item: it, patternIdx: idx, valuePct, mountKey: extractMount(key) }
+          }
+        } else {
+          // CPU / Memory: prefer higher-priority pattern (lower idx).
+          const cur = perHost[hostid]
+          if (!cur || idx < cur.patternIdx) {
+            perHost[hostid] = { item: it, patternIdx: idx, valuePct }
+          }
+        }
+      }
+      return perHost
+    }
+
+    function rowsFor(metric) {
+      const perHost = pickPerHost(metric)
+      const out = []
+      for (const hid of Object.keys(perHost)) {
+        const h = hostMap[hid]
+        const e = perHost[hid]
+        const row = {
+          hostid: hid,
+          host: h.host,
+          name: h.name,
+          itemid: String(e.item.itemid),
+          itemName: e.item.name || e.item.key_,
+          key: e.item.key_,
+          units: '%',
+          percent: e.valuePct,
+          lastclock: e.item.lastclock != null && e.item.lastclock !== '' ? Number(e.item.lastclock) : null,
+        }
+        if (metric === 'disk') {
+          row.mount = e.mountKey || ''
+          // Try to enrich with real bytes from sibling fs items.
+          const used = lookupFsBytes(hid, row.mount, 'used')
+          const total = lookupFsBytes(hid, row.mount, 'total')
+          const free = lookupFsBytes(hid, row.mount, 'free')
+          let usedBytes = used
+          let totalBytes = total
+          if (usedBytes == null && total != null && free != null) usedBytes = Math.max(0, total - free)
+          if (totalBytes == null && used != null && free != null) totalBytes = used + free
+          if (usedBytes == null && totalBytes != null) usedBytes = totalBytes * (e.valuePct / 100)
+          if (totalBytes == null && usedBytes != null && e.valuePct > 0) totalBytes = usedBytes / (e.valuePct / 100)
+          if (usedBytes != null) row.usedBytes = Math.round(usedBytes)
+          if (totalBytes != null) row.totalBytes = Math.round(totalBytes)
+          if (free != null) row.freeBytes = Math.round(free)
+        }
+        out.push(row)
+      }
+      out.sort((a, b) => b.percent - a.percent)
+      return out.slice(0, limit)
+    }
+
+    res.json({
+      cpu: rowsFor('cpu'),
+      memory: rowsFor('memory'),
+      disk: rowsFor('disk'),
+      limit,
+      sampledAt: Math.floor(Date.now() / 1000),
+    })
   } catch (e) {
     return sendZabbixError(res, e)
   }

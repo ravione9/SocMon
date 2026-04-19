@@ -307,8 +307,86 @@ function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts }) {
   )
 }
 
+/**
+ * Build a per-mount bytes index from the host's latest item list, then enrich
+ * percentage rows (vfs.fs.size[*,pused/pfree]) with usedBytes/totalBytes/freeBytes
+ * and mark raw byte siblings as `_hidden` so they don't duplicate the % row.
+ */
+function enrichDiskRows(items) {
+  const list = items || []
+  const fsByteRe = /^vfs\.fs(?:\.dependent)?\.size\[/i
+  const modeOf = (key) => {
+    const m = key.match(/\[[^,]*,\s*([^\]]+)\]/)
+    return m ? m[1].trim().replace(/^"|"$/g, '').toLowerCase() : ''
+  }
+  const mountOf = (key) => {
+    const m = key.match(/\[\s*([^,\]]+)/)
+    return m ? m[1].replace(/^"|"$/g, '') : ''
+  }
+  const toBytes = (it) => {
+    const v = Number(it.value)
+    if (!Number.isFinite(v) || v < 0) return null
+    const u = String(it.units || '').trim().toUpperCase()
+    const mul = ({ B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4, PB: 1024 ** 5 })[u]
+    return mul ? v * mul : v
+  }
+
+  const byteIdx = {} // `${mount}|${mode}` -> { bytes, itemid }
+  for (const it of list) {
+    const k = String(it.key || '')
+    if (!fsByteRe.test(k)) continue
+    const mode = modeOf(k)
+    if (!['used', 'total', 'free'].includes(mode)) continue
+    const u = String(it.units || '').trim().toUpperCase()
+    if (u && !['B', 'KB', 'MB', 'GB', 'TB', 'PB'].includes(u)) continue
+    const mount = mountOf(k)
+    if (!mount) continue
+    const b = toBytes(it)
+    if (b == null) continue
+    byteIdx[`${mount}|${mode}`] = { bytes: b, itemid: it.itemid }
+  }
+
+  const hiddenIds = new Set()
+  const enriched = list.map((it) => {
+    const k = String(it.key || '')
+    if (!fsByteRe.test(k)) return it
+    const mode = modeOf(k)
+    const mount = mountOf(k)
+    if (mode === 'pused' || mode === 'pfree') {
+      const used = byteIdx[`${mount}|used`]?.bytes ?? null
+      const total = byteIdx[`${mount}|total`]?.bytes ?? null
+      const free = byteIdx[`${mount}|free`]?.bytes ?? null
+      let usedBytes = used
+      let totalBytes = total
+      const pct = Number(it.value)
+      if (usedBytes == null && total != null && free != null) usedBytes = Math.max(0, total - free)
+      if (totalBytes == null && used != null && free != null) totalBytes = used + free
+      if (Number.isFinite(pct) && pct > 0) {
+        if (usedBytes == null && totalBytes != null) usedBytes = totalBytes * (pct / 100)
+        if (totalBytes == null && usedBytes != null) totalBytes = usedBytes / (pct / 100)
+      }
+      // Hide sibling raw byte rows (used/total/free) — they're rolled up here.
+      ;['used', 'total', 'free'].forEach((m) => {
+        const sib = byteIdx[`${mount}|${m}`]
+        if (sib?.itemid) hiddenIds.add(sib.itemid)
+      })
+      return {
+        ...it,
+        usedBytes: usedBytes != null ? Math.round(usedBytes) : null,
+        totalBytes: totalBytes != null ? Math.round(totalBytes) : null,
+        freeBytes: free != null ? Math.round(free) : null,
+        _mount: mount,
+      }
+    }
+    return it
+  }).filter((it) => !hiddenIds.has(it.itemid))
+
+  return enriched
+}
+
 function LatestMetricsView({ latestData, chartOpts }) {
-  const grouped = useMemo(() => groupLatestMetrics(latestData?.latest), [latestData])
+  const enrichedLatest = useMemo(() => enrichDiskRows(latestData?.latest), [latestData])
+  const grouped = useMemo(() => groupLatestMetrics(enrichedLatest), [enrichedLatest])
   const [search, setSearch] = useState('')
   const firstNumericId = useMemo(() => {
     for (const g of grouped.groups) {
@@ -382,6 +460,14 @@ function LatestMetricsView({ latestData, chartOpts }) {
                           <span style={{ color: isActive ? 'var(--accent)' : 'var(--text2)', fontWeight: isActive ? 600 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11 }} title={r.name || r.key}>
                             {(r.name || r.key || '').replace(/^VMware:\s*/i, '')}
                           </span>
+                          {(r.usedBytes != null || r.totalBytes != null) && (
+                            <span title={r.freeBytes != null ? `Free: ${fmtBytes(r.freeBytes)}` : undefined}
+                              style={{ fontSize: 9, color: 'var(--text3)', fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              <span style={{ color: 'var(--text2)', fontWeight: 600 }}>{fmtBytes(r.usedBytes) || '—'}</span>
+                              <span style={{ opacity: .55 }}> / </span>
+                              <span>{fmtBytes(r.totalBytes) || '—'}</span>
+                            </span>
+                          )}
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <div style={{ flex: 1, height: 4, borderRadius: 2, background: 'var(--bg4)', overflow: 'hidden' }}>
                               <div style={{ width: `${Math.max(pct, v > 0 ? 2 : 0)}%`, height: '100%', borderRadius: 2, background: barColor, transition: 'width .3s' }} />
@@ -447,31 +533,53 @@ function LatestMetricsView({ latestData, chartOpts }) {
 
 /* ─── Inline styles (injected once) ─── */
 const INLINE_CSS = `
-.opm-widget{background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:box-shadow .2s}
-.opm-widget:hover{box-shadow:0 4px 20px rgba(0,0,0,.12)}
-.opm-widget-hd{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border);background:var(--bg3)}
-.opm-widget-title{font-size:11px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--text2);font-family:var(--mono)}
-.opm-widget-body{padding:14px 16px}
-.opm-row-hover{transition:background .1s}
-.opm-row-hover:hover{background:rgba(79,126,245,.06)!important}
+.opm-widget{background:var(--bg2);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:box-shadow .25s,border-color .25s}
+.opm-widget:hover{box-shadow:0 8px 28px rgba(0,0,0,.18);border-color:var(--border2)}
+.opm-widget-hd{display:flex;align-items:center;justify-content:space-between;padding:11px 16px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,var(--bg3) 0%,var(--bg2) 100%)}
+.opm-widget-title{font-size:11px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--text2);font-family:var(--mono);display:inline-flex;align-items:center;gap:8px}
+.opm-widget-title::before{content:'';display:inline-block;width:3px;height:12px;background:var(--accent);border-radius:2px}
+.opm-widget-body{padding:16px}
+.opm-row-hover{transition:background .12s}
+.opm-row-hover:hover{background:rgba(79,126,245,.07)!important}
 .opm-status-strip{display:flex;gap:0;border-radius:6px;overflow:hidden;height:8px}
-.opm-tab{position:relative;padding:10px 20px;font-size:12px;font-weight:600;border:none;cursor:pointer;font-family:var(--mono);color:var(--text3);background:transparent;transition:all .15s;border-bottom:2px solid transparent}
-.opm-tab:hover{color:var(--text2)}
-.opm-tab.active{color:var(--accent);border-bottom-color:var(--accent);background:rgba(79,126,245,.06)}
+.opm-tabs{display:flex;align-items:center;gap:2px;padding:4px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow-x:auto}
+.opm-tab{position:relative;padding:8px 16px;font-size:12px;font-weight:600;border:none;cursor:pointer;font-family:var(--mono);color:var(--text3);background:transparent;transition:all .18s;border-radius:7px;display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+.opm-tab:hover{color:var(--text2);background:rgba(79,126,245,.06)}
+.opm-tab.active{color:#fff;background:var(--accent);box-shadow:0 2px 8px rgba(59,130,246,.35)}
+.opm-tab .opm-tab-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:16px;padding:0 5px;border-radius:8px;font-size:9px;font-weight:700;background:rgba(255,255,255,.2);color:inherit}
+.opm-tab:not(.active) .opm-tab-badge{background:var(--bg4);color:var(--text2)}
 .opm-device-card{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border);cursor:pointer;transition:all .12s;border-left:3px solid transparent}
 .opm-device-card:hover{background:rgba(79,126,245,.06)}
-.opm-device-card.active{border-left-color:var(--accent);background:rgba(79,126,245,.08)}
+.opm-device-card.active{border-left-color:var(--accent);background:rgba(79,126,245,.10)}
 .opm-graph-item{display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid var(--border);cursor:pointer;transition:all .12s}
 .opm-graph-item:hover{background:rgba(79,126,245,.05);padding-left:18px}
-.opm-graph-item.active{background:rgba(79,126,245,.10)}
+.opm-graph-item.active{background:rgba(79,126,245,.12);box-shadow:inset 3px 0 0 var(--accent)}
 .opm-alarm-row{display:flex;align-items:stretch;border-bottom:1px solid var(--border);transition:background .1s;cursor:default}
 .opm-alarm-row:hover{background:rgba(79,126,245,.04)}
 .opm-sev-strip{width:4px;flex-shrink:0}
 .opm-pill{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;font-family:var(--mono);letter-spacing:.3px}
-.opm-counter-tile{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:14px 8px;border-radius:10px;border:1px solid var(--border);background:var(--bg2);min-width:100px;cursor:pointer;transition:all .2s}
-.opm-counter-tile:hover{border-color:var(--border2);transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.1)}
+.opm-counter-tile{position:relative;display:flex;flex-direction:column;align-items:flex-start;justify-content:space-between;padding:14px 16px;border-radius:12px;border:1px solid var(--border);background:linear-gradient(135deg,var(--bg2) 0%,var(--bg3) 100%);min-width:130px;min-height:96px;cursor:pointer;transition:all .22s;overflow:hidden}
+.opm-counter-tile::before{content:'';position:absolute;top:0;right:0;width:60px;height:60px;background:radial-gradient(circle at top right,var(--tile-glow,transparent) 0%,transparent 70%);opacity:.5;pointer-events:none}
+.opm-counter-tile:hover{border-color:var(--border2);transform:translateY(-2px);box-shadow:0 8px 20px rgba(0,0,0,.18)}
+.opm-counter-tile .ct-icon{position:absolute;top:10px;right:12px;width:28px;height:28px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;font-size:14px;background:var(--ct-icon-bg,rgba(59,130,246,.15));color:var(--ct-icon-color,#3b82f6)}
+.opm-page-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-radius:12px;background:linear-gradient(135deg,var(--bg2) 0%,var(--bg3) 100%);border:1px solid var(--border);margin-bottom:14px;flex-wrap:wrap}
+.opm-page-title{display:flex;align-items:center;gap:12px}
+.opm-page-title h1{margin:0;font-size:18px;font-weight:700;color:var(--text);font-family:var(--mono);letter-spacing:.3px}
+.opm-page-subtitle{font-size:11px;color:var(--text3);font-family:var(--mono);font-weight:600;letter-spacing:.5px}
+.opm-status-dot{width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.18);animation:pulseDot 2s ease-in-out infinite}
+.opm-refresh-btn{display:inline-flex;align-items:center;gap:8px;padding:8px 16px;border-radius:8px;border:1px solid var(--border);background:var(--bg3);color:var(--text2);cursor:pointer;font-size:12px;font-family:var(--mono);font-weight:600;transition:all .15s}
+.opm-refresh-btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent);background:rgba(79,126,245,.06)}
+.opm-refresh-btn:disabled{cursor:wait;opacity:.6}
+.opm-toolbar{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-radius:10px;background:linear-gradient(180deg,var(--bg2) 0%,var(--bg3) 100%);border:1px solid var(--border)}
+.opm-toolbar-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.opm-toolbar-label{font-size:10px;color:var(--text3);font-family:var(--mono);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-right:2px}
+.opm-search{position:relative;flex:1 1 auto;max-width:480px}
+.opm-search input{width:100%;padding:9px 14px 9px 36px;border-radius:9px;border:1px solid var(--border);background:var(--bg3);color:var(--text);font-size:12px;font-family:var(--mono);outline:none;transition:all .18s}
+.opm-search input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,130,246,.12);background:var(--bg2)}
+.opm-search-icon{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:14px;pointer-events:none}
 @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+@keyframes pulseDot{0%,100%{box-shadow:0 0 0 3px rgba(34,197,94,.18)}50%{box-shadow:0 0 0 6px rgba(34,197,94,.08)}}
 `
 
 /* ─── Shared components ─── */
@@ -490,15 +598,24 @@ function Widget({ title, badge, badgeColor, children, noPad, actions, style: sx 
   )
 }
 
-function CounterTile({ label, value, sub, color, onClick }) {
+function CounterTile({ label, value, sub, color, onClick, icon }) {
   const cMap = { green: '#22c55e', red: '#ef4444', amber: '#eab308', cyan: '#06b6d4', blue: '#3b82f6', purple: '#8b5cf6' }
+  const c = cMap[color] || cMap.blue
   return (
     <div className="opm-counter-tile" onClick={onClick} role={onClick ? 'button' : undefined} tabIndex={onClick ? 0 : undefined}
       onKeyDown={onClick ? (e) => { if (e.key === 'Enter') onClick() } : undefined}
-      style={{ borderTop: `3px solid ${cMap[color] || cMap.blue}` }}>
-      <div style={{ fontSize: 28, fontWeight: 800, lineHeight: 1, color: cMap[color] || cMap.blue, fontFamily: 'var(--mono)' }}>{value ?? '—'}</div>
-      <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text3)', marginTop: 6, letterSpacing: .5, textTransform: 'uppercase', fontFamily: 'var(--mono)', textAlign: 'center' }}>{label}</div>
-      {sub && <div style={{ fontSize: 9, color: 'var(--text3)', marginTop: 2, fontFamily: 'var(--mono)', opacity: .7 }}>{sub}</div>}
+      style={{
+        borderTop: `3px solid ${c}`,
+        '--tile-glow': `${c}22`,
+        '--ct-icon-bg': `${c}1f`,
+        '--ct-icon-color': c,
+      }}>
+      {icon && <span className="ct-icon">{icon}</span>}
+      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text3)', letterSpacing: .6, textTransform: 'uppercase', fontFamily: 'var(--mono)' }}>{label}</div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginTop: 2 }}>
+        <span style={{ fontSize: 28, fontWeight: 800, lineHeight: 1, color: c, fontFamily: 'var(--mono)' }}>{value ?? '—'}</span>
+      </div>
+      {sub && <div style={{ fontSize: 9, color: 'var(--text3)', marginTop: 4, fontFamily: 'var(--mono)', opacity: .8, fontWeight: 600 }}>{sub}</div>}
     </div>
   )
 }
@@ -591,6 +708,77 @@ function TopDevicesRanked({ items, onItemClick }) {
           <span style={{ width: 28, textAlign: 'right', fontWeight: 700, color: sevColor(h.maxSeverity), flexShrink: 0 }}>{h.count}</span>
         </div>
       ))}
+    </div>
+  )
+}
+
+function fmtBytes(n) {
+  if (n == null || !Number.isFinite(n)) return null
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  let v = Math.max(0, n)
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  const decimals = v >= 100 ? 0 : v >= 10 ? 1 : 2
+  return `${v.toFixed(decimals)} ${units[i]}`
+}
+
+function TopUtilWidget({ rows, accent, unitSuffix = '%', emptyMsg = 'No data available.', onRowClick, showMount, showBytes }) {
+  if (!rows?.length) {
+    return <div style={{ color: 'var(--text3)', fontSize: 12, fontFamily: 'var(--mono)', padding: '16px 4px' }}>{emptyMsg}</div>
+  }
+  const barColor = (pct) => {
+    if (pct >= 90) return '#ef4444'
+    if (pct >= 75) return '#f59e0b'
+    if (pct >= 50) return '#eab308'
+    return accent || '#22c55e'
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      {rows.map((r, i) => {
+        const pct = Number(r.percent) || 0
+        const c = barColor(pct)
+        const used = fmtBytes(r.usedBytes)
+        const total = fmtBytes(r.totalBytes)
+        const free = fmtBytes(r.freeBytes)
+        const showSpace = showBytes && (used || total)
+        return (
+          <div key={r.itemid || `${r.hostid}-${i}`} className="opm-row-hover"
+            onClick={onRowClick ? () => onRowClick(r) : undefined}
+            role={onRowClick ? 'button' : undefined} tabIndex={onRowClick ? 0 : undefined}
+            onKeyDown={onRowClick ? (e) => { if (e.key === 'Enter') onRowClick(r) } : undefined}
+            style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 7, cursor: onRowClick ? 'pointer' : 'default', fontSize: 11, fontFamily: 'var(--mono)' }}>
+            <span style={{ width: 22, height: 22, borderRadius: 5, background: 'var(--bg4)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 800, color: i < 3 ? c : 'var(--text3)', flexShrink: 0, border: i < 3 ? `1px solid ${c}55` : 'none' }}>
+              {i + 1}
+            </span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ color: 'var(--text)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {r.name || r.host}
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 10, color: 'var(--text3)', marginTop: 1, overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                {showMount && r.mount && (
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '40%' }}>{r.mount}</span>
+                )}
+                {showSpace && (
+                  <>
+                    {showMount && r.mount && <span style={{ opacity: .3 }}>·</span>}
+                    <span title={free ? `Free: ${free}` : undefined}>
+                      <span style={{ color: 'var(--text2)', fontWeight: 600 }}>{used || '—'}</span>
+                      <span style={{ opacity: .55 }}> / </span>
+                      <span style={{ color: 'var(--text2)' }}>{total || '—'}</span>
+                    </span>
+                  </>
+                )}
+              </div>
+            </div>
+            <div style={{ width: 90, height: 6, borderRadius: 3, background: 'var(--bg4)', overflow: 'hidden', flexShrink: 0 }}>
+              <div style={{ width: `${Math.max(2, Math.min(100, pct))}%`, height: '100%', borderRadius: 3, background: c, transition: 'width .35s ease' }} />
+            </div>
+            <span style={{ minWidth: 52, textAlign: 'right', fontWeight: 800, color: c, flexShrink: 0, fontSize: 12 }}>
+              {pct.toFixed(1)}{unitSuffix}
+            </span>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -729,6 +917,10 @@ export default function InfraMonitoringPage() {
   const [itemsLatestBusy, setItemsLatestBusy] = useState(false)
   const [hostViewMode, setHostViewMode] = useState('latest')
   const [eventLimit, setEventLimit] = useState(500)
+  const [groupFilter, setGroupFilter] = useState('') // active group filter for Snapshot tab
+  const [topUtil, setTopUtil] = useState(null)
+  const [topUtilBusy, setTopUtilBusy] = useState(false)
+  const [topLimit, setTopLimit] = useState(10)
   const hostListRef = useRef(null)
 
   /* ─── data loaders (unchanged logic) ─── */
@@ -763,6 +955,10 @@ export default function InfraMonitoringPage() {
     const { data } = await api.get(`/api/zabbix/graphs/${encodeURIComponent(graphId)}/series?${qs}`); return data
   }, [])
   const loadEvents = useCallback(async (lim) => { const { data } = await api.get(`/api/zabbix/events?limit=${lim || eventLimit}`); setEvents(data.events || []) }, [eventLimit])
+  const loadTopUtil = useCallback(async (lim) => {
+    const { data } = await api.get(`/api/zabbix/top-utilization?limit=${lim || topLimit}`)
+    setTopUtil(data)
+  }, [topLimit])
 
   const loadConfigAndOverview = useCallback(async () => {
     setError(null); setErrorHint(null)
@@ -818,6 +1014,15 @@ export default function InfraMonitoringPage() {
   }, [tab, config?.configured, hostsExplorer, loadAllHosts, parseErr])
 
   useEffect(() => {
+    if (tab !== 'topMon' || !config?.configured) return
+    let c = false; setTopUtilBusy(true); setError(null); setErrorHint(null)
+    loadTopUtil(topLimit)
+      .catch((e) => { if (c) return; const r = parseErr(e); setError(r.message); setErrorHint(r.hint); setTopUtil(null) })
+      .finally(() => { if (!c) setTopUtilBusy(false) })
+    return () => { c = true }
+  }, [tab, config?.configured, topLimit, loadTopUtil, parseErr])
+
+  useEffect(() => {
     if (!selectedGraphId || tab !== 'hostGraphs') return; let c = false; setGraphSeriesBusy(true); setError(null); setErrorHint(null)
     fetchGraphSeries(selectedGraphId, graphRange, graphDataMode, graphCustomRange)
       .then((data) => { if (!c) setGraphSeries(data) })
@@ -851,8 +1056,16 @@ export default function InfraMonitoringPage() {
     return scored.map((s) => s.h)
   }, [])
 
-  const filteredHosts = useMemo(() => scoreHosts(hostsExplorer || [], (hostSearch || '').trim().toLowerCase()), [hostsExplorer, hostSearch, scoreHosts])
+  const filteredHosts = useMemo(() => {
+    const base = (hostsExplorer || []).filter((h) => !groupFilter || (h.groups || []).includes(groupFilter))
+    return scoreHosts(base, (hostSearch || '').trim().toLowerCase())
+  }, [hostsExplorer, hostSearch, groupFilter, scoreHosts])
   const filteredInventory = useMemo(() => scoreHosts(hosts || [], (inventorySearch || '').trim().toLowerCase()), [hosts, inventorySearch, scoreHosts])
+  const availableGroups = useMemo(() => {
+    const set = new Set()
+    for (const h of hostsExplorer || []) for (const g of h.groups || []) if (g) set.add(g)
+    return Array.from(set).sort((a, b) => a.localeCompare(b))
+  }, [hostsExplorer])
   const ovProblemsFiltered = useMemo(() => { const l = overview?.problems || []; return severityFilter == null ? l : l.filter((p) => Number(p.severity) === Number(severityFilter)) }, [overview?.problems, severityFilter])
 
   const theme = useThemeStore((s) => s.theme)
@@ -880,16 +1093,37 @@ export default function InfraMonitoringPage() {
   const configured = config?.configured
 
   /* Navigate to Host & Graphs tab */
-  const goToHostGraphs = useCallback(async (host) => {
-    setTab('hostGraphs'); setSelectedHost(host); setGraphDataMode('auto'); setSelectedGraphId(null); setGraphSeries(null); setHostItemsLatest(null); setGraphsBusy(true); setError(null); setErrorHint(null); setHostViewMode('latest')
-    try {
-      if (hostsExplorer === null) await loadAllHosts()
-      await loadHostItemsLatest(host.hostid)
-      const g = await loadHostGraphs(host.hostid); if (g.length) setSelectedGraphId(g[0].graphid)
+  const goToHostGraphs = useCallback(async (host, opts = {}) => {
+    setTab('hostGraphs')
+    if (opts.group !== undefined) setGroupFilter(opts.group || '')
+    if (host) {
+      setSelectedHost(host); setGraphDataMode('auto'); setSelectedGraphId(null); setGraphSeries(null); setHostItemsLatest(null); setGraphsBusy(true); setError(null); setErrorHint(null); setHostViewMode('latest')
+      try {
+        if (hostsExplorer === null) await loadAllHosts()
+        await loadHostItemsLatest(host.hostid)
+        const g = await loadHostGraphs(host.hostid); if (g.length) setSelectedGraphId(g[0].graphid)
+      }
+      catch (e) { const r = parseErr(e); setError(r.message); setErrorHint(r.hint); setHostGraphs(null); setHostItemsLatest(null) }
+      finally { setGraphsBusy(false) }
+    } else {
+      // No host: just open Snapshot tab (group filter applied via opts.group)
+      if (hostsExplorer === null) {
+        setExplorerBusy(true)
+        loadAllHosts().catch(() => {}).finally(() => setExplorerBusy(false))
+      }
     }
-    catch (e) { const r = parseErr(e); setError(r.message); setErrorHint(r.hint); setHostGraphs(null); setHostItemsLatest(null) }
-    finally { setGraphsBusy(false) }
   }, [hostsExplorer, loadAllHosts, loadHostGraphs, loadHostItemsLatest, parseErr])
+
+  /* Navigate to Snapshot tab with a group filter (no host preselected) */
+  const goToGroup = useCallback((groupName) => {
+    setTab('hostGraphs')
+    setGroupFilter(groupName || '')
+    setSelectedHost(null); setSelectedGraphId(null); setGraphSeries(null); setHostItemsLatest(null); setHostGraphs(null)
+    if (hostsExplorer === null) {
+      setExplorerBusy(true)
+      loadAllHosts().catch(() => {}).finally(() => setExplorerBusy(false))
+    }
+  }, [hostsExplorer, loadAllHosts])
 
   const pickHost = useCallback(async (h) => {
     setSelectedHost(h); setGraphDataMode('auto'); setSelectedGraphId(null); setGraphSeries(null); setHostItemsLatest(null); setGraphsBusy(true); setError(null); setErrorHint(null); setHostViewMode('latest')
@@ -935,10 +1169,11 @@ export default function InfraMonitoringPage() {
       if (tab === 'hosts') await loadHosts()
       if (tab === 'problems') { const qs = new URLSearchParams({ limit: '250' }); if (severityFilter != null) qs.set('severity', String(severityFilter)); const { data } = await api.get(`/api/zabbix/problems?${qs}`); setProblemsFull(data.problems || []) }
       if (tab === 'events') await loadEvents(eventLimit)
+      if (tab === 'topMon') await loadTopUtil(topLimit)
       if (tab === 'hostGraphs') { await loadAllHosts(); if (selectedHost?.hostid) { const g = await loadHostGraphs(selectedHost.hostid); if (!g.length) await loadHostItemsLatest(selectedHost.hostid); else setHostItemsLatest(null); if (selectedGraphId) { const d = await fetchGraphSeries(selectedGraphId, graphRange, graphDataMode); setGraphSeries(d) } } }
     } catch (e) { const r = parseErr(e); setError(r.message); setErrorHint(r.hint) }
     finally { setLoading(false) }
-  }, [tab, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries])
+  }, [tab, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries, loadTopUtil, topLimit])
 
   /* ─── column definitions ─── */
   const hostCols = [
@@ -971,29 +1206,47 @@ export default function InfraMonitoringPage() {
 
   /* ─── RENDER ─── */
   const avail = overview?.availability
+  const healthPct = overview?.healthPercent
+  const tabDefs = [
+    { id: 'overview', label: 'Dashboard', icon: '▤' },
+    { id: 'hosts', label: 'Inventory', icon: '▦', badge: hosts?.length ?? avail?.total },
+    { id: 'hostGraphs', label: 'Device Snapshot', icon: '▣' },
+    { id: 'topMon', label: 'Top Monitoring', icon: '★' },
+    { id: 'problems', label: 'Alarms', icon: '⚠', badge: overview?.activeProblems },
+    { id: 'events', label: 'Events', icon: '◉' },
+  ]
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 0, minHeight: 0 }}>
       <style>{INLINE_CSS}</style>
 
-      {/* ──── Header bar ──── */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', padding: '12px 0', gap: 12, flexWrap: 'wrap' }}>
-        <button type="button" onClick={refresh} disabled={loading || tabBusy}
-          style={{ padding: '7px 18px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', cursor: loading || tabBusy ? 'wait' : 'pointer', fontSize: 12, fontFamily: 'var(--mono)', fontWeight: 600, transition: 'all .15s' }}>
-          {loading ? '↻ Loading…' : '↻ Refresh'}
+      {/* ──── Page header ──── */}
+      <div className="opm-page-header">
+        <div className="opm-page-title">
+          <span className="opm-status-dot" style={{ background: configured ? '#22c55e' : '#ef4444' }} />
+          <div>
+            <h1>Infrastructure Monitoring</h1>
+            <div className="opm-page-subtitle">
+              {!configured ? 'Not configured' :
+                healthPct != null ? `Health ${healthPct}% · ${avail?.available ?? 0}/${avail?.total ?? 0} devices online` :
+                'Connected to Zabbix'}
+            </div>
+          </div>
+        </div>
+        <button type="button" onClick={refresh} disabled={loading || tabBusy} className="opm-refresh-btn">
+          <span style={{ display: 'inline-block', animation: loading || tabBusy ? 'pulse 1s ease-in-out infinite' : 'none' }}>↻</span>
+          {loading || tabBusy ? 'Refreshing…' : 'Refresh'}
         </button>
       </div>
 
-      {/* ──── Tab bar (OpManager horizontal tabs) ──── */}
+      {/* ──── Tab bar ──── */}
       {configured && (
-        <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', marginBottom: 16, gap: 0, overflowX: 'auto' }}>
-          {[
-            { id: 'overview', label: 'Dashboard' },
-            { id: 'hosts', label: 'Inventory' },
-            { id: 'hostGraphs', label: 'Device Snapshot' },
-            { id: 'problems', label: 'Alarms' },
-            { id: 'events', label: 'Events' },
-          ].map((t) => (
-            <button key={t.id} type="button" onClick={() => setTab(t.id)} className={`opm-tab ${tab === t.id ? 'active' : ''}`}>{t.label}</button>
+        <div className="opm-tabs" style={{ marginBottom: 16 }}>
+          {tabDefs.map((t) => (
+            <button key={t.id} type="button" onClick={() => setTab(t.id)} className={`opm-tab ${tab === t.id ? 'active' : ''}`}>
+              <span style={{ fontSize: 12, opacity: .9 }}>{t.icon}</span>
+              {t.label}
+              {t.badge != null && t.badge !== 0 && <span className="opm-tab-badge">{t.badge}</span>}
+            </button>
           ))}
         </div>
       )}
@@ -1017,13 +1270,13 @@ export default function InfraMonitoringPage() {
       {configured && tab === 'overview' && overview && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           {/* Row 1: Counter tiles */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 12 }}>
-            <CounterTile label="Devices" value={avail?.total ?? 0} sub="Monitored" color="blue" onClick={() => setTab('hosts')} />
-            <CounterTile label="Available" value={avail?.available ?? 0} color="green" />
-            <CounterTile label="Unavailable" value={avail?.unavailable ?? 0} color="red" />
-            <CounterTile label="Unknown" value={avail?.unknown ?? 0} sub="Agent unchecked" color="cyan" />
-            <CounterTile label="Active Alarms" value={overview.activeProblems} color="amber" onClick={() => { setSeverityFilter(null); setTab('problems') }} />
-            <CounterTile label="Zabbix" value={overview.version || '—'} sub="API version" color="purple" />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 12 }}>
+            <CounterTile label="Devices" value={avail?.total ?? 0} sub="Monitored" color="blue" icon="▦" onClick={() => setTab('hosts')} />
+            <CounterTile label="Available" value={avail?.available ?? 0} sub={healthPct != null ? `${healthPct}% health` : null} color="green" icon="●" />
+            <CounterTile label="Unavailable" value={avail?.unavailable ?? 0} sub="Down" color="red" icon="✕" />
+            <CounterTile label="Unknown" value={avail?.unknown ?? 0} sub="Unchecked" color="cyan" icon="?" />
+            <CounterTile label="Active Alarms" value={overview.activeProblems} sub="Click to view" color="amber" icon="⚠" onClick={() => { setSeverityFilter(null); setTab('problems') }} />
+            <CounterTile label="Zabbix" value={overview.version || '—'} sub="API version" color="purple" icon="◆" />
           </div>
 
           {/* Row 2: Device Snapshot + Alarm Summary + Top Problematic */}
@@ -1050,12 +1303,18 @@ export default function InfraMonitoringPage() {
             <Widget title="Device Groups" badge={overview.hostGroups?.length ?? 0} badgeColor="blue">
               {!(overview.hostGroups || []).length
                 ? <div style={{ color: 'var(--text3)', fontSize: 12, fontFamily: 'var(--mono)' }}>No groups.</div>
-                : <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                     {(overview.hostGroups || []).map((g) => (
-                      <div key={g.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '5px 6px', borderRadius: 6, fontSize: 12, fontFamily: 'var(--mono)' }} className="opm-row-hover">
-                        <span style={{ color: 'var(--text2)' }}>{g.name}</span>
-                        <span style={{ fontWeight: 700, color: 'var(--accent)', fontSize: 13 }}>{g.count}</span>
-                      </div>
+                      <button key={g.name} type="button" onClick={() => goToGroup(g.name)}
+                        title={`Show ${g.count} device(s) in “${g.name}”`}
+                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 10px', borderRadius: 7, fontSize: 12, fontFamily: 'var(--mono)', border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left', transition: 'all .12s' }}
+                        className="opm-row-hover">
+                        <span style={{ color: 'var(--text2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>{g.name}</span>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                          <span style={{ fontWeight: 700, color: 'var(--accent)', fontSize: 13 }}>{g.count}</span>
+                          <span style={{ color: 'var(--text3)', fontSize: 11 }}>›</span>
+                        </span>
+                      </button>
                     ))}
                   </div>
               }
@@ -1074,12 +1333,9 @@ export default function InfraMonitoringPage() {
       {/* ═══════════ INVENTORY (Hosts) ═══════════ */}
       {configured && tab === 'hosts' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {/* Search bar */}
-          <div style={{ position: 'relative', maxWidth: 480 }}>
-            <input type="search" value={inventorySearch} onChange={(e) => setInventorySearch(e.target.value)} placeholder="Search by name, IP, host, group…"
-              style={{ width: '100%', padding: '9px 14px 9px 34px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', outline: 'none', transition: 'border-color .2s' }}
-              onFocus={(e) => e.target.style.borderColor = 'var(--accent)'} onBlur={(e) => e.target.style.borderColor = ''} />
-            <span style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: 'var(--text3)', fontSize: 13, pointerEvents: 'none' }}>⌕</span>
+          <div className="opm-search">
+            <input type="search" value={inventorySearch} onChange={(e) => setInventorySearch(e.target.value)} placeholder="Search by name, IP, host, group…" />
+            <span className="opm-search-icon">⌕</span>
           </div>
           <Widget title="Device Inventory" badge={`${filteredInventory.length}${inventorySearch && hosts ? ` / ${hosts.length}` : ''}`} badgeColor="green" noPad
             actions={null}>
@@ -1094,17 +1350,30 @@ export default function InfraMonitoringPage() {
       {/* ═══════════ DEVICE SNAPSHOT (Host & Graphs) ═══════════ */}
       {configured && tab === 'hostGraphs' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {/* Search */}
+          {/* Search + group filter */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-            <div style={{ position: 'relative', flex: '1 1 auto', maxWidth: 440 }}>
-              <input type="search" value={hostSearch} onChange={(e) => setHostSearch(e.target.value)} placeholder="Search devices…"
-                style={{ width: '100%', padding: '9px 14px 9px 34px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', outline: 'none', transition: 'border-color .2s' }}
-                onFocus={(e) => e.target.style.borderColor = 'var(--accent)'} onBlur={(e) => e.target.style.borderColor = ''} />
-              <span style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: 'var(--text3)', fontSize: 13, pointerEvents: 'none' }}>⌕</span>
+            <div className="opm-search">
+              <input type="search" value={hostSearch} onChange={(e) => setHostSearch(e.target.value)} placeholder="Search devices…" />
+              <span className="opm-search-icon">⌕</span>
+            </div>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 10px', borderRadius: 9, border: '1px solid var(--border)', background: 'var(--bg3)' }}>
+              <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, letterSpacing: .5, textTransform: 'uppercase' }}>Group</span>
+              <select value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)}
+                style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', outline: 'none', minWidth: 160, maxWidth: 260 }}>
+                <option value="">All ({(hostsExplorer || []).length})</option>
+                {availableGroups.map((g) => {
+                  const count = (hostsExplorer || []).filter((h) => (h.groups || []).includes(g)).length
+                  return <option key={g} value={g}>{g} ({count})</option>
+                })}
+              </select>
+              {groupFilter && (
+                <button type="button" onClick={() => setGroupFilter('')} title="Clear group filter"
+                  style={{ padding: '2px 8px', borderRadius: 5, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text3)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 700 }}>✕</button>
+              )}
             </div>
             {selectedHost && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 14px', borderRadius: 8, background: 'rgba(59,130,246,.08)', border: '1px solid rgba(59,130,246,.2)', fontSize: 12, fontFamily: 'var(--mono)', color: 'var(--accent)', fontWeight: 700 }}>
-                <span style={{ width: 8, height: 8, borderRadius: '50%', background: selectedHost.availability === 'Available' ? '#22c55e' : selectedHost.availability === 'Unavailable' ? '#ef4444' : '#64748b' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px 6px 10px', borderRadius: 999, background: 'rgba(59,130,246,.08)', border: '1px solid rgba(59,130,246,.25)', fontSize: 12, fontFamily: 'var(--mono)', color: 'var(--accent)', fontWeight: 700 }}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: selectedHost.availability === 'Available' ? '#22c55e' : selectedHost.availability === 'Unavailable' ? '#ef4444' : '#64748b', boxShadow: selectedHost.availability === 'Available' ? '0 0 0 3px rgba(34,197,94,.18)' : 'none' }} />
                 {selectedHost.name || selectedHost.host}
               </div>
             )}
@@ -1114,8 +1383,13 @@ export default function InfraMonitoringPage() {
           <div style={{ display: 'flex', gap: 14, alignItems: 'start', minHeight: 520 }}>
             {/* Left: device sidebar */}
             <div ref={hostListRef} style={{ flex: '0 0 250px', maxHeight: 620, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 10, background: 'var(--bg2)' }}>
-              <div style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)', background: 'var(--bg3)', fontSize: 10, fontWeight: 700, color: 'var(--text3)', fontFamily: 'var(--mono)', letterSpacing: .8, textTransform: 'uppercase' }}>
-                Devices {filteredHosts.length > 0 ? `(${filteredHosts.length}${hostsExplorer && filteredHosts.length !== hostsExplorer.length ? ` / ${hostsExplorer.length}` : ''})` : hostsExplorer ? `(${hostsExplorer.length})` : ''}
+              <div style={{ padding: '9px 14px', borderBottom: '1px solid var(--border)', background: 'var(--bg3)', fontSize: 10, fontWeight: 700, color: 'var(--text3)', fontFamily: 'var(--mono)', letterSpacing: .8, textTransform: 'uppercase', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+                <span>Devices {filteredHosts.length > 0 ? `(${filteredHosts.length}${hostsExplorer && filteredHosts.length !== hostsExplorer.length ? ` / ${hostsExplorer.length}` : ''})` : hostsExplorer ? `(${hostsExplorer.length})` : ''}</span>
+                {groupFilter && (
+                  <span title={`Filtered by group: ${groupFilter}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '1px 6px', borderRadius: 4, background: 'rgba(59,130,246,.12)', color: 'var(--accent)', fontSize: 9, textTransform: 'none', letterSpacing: 0, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    ▦ {groupFilter}
+                  </span>
+                )}
               </div>
               {explorerBusy
                 ? <div style={{ padding: 20, color: 'var(--text3)', fontSize: 12, fontFamily: 'var(--mono)', display: 'flex', alignItems: 'center', gap: 8 }}><span className="np-page-loading-dot" style={{ width: 12, height: 12 }} />Searching…</div>
@@ -1138,7 +1412,11 @@ export default function InfraMonitoringPage() {
                   })
               }
               {!explorerBusy && filteredHosts.length === 0 && hostsExplorer?.length === 0 && <div style={{ padding: 20, color: 'var(--text3)', fontSize: 12 }}>No devices found.</div>}
-              {!explorerBusy && filteredHosts.length === 0 && (hostsExplorer?.length || 0) > 0 && <div style={{ padding: 20, color: 'var(--text3)', fontSize: 12 }}>No matches for "{hostSearch}". Try a different search.</div>}
+              {!explorerBusy && filteredHosts.length === 0 && (hostsExplorer?.length || 0) > 0 && (
+                <div style={{ padding: 20, color: 'var(--text3)', fontSize: 12, fontFamily: 'var(--mono)' }}>
+                  {hostSearch ? <>No matches for &quot;{hostSearch}&quot;{groupFilter ? <> in group <strong>{groupFilter}</strong></> : ''}.</> : groupFilter ? <>No devices in group <strong>{groupFilter}</strong>.</> : 'No devices.'}
+                </div>
+              )}
             </div>
 
             {/* Right: snapshot + graphs */}
@@ -1155,17 +1433,19 @@ export default function InfraMonitoringPage() {
                 <>
                   {/* View mode toggle (only when host has graphs) */}
                   {!noGraphHost && hostGraphs?.length > 0 && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', borderRadius: 8, background: 'var(--bg2)', border: '1px solid var(--border)' }}>
-                      <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, marginRight: 4 }}>VIEW</span>
-                      {[
-                        { id: 'graphs', label: 'Graphs' },
-                        { id: 'latest', label: 'Latest' },
-                      ].map((m) => (
-                        <button key={m.id} type="button" onClick={() => switchHostView(m.id)}
-                          style={{ padding: '5px 14px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600, border: hostViewMode === m.id ? '1px solid var(--accent)' : '1px solid var(--border)', background: hostViewMode === m.id ? 'rgba(59,130,246,.12)' : 'transparent', color: hostViewMode === m.id ? 'var(--accent)' : 'var(--text3)', cursor: 'pointer', transition: 'all .12s' }}>
-                          {m.label}
-                        </button>
-                      ))}
+                    <div className="opm-toolbar">
+                      <div className="opm-toolbar-row">
+                        <span className="opm-toolbar-label">View</span>
+                        {[
+                          { id: 'graphs', label: 'Graphs' },
+                          { id: 'latest', label: 'Latest' },
+                        ].map((m) => (
+                          <button key={m.id} type="button" onClick={() => switchHostView(m.id)}
+                            style={{ padding: '5px 14px', borderRadius: 6, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600, border: hostViewMode === m.id ? '1px solid var(--accent)' : '1px solid var(--border)', background: hostViewMode === m.id ? 'rgba(59,130,246,.12)' : 'var(--bg3)', color: hostViewMode === m.id ? 'var(--accent)' : 'var(--text3)', cursor: 'pointer', transition: 'all .12s' }}>
+                            {m.label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   )}
 
@@ -1189,9 +1469,9 @@ export default function InfraMonitoringPage() {
 
                   {/* Range + mode toolbar (graphs view only) */}
                   {hostViewMode === 'graphs' && !noGraphHost && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 10px', borderRadius: 8, background: 'var(--bg2)', border: '1px solid var(--border)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                      <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, marginRight: 2 }}>RANGE</span>
+                  <div className="opm-toolbar">
+                    <div className="opm-toolbar-row">
+                      <span className="opm-toolbar-label">Range</span>
                       {Object.keys(RANGE_SEC).map((r) => {
                         const active = graphRange === r && !graphCustomRange
                         return (
@@ -1202,7 +1482,7 @@ export default function InfraMonitoringPage() {
                         )
                       })}
                       <span style={{ width: 1, height: 14, background: 'var(--border)', margin: '0 4px' }} />
-                      <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, marginRight: 2 }}>MODE</span>
+                      <span className="opm-toolbar-label">Mode</span>
                       {[{ id: 'auto', label: 'History' }, { id: 'latest', label: 'Live' }].map((m) => (
                         <button key={m.id} type="button" disabled={!selectedGraphId} onClick={() => setGraphDataMode(m.id)}
                           style={{ padding: '3px 10px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600, border: graphDataMode === m.id ? '1px solid var(--accent)' : '1px solid var(--border)', background: graphDataMode === m.id ? 'rgba(59,130,246,.12)' : 'transparent', color: graphDataMode === m.id ? 'var(--accent)' : 'var(--text3)', cursor: selectedGraphId ? 'pointer' : 'not-allowed', opacity: selectedGraphId ? 1 : .35, transition: 'all .12s' }}>
@@ -1210,8 +1490,8 @@ export default function InfraMonitoringPage() {
                         </button>
                       ))}
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                      <span style={{ fontSize: 10, color: graphCustomRange ? 'var(--accent)' : 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, marginRight: 2 }}>CUSTOM</span>
+                    <div className="opm-toolbar-row">
+                      <span className="opm-toolbar-label" style={{ color: graphCustomRange ? 'var(--accent)' : 'var(--text3)' }}>Custom</span>
                       <input type="datetime-local" value={graphCustomFrom} onChange={(e) => setGraphCustomFrom(e.target.value)}
                         disabled={!selectedGraphId || graphDataMode === 'latest'}
                         style={{ padding: '3px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: selectedGraphId && graphDataMode !== 'latest' ? 1 : .4 }} />
@@ -1282,6 +1562,63 @@ export default function InfraMonitoringPage() {
         </div>
       )}
 
+      {/* ═══════════ TOP MONITORING ═══════════ */}
+      {configured && tab === 'topMon' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {/* Toolbar: Top-N selector */}
+          <div className="opm-toolbar">
+            <div className="opm-toolbar-row" style={{ justifyContent: 'space-between' }}>
+              <div className="opm-toolbar-row" style={{ gap: 6 }}>
+                <span className="opm-toolbar-label">Show Top</span>
+                {[5, 10, 20].map((n) => (
+                  <button key={n} type="button" onClick={() => setTopLimit(n)}
+                    style={{ padding: '4px 12px', borderRadius: 6, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 700, border: topLimit === n ? '1px solid var(--accent)' : '1px solid var(--border)', background: topLimit === n ? 'rgba(59,130,246,.12)' : 'var(--bg3)', color: topLimit === n ? 'var(--accent)' : 'var(--text3)', cursor: 'pointer', transition: 'all .12s' }}>
+                    {n}
+                  </button>
+                ))}
+              </div>
+              <div className="opm-toolbar-row" style={{ gap: 8 }}>
+                {topUtil?.sampledAt && (
+                  <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                    Updated {relAge(topUtil.sampledAt)}
+                  </span>
+                )}
+                <button type="button" onClick={() => loadTopUtil(topLimit)} disabled={topUtilBusy}
+                  style={{ padding: '5px 14px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', fontSize: 11, fontFamily: 'var(--mono)', cursor: topUtilBusy ? 'wait' : 'pointer', fontWeight: 600 }}>
+                  {topUtilBusy ? '↻ Refreshing…' : '↻ Refresh'}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {topUtilBusy && !topUtil && (
+            <div style={{ padding: 40, color: 'var(--text3)', fontSize: 12, fontFamily: 'var(--mono)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+              <span className="np-page-loading-dot" style={{ width: 14, height: 14 }} />Loading utilization metrics…
+            </div>
+          )}
+
+          {topUtil && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 14, alignItems: 'start' }}>
+              <Widget title="Top CPU Utilization" badge={topUtil.cpu?.length ?? 0} badgeColor="blue">
+                <TopUtilWidget rows={topUtil.cpu} accent="#3b82f6"
+                  emptyMsg="No CPU utilization items found in Zabbix."
+                  onRowClick={(r) => goToHostGraphs({ hostid: r.hostid, host: r.host, name: r.name })} />
+              </Widget>
+              <Widget title="Top Memory Utilization" badge={topUtil.memory?.length ?? 0} badgeColor="purple">
+                <TopUtilWidget rows={topUtil.memory} accent="#8b5cf6"
+                  emptyMsg="No memory utilization items found in Zabbix."
+                  onRowClick={(r) => goToHostGraphs({ hostid: r.hostid, host: r.host, name: r.name })} />
+              </Widget>
+              <Widget title="Top Disk Space Usage" badge={topUtil.disk?.length ?? 0} badgeColor="amber">
+                <TopUtilWidget rows={topUtil.disk} accent="#f59e0b" showMount showBytes
+                  emptyMsg="No filesystem usage items found in Zabbix."
+                  onRowClick={(r) => goToHostGraphs({ hostid: r.hostid, host: r.host, name: r.name })} />
+              </Widget>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ═══════════ ALARMS (Problems) ═══════════ */}
       {configured && tab === 'problems' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -1303,11 +1640,11 @@ export default function InfraMonitoringPage() {
             const res = events.filter((e) => e.status === 'RESOLVED').length
             const ack = events.filter((e) => e.acknowledged).length
             return (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 12 }}>
-                <CounterTile label="Total Events" value={events.length} color="blue" />
-                <CounterTile label="Problems" value={prob} color="red" />
-                <CounterTile label="Resolved" value={res} color="green" />
-                <CounterTile label="Acknowledged" value={ack} color="cyan" />
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 12 }}>
+                <CounterTile label="Total Events" value={events.length} color="blue" icon="◉" />
+                <CounterTile label="Problems" value={prob} color="red" icon="⚠" />
+                <CounterTile label="Resolved" value={res} color="green" icon="✓" />
+                <CounterTile label="Acknowledged" value={ack} color="cyan" icon="◈" />
               </div>
             )
           })()}
