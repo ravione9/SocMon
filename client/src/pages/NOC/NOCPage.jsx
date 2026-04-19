@@ -172,7 +172,7 @@ export default function NOCPage() {
         const rp = `range=${range?.value||''}&from=${range?.from||''}&to=${range?.to||''}`
         const [s, e, iface, mac] = await Promise.all([
           api.get(`/api/stats/noc?${rp}`),
-          api.get(`/api/logs/search?type=cisco&size=500&page=0&${rp}`),
+          api.get(`/api/logs/search?type=cisco&size=500&page=0&${rp}`, { timeout: 120000 }),
           api.get(`/api/logs/interfaces?${rp}`),
           api.get(`/api/logs/macflap?${rp}`),
         ])

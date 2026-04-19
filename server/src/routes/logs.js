@@ -574,30 +574,55 @@ function firewallSeverityMatchQuery(sevKey) {
   return { bool: { should, minimum_should_match: 1 } }
 }
 
-/** ES 8+ returns filters agg buckets as an array [{ key, doc_count }]; older as keyed object. */
-function normalizeFilterAggBuckets(agg) {
-  if (!agg) return null
-  const raw = agg.buckets
-  if (Array.isArray(raw)) {
-    return raw.map(b => ({
-      key: b.key != null ? String(b.key) : String(b.key_as_string || ''),
-      doc_count: typeof b.doc_count === 'number' ? b.doc_count : 0,
-    }))
+/** ES 7+ total with optional relation when track_total_hits is capped. */
+function hitsTotalMeta(total) {
+  if (total == null) return { value: 0, relation: 'eq' }
+  if (typeof total === 'object' && 'value' in total) {
+    return { value: total.value, relation: total.relation === 'gte' ? 'gte' : 'eq' }
   }
-  if (raw && typeof raw === 'object') {
-    return Object.entries(raw).map(([key, v]) => ({
-      key,
-      doc_count: typeof v?.doc_count === 'number' ? v.doc_count : 0,
-    }))
-  }
-  return null
+  if (typeof total === 'number') return { value: total, relation: 'eq' }
+  return { value: 0, relation: 'eq' }
 }
 
-function hitsTotalValue(total) {
-  if (total == null) return 0
-  if (typeof total === 'object' && 'value' in total) return total.value
-  if (typeof total === 'number') return total
-  return 0
+/** Avoid exact doc counts on huge windows — speeds up 7d/30d searches materially. */
+const SEARCH_TRACK_TOTAL_HITS_CAP = Math.min(
+  Math.max(parseInt(process.env.LOG_SEARCH_TRACK_TOTAL_CAP, 10) || 100000, 1000),
+  2_000_000,
+)
+
+const FW_SEARCH_SOURCE = {
+  includes: [
+    '@timestamp',
+    'syslog_severity_label',
+    'fgt',
+    'message',
+    'device',
+    'user',
+    'host',
+    'observer',
+    'source',
+    'fortinet',
+    'log',
+    'event',
+    'hostname',
+    'site_name',
+  ],
+}
+
+const CISCO_SEARCH_SOURCE = {
+  includes: [
+    '@timestamp',
+    'syslog_severity_label',
+    'cisco_severity_label',
+    'cisco_message',
+    'cisco_mnemonic',
+    'cisco_interface_full',
+    'cisco_vlan_id',
+    'device_name',
+    'site_name',
+    'user',
+    'message',
+  ],
 }
 
 /** Same filters as GET /search — used by /search and GET /export (search_after). */
@@ -643,6 +668,26 @@ function buildLogSearchClauses(req) {
   }
 
   if (isFirewall) {
+    // Term queries on indexed keyword fields — uses inverted index, fast on any window size.
+    if (device && device !== 'all') {
+      const dev = String(device).trim()
+      if (dev) {
+        filter.push({
+          bool: {
+            should: [
+              { term: { 'fgt.devname.keyword': dev } },
+              { term: { 'device.name.keyword': dev } },
+              { term: { 'observer.name.keyword': dev } },
+              { term: { 'observer.hostname.keyword': dev } },
+              { term: { 'host.hostname.keyword': dev } },
+              { term: { 'host.name.keyword': dev } },
+              { term: { 'hostname.keyword': dev } },
+            ],
+            minimum_should_match: 1,
+          },
+        })
+      }
+    }
     if (srcip) filter.push({ term: { 'fgt.srcip.keyword': srcip } })
     if (dstip) filter.push({ term: { 'fgt.dstip.keyword': dstip } })
     if (srccountry) filter.push({ term: { 'fgt.srccountry.keyword': srccountry } })
@@ -776,52 +821,111 @@ function exportCiscoCsvLine(src) {
   return [ts, sev, device, user, mnemonic, iface, vlan, msg].map(csvEscape).join(',')
 }
 
+/** ES 7/8 terms agg: buckets array, or keyed object in some configs. */
+function normalizeTermsBuckets(agg) {
+  if (!agg) return []
+  const raw = agg.buckets
+  if (Array.isArray(raw)) return raw
+  if (raw && typeof raw === 'object') return Object.values(raw).filter(Boolean)
+  return []
+}
+
 router.get('/search', async (req, res) => {
   try {
     const es = getESClient()
     const size = Math.min(parseInt(req.query.size) || 50, 500)
     const page = Math.max(parseInt(req.query.page) || 0, 0)
+    const fast = String(req.query.fast || '').toLowerCase() === '1' || String(req.query.fast || '').toLowerCase() === 'true'
     const { index, must, filter, isFirewall } = buildLogSearchClauses(req)
 
     const sevField = isFirewall ? 'syslog_severity_label.keyword' : 'cisco_severity_label.keyword'
 
-    const result = await es.search({
-      index,
-      body: {
-        track_total_hits: true,
-        from: page * size,
-        size,
-        sort: [{ '@timestamp': { order: 'desc' } }],
-        query: buildBoolQuery(must, filter),
-        aggs: {
-          by_severity: { terms: { field: sevField, size: 10 } },
-          ...(isFirewall && {
-            by_action: { terms: { field: 'fgt.action.keyword', size: 5 } },
-            by_sev_cat: {
-              filters: {
-                filters: {
-                  critical: firewallSeverityMatchQuery('critical'),
-                  high: firewallSeverityMatchQuery('high'),
-                  medium: firewallSeverityMatchQuery('medium'),
-                  low: firewallSeverityMatchQuery('low'),
-                  info: firewallSeverityMatchQuery('info'),
+    // Detect very wide ranges → drop heavy aggs to keep response under timeout.
+    const trMs = (() => {
+      const { from, to, range } = req.query
+      if (from && to) {
+        const ms = new Date(to) - new Date(from)
+        return Number.isFinite(ms) ? ms : 0
+      }
+      const map = { '15m': 9e5, '1h': 3.6e6, '6h': 2.16e7, '12h': 4.32e7, '24h': 8.64e7, '3d': 2.592e8, '7d': 6.048e8, '30d': 2.592e9 }
+      return map[range] || 0
+    })()
+    const wideRange = trMs > 7 * 86_400_000  // > 7 days
+    const skipDeviceAgg = String(req.query.skipDeviceAgg || '').toLowerCase() === '1'
+
+    // `by_sev_cat` (filters agg with five full-text bool queries) is very expensive on multi‑million
+    // doc windows; severity breakdown uses `by_severity` + client mapping (LogSearch.jsx).
+    const result = await es.search(
+      {
+        index,
+        body: {
+          // Use a small cap instead of false so pagination total is available.
+          // false would return total=0, breaking page navigation.
+          track_total_hits: fast || wideRange ? 5000 : SEARCH_TRACK_TOTAL_HITS_CAP,
+          timeout: fast ? '45s' : wideRange ? '210s' : '150s',
+          from: page * size,
+          size,
+          ...(fast || wideRange ? { terminate_after: Math.max(size * 20, 5000) } : {}),
+          sort: [{ '@timestamp': { order: 'desc' } }],
+          query: buildBoolQuery(must, filter),
+          _source: isFirewall ? FW_SEARCH_SOURCE : CISCO_SEARCH_SOURCE,
+          aggs: {
+            ...(wideRange ? {} : { by_severity: { terms: { field: sevField, size: 15 } } }),
+            ...(isFirewall && !wideRange && {
+              by_action: { terms: { field: 'fgt.action.keyword', size: 8 } },
+            }),
+            // Device agg: sampler caps at shard_size docs per shard → fast even on large indices.
+            // Both indexed fields merged on client side.
+            ...(isFirewall && !skipDeviceAgg && !wideRange && {
+              device_sample: {
+                sampler: { shard_size: 500 },
+                aggs: {
+                  by_devname: {
+                    terms: { field: 'fgt.devname.keyword', size: 50, missing: '__missing__' },
+                  },
+                  by_device_name: {
+                    terms: { field: 'device.name.keyword', size: 50, missing: '__missing__' },
+                  },
                 },
               },
-            },
-          }),
+            }),
+          },
         },
       },
-    })
+      { requestTimeout: fast ? 90_000 : wideRange ? 300_000 : 240_000 },
+    )
+
+    const totalMeta = hitsTotalMeta(result.hits.total)
+
+    // Merge both device name fields, dedupe, strip missing sentinel.
+    const deviceBuckets = (() => {
+      const s = result.aggregations?.device_sample
+      const raw = [
+        ...normalizeTermsBuckets(s?.by_devname),
+        ...normalizeTermsBuckets(s?.by_device_name),
+      ]
+      const m = new Map()
+      for (const b of raw) {
+        const k = String(b.key ?? '').trim()
+        if (!k || k === '__missing__') continue
+        m.set(k, (m.get(k) || 0) + (b.doc_count || 0))
+      }
+      return [...m.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([key, doc_count]) => ({ key, doc_count }))
+    })()
 
     res.json({
-      total: hitsTotalValue(result.hits.total),
+      total: totalMeta.value,
+      totalRelation: totalMeta.relation,
       page,
       size,
       hits: result.hits.hits.map(h => ({ ...h._source, _id: h._id, _index: h._index })),
       aggs: {
         by_severity: result.aggregations?.by_severity?.buckets ?? [],
         by_action: result.aggregations?.by_action?.buckets ?? [],
-        by_sev_cat: normalizeFilterAggBuckets(result.aggregations?.by_sev_cat),
+        by_device: deviceBuckets,
+        by_sev_cat: null,
       },
     })
   } catch (err) {

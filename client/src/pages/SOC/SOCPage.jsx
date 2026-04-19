@@ -349,8 +349,8 @@ export default function SOCPage() {
           api.get(`/api/logs/traffic/timeline?${rp}`),
           api.get(`/api/logs/threats/top?${rp}`),
           api.get(`/api/logs/denied?${rp}`),
-          api.get(`/api/logs/search?type=firewall&size=500&page=0&${rp}`),
-          api.get(`/api/logs/search?type=firewall&logtype=vpn&size=250&page=0&${rp}`),
+          api.get(`/api/logs/search?type=firewall&size=500&page=0&${rp}`, { timeout: 120000 }),
+          api.get(`/api/logs/search?type=firewall&logtype=vpn&size=250&page=0&${rp}`, { timeout: 120000 }),
           api.get(`/api/logs/sessions?${rp}`),
         ])
         setStats(s.data); setTimeline(t.data); setThreats(th.data)

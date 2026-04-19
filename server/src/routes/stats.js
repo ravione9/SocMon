@@ -3,6 +3,7 @@ import { getESClient } from '../config/elasticsearch.js'
 import Ticket from '../models/Ticket.js'
 import { fortigateVpnFilterBool } from '../utils/fortigateVpnQuery.js'
 import { fortigateUserLoginFailedBool, ciscoUserLoginFailedBool } from '../utils/loginFailureQuery.js'
+import { FIREWALL_DEVICE_LABEL_SCRIPT } from '../utils/firewallDeviceRuntimeScript.js'
 
 const router = Router()
 
@@ -228,21 +229,6 @@ function mapAggBuckets(buckets, keyName = 'key') {
   }))
 }
 
-/** Painless: first non-empty Forti / ECS hostname for report device breakdown (one value per doc). */
-const REPORT_FW_DEVICE_SCRIPT = `
-  String n = "";
-  try { def d = doc["fgt.devname.keyword"]; if (d != null && d.size() != 0) { n = d.value; } } catch (Exception e0) {}
-  if (n.length() == 0) { try { def d = doc["firewall_name.keyword"]; if (d != null && d.size() != 0) { n = d.value; } } catch (Exception e0b) {} }
-  if (n.length() == 0) { try { def d = doc["fortinet.firewall.devname.keyword"]; if (d != null && d.size() != 0) { n = d.value; } } catch (Exception e1) {} }
-  if (n.length() == 0) { try { def d = doc["fortinet.firewall.devname"]; if (d != null && d.size() != 0) { n = d.value; } } catch (Exception e2) {} }
-  if (n.length() == 0) { try { def d = doc["device.name.keyword"]; if (d != null && d.size() != 0) { n = d.value; } } catch (Exception e3) {} }
-  if (n.length() == 0) { try { def d = doc["observer.name.keyword"]; if (d != null && d.size() != 0) { n = d.value; } } catch (Exception e4) {} }
-  if (n.length() == 0) { try { def d = doc["host.hostname.keyword"]; if (d != null && d.size() != 0) { n = d.value; } } catch (Exception e5) {} }
-  if (n.length() == 0) { try { def d = doc["host.name.keyword"]; if (d != null && d.size() != 0) { n = d.value; } } catch (Exception e6) {} }
-  if (n.length() == 0) { try { def d = doc["fgt.devname"]; if (d != null && d.size() != 0) { n = d.value; } } catch (Exception e7) {} }
-  if (n.length() > 0) emit(n);
-`.replace(/\s+/g, ' ')
-
 const FW_REPORT_BY_TYPE_AGG = { terms: { field: 'fgt.type.keyword', size: 14, missing: '__missing__' } }
 
 async function fetchFirewallReportBreakdown(es, fwQ) {
@@ -255,7 +241,7 @@ async function fetchFirewallReportBreakdown(es, fwQ) {
         runtime_mappings: {
           report_fw_device: {
             type: 'keyword',
-            script: { source: REPORT_FW_DEVICE_SCRIPT },
+            script: { source: FIREWALL_DEVICE_LABEL_SCRIPT },
           },
         },
         aggs: {

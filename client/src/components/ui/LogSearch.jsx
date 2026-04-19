@@ -80,7 +80,7 @@ function Btn({ label, onClick, color=C.accent, small, disabled }) {
 const PAGE_SIZES = [25, 50, 100, 200]
 const LIVE_SIZES = [50, 100, 200, 500]
 
-const SOC_FILTERS = { q:'', srcip:'', dstip:'', srccountry:'', dstcountry:'', action:'all', severity:'all', logtype:'all' }
+const SOC_FILTERS = { q:'', device:'all', srcip:'', dstip:'', srccountry:'', dstcountry:'', action:'all', severity:'all', logtype:'all' }
 const NOC_FILTERS = { q:'', device:'', mnemonic:'all', logtype:'all', severity:'all', site:'', iface:'', vlan:'' }
 
 function fillTextOnAccent(accent) {
@@ -104,7 +104,7 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
   const baseF = isFirewall ? SOC_FILTERS : NOC_FILTERS
   const mergedInit = { ...baseF, ...(initialFilters || {}) }
 
-  const [mode,       setMode]       = useState(() => (drillActive(isFirewall, initialFilters) ? 'range' : 'live'))
+  const [mode,       setMode]       = useState(() => (drillActive(isFirewall, initialFilters) ? 'range' : 'range'))
   const [liveSize,   setLiveSize]   = useState(50)
   const [range,      setRange]      = useState(() =>
     dashboardRange && (dashboardRange.value || (dashboardRange.from && dashboardRange.to))
@@ -117,6 +117,8 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
 
   const [results,  setResults]  = useState([])
   const [total,    setTotal]    = useState(0)
+  /** `gte` when server caps track_total_hits (large windows). */
+  const [totalRelation, setTotalRelation] = useState('eq')
   const [aggs,     setAggs]     = useState({ by_severity: [], by_action: [] })
   const [loading,  setLoading]  = useState(false)
   const [error,    setError]    = useState(null)
@@ -129,6 +131,7 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
     if (isFirewall) {
       return [
         filters.severity,
+        filters.device,
         filters.action,
         filters.logtype,
         filters.srcip,
@@ -166,15 +169,22 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
       }
       p.set('size', String(Math.min(liveSize, 500)))
       p.set('page', '0')
+      p.set('fast', '1')
     } else {
       p.set('range', range?.value || '')
       if (range?.from) p.set('from', range.from)
       if (range?.to)   p.set('to',   range.to)
       p.set('size', String(overrides.pageSize ?? pageSize))
       p.set('page', String(overrides.page     ?? page))
+      // Very wide windows in range mode → ask server for fast path (no exact total, terminate early).
+      const ms = range?.from && range?.to
+        ? new Date(range.to) - new Date(range.from)
+        : ({ '15m': 9e5, '1h': 3.6e6, '6h': 2.16e7, '12h': 4.32e7, '24h': 8.64e7, '3d': 2.592e8, '7d': 6.048e8, '30d': 2.592e9 }[range?.value] || 0)
+      if (ms > 7 * 86_400_000) p.set('fast', '1')
     }
     if (filters.q)        p.set('q',        filters.q)
     if (isFirewall) {
+      if (filters.device && filters.device !== 'all') p.set('device', filters.device)
       if (filters.srcip)                          p.set('srcip',   filters.srcip)
       if (filters.dstip)                          p.set('dstip',   filters.dstip)
       if (filters.srccountry)                     p.set('srccountry', filters.srccountry)
@@ -211,6 +221,7 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
     }
     if (filters.q) p.set('q', filters.q)
     if (isFirewall) {
+      if (filters.device && filters.device !== 'all') p.set('device', filters.device)
       if (filters.srcip) p.set('srcip', filters.srcip)
       if (filters.dstip) p.set('dstip', filters.dstip)
       if (filters.srccountry) p.set('srccountry', filters.srccountry)
@@ -233,10 +244,11 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
     try {
       if (!overrides.silent) setLoading(true)
       setError(null)
-      const { data } = await api.get(`/api/logs/search?${buildParams(overrides)}`)
+      const { data } = await api.get(`/api/logs/search?${buildParams(overrides)}`, { timeout: 300000 })
       setResults(data.hits)
       setTotal(data.total)
-      setAggs(data.aggs)
+      setTotalRelation(data.totalRelation === 'gte' ? 'gte' : 'eq')
+      setAggs(data.aggs || { by_severity: [], by_action: [] })
     } catch (err) {
       setError(err.response?.data?.error || 'Search failed')
     } finally {
@@ -268,6 +280,7 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
     setPage(0)
     setResults([])
     setTotal(0)
+    setTotalRelation('eq')
     setError(null)
   }
 
@@ -319,7 +332,7 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
     try {
       const p = buildExportParams()
       const cap = 100000
-      const capped = total > cap
+      const capped = totalRelation === 'gte' || total > cap
       p.set('maxRows', String(capped ? cap : Math.max(total, 1)))
       const res = await api.post('/api/logs/export', p.toString(), {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -366,6 +379,28 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
   }
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  /** Device dropdown: indexed agg buckets (when available) merged with labels from result rows. */
+  const deviceOptions = useMemo(() => {
+    if (!isFirewall) return [{ value: 'all', label: 'Device: All' }]
+    const counts = new Map()
+    // 1. Fast indexed aggs from server (may be empty on wide ranges).
+    for (const b of aggs.by_device || []) {
+      const v = String(b?.key ?? '').trim()
+      if (v) counts.set(v, (counts.get(v) || 0) + (Number(b.doc_count) || 0))
+    }
+    // 2. Labels from currently visible rows — always present, matches DEVICE column exactly.
+    for (const e of results || []) {
+      const v = String(logSearchDeviceLabel(e) || '').trim()
+      if (v) counts.set(v, (counts.get(v) || 0) + 1)
+    }
+    // 3. Preserve a previously selected device even if not in current results/aggs.
+    if (filters.device && filters.device !== 'all' && !counts.has(filters.device))
+      counts.set(filters.device, 0)
+    const opts = [{ value: 'all', label: 'Device: All' }]
+    for (const [v] of [...counts.entries()].sort((a, b) => b[1] - a[1]))
+      opts.push({ value: v, label: v })
+    return opts
+  }, [isFirewall, aggs.by_device, filters.device, results])
   const showFwAuthUserCol =
     isFirewall && (filters.logtype === 'vpn' || filters.logtype === 'login_fail')
   const showNocLoginUserCol = !isFirewall && filters.logtype === 'login_fail'
@@ -524,13 +559,16 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
       </div>
 
       {/* ── FILTER BAR ── */}
-      <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center',
+      <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center', position:'relative', zIndex:1,
         padding:'10px 14px', background:'var(--bg3)', borderRadius:10, border:`1px solid ${C.border}` }}>
 
         <Input value={filters.q} onChange={f('q')} placeholder="Search logs..." width={180} />
 
         {isFirewall ? (
           <>
+            <div style={{ position:'relative', zIndex:2, minWidth:160, maxWidth:280 }}>
+              <Sel value={filters.device || 'all'} onChange={f('device')} options={deviceOptions} />
+            </div>
             <Input value={filters.srcip} onChange={f('srcip')} placeholder="Src IP" />
             <Input value={filters.dstip} onChange={f('dstip')} placeholder="Dst IP" />
             <Input value={filters.srccountry} onChange={f('srccountry')} placeholder="Src country" width={100} />
@@ -572,7 +610,9 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
           {value:'low',label:'Low'},{value:'info',label:'Info'},
         ]} />
 
-        {mode === 'range' && <Btn label="Search" onClick={handleSearch} color={accent} disabled={loading} />}
+        <div style={{ position:'relative', zIndex:3 }}>
+          <Btn label="Search" onClick={handleSearch} color={accent} disabled={loading} />
+        </div>
 
         <button onClick={() => {
           setFilters(isFirewall ? SOC_FILTERS : NOC_FILTERS)
@@ -586,8 +626,8 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
       {/* ── STATS BAR ── */}
       <div style={{ display:'flex', alignItems:'center', gap:12, flexWrap:'wrap',
         padding:'8px 14px', background:'var(--bg3)', borderRadius:8, border:`1px solid ${C.border}` }}>
-        <span style={{ fontSize:12, fontWeight:700, color:C.text, fontFamily:'var(--mono)' }}>
-          {(Number(total) || 0).toLocaleString()} results
+        <span style={{ fontSize:12, fontWeight:700, color:C.text, fontFamily:'var(--mono)' }} title={totalRelation === 'gte' ? 'Count is a lower bound; narrow filters or shorten the range for an exact total.' : undefined}>
+          {totalRelation === 'gte' ? '≥' : ''}{(Number(total) || 0).toLocaleString()}{totalRelation === 'gte' ? '+' : ''} results
         </span>
         <div style={{ display:'flex', gap:6 }}>
           {Object.entries(sevCats).map(([cat, count]) => (
@@ -648,7 +688,7 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
             }}
           >
             {exporting ? '…' : '📊'} Export all (Excel){' '}
-            {total > 0 ? `(${Number(total).toLocaleString()})` : ''}
+            {total > 0 ? `(${totalRelation === 'gte' ? '≥' : ''}${Number(total).toLocaleString()}${totalRelation === 'gte' ? '+' : ''})` : ''}
           </button>
         </div>
       </div>
@@ -767,13 +807,13 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
       </div>
 
       {/* ── PAGINATION (range mode only) ── */}
-      {mode === 'range' && total > pageSize && (
+      {mode === 'range' && (total > pageSize || results.length >= pageSize) && (
         <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:12 }}>
           <Btn label="← Prev" small onClick={() => setPage(p => p - 1)} disabled={page === 0} color={accent} />
           <span style={{ fontSize:11, color:C.text2, fontFamily:'var(--mono)' }}>
-            Page {page + 1} of {totalPages} &nbsp;·&nbsp; {total.toLocaleString()} total
+            Page {page + 1}{totalPages > 1 ? ` of ${totalPages}` : ''} &nbsp;·&nbsp; {totalRelation === 'gte' ? '≥' : ''}{total.toLocaleString()}{totalRelation === 'gte' ? '+' : ''} total
           </span>
-          <Btn label="Next →" small onClick={() => setPage(p => p + 1)} disabled={page >= totalPages - 1} color={accent} />
+          <Btn label="Next →" small onClick={() => setPage(p => p + 1)} disabled={page >= totalPages - 1 && results.length < pageSize} color={accent} />
         </div>
       )}
 
