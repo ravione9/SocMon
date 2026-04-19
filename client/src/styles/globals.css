@@ -189,9 +189,12 @@ html:not([data-theme="paper"]):not([data-theme="sand"]) select option {
 .kpi.teal::before   { background:#14b8a6; }
 .kpi.orange::before { background:#f97316; }
 .kpi.indigo::before { background:#818cf8; }
-.kpi.kpi-clickable { cursor: pointer; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
-.kpi.kpi-clickable:hover { border-color: var(--border2); box-shadow: 0 0 0 1px rgba(79, 126, 245, 0.22); }
+.kpi.kpi-clickable { cursor: pointer; transition: all 0.2s ease; }
+.kpi.kpi-clickable:hover { border-color: var(--border2); box-shadow: 0 0 0 1px rgba(79, 126, 245, 0.22); transform: translateY(-1px); }
+.kpi.kpi-clickable:active { transform: translateY(0); }
 .kpi.kpi-clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.card { transition: box-shadow 0.2s ease; }
+.card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.12); }
 
 /* Resizable table column handles (see ResizableTable.jsx) */
 .np-col-resize-handle {

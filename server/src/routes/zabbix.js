@@ -256,23 +256,37 @@ router.get('/hosts', async (req, res) => {
       return res.status(503).json({ error: 'Zabbix not configured' })
     }
     const limit = Math.min(Math.max(parseInt(String(req.query.limit || '400'), 10) || 400, 1), 500)
+    let selectGroupsKey = 'selectGroups'
+    try {
+      await zabbixRpc('hostgroup.get', { output: ['groupid'], limit: 1 })
+      selectGroupsKey = 'selectHostGroups'
+    } catch { /* keep selectGroups */ }
     const raw = await zabbixRpc('host.get', {
       monitored_hosts: true,
       output: ['hostid', 'host', 'name', 'status', 'available'],
-      selectGroups: ['groupid', 'name'],
+      selectInterfaces: ['interfaceid', 'available', 'type', 'ip', 'dns', 'port', 'main'],
+      [selectGroupsKey]: ['groupid', 'name'],
       sortfield: 'name',
       limit,
       ...hostSearchParams(req.query.q),
     })
-    const hosts = (raw || []).map((h) => ({
-      hostid: h.hostid,
-      host: h.host,
-      name: h.name,
-      monitored: String(h.status) === '0',
-      availability: availLabel(h.available),
-      availabilityCode: h.available,
-      groups: (h.groups || []).map((g) => g.name).filter(Boolean),
-    }))
+    const hosts = (raw || []).map((h) => {
+      const ifaces = Array.isArray(h.interfaces) ? h.interfaces : []
+      const primary = ifaces.find((i) => String(i.main) === '1') || ifaces[0]
+      const ip = primary?.ip || ''
+      const dns = primary?.dns || ''
+      return {
+        hostid: h.hostid,
+        host: h.host,
+        name: h.name,
+        ip: ip || dns || h.host,
+        dns,
+        monitored: String(h.status) === '0',
+        availability: availLabel(deriveHostAvail(h)),
+        availabilityCode: deriveHostAvail(h),
+        groups: (h.hostgroups || h.groups || []).map((g) => g.name).filter(Boolean),
+      }
+    })
     res.json({ hosts })
   } catch (e) {
     return sendZabbixError(res, e)
@@ -692,6 +706,74 @@ router.get('/graphs/:graphId/series', async (req, res) => {
         displayMode === 'latest' && series.length === 0
           ? 'No history in range; showing Zabbix last values (common for VMware-integrated hosts).'
           : undefined,
+    })
+  } catch (e) {
+    return sendZabbixError(res, e)
+  }
+})
+
+/**
+ * GET /api/zabbix/items/:itemId/history?from=&to=&maxPoints=500
+ * Fetch history (or trends for long ranges) for a single item.
+ * Works for any item — VMware integration, Linux agents, SNMP, etc.
+ */
+router.get('/items/:itemId/history', async (req, res) => {
+  try {
+    if (!isZabbixConfigured()) return res.status(503).json({ error: 'Zabbix not configured' })
+    const itemId = String(req.params.itemId || '').trim()
+    if (!itemId) return res.status(400).json({ error: 'itemId required' })
+
+    const now = Math.floor(Date.now() / 1000)
+    const to = parseInt(String(req.query.to || now), 10) || now
+    const from = parseInt(String(req.query.from || (now - 3600)), 10) || (now - 3600)
+    const maxPoints = Math.min(Math.max(parseInt(String(req.query.maxPoints || '500'), 10) || 500, 50), 3000)
+
+    const metaRows = await zabbixRpc('item.get', {
+      itemids: [itemId],
+      output: ['itemid', 'name', 'key_', 'value_type', 'units', 'status', 'lastvalue', 'lastclock'],
+    })
+    const meta = (metaRows || [])[0]
+    if (!meta) return res.status(404).json({ error: 'Item not found or no permission' })
+
+    const hk = historyKind(meta.value_type)
+    if (!hk) return res.json({
+      item: { itemid: meta.itemid, name: meta.name, key: meta.key_, units: meta.units || '', valueType: Number(meta.value_type) },
+      points: [], displayMode: 'unsupported',
+      note: `value_type ${meta.value_type} is not plottable`,
+    })
+
+    const span = to - from
+    const useTrend = span > 2 * 86400 && hk.trends
+    let points = []
+
+    if (useTrend) {
+      const tr = await zabbixRpc('trend.get', {
+        itemids: [itemId], time_from: from, time_till: to,
+        output: ['itemid', 'clock', 'value_avg', 'value_min', 'value_max'],
+        sortfield: 'clock', sortorder: 'ASC', limit: 5000,
+      })
+      points = (tr || []).map((r) => ({ clock: Number(r.clock), value: Number(r.value_avg) })).filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+    }
+
+    if (!points.length) {
+      const hist = await zabbixRpc('history.get', {
+        history: hk.history, itemids: [itemId], time_from: from, time_till: to,
+        output: ['clock', 'value'], sortfield: 'clock', sortorder: 'ASC', limit: 15000,
+      })
+      points = (hist || []).map((r) => ({ clock: Number(r.clock), value: hk.parse(r.value) })).filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+    }
+
+    points = downsamplePoints(points, maxPoints)
+
+    res.json({
+      item: { itemid: meta.itemid, name: meta.name, key: meta.key_, units: meta.units || '', valueType: Number(meta.value_type) },
+      points,
+      from, to,
+      aggregated: useTrend && points.length > 0,
+      displayMode: points.length > 0 ? 'timeseries' : 'empty',
+      lastvalue: meta.lastvalue,
+      lastclock: meta.lastclock,
+      note: points.length === 0 ? 'No history data in this range. Try a shorter range or check item retention settings in Zabbix.' : undefined,
     })
   } catch (e) {
     return sendZabbixError(res, e)
