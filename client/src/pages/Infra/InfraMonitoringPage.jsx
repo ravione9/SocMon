@@ -135,48 +135,6 @@ function groupLatestMetrics(items) {
   return { groups: ordered, textItems, totalNumeric: numericItems.length }
 }
 
-function MetricRow({ r, i, effectiveMax, isPercentage, isActive, onSelect }) {
-  const v = Number(r.value)
-  const pct = Math.min(Math.abs(v) / effectiveMax * 100, 100)
-  const color = DATASET_COLORS[i % DATASET_COLORS.length]
-  const barColor = isPercentage && v > 90 ? '#ef4444' : isPercentage && v > 75 ? '#eab308' : color
-  return (
-    <div onClick={() => onSelect?.(r)} className="opm-row-hover"
-      style={{
-        display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px',
-        borderBottom: '1px solid var(--border)', fontSize: 11, fontFamily: 'var(--mono)',
-        cursor: onSelect ? 'pointer' : 'default',
-        background: isActive ? 'rgba(59,130,246,.08)' : undefined,
-        borderLeft: isActive ? '3px solid var(--accent)' : '3px solid transparent',
-      }}>
-      <span style={{ width: 14, textAlign: 'center', color: 'var(--text3)', fontSize: 9, flexShrink: 0, opacity: .6 }}>📈</span>
-      <span style={{ flex: '1 1 auto', color: isActive ? 'var(--accent)' : 'var(--text2)', fontWeight: isActive ? 600 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }} title={r.name || r.key}>
-        {(r.name || r.key || '').replace(/^VMware:\s*/i, '')}
-      </span>
-      <div style={{ width: 100, height: 6, borderRadius: 3, background: 'var(--bg4)', overflow: 'hidden', flexShrink: 0 }}>
-        <div style={{ width: `${Math.max(pct, v > 0 ? 2 : 0)}%`, height: '100%', borderRadius: 3, background: barColor, transition: 'width .3s' }} />
-      </div>
-      <span style={{ width: 90, textAlign: 'right', fontWeight: 700, color: 'var(--text)', flexShrink: 0, fontSize: 11 }}>
-        {fmtValue(v, r.units)}
-      </span>
-    </div>
-  )
-}
-
-function MetricGroup({ group, selectedItemId, onSelectItem }) {
-  const max = Math.max(...group.items.map((r) => Math.abs(Number(r.value))), 1)
-  const isPercentage = group.key === 'percentage'
-  const effectiveMax = isPercentage ? 100 : max
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
-      {group.items.map((r, i) => (
-        <MetricRow key={r.itemid} r={r} i={i} effectiveMax={effectiveMax} isPercentage={isPercentage}
-          isActive={selectedItemId === r.itemid} onSelect={r.numeric ? onSelectItem : undefined} />
-      ))}
-    </div>
-  )
-}
-
 const HISTORY_RANGES = [
   { key: '15m', label: '15m', sec: 900 },
   { key: '1h', label: '1h', sec: 3600 },
@@ -350,49 +308,120 @@ function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts }) {
 }
 
 function LatestMetricsView({ latestData, chartOpts }) {
-  const [selectedItem, setSelectedItem] = useState(null)
   const grouped = useMemo(() => groupLatestMetrics(latestData?.latest), [latestData])
+  const [search, setSearch] = useState('')
+  const firstNumericId = useMemo(() => {
+    for (const g of grouped.groups) {
+      if (g.items.length) return g.items[0].itemid
+    }
+    return null
+  }, [grouped])
+  const [selectedItemId, setSelectedItemId] = useState(null)
 
-  const handleSelect = useCallback((item) => {
-    setSelectedItem((prev) => prev?.itemid === item.itemid ? null : item)
-  }, [])
+  useEffect(() => {
+    if (selectedItemId == null && firstNumericId) setSelectedItemId(firstNumericId)
+  }, [firstNumericId, selectedItemId])
+
+  const allItemsById = useMemo(() => {
+    const map = new Map()
+    for (const g of grouped.groups) for (const it of g.items) map.set(it.itemid, it)
+    return map
+  }, [grouped])
+  const selectedItem = selectedItemId ? allItemsById.get(selectedItemId) : null
+
+  const filteredGroups = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return grouped.groups
+    return grouped.groups.map((g) => ({
+      ...g,
+      items: g.items.filter((i) => (i.name || i.key || '').toLowerCase().includes(q)),
+    })).filter((g) => g.items.length)
+  }, [grouped.groups, search])
 
   if (!grouped.groups.length && !grouped.textItems.length) {
     return <p style={{ margin: 0, fontSize: 13, color: 'var(--text3)', textAlign: 'center', padding: '20px 0' }}>No metrics available for this device.</p>
   }
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {/* Summary */}
-      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text3)', alignItems: 'center' }}>
-        <span>{grouped.totalNumeric} numeric</span>
-        <span>{grouped.textItems.length} text</span>
-        <span style={{ opacity: .5 }}>·</span>
-        <span style={{ color: 'var(--accent)', fontSize: 10 }}>Click any numeric metric to view its history graph</span>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* Sidebar + chart layout */}
+      <div style={{ display: 'flex', gap: 12, alignItems: 'start' }}>
+        {/* Left sidebar: grouped metric list */}
+        <div style={{ flex: '0 0 280px', border: '1px solid var(--border)', borderRadius: 10, background: 'var(--bg2)', overflow: 'hidden', maxHeight: 600, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ padding: '8px 12px', background: 'var(--bg3)', borderBottom: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0 }}>
+            <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text3)', fontFamily: 'var(--mono)', letterSpacing: .8, textTransform: 'uppercase' }}>
+              Metrics ({grouped.totalNumeric})
+            </span>
+            <input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Filter metrics…"
+              style={{ width: '100%', padding: '5px 8px', borderRadius: 5, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 11, fontFamily: 'var(--mono)', outline: 'none' }} />
+          </div>
+          <div style={{ overflowY: 'auto', flex: 1 }}>
+            {filteredGroups.map((g) => {
+              const max = Math.max(...g.items.map((r) => Math.abs(Number(r.value))), 1)
+              const isPercentage = g.key === 'percentage'
+              const effectiveMax = isPercentage ? 100 : max
+              return (
+                <div key={g.key}>
+                  <div style={{ padding: '6px 12px', background: 'var(--bg3)', borderBottom: '1px solid var(--border)', borderTop: '1px solid var(--border)', fontSize: 9, fontWeight: 700, color: 'var(--text3)', fontFamily: 'var(--mono)', letterSpacing: .8, textTransform: 'uppercase', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span>{g.label}</span>
+                    <span style={{ color: 'var(--accent)' }}>{g.items.length}</span>
+                  </div>
+                  {g.items.map((r, i) => {
+                    const v = Number(r.value)
+                    const pct = Math.min(Math.abs(v) / effectiveMax * 100, 100)
+                    const color = DATASET_COLORS[i % DATASET_COLORS.length]
+                    const barColor = isPercentage && v > 90 ? '#ef4444' : isPercentage && v > 75 ? '#eab308' : color
+                    const isActive = r.itemid === selectedItemId
+                    return (
+                      <button key={r.itemid} type="button" onClick={() => setSelectedItemId(r.itemid)}
+                        style={{ width: '100%', textAlign: 'left', border: 'none', display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderBottom: '1px solid var(--border)', borderLeft: isActive ? '3px solid var(--accent)' : '3px solid transparent', cursor: 'pointer', background: isActive ? 'rgba(59,130,246,.08)' : 'transparent', fontSize: 11, fontFamily: 'var(--mono)', transition: 'background .12s' }}
+                        onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = 'rgba(79,126,245,.06)' }}
+                        onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = 'transparent' }}>
+                        <span style={{ width: 6, height: 6, borderRadius: 1, background: color, flexShrink: 0, opacity: .8 }} />
+                        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                          <span style={{ color: isActive ? 'var(--accent)' : 'var(--text2)', fontWeight: isActive ? 600 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11 }} title={r.name || r.key}>
+                            {(r.name || r.key || '').replace(/^VMware:\s*/i, '')}
+                          </span>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <div style={{ flex: 1, height: 4, borderRadius: 2, background: 'var(--bg4)', overflow: 'hidden' }}>
+                              <div style={{ width: `${Math.max(pct, v > 0 ? 2 : 0)}%`, height: '100%', borderRadius: 2, background: barColor, transition: 'width .3s' }} />
+                            </div>
+                            <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text)', flexShrink: 0, minWidth: 60, textAlign: 'right' }}>
+                              {fmtValue(v, r.units)}
+                            </span>
+                          </div>
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+              )
+            })}
+            {!filteredGroups.length && search && (
+              <div style={{ padding: 16, color: 'var(--text3)', fontSize: 11, fontFamily: 'var(--mono)', textAlign: 'center' }}>No metrics match "{search}"</div>
+            )}
+          </div>
+        </div>
+
+        {/* Right: history chart */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {selectedItem ? (
+            <ItemHistoryChart
+              key={selectedItem.itemid}
+              itemId={selectedItem.itemid}
+              itemName={selectedItem.name}
+              itemUnits={selectedItem.units}
+              chartOpts={chartOpts}
+            />
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 50, borderRadius: 10, border: '1px dashed var(--border)', background: 'var(--bg2)', color: 'var(--text3)', fontSize: 13, fontFamily: 'var(--mono)' }}>
+              Select a metric from the sidebar to view its history
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* History chart for selected item */}
-      {selectedItem && (
-        <ItemHistoryChart
-          key={selectedItem.itemid}
-          itemId={selectedItem.itemid}
-          itemName={selectedItem.name}
-          itemUnits={selectedItem.units}
-          chartOpts={chartOpts}
-        />
-      )}
-
-      {/* Metric groups */}
-      {grouped.groups.map((g) => (
-        <div key={g.key} className="opm-widget" style={{ animation: 'fadeIn .2s ease' }}>
-          <div className="opm-widget-hd" style={{ padding: '8px 14px' }}>
-            <span className="opm-widget-title" style={{ fontSize: 10 }}>{g.label}</span>
-            <span className="badge badge-blue">{g.items.length}</span>
-          </div>
-          <MetricGroup group={g} selectedItemId={selectedItem?.itemid} onSelectItem={handleSelect} />
-        </div>
-      ))}
-
-      {/* Text items */}
+      {/* Text items (if any) */}
       {grouped.textItems.length > 0 && (
         <div className="opm-widget" style={{ animation: 'fadeIn .2s ease' }}>
           <div className="opm-widget-hd" style={{ padding: '8px 14px' }}>
@@ -690,11 +719,15 @@ export default function InfraMonitoringPage() {
   const [selectedGraphId, setSelectedGraphId] = useState(null)
   const [graphSeries, setGraphSeries] = useState(null)
   const [graphRange, setGraphRange] = useState('12h')
+  const [graphCustomRange, setGraphCustomRange] = useState(null)
+  const [graphCustomFrom, setGraphCustomFrom] = useState('')
+  const [graphCustomTo, setGraphCustomTo] = useState('')
   const [severityFilter, setSeverityFilter] = useState(null)
   const [graphSeriesBusy, setGraphSeriesBusy] = useState(false)
   const [graphDataMode, setGraphDataMode] = useState('auto')
   const [hostItemsLatest, setHostItemsLatest] = useState(null)
   const [itemsLatestBusy, setItemsLatestBusy] = useState(false)
+  const [hostViewMode, setHostViewMode] = useState('latest')
   const [eventLimit, setEventLimit] = useState(500)
   const hostListRef = useRef(null)
 
@@ -718,9 +751,14 @@ export default function InfraMonitoringPage() {
     catch (e) { const { message, hint } = parseErr(e); setError(message); setErrorHint(hint); setHostItemsLatest(null) }
     finally { setItemsLatestBusy(false) }
   }, [parseErr])
-  const fetchGraphSeries = useCallback(async (graphId, rangeKey, dataMode) => {
-    const sec = RANGE_SEC[rangeKey] || RANGE_SEC['12h']; const now = Math.floor(Date.now() / 1000)
-    const qs = new URLSearchParams({ from: String(now - sec), to: String(now) })
+  const fetchGraphSeries = useCallback(async (graphId, rangeKey, dataMode, customRange) => {
+    let from, to
+    if (customRange?.from && customRange?.to) {
+      from = customRange.from; to = customRange.to
+    } else {
+      const sec = RANGE_SEC[rangeKey] || RANGE_SEC['12h']; to = Math.floor(Date.now() / 1000); from = to - sec
+    }
+    const qs = new URLSearchParams({ from: String(from), to: String(to) })
     if (dataMode === 'latest') qs.set('mode', 'latest')
     const { data } = await api.get(`/api/zabbix/graphs/${encodeURIComponent(graphId)}/series?${qs}`); return data
   }, [])
@@ -781,12 +819,12 @@ export default function InfraMonitoringPage() {
 
   useEffect(() => {
     if (!selectedGraphId || tab !== 'hostGraphs') return; let c = false; setGraphSeriesBusy(true); setError(null); setErrorHint(null)
-    fetchGraphSeries(selectedGraphId, graphRange, graphDataMode)
+    fetchGraphSeries(selectedGraphId, graphRange, graphDataMode, graphCustomRange)
       .then((data) => { if (!c) setGraphSeries(data) })
       .catch((e) => { if (c) return; const r = parseErr(e); setError(r.message); setErrorHint(r.hint); setGraphSeries(null) })
       .finally(() => { if (!c) setGraphSeriesBusy(false) })
     return () => { c = true }
-  }, [graphRange, selectedGraphId, tab, graphDataMode, fetchGraphSeries, parseErr])
+  }, [graphRange, selectedGraphId, tab, graphDataMode, graphCustomRange, fetchGraphSeries, parseErr])
 
   /* ─── derived data ─── */
   const chartData = useMemo(() => graphSeries?.series?.length ? buildAlignedChart(graphSeries) : null, [graphSeries])
@@ -840,24 +878,54 @@ export default function InfraMonitoringPage() {
   }), [tc])
 
   const configured = config?.configured
-  const baseUrl = config?.zabbixUrl
 
   /* Navigate to Host & Graphs tab */
   const goToHostGraphs = useCallback(async (host) => {
-    setTab('hostGraphs'); setSelectedHost(host); setGraphDataMode('auto'); setSelectedGraphId(null); setGraphSeries(null); setHostItemsLatest(null); setGraphsBusy(true); setError(null); setErrorHint(null)
-    try { if (hostsExplorer === null) await loadAllHosts(); const g = await loadHostGraphs(host.hostid); if (!g.length) await loadHostItemsLatest(host.hostid); else setSelectedGraphId(g[0].graphid) }
+    setTab('hostGraphs'); setSelectedHost(host); setGraphDataMode('auto'); setSelectedGraphId(null); setGraphSeries(null); setHostItemsLatest(null); setGraphsBusy(true); setError(null); setErrorHint(null); setHostViewMode('latest')
+    try {
+      if (hostsExplorer === null) await loadAllHosts()
+      await loadHostItemsLatest(host.hostid)
+      const g = await loadHostGraphs(host.hostid); if (g.length) setSelectedGraphId(g[0].graphid)
+    }
     catch (e) { const r = parseErr(e); setError(r.message); setErrorHint(r.hint); setHostGraphs(null); setHostItemsLatest(null) }
     finally { setGraphsBusy(false) }
   }, [hostsExplorer, loadAllHosts, loadHostGraphs, loadHostItemsLatest, parseErr])
 
   const pickHost = useCallback(async (h) => {
-    setSelectedHost(h); setGraphDataMode('auto'); setSelectedGraphId(null); setGraphSeries(null); setHostItemsLatest(null); setGraphsBusy(true); setError(null); setErrorHint(null)
-    try { const g = await loadHostGraphs(h.hostid); if (!g.length) await loadHostItemsLatest(h.hostid); else setSelectedGraphId(g[0].graphid) }
+    setSelectedHost(h); setGraphDataMode('auto'); setSelectedGraphId(null); setGraphSeries(null); setHostItemsLatest(null); setGraphsBusy(true); setError(null); setErrorHint(null); setHostViewMode('latest')
+    try {
+      await loadHostItemsLatest(h.hostid)
+      const g = await loadHostGraphs(h.hostid); if (g.length) setSelectedGraphId(g[0].graphid)
+    }
     catch (e) { const r = parseErr(e); setError(r.message); setErrorHint(r.hint); setHostGraphs(null); setHostItemsLatest(null) }
     finally { setGraphsBusy(false) }
   }, [loadHostGraphs, loadHostItemsLatest, parseErr])
 
+  const switchHostView = useCallback(async (mode) => {
+    setHostViewMode(mode)
+    if (mode === 'latest' && selectedHost?.hostid && hostItemsLatest === null && !itemsLatestBusy) {
+      await loadHostItemsLatest(selectedHost.hostid)
+    }
+  }, [selectedHost, hostItemsLatest, itemsLatestBusy, loadHostItemsLatest])
+
   const pickGraph = useCallback((gid) => { setSelectedGraphId(gid); setGraphSeries(null) }, [])
+
+  const pickGraphRange = useCallback((r) => { setGraphRange(r); setGraphCustomRange(null) }, [])
+  const applyGraphCustomRange = useCallback(() => {
+    if (!graphCustomFrom || !graphCustomTo) return
+    const fromTs = Math.floor(new Date(graphCustomFrom).getTime() / 1000)
+    const toTs = Math.floor(new Date(graphCustomTo).getTime() / 1000)
+    if (isNaN(fromTs) || isNaN(toTs) || fromTs >= toTs) return
+    setGraphCustomRange({ from: fromTs, to: toTs })
+  }, [graphCustomFrom, graphCustomTo])
+
+  useEffect(() => {
+    if (graphCustomRange || graphCustomFrom) return
+    const sec = RANGE_SEC[graphRange] || RANGE_SEC['12h']
+    const to = Math.floor(Date.now() / 1000)
+    setGraphCustomFrom(toLocalInput(to - sec))
+    setGraphCustomTo(toLocalInput(to))
+  }, [graphRange, graphCustomRange, graphCustomFrom])
 
   const refresh = useCallback(async () => {
     setLoading(true); setError(null); setErrorHint(null)
@@ -908,10 +976,7 @@ export default function InfraMonitoringPage() {
       <style>{INLINE_CSS}</style>
 
       {/* ──── Header bar ──── */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', gap: 12, flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          {baseUrl && <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text3)', padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg3)' }}>{baseUrl}</span>}
-        </div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', padding: '12px 0', gap: 12, flexWrap: 'wrap' }}>
         <button type="button" onClick={refresh} disabled={loading || tabBusy}
           style={{ padding: '7px 18px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', cursor: loading || tabBusy ? 'wait' : 'pointer', fontSize: 12, fontFamily: 'var(--mono)', fontWeight: 600, transition: 'all .15s' }}>
           {loading ? '↻ Loading…' : '↻ Refresh'}
@@ -1017,7 +1082,7 @@ export default function InfraMonitoringPage() {
             <span style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: 'var(--text3)', fontSize: 13, pointerEvents: 'none' }}>⌕</span>
           </div>
           <Widget title="Device Inventory" badge={`${filteredInventory.length}${inventorySearch && hosts ? ` / ${hosts.length}` : ''}`} badgeColor="green" noPad
-            actions={<span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Click a device to view snapshot</span>}>
+            actions={null}>
             {hosts === null || tabBusy
               ? <div style={{ padding: 24, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}><span className="np-page-loading-dot" style={{ width: 14, height: 14 }} />Loading devices…</div>
               : <DataTable columns={hostCols} rows={filteredInventory} empty={inventorySearch ? `No devices match "${inventorySearch}".` : 'No monitored devices.'} rowKey={(h) => h.hostid} onRowClick={(h) => goToHostGraphs(h)} />
@@ -1088,6 +1153,22 @@ export default function InfraMonitoringPage() {
 
               {selectedHost && (
                 <>
+                  {/* View mode toggle (only when host has graphs) */}
+                  {!noGraphHost && hostGraphs?.length > 0 && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', borderRadius: 8, background: 'var(--bg2)', border: '1px solid var(--border)' }}>
+                      <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, marginRight: 4 }}>VIEW</span>
+                      {[
+                        { id: 'graphs', label: 'Graphs' },
+                        { id: 'latest', label: 'Latest' },
+                      ].map((m) => (
+                        <button key={m.id} type="button" onClick={() => switchHostView(m.id)}
+                          style={{ padding: '5px 14px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600, border: hostViewMode === m.id ? '1px solid var(--accent)' : '1px solid var(--border)', background: hostViewMode === m.id ? 'rgba(59,130,246,.12)' : 'transparent', color: hostViewMode === m.id ? 'var(--accent)' : 'var(--text3)', cursor: 'pointer', transition: 'all .12s' }}>
+                          {m.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
                   {/* Device info card */}
                   <Widget title="Device Info">
                     <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 12, fontFamily: 'var(--mono)' }}>
@@ -1106,27 +1187,50 @@ export default function InfraMonitoringPage() {
                     </div>
                   </Widget>
 
-                  {/* Range + mode toolbar */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', padding: '6px 10px', borderRadius: 8, background: 'var(--bg2)', border: '1px solid var(--border)' }}>
-                    <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, marginRight: 2 }}>RANGE</span>
-                    {Object.keys(RANGE_SEC).map((r) => (
-                      <button key={r} type="button" disabled={!selectedGraphId || graphDataMode === 'latest'} onClick={() => setGraphRange(r)}
-                        style={{ padding: '3px 10px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600, border: graphRange === r ? '1px solid var(--accent)' : '1px solid var(--border)', background: graphRange === r ? 'rgba(59,130,246,.12)' : 'transparent', color: graphRange === r ? 'var(--accent)' : 'var(--text3)', cursor: selectedGraphId && graphDataMode !== 'latest' ? 'pointer' : 'not-allowed', opacity: selectedGraphId && graphDataMode !== 'latest' ? 1 : .35, transition: 'all .12s' }}>
-                        {r}
+                  {/* Range + mode toolbar (graphs view only) */}
+                  {hostViewMode === 'graphs' && !noGraphHost && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 10px', borderRadius: 8, background: 'var(--bg2)', border: '1px solid var(--border)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, marginRight: 2 }}>RANGE</span>
+                      {Object.keys(RANGE_SEC).map((r) => {
+                        const active = graphRange === r && !graphCustomRange
+                        return (
+                          <button key={r} type="button" disabled={!selectedGraphId || graphDataMode === 'latest'} onClick={() => pickGraphRange(r)}
+                            style={{ padding: '3px 10px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600, border: active ? '1px solid var(--accent)' : '1px solid var(--border)', background: active ? 'rgba(59,130,246,.12)' : 'transparent', color: active ? 'var(--accent)' : 'var(--text3)', cursor: selectedGraphId && graphDataMode !== 'latest' ? 'pointer' : 'not-allowed', opacity: selectedGraphId && graphDataMode !== 'latest' ? 1 : .35, transition: 'all .12s' }}>
+                            {r}
+                          </button>
+                        )
+                      })}
+                      <span style={{ width: 1, height: 14, background: 'var(--border)', margin: '0 4px' }} />
+                      <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, marginRight: 2 }}>MODE</span>
+                      {[{ id: 'auto', label: 'History' }, { id: 'latest', label: 'Live' }].map((m) => (
+                        <button key={m.id} type="button" disabled={!selectedGraphId} onClick={() => setGraphDataMode(m.id)}
+                          style={{ padding: '3px 10px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600, border: graphDataMode === m.id ? '1px solid var(--accent)' : '1px solid var(--border)', background: graphDataMode === m.id ? 'rgba(59,130,246,.12)' : 'transparent', color: graphDataMode === m.id ? 'var(--accent)' : 'var(--text3)', cursor: selectedGraphId ? 'pointer' : 'not-allowed', opacity: selectedGraphId ? 1 : .35, transition: 'all .12s' }}>
+                          {m.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 10, color: graphCustomRange ? 'var(--accent)' : 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, marginRight: 2 }}>CUSTOM</span>
+                      <input type="datetime-local" value={graphCustomFrom} onChange={(e) => setGraphCustomFrom(e.target.value)}
+                        disabled={!selectedGraphId || graphDataMode === 'latest'}
+                        style={{ padding: '3px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: selectedGraphId && graphDataMode !== 'latest' ? 1 : .4 }} />
+                      <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>to</span>
+                      <input type="datetime-local" value={graphCustomTo} onChange={(e) => setGraphCustomTo(e.target.value)}
+                        disabled={!selectedGraphId || graphDataMode === 'latest'}
+                        style={{ padding: '3px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: selectedGraphId && graphDataMode !== 'latest' ? 1 : .4 }} />
+                      <button type="button" onClick={applyGraphCustomRange}
+                        disabled={!selectedGraphId || graphDataMode === 'latest' || !graphCustomFrom || !graphCustomTo}
+                        style={{ padding: '4px 14px', borderRadius: 5, fontSize: 11, fontWeight: 700, fontFamily: 'var(--mono)', border: 'none', background: 'var(--accent)', color: '#fff', cursor: selectedGraphId && graphCustomFrom && graphCustomTo && graphDataMode !== 'latest' ? 'pointer' : 'not-allowed', opacity: selectedGraphId && graphCustomFrom && graphCustomTo && graphDataMode !== 'latest' ? 1 : .4, transition: 'opacity .12s' }}>
+                        Apply
                       </button>
-                    ))}
-                    <span style={{ width: 1, height: 14, background: 'var(--border)', margin: '0 4px' }} />
-                    <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, marginRight: 2 }}>MODE</span>
-                    {[{ id: 'auto', label: 'History' }, { id: 'latest', label: 'Live' }].map((m) => (
-                      <button key={m.id} type="button" disabled={!selectedGraphId} onClick={() => setGraphDataMode(m.id)}
-                        style={{ padding: '3px 10px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600, border: graphDataMode === m.id ? '1px solid var(--accent)' : '1px solid var(--border)', background: graphDataMode === m.id ? 'rgba(59,130,246,.12)' : 'transparent', color: graphDataMode === m.id ? 'var(--accent)' : 'var(--text3)', cursor: selectedGraphId ? 'pointer' : 'not-allowed', opacity: selectedGraphId ? 1 : .35, transition: 'all .12s' }}>
-                        {m.label}
-                      </button>
-                    ))}
+                      {graphCustomRange && <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: '#3b82f6', fontSize: 10 }}>Custom Range Active</span>}
+                    </div>
                   </div>
+                  )}
 
-                  {/* Graph list + chart */}
-                  {!noGraphHost && (
+                  {/* GRAPHS VIEW: Graph list + chart */}
+                  {hostViewMode === 'graphs' && !noGraphHost && (
                     <div style={{ display: 'flex', gap: 12, alignItems: 'start' }}>
                       {/* Graph sidebar */}
                       <div style={{ flex: '0 0 200px', border: '1px solid var(--border)', borderRadius: 10, background: 'var(--bg2)', overflow: 'hidden', maxHeight: 440, overflowY: 'auto' }}>
@@ -1159,18 +1263,16 @@ export default function InfraMonitoringPage() {
                     </div>
                   )}
 
-                  {/* No-graph host: latest metrics */}
-                  {noGraphHost && (
+                  {/* LATEST METRICS VIEW: per-item history (also for no-graph hosts) */}
+                  {(hostViewMode === 'latest' || noGraphHost) && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <div style={{ fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>
-                          No Zabbix graphs defined — showing latest monitored item values
-                        </div>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
                         <button type="button" onClick={() => selectedHost?.hostid && loadHostItemsLatest(selectedHost.hostid)}
                           style={{ padding: '5px 14px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 600 }}>↻ Refresh</button>
                       </div>
                       {itemsLatestBusy && <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--text3)', fontSize: 12, fontFamily: 'var(--mono)', padding: '40px 0', justifyContent: 'center' }}><span className="np-page-loading-dot" style={{ width: 14, height: 14 }} />Loading metrics…</div>}
-                      {!itemsLatestBusy && hostItemsLatest && <LatestMetricsView latestData={hostItemsLatest} chartOpts={chartOpts} />}
+                      {!itemsLatestBusy && hostItemsLatest && <LatestMetricsView key={selectedHost?.hostid} latestData={hostItemsLatest} chartOpts={chartOpts} />}
+                      {!itemsLatestBusy && !hostItemsLatest && <div style={{ padding: 30, textAlign: 'center', color: 'var(--text3)', fontSize: 12, fontFamily: 'var(--mono)' }}>No data loaded yet.</div>}
                     </div>
                   )}
                 </>

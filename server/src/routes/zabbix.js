@@ -523,7 +523,7 @@ router.get('/graphs/:graphId/series', async (req, res) => {
     let from = parseInt(String(req.query.from || ''), 10)
     if (!Number.isFinite(to)) to = now
     if (!Number.isFinite(from)) from = to - 3600
-    const maxSpan = 86400 * 31
+    const maxSpan = 86400 * 365
     if (to < from) [from, to] = [to, from]
     if (to - from > maxSpan) from = to - maxSpan
 
