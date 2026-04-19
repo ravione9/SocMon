@@ -15,17 +15,47 @@ const SEVERITY_LABEL = {
 function mapProblems(problems) {
   return (problems || []).map((p) => ({
     eventid: p.eventid,
+    objectid: p.objectid,
     name: p.name,
     severity: p.severity,
     severityLabel: SEVERITY_LABEL[p.severity] || 'Unknown',
     clock: p.clock,
     r_clock: p.r_clock,
+    acknowledged: String(p.acknowledged) === '1',
     hosts: (p.hosts || []).map((h) => ({
       hostid: h.hostid,
       host: h.host,
       name: h.name,
     })),
   }))
+}
+
+/** Filter monitored host rows by optional Zabbix group name (exact) and/or host name search (substring). */
+function filterOverviewHosts(rows, groupName, q) {
+  let out = rows || []
+  const g = String(groupName || '').trim()
+  if (g) {
+    out = out.filter((h) => (h.hostgroups || h.groups || []).some((x) => (x.name || '') === g))
+  }
+  const search = String(q || '').trim().toLowerCase()
+  if (search) {
+    out = out.filter((h) => {
+      const name = String(h.name || '').toLowerCase()
+      const host = String(h.host || '').toLowerCase()
+      return name.includes(search) || host.includes(search)
+    })
+  }
+  return out
+}
+
+async function problemCountForHostids(hostids) {
+  if (!hostids?.length) return 0
+  try {
+    return await zabbixRpc('problem.get', { hostids, recent: true, countOutput: true })
+  } catch (e) {
+    if (e.code !== 'ZABBIX_API_ERROR') throw e
+    return zabbixRpc('problem.get', { hostids, countOutput: true })
+  }
 }
 
 async function problemGet(params) {
@@ -204,7 +234,10 @@ router.get('/overview', async (req, res) => {
       selectGroupsParam = { selectGroups: ['groupid', 'name'] }
     }
 
-    const [version, hostRows, problemCount, problems, sevRows] = await Promise.all([
+    const groupFilter = String(req.query.group || '').trim()
+    const qFilter = String(req.query.q || '').trim()
+
+    const [version, hostRows] = await Promise.all([
       zabbixRpc('apiinfo.version', {}),
       zabbixRpc('host.get', {
         monitored_hosts: true,
@@ -213,15 +246,32 @@ router.get('/overview', async (req, res) => {
         ...selectGroupsParam,
         limit: 500,
       }),
-      problemCountParams(),
-      problemGet({
+    ])
+
+    const hostsForGroups = (hostRows || []).map((h) => ({
+      ...h,
+      groups: h.hostgroups || h.groups || [],
+    }))
+    const filteredRows = filterOverviewHosts(hostsForGroups, groupFilter, qFilter)
+    const hostids = filteredRows.map((h) => String(h.hostid))
+    const scopeFiltered = Boolean(groupFilter || qFilter)
+
+    const problemQuery = (extra) => {
+      if (scopeFiltered && !hostids.length) return Promise.resolve([])
+      if (scopeFiltered) return problemGet({ hostids, ...extra })
+      return problemGet(extra)
+    }
+
+    const [problemCount, problems, sevRows] = await Promise.all([
+      scopeFiltered && !hostids.length ? Promise.resolve(0) : scopeFiltered ? problemCountForHostids(hostids) : problemCountParams(),
+      problemQuery({
         sortfield: ['eventid'],
         sortorder: 'DESC',
         limit: 500,
-        output: ['eventid', 'name', 'severity', 'clock', 'r_clock', 'objectid'],
+        output: ['eventid', 'name', 'severity', 'clock', 'r_clock', 'objectid', 'acknowledged'],
         selectHosts: ['hostid', 'host', 'name'],
       }),
-      problemGet({
+      problemQuery({
         output: ['severity'],
         limit: 3000,
         sortfield: ['eventid'],
@@ -229,15 +279,12 @@ router.get('/overview', async (req, res) => {
       }),
     ])
 
-    const hostsForGroups = (hostRows || []).map((h) => ({
-      ...h,
-      groups: h.hostgroups || h.groups || [],
-    }))
-    const avail = hostAvailability(hostRows)
+    const availBase = scopeFiltered ? filteredRows : hostRows
+    const avail = hostAvailability(availBase)
     const topHosts = topProblemHosts(problems)
-    const groupStats = hostGroupSummary(hostsForGroups)
+    const groupStats = hostGroupSummary(scopeFiltered ? filteredRows : hostsForGroups)
     const healthPct = avail.total > 0 ? Math.round((avail.available / avail.total) * 1000) / 10 : 0
-    const latestProblems = problems.slice(0, 50)
+    const latestProblems = (problems || []).slice(0, 50)
 
     res.json({
       version: String(version || ''),
@@ -249,6 +296,10 @@ router.get('/overview', async (req, res) => {
       healthPercent: healthPct,
       topProblemHosts: topHosts,
       hostGroups: groupStats,
+      /** Full group list for filter dropdowns (always unfiltered). */
+      allHostGroups: hostGroupSummary(hostsForGroups),
+      dashboardFilter: { group: groupFilter || null, q: qFilter || null },
+      scopeFiltered,
     })
   } catch (e) {
     return sendZabbixError(res, e)
@@ -834,15 +885,78 @@ router.get('/problems', async (req, res) => {
     const sevNum =
       sevRaw != null && String(sevRaw).trim() !== '' && !Number.isNaN(Number(sevRaw)) ? Number(sevRaw) : null
     const filter = sevNum != null && sevNum >= 0 && sevNum <= 5 ? { severity: sevNum } : undefined
+
+    const groupF = String(req.query.group || '').trim()
+    const qF = String(req.query.q || '').trim()
+    let hostids
+    if (groupF || qF) {
+      let selectGroupsKey = 'selectGroups'
+      try {
+        await zabbixRpc('hostgroup.get', { output: ['groupid'], limit: 1 })
+        selectGroupsKey = 'selectHostGroups'
+      } catch { /* keep */ }
+      const raw = await zabbixRpc('host.get', {
+        monitored_hosts: true,
+        output: ['hostid', 'host', 'name'],
+        [selectGroupsKey]: ['groupid', 'name'],
+        limit: 500,
+      })
+      const mapped = (raw || []).map((h) => ({
+        ...h,
+        groups: h.hostgroups || h.groups || [],
+        hostgroups: h.hostgroups || h.groups || [],
+      }))
+      const filtered = filterOverviewHosts(mapped, groupF, qF)
+      hostids = filtered.map((h) => String(h.hostid))
+      if (!hostids.length) return res.json({ problems: [], totalReturned: 0 })
+    }
+
     const rows = await problemGet({
       sortfield: ['eventid'],
       sortorder: 'DESC',
       limit,
-      output: ['eventid', 'name', 'severity', 'clock', 'r_clock', 'objectid'],
+      output: ['eventid', 'name', 'severity', 'clock', 'r_clock', 'objectid', 'acknowledged'],
       selectHosts: ['hostid', 'host', 'name'],
       ...(filter ? { filter } : {}),
+      ...(hostids ? { hostids } : {}),
     })
     res.json({ problems: mapProblems(rows), totalReturned: (rows || []).length })
+  } catch (e) {
+    return sendZabbixError(res, e)
+  }
+})
+
+/**
+ * Acknowledge or manually close Zabbix problems (same as UI: event.acknowledge).
+ * POST body: { eventids: string[], message?: string, acknowledge?: boolean (default true), close?: boolean }
+ */
+router.post('/problems/acknowledge', async (req, res) => {
+  try {
+    if (!isZabbixConfigured()) {
+      return res.status(503).json({ error: 'Zabbix not configured' })
+    }
+    const rawIds = req.body?.eventids
+    const ids = (Array.isArray(rawIds) ? rawIds : [rawIds])
+      .map((x) => String(x || '').trim())
+      .filter(Boolean)
+      .slice(0, 100)
+    if (!ids.length) return res.status(400).json({ error: 'eventids required' })
+
+    const message = String(req.body?.message || '').trim()
+    const close = Boolean(req.body?.close)
+    const doAck = req.body?.acknowledge !== false
+
+    let action = 0
+    if (close) action |= 1
+    if (doAck) action |= 2
+    if (message) action |= 4
+    if (action === 0) action = 2
+
+    const params = { eventids: ids, action }
+    if (message) params.message = message
+
+    await zabbixRpc('event.acknowledge', params)
+    res.json({ ok: true, eventids: ids })
   } catch (e) {
     return sendZabbixError(res, e)
   }

@@ -814,6 +814,7 @@ function SeverityFilter({ counts, selected, onSelect }) {
   )
 }
 
+/** DataTable: set `stopRowClick: true` on a column to prevent row onRowClick. */
 function DataTable({ columns, rows, empty, rowKey, onRowClick }) {
   const storageKey = `infra-${columns.map((c) => c.key).join('-')}`
   const defaults = columns.map(() => 128)
@@ -840,7 +841,8 @@ function DataTable({ columns, rows, empty, rowKey, onRowClick }) {
               onClick={onRowClick ? () => onRowClick(row) : undefined}
               style={{ borderBottom: '1px solid var(--border)', cursor: onRowClick ? 'pointer' : 'default' }}>
               {columns.map((col) => (
-                <td key={col.key} style={{ padding: '10px 14px', overflow: 'hidden', textOverflow: 'ellipsis' }}>{col.render(row)}</td>
+                <td key={col.key} style={{ padding: '10px 14px', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                  onClick={col.stopRowClick ? (ev) => ev.stopPropagation() : undefined}>{col.render(row)}</td>
               ))}
             </tr>
           ))}
@@ -918,9 +920,15 @@ export default function InfraMonitoringPage() {
   const [hostViewMode, setHostViewMode] = useState('latest')
   const [eventLimit, setEventLimit] = useState(500)
   const [groupFilter, setGroupFilter] = useState('') // active group filter for Snapshot tab
+  const [dashboardGroupFilter, setDashboardGroupFilter] = useState('')
+  const [dashboardSearch, setDashboardSearch] = useState('')
+  const [inventoryGroupFilter, setInventoryGroupFilter] = useState('')
+  /** '' = all, or Zabbix availability label: Available | Unavailable | Unknown */
+  const [inventoryAvailFilter, setInventoryAvailFilter] = useState('')
   const [topUtil, setTopUtil] = useState(null)
   const [topUtilBusy, setTopUtilBusy] = useState(false)
   const [topLimit, setTopLimit] = useState(10)
+  const [problemAckBusy, setProblemAckBusy] = useState(null)
   const hostListRef = useRef(null)
 
   /* ─── data loaders (unchanged logic) ─── */
@@ -930,7 +938,14 @@ export default function InfraMonitoringPage() {
     const hints = [d?.hint, d?.code && `code: ${d.code}`, d?.zabbixCode != null && `zabbix: ${d.zabbixCode}`].filter(Boolean)
     return { message: typeof msg === 'string' ? msg : JSON.stringify(msg), hint: hints.length ? hints.join(' · ') : null }
   }, [])
-  const loadOverview = useCallback(async () => { const { data: ov } = await api.get('/api/zabbix/overview'); setOverview(ov) }, [])
+  const loadOverview = useCallback(async () => {
+    const qs = new URLSearchParams()
+    if (dashboardGroupFilter) qs.set('group', dashboardGroupFilter)
+    if (dashboardSearch.trim()) qs.set('q', dashboardSearch.trim())
+    const suf = qs.toString() ? `?${qs}` : ''
+    const { data: ov } = await api.get(`/api/zabbix/overview${suf}`)
+    setOverview(ov)
+  }, [dashboardGroupFilter, dashboardSearch])
   const loadHosts = useCallback(async () => { const { data } = await api.get('/api/zabbix/hosts'); setHosts(data.hosts || []) }, [])
   const loadAllHosts = useCallback(async () => {
     const { data } = await api.get('/api/zabbix/hosts?limit=500')
@@ -960,11 +975,23 @@ export default function InfraMonitoringPage() {
     setTopUtil(data)
   }, [topLimit])
 
+  const refetchProblems = useCallback(async () => {
+    const qs = new URLSearchParams({ limit: '250' })
+    if (severityFilter != null) qs.set('severity', String(severityFilter))
+    const { data } = await api.get(`/api/zabbix/problems?${qs}`)
+    setProblemsFull(data.problems || [])
+  }, [severityFilter])
+
   const loadConfigAndOverview = useCallback(async () => {
     setError(null); setErrorHint(null)
-    try { const { data: cfg } = await api.get('/api/zabbix/config'); setConfig(cfg); if (!cfg.configured) { setOverview(null); return }; await loadOverview() }
-    catch (e) { const { message, hint } = parseErr(e); setError(message); setErrorHint(hint); setOverview(null) }
-  }, [loadOverview, parseErr])
+    try {
+      const { data: cfg } = await api.get('/api/zabbix/config')
+      setConfig(cfg)
+      if (!cfg.configured) setOverview(null)
+    } catch (e) {
+      const { message, hint } = parseErr(e); setError(message); setErrorHint(hint); setOverview(null)
+    }
+  }, [parseErr])
 
   const loadTabData = useCallback(async (t) => {
     if (!config?.configured) return; setTabBusy(true); setError(null); setErrorHint(null)
@@ -977,9 +1004,27 @@ export default function InfraMonitoringPage() {
   useEffect(() => {
     let c = false
     ;(async () => { setLoading(true); await loadConfigAndOverview(); if (!c) setLoading(false) })()
-    const t = setInterval(() => { loadConfigAndOverview().catch(() => {}) }, 60_000)
-    return () => { c = true; clearInterval(t) }
+    return () => { c = true }
   }, [loadConfigAndOverview])
+
+  useEffect(() => {
+    if (!config?.configured || tab !== 'overview') return
+    let cancelled = false
+    loadOverview()
+      .catch((e) => {
+        if (cancelled) return; const r = parseErr(e); setError(r.message); setErrorHint(r.hint)
+      })
+    return () => { cancelled = true }
+  }, [config?.configured, tab, dashboardGroupFilter, dashboardSearch, loadOverview, parseErr])
+
+  useEffect(() => {
+    if (!config?.configured) return
+    const t = setInterval(() => {
+      loadConfigAndOverview().catch(() => {})
+      if (tab === 'overview') loadOverview().catch(() => {})
+    }, 60_000)
+    return () => clearInterval(t)
+  }, [config?.configured, tab, loadConfigAndOverview, loadOverview])
 
   useEffect(() => {
     if (!config?.configured || tab === 'overview') return
@@ -998,14 +1043,11 @@ export default function InfraMonitoringPage() {
 
   useEffect(() => {
     if (!config?.configured || tab !== 'problems') return; let c = false; setTabBusy(true); setError(null); setErrorHint(null)
-    const qs = new URLSearchParams({ limit: '250' })
-    if (severityFilter != null) qs.set('severity', String(severityFilter))
-    api.get(`/api/zabbix/problems?${qs}`)
-      .then(({ data }) => { if (!c) setProblemsFull(data.problems || []) })
+    refetchProblems()
       .catch((e) => { if (c) return; const r = parseErr(e); setError(r.message); setErrorHint(r.hint); setProblemsFull([]) })
       .finally(() => { if (!c) setTabBusy(false) })
     return () => { c = true }
-  }, [tab, config?.configured, severityFilter, parseErr])
+  }, [tab, config?.configured, severityFilter, parseErr, refetchProblems])
 
   useEffect(() => {
     if (tab !== 'hostGraphs' || !config?.configured || hostsExplorer !== null) return
@@ -1060,7 +1102,26 @@ export default function InfraMonitoringPage() {
     const base = (hostsExplorer || []).filter((h) => !groupFilter || (h.groups || []).includes(groupFilter))
     return scoreHosts(base, (hostSearch || '').trim().toLowerCase())
   }, [hostsExplorer, hostSearch, groupFilter, scoreHosts])
-  const filteredInventory = useMemo(() => scoreHosts(hosts || [], (inventorySearch || '').trim().toLowerCase()), [hosts, inventorySearch, scoreHosts])
+  const availableInventoryGroups = useMemo(() => {
+    const set = new Set()
+    for (const h of hosts || []) for (const g of h.groups || []) if (g) set.add(g)
+    return Array.from(set).sort((a, b) => a.localeCompare(b))
+  }, [hosts])
+  const inventoryAvailCounts = useMemo(() => {
+    const h = hosts || []
+    return {
+      all: h.length,
+      Available: h.filter((x) => x.availability === 'Available').length,
+      Unavailable: h.filter((x) => x.availability === 'Unavailable').length,
+      Unknown: h.filter((x) => x.availability === 'Unknown').length,
+    }
+  }, [hosts])
+  const filteredInventory = useMemo(() => {
+    let base = hosts || []
+    if (inventoryGroupFilter) base = base.filter((h) => (h.groups || []).includes(inventoryGroupFilter))
+    if (inventoryAvailFilter) base = base.filter((h) => h.availability === inventoryAvailFilter)
+    return scoreHosts(base, (inventorySearch || '').trim().toLowerCase())
+  }, [hosts, inventorySearch, inventoryGroupFilter, inventoryAvailFilter, scoreHosts])
   const availableGroups = useMemo(() => {
     const set = new Set()
     for (const h of hostsExplorer || []) for (const g of h.groups || []) if (g) set.add(g)
@@ -1161,19 +1222,47 @@ export default function InfraMonitoringPage() {
     setGraphCustomTo(toLocalInput(to))
   }, [graphRange, graphCustomRange, graphCustomFrom])
 
+  const acknowledgeProblems = useCallback(async (eventids, { close = false, message = '' } = {}) => {
+    if (!eventids?.length) return
+    await api.post('/api/zabbix/problems/acknowledge', { eventids, close, message: message || undefined, acknowledge: true })
+  }, [])
+
+  const runProblemAck = useCallback(async (p, { close }) => {
+    setProblemAckBusy(p.eventid)
+    setError(null); setErrorHint(null)
+    try {
+      let message = ''
+      if (close) {
+        if (!window.confirm('Manually close this problem in Zabbix? The trigger must allow manual close.')) {
+          setProblemAckBusy(null); return
+        }
+        message = window.prompt('Close comment (optional):', '') ?? ''
+      } else {
+        message = window.prompt('Acknowledgement message (optional):', '') ?? ''
+      }
+      await acknowledgeProblems([p.eventid], { close, message })
+      await loadOverview()
+      if (tab === 'problems') await refetchProblems()
+    } catch (e) {
+      const r = parseErr(e); setError(r.message); setErrorHint(r.hint)
+    } finally {
+      setProblemAckBusy(null)
+    }
+  }, [acknowledgeProblems, loadOverview, refetchProblems, tab, parseErr])
+
   const refresh = useCallback(async () => {
     setLoading(true); setError(null); setErrorHint(null)
     try {
       const { data: cfg } = await api.get('/api/zabbix/config'); setConfig(cfg); if (!cfg.configured) { setOverview(null); return }
-      await loadOverview()
+      if (tab === 'overview') await loadOverview()
       if (tab === 'hosts') await loadHosts()
-      if (tab === 'problems') { const qs = new URLSearchParams({ limit: '250' }); if (severityFilter != null) qs.set('severity', String(severityFilter)); const { data } = await api.get(`/api/zabbix/problems?${qs}`); setProblemsFull(data.problems || []) }
+      if (tab === 'problems') await refetchProblems()
       if (tab === 'events') await loadEvents(eventLimit)
       if (tab === 'topMon') await loadTopUtil(topLimit)
       if (tab === 'hostGraphs') { await loadAllHosts(); if (selectedHost?.hostid) { const g = await loadHostGraphs(selectedHost.hostid); if (!g.length) await loadHostItemsLatest(selectedHost.hostid); else setHostItemsLatest(null); if (selectedGraphId) { const d = await fetchGraphSeries(selectedGraphId, graphRange, graphDataMode); setGraphSeries(d) } } }
     } catch (e) { const r = parseErr(e); setError(r.message); setErrorHint(r.hint) }
     finally { setLoading(false) }
-  }, [tab, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries, loadTopUtil, topLimit])
+  }, [tab, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries, loadTopUtil, topLimit, refetchProblems])
 
   /* ─── column definitions ─── */
   const hostCols = [
@@ -1187,13 +1276,28 @@ export default function InfraMonitoringPage() {
     { key: 'groups', label: 'Category', render: (h) => <span style={{ color: 'var(--text3)', fontSize: 11 }}>{(h.groups || []).join(', ') || '—'}</span> },
     { key: 'mon', label: 'Monitoring', render: (h) => <span className="opm-pill" style={{ background: h.monitored ? 'rgba(34,197,94,.12)' : 'rgba(234,179,8,.1)', color: h.monitored ? '#22c55e' : '#eab308', border: `1px solid ${h.monitored ? 'rgba(34,197,94,.25)' : 'rgba(234,179,8,.2)'}` }}>{h.monitored ? 'Enabled' : 'Disabled'}</span> },
   ]
-  const problemCols = [
+  const problemCols = useMemo(() => [
     { key: 'sev', label: 'Severity', render: (p) => <span className="opm-pill" style={{ color: sevColor(p.severity), background: `${sevColor(p.severity)}15`, border: `1px solid ${sevColor(p.severity)}30` }}>{p.severityLabel}</span> },
+    { key: 'ackst', label: 'Ack', render: (p) => (
+      <span className="opm-pill" style={{ background: p.acknowledged ? 'rgba(34,197,94,.12)' : 'rgba(148,163,184,.1)', color: p.acknowledged ? '#22c55e' : 'var(--text3)', border: `1px solid ${p.acknowledged ? 'rgba(34,197,94,.25)' : 'var(--border)'}` }}>
+        {p.acknowledged ? 'Yes' : 'No'}
+      </span>
+    ) },
     { key: 'name', label: 'Problem', render: (p) => <span style={{ color: 'var(--text)' }}>{p.name}</span> },
     { key: 'hosts', label: 'Affected Device', render: (p) => <span style={{ color: 'var(--text2)', fontSize: 11 }}>{(p.hosts || []).map((h) => h.name || h.host).join(', ') || '—'}</span> },
     { key: 'dur', label: 'Duration', render: (p) => <span style={{ color: 'var(--text3)', fontSize: 11 }}>{relAge(p.clock)}</span> },
     { key: 'since', label: 'Since', render: (p) => <span style={{ color: 'var(--text3)', fontSize: 11 }}>{fmtClock(p.clock)}</span> },
-  ]
+    { key: 'actions', label: 'Actions', stopRowClick: true, render: (p) => {
+      const busy = problemAckBusy === p.eventid
+      const btn = { padding: '3px 8px', borderRadius: 5, fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600, border: '1px solid var(--border)', cursor: busy ? 'wait' : 'pointer', background: 'var(--bg3)', color: 'var(--text2)' }
+      return (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }} onClick={(e) => e.stopPropagation()}>
+          <button type="button" disabled={busy || p.acknowledged} style={{ ...btn, opacity: p.acknowledged ? .45 : 1 }} onClick={() => runProblemAck(p, { close: false })}>Ack</button>
+          <button type="button" disabled={busy} style={{ ...btn, borderColor: 'rgba(239,68,68,.35)', color: '#ef4444' }} onClick={() => runProblemAck(p, { close: true })}>Close</button>
+        </div>
+      )
+    } },
+  ], [problemAckBusy, runProblemAck])
   const eventCols = [
     { key: 'status', label: 'Status', render: (ev) => <span className="opm-pill" style={{ background: ev.status === 'PROBLEM' ? 'rgba(239,68,68,.12)' : 'rgba(34,197,94,.1)', color: ev.status === 'PROBLEM' ? '#ef4444' : '#22c55e', border: `1px solid ${ev.status === 'PROBLEM' ? 'rgba(239,68,68,.25)' : 'rgba(34,197,94,.2)'}` }}>{ev.status}</span> },
     { key: 'sev', label: 'Severity', render: (ev) => <span className="opm-pill" style={{ color: sevColor(ev.severity), background: `${sevColor(ev.severity)}15`, border: `1px solid ${sevColor(ev.severity)}30` }}>{ev.severityLabel}</span> },
@@ -1269,12 +1373,43 @@ export default function InfraMonitoringPage() {
       {/* ═══════════ DASHBOARD (Overview) ═══════════ */}
       {configured && tab === 'overview' && overview && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div className="opm-toolbar">
+            <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <span className="opm-toolbar-label">Dashboard scope</span>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Group</span>
+                <select value={dashboardGroupFilter} onChange={(e) => setDashboardGroupFilter(e.target.value)}
+                  style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', minWidth: 180, maxWidth: 280 }}>
+                  <option value="">All groups</option>
+                  {(overview.allHostGroups || overview.hostGroups || []).map((g) => (
+                    <option key={g.name} value={g.name}>{g.name} ({g.count})</option>
+                  ))}
+                </select>
+              </div>
+              <div className="opm-search" style={{ maxWidth: 320, flex: '1 1 200px' }}>
+                <input type="search" value={dashboardSearch} onChange={(e) => setDashboardSearch(e.target.value)} placeholder="Filter by host name…" />
+                <span className="opm-search-icon">⌕</span>
+              </div>
+              {(dashboardGroupFilter || dashboardSearch.trim()) && (
+                <button type="button" onClick={() => { setDashboardGroupFilter(''); setDashboardSearch('') }}
+                  style={{ padding: '5px 12px', borderRadius: 6, border: '1px solid var(--border)', background: 'transparent', color: 'var(--cyan)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 600 }}>
+                  Clear filters
+                </button>
+              )}
+              {overview.scopeFiltered && (
+                <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', fontSize: 10 }}>
+                  Scoped view
+                </span>
+              )}
+            </div>
+          </div>
+
           {/* Row 1: Counter tiles */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 12 }}>
-            <CounterTile label="Devices" value={avail?.total ?? 0} sub="Monitored" color="blue" icon="▦" onClick={() => setTab('hosts')} />
-            <CounterTile label="Available" value={avail?.available ?? 0} sub={healthPct != null ? `${healthPct}% health` : null} color="green" icon="●" />
-            <CounterTile label="Unavailable" value={avail?.unavailable ?? 0} sub="Down" color="red" icon="✕" />
-            <CounterTile label="Unknown" value={avail?.unknown ?? 0} sub="Unchecked" color="cyan" icon="?" />
+            <CounterTile label="Devices" value={avail?.total ?? 0} sub="Monitored" color="blue" icon="▦" onClick={() => { setInventoryAvailFilter(''); setTab('hosts') }} />
+            <CounterTile label="Available" value={avail?.available ?? 0} sub={healthPct != null ? `${healthPct}% health` : null} color="green" icon="●" onClick={() => { setInventoryAvailFilter('Available'); setTab('hosts') }} />
+            <CounterTile label="Unavailable" value={avail?.unavailable ?? 0} sub="Down" color="red" icon="✕" onClick={() => { setInventoryAvailFilter('Unavailable'); setTab('hosts') }} />
+            <CounterTile label="Unknown" value={avail?.unknown ?? 0} sub="Unchecked" color="cyan" icon="?" onClick={() => { setInventoryAvailFilter('Unknown'); setTab('hosts') }} />
             <CounterTile label="Active Alarms" value={overview.activeProblems} sub="Click to view" color="amber" icon="⚠" onClick={() => { setSeverityFilter(null); setTab('problems') }} />
             <CounterTile label="Zabbix" value={overview.version || '—'} sub="API version" color="purple" icon="◆" />
           </div>
@@ -1333,15 +1468,51 @@ export default function InfraMonitoringPage() {
       {/* ═══════════ INVENTORY (Hosts) ═══════════ */}
       {configured && tab === 'hosts' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div className="opm-search">
-            <input type="search" value={inventorySearch} onChange={(e) => setInventorySearch(e.target.value)} placeholder="Search by name, IP, host, group…" />
-            <span className="opm-search-icon">⌕</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div className="opm-search" style={{ flex: '1 1 280px', maxWidth: 520 }}>
+              <input type="search" value={inventorySearch} onChange={(e) => setInventorySearch(e.target.value)} placeholder="Search by name, IP, host, group…" />
+              <span className="opm-search-icon">⌕</span>
+            </div>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 10px', borderRadius: 9, border: '1px solid var(--border)', background: 'var(--bg3)' }}>
+              <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, letterSpacing: .5, textTransform: 'uppercase' }}>Group</span>
+              <select value={inventoryGroupFilter} onChange={(e) => setInventoryGroupFilter(e.target.value)}
+                style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', outline: 'none', minWidth: 160, maxWidth: 260 }}>
+                <option value="">All ({hosts?.length ?? 0})</option>
+                {availableInventoryGroups.map((g) => {
+                  const n = (hosts || []).filter((h) => (h.groups || []).includes(g)).length
+                  return <option key={g} value={g}>{g} ({n})</option>
+                })}
+              </select>
+              {inventoryGroupFilter && (
+                <button type="button" onClick={() => setInventoryGroupFilter('')} title="Clear group"
+                  style={{ padding: '2px 8px', borderRadius: 5, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text3)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 700 }}>✕</button>
+              )}
+            </div>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 10px', borderRadius: 9, border: '1px solid var(--border)', background: 'var(--bg3)' }}>
+              <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, letterSpacing: .5, textTransform: 'uppercase' }}>Status</span>
+              <select value={inventoryAvailFilter} onChange={(e) => setInventoryAvailFilter(e.target.value)}
+                style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', outline: 'none', minWidth: 168, maxWidth: 220 }}>
+                <option value="">All ({inventoryAvailCounts.all})</option>
+                <option value="Available">Available ({inventoryAvailCounts.Available})</option>
+                <option value="Unavailable">Unavailable ({inventoryAvailCounts.Unavailable})</option>
+                <option value="Unknown">Unknown ({inventoryAvailCounts.Unknown})</option>
+              </select>
+              {inventoryAvailFilter && (
+                <button type="button" onClick={() => setInventoryAvailFilter('')} title="Clear status"
+                  style={{ padding: '2px 8px', borderRadius: 5, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text3)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 700 }}>✕</button>
+              )}
+            </div>
           </div>
-          <Widget title="Device Inventory" badge={`${filteredInventory.length}${inventorySearch && hosts ? ` / ${hosts.length}` : ''}`} badgeColor="green" noPad
+          <Widget title="Device Inventory" badge={`${filteredInventory.length}${(inventorySearch || inventoryGroupFilter || inventoryAvailFilter) && hosts ? ` / ${hosts.length}` : ''}`} badgeColor="green" noPad
             actions={null}>
             {hosts === null || tabBusy
               ? <div style={{ padding: 24, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}><span className="np-page-loading-dot" style={{ width: 14, height: 14 }} />Loading devices…</div>
-              : <DataTable columns={hostCols} rows={filteredInventory} empty={inventorySearch ? `No devices match "${inventorySearch}".` : 'No monitored devices.'} rowKey={(h) => h.hostid} onRowClick={(h) => goToHostGraphs(h)} />
+              : <DataTable columns={hostCols} rows={filteredInventory} empty={(() => {
+                  if (!hosts?.length) return 'No monitored devices.'
+                  if (inventorySearch) return `No devices match "${inventorySearch}"${inventoryAvailFilter ? ` with status ${inventoryAvailFilter}` : ''}${inventoryGroupFilter ? ` in group “${inventoryGroupFilter}”` : ''}.`
+                  if (inventoryAvailFilter || inventoryGroupFilter) return `No devices${inventoryAvailFilter ? ` with status “${inventoryAvailFilter}”` : ''}${inventoryGroupFilter ? ` in group “${inventoryGroupFilter}”` : ''}.`
+                  return 'No monitored devices.'
+                })()} rowKey={(h) => h.hostid} onRowClick={(h) => goToHostGraphs(h)} />
             }
           </Widget>
         </div>
