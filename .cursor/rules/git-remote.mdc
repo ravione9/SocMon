@@ -1,0 +1,10 @@
+---
+description: Default Git remote for this repo — push only to ravione9/SocMon
+alwaysApply: true
+---
+
+# Git remote (netpulse / SocMon)
+
+- **Only push to:** `https://github.com/ravione9/SocMon.git`
+- **`origin`** is configured to that URL; use `git push origin main` (or `git push` with upstream set).
+- Do **not** add or use `Sunil123456789/netpulse` as the default push target unless the user explicitly asks to change remotes.
