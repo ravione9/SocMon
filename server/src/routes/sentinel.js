@@ -40,6 +40,11 @@ function hostGroupMustClause(hostGroup) {
         { term: { 'agent_realtime_info.group_name.keyword': hg } },
         { term: { 'groupName.keyword': hg } },
         { term: { 'site_name.keyword': hg } },
+        { term: { 'related.group.name.keyword': hg } },
+        { term: { 'sentinel_one.group.name.keyword': hg } },
+        { term: { 'sentinel_one.site.name.keyword': hg } },
+        { term: { 'sentinel_one.agent.group_name.keyword': hg } },
+        { term: { 'sentinel_one.agent.site_name.keyword': hg } },
         { match_phrase: { 'group.name': hg } },
         { match_phrase: { 'site.name': hg } },
         { match_phrase: { 'agentRealtimeInfo.groupName': hg } },
@@ -47,8 +52,6 @@ function hostGroupMustClause(hostGroup) {
         { match_phrase: { groupName: hg } },
         { match_phrase: { site_name: hg } },
         { match_phrase: { 'related.group.name': hg } },
-        { match_bool_prefix: { groupName: hg } },
-        { match_bool_prefix: { 'group.name': hg } },
       ],
       minimum_should_match: 1,
     },
@@ -162,6 +165,10 @@ const HOST_GROUP_AGG_FIELDS = [
   'agent_realtime_info.groupName.keyword',
   'agent_realtime_info.group_name.keyword',
   'related.group.name.keyword',
+  'sentinel_one.group.name.keyword',
+  'sentinel_one.site.name.keyword',
+  'sentinel_one.agent.group_name.keyword',
+  'sentinel_one.agent.site_name.keyword',
 ]
 
 async function aggregateDistinctHostGroupsFromLogs(es, index, must) {
@@ -279,15 +286,21 @@ function pickSentinelUser(src) {
 /** Host group label from ECS or SentinelOne agent realtime (must stay in sync with hostGroupMustClause). */
 function pickHostGroup(src) {
   const ar = src.agentRealtimeInfo || src.agent_realtime_info || {}
+  const s1 = src.sentinel_one || {}
   const candidates = [
     strVal(src.group?.name),
     strVal(src['group.name']),
     strVal(src.site?.name),
     strVal(src['site.name']),
     strVal(src.groupName),
+    strVal(src.site_name),
     strVal(ar.groupName),
     strVal(ar.group_name),
     strVal(src.related?.group?.name),
+    strVal(s1.group?.name),
+    strVal(s1.site?.name),
+    strVal(s1.agent?.group_name),
+    strVal(s1.agent?.site_name),
   ]
   for (const c of candidates) {
     if (c) return c
@@ -900,13 +913,7 @@ router.get('/dashboard', async (req, res) => {
       'user.id.keyword',
     ])
 
-    const sites = await tryCardinality(es, ix, mustBase, [
-      'group.name.keyword',
-      'site.name.keyword',
-      'agentRealtimeInfo.groupName.keyword',
-      'groupName.keyword',
-      'site_name.keyword',
-    ])
+    const sites = await tryCardinality(es, ix, mustBase, HOST_GROUP_AGG_FIELDS)
 
     let usbEvents = 0
     let bluetoothEvents = 0
