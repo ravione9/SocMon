@@ -128,6 +128,20 @@ function appendThreatListSortParams(params, query) {
   params.set('sortOrder', String(query.sortOrder || 'desc').trim().toLowerCase() === 'asc' ? 'asc' : 'desc')
 }
 
+/** True when query asks for every incident state (explicit incidents=all or all three statuses listed). */
+function incidentStatusesCoverAll(val) {
+  if (val == null || val === '') return false
+  const pieces = Array.isArray(val)
+    ? val.map(v => String(v).trim()).filter(Boolean)
+    : String(val)
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+  const set = new Set(pieces)
+  const need = ['unresolved', 'in_progress', 'resolved']
+  return need.every(s => set.has(s))
+}
+
 /** Query flags for GET /threats — uses createdAt window + optional cursor page. */
 export function buildThreatListParams(query) {
   const params = new URLSearchParams()
@@ -168,8 +182,10 @@ export function buildThreatListParams(query) {
     appendMultiParam(params, 'mitigationStatuses', mit)
   }
 
-  /** Omit incidentStatuses filter — count/list every incident state (resolved + unresolved + in progress). */
-  const incidentsAll = ['all', 'any', '1', 'true'].includes(String(query.incidents || '').trim().toLowerCase())
+  /** Omit incidentStatuses filter — full incident spectrum or incidents=all / equivalent triple selection. */
+  const incidentsAll =
+    ['all', 'any', '1', 'true'].includes(String(query.incidents || '').trim().toLowerCase()) ||
+    incidentStatusesCoverAll(query.incidentStatuses)
   if (!incidentsAll) {
     const inc = queryToCsvPieces(query.incidentStatuses, 'unresolved,in_progress')
     appendMultiParam(params, 'incidentStatuses', inc)

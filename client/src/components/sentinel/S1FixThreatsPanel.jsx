@@ -227,8 +227,16 @@ export default function S1FixThreatsPanel({ range }) {
       if (mitigationAny) params.set('mitigation', 'all')
       else params.append('mitigationStatuses', mitigationStatuses)
 
-      const inc = incidentSelections.length ? incidentSelections : ['unresolved']
-      for (const s of inc) params.append('incidentStatuses', s)
+      /** All toggles on = show every incident state; sending three incidentStatuses breaks some tenants (behaves like AND → zero rows). */
+      const allIncidentStatusesSelected =
+        INCIDENT_FILTER_OPTIONS.length > 0 &&
+        INCIDENT_FILTER_OPTIONS.every(o => incidentSelections.includes(o.value))
+      if (allIncidentStatusesSelected) {
+        params.set('incidents', 'all')
+      } else {
+        const inc = incidentSelections.length ? incidentSelections : ['unresolved']
+        for (const s of inc) params.append('incidentStatuses', s)
+      }
       const q = searchQ.trim()
       if (q) params.set('q', q)
 
