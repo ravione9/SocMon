@@ -673,14 +673,26 @@ export default function AdminPage() {
               {[
                 { label:'Version', value:'1.0.0' },
                 { label:'License', value:'Lenskart Security Team' },
-                { label:'GitHub', value:'Sunil123456789/netpulse' },
+                {
+                  label:'GitHub',
+                  value:'ravione9/SocMon',
+                  href:'https://github.com/ravione9/SocMon',
+                },
                 { label:'Node.js', value:'22.x' },
                 { label:'React', value:'18.x' },
-                { label:'Elasticsearch', value:'9.2.2' },
+                { label:'Elasticsearch', value:'8.x (JS client)' },
               ].map((item,i) => (
                 <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'8px 0', borderBottom:'1px solid var(--border)' }}>
                   <span style={{ fontSize:11, color:'var(--text3)', fontFamily:'var(--mono)' }}>{item.label}</span>
-                  <span style={{ fontSize:11, color:'var(--text2)', fontFamily:'var(--mono)', textAlign:'right', maxWidth:'55%' }}>{item.value}</span>
+                  <span style={{ fontSize:11, color:'var(--text2)', fontFamily:'var(--mono)', textAlign:'right', maxWidth:'55%' }}>
+                    {item.href ? (
+                      <a href={item.href} target="_blank" rel="noopener noreferrer" style={{ color:'var(--accent)', textDecoration:'none' }}>
+                        {item.value}
+                      </a>
+                    ) : (
+                      item.value
+                    )}
+                  </span>
                 </div>
               ))}
             </div>
