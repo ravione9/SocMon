@@ -5,7 +5,7 @@
   "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "dev": "nodemon --inspect=0.0.0.0:9229 src/index.js",
+    "dev": "node --inspect=0.0.0.0:9229 --watch src/index.js",
     "start": "node src/index.js",
     "lint": "eslint src/",
     "test": "jest"

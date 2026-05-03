@@ -4,6 +4,7 @@ import {
   getSentinelIndex,
   ACTIVE_THREAT_BOOL,
   RESOLVED_THREAT_BOOL,
+  THREAT_DETECTED_BOOL,
   AGENT_DISCONNECTED_BOOL,
   AGENT_CONNECTED_BOOL,
   hitsTotalValue,
@@ -841,7 +842,7 @@ router.get('/dashboard', async (req, res) => {
       btOnlyCount,
     ] = await Promise.all([
       safeCount(es, ix, mustBase),
-      safeCount(es, ix, [...mustBase, ACTIVE_THREAT_BOOL]),
+      safeCount(es, ix, [...mustBase, THREAT_DETECTED_BOOL, { bool: { must_not: [USB_PERIPHERAL_EVENT_BOOL] } }]),
       safeCount(es, ix, [...mustBase, AGENT_DISCONNECTED_BOOL]),
       safeCount(es, ix, [...mustBase, AGENT_CONNECTED_BOOL]),
       safeCount(es, ix, [...mustBase, BLOCKED_OR_MITIGATED_BOOL]),
@@ -865,7 +866,12 @@ router.get('/dashboard', async (req, res) => {
         index: ix,
         body: {
           size: 0,
-          query: { bool: { must: [...mustBase, ACTIVE_THREAT_BOOL] } },
+          query: {
+            bool: {
+              must: [...mustBase, THREAT_DETECTED_BOOL],
+              must_not: [USB_PERIPHERAL_EVENT_BOOL],
+            },
+          },
           aggs: {
             h: {
               date_histogram: {
@@ -877,23 +883,19 @@ router.get('/dashboard', async (req, res) => {
           },
         },
       }),
-      scope === 'no_usb' || scope === 'bt_only'
-        ? Promise.resolve(0)
-        : (() => {
-            const m = [rangeQ, USB_PERIPHERAL_EVENT_BOOL]
-            appendHostGroup(m, hostGroup)
-            appendEndpoints(m, endpoints)
-            appendUsbDevicesFilter(m, usbDevices)
-            return safeCount(es, ix, m)
-          })(),
-      scope === 'no_usb' || scope === 'usb_only'
-        ? Promise.resolve(0)
-        : (() => {
-            const m = [rangeQ, BLUETOOTH_DEVICE_EVENT_BOOL]
-            appendHostGroup(m, hostGroup)
-            appendEndpoints(m, endpoints)
-            return safeCount(es, ix, m)
-          })(),
+      (() => {
+        const m = [rangeQ, USB_PERIPHERAL_EVENT_BOOL]
+        appendHostGroup(m, hostGroup)
+        appendEndpoints(m, endpoints)
+        appendUsbDevicesFilter(m, usbDevices)
+        return safeCount(es, ix, m)
+      })(),
+      (() => {
+        const m = [rangeQ, BLUETOOTH_DEVICE_EVENT_BOOL]
+        appendHostGroup(m, hostGroup)
+        appendEndpoints(m, endpoints)
+        return safeCount(es, ix, m)
+      })(),
     ])
 
     const timeline = alignHistograms(
@@ -918,8 +920,8 @@ router.get('/dashboard', async (req, res) => {
     let usbEvents = 0
     let bluetoothEvents = 0
     if (scope === 'no_usb') {
-      usbEvents = 0
-      bluetoothEvents = 0
+      usbEvents = usbOnlyCount
+      bluetoothEvents = btOnlyCount
     } else if (scope === 'usb_only') {
       usbEvents = total
       bluetoothEvents = 0

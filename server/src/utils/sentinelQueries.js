@@ -91,6 +91,14 @@ export const RESOLVED_THREAT_BOOL = {
   },
 }
 
+/** Any threat lifecycle signal in-window (active ∪ resolved/mitigated) — dashboard “Threats detected” KPI + timeline. */
+export const THREAT_DETECTED_BOOL = {
+  bool: {
+    should: [ACTIVE_THREAT_BOOL, RESOLVED_THREAT_BOOL],
+    minimum_should_match: 1,
+  },
+}
+
 /** Message / event.original phrases for agent or endpoint device connectivity (indexed + text). */
 const MSG_FIELDS = ['message', 'event.original']
 
@@ -189,6 +197,20 @@ export const USB_PERIPHERAL_EVENT_BOOL = {
       { terms: { 'event.action': ['usb_device_control', 'device_control'] } },
       { terms: { 'event.category.keyword': ['device', 'peripheral'] } },
       { match_phrase: { 'event.original': 'USB' } },
+      // Looser text match — many pipelines omit canonical actions but mention USB/removable in message.
+      {
+        simple_query_string: {
+          query:
+            '"USB device" | usb_device | "removable device" | "mass storage" | peripheral_device | "device control"',
+          fields: ['message', 'event.original'],
+          lenient: true,
+          default_operator: 'or',
+        },
+      },
+      { wildcard: { 'event.action.keyword': '*usb*' } },
+      { wildcard: { 'event.action.keyword': '*USB*' } },
+      { match_phrase_prefix: { 'sentinel_one.activity.data.externalDeviceType': 'USB' } },
+      { match_phrase_prefix: { 'sentinel_one.activity.data.deviceClass': 'USB' } },
     ],
     minimum_should_match: 1,
   },

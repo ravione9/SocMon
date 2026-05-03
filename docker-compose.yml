@@ -12,9 +12,10 @@ services:
       - ./client:/app
       - /app/node_modules
     environment:
-      # Use 127.0.0.1 — on Windows, localhost (::1) often hits Docker port-forward bugs (connection reset).
-      - VITE_API_URL=http://127.0.0.1:5000
-      - VITE_WS_URL=ws://127.0.0.1:5000
+      NODE_ENV: development
+      # 127.0.0.1 — on Windows, localhost (::1) often hits Docker port-forward bugs (connection reset).
+      VITE_API_URL: http://127.0.0.1:5000
+      VITE_WS_URL: ws://127.0.0.1:5000
     depends_on:
       - server
     networks:
@@ -35,6 +36,8 @@ services:
       - ./certs:/app/certs:ro
     env_file:
       - .env
+    environment:
+      NODE_ENV: development
     depends_on:
       mongo:
         condition: service_healthy

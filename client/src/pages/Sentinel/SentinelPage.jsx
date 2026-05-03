@@ -1,5 +1,6 @@
 import RangePicker from '../../components/ui/RangePicker.jsx'
 import SentinelLogSearch from '../../components/sentinel/SentinelLogSearch.jsx'
+import S1FixThreatsPanel from '../../components/sentinel/S1FixThreatsPanel.jsx'
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { Line, Bar, Doughnut } from 'react-chartjs-2'
 import {
@@ -42,6 +43,7 @@ const C = {
 const TABS = [
   { id: 'overview', label: 'Overview' },
   { id: 'active', label: 'Active & detection' },
+  { id: 'fix_threats', label: 'Threat Incident' },
   { id: 'usb', label: 'USB device connection' },
   { id: 'usb_dash', label: 'USB custom Dashboard' },
   { id: 'bluetooth', label: 'Bluetooth device connection' },
@@ -99,6 +101,7 @@ function drillPatchHasFilters(patch) {
 function scopeForTab(tab) {
   if (tab === 'overview') return 'all'
   if (tab === 'active') return 'no_usb'
+  if (tab === 'fix_threats') return 'all'
   if (tab === 'usb' || tab === 'usb_dash') return 'usb_only'
   if (tab === 'bluetooth') return 'bt_only'
   return 'all'
@@ -239,6 +242,11 @@ export default function SentinelPage() {
   const [activeThreatTotal, setActiveThreatTotal] = useState(null)
   const [resolvedThreatTotal, setResolvedThreatTotal] = useState(null)
   const [threatsLoading, setThreatsLoading] = useState(false)
+  /** Threat Incident-aligned unresolved KPI state (not mitigated · unresolved + in-progress). */
+  const [s1NotMitigatedCount, setS1NotMitigatedCount] = useState(null)
+  /** Full incident-time-window count for main Threats KPI (incidents=all — no incidentStatuses filter). */
+  const [s1DetectedThreatCount, setS1DetectedThreatCount] = useState(null)
+  const [s1ThreatApiLoading, setS1ThreatApiLoading] = useState(true)
   const [sentinelDrill, setSentinelDrill] = useState(null)
   const [usbDrill, setUsbDrill] = useState(null)
   const [bluetoothDrill, setBluetoothDrill] = useState(null)
@@ -478,6 +486,55 @@ export default function SentinelPage() {
     }
   }, [range, tab, hostGroupQuery, usbDashEndpointsQuery, usbDashUsbDevicesQuery, usbDashSelectedHosts.length, usbDashSelectedDevices.length])
 
+  /**
+   * Parallel counts: (1) Threat Incident-style unresolved KPI (not mitigated · unresolved + in-progress).
+   * (2) Threats KPI — full incident count (omit incidentStatuses filter via incidents=all; mitigation=all).
+   */
+  useEffect(() => {
+    let cancelled = false
+    async function loadS1ThreatKpis() {
+      setS1ThreatApiLoading(true)
+      try {
+        const base = () => {
+          const p = new URLSearchParams()
+          if (range?.type === 'custom' && range.from && range.to) {
+            p.set('from', range.from)
+            p.set('to', range.to)
+          } else {
+            p.set('range', range?.value || DEFAULT_RANGE_VALUE)
+          }
+          return p
+        }
+        const nmParams = base()
+        const detParams = base()
+        detParams.set('mitigation', 'all')
+        detParams.set('incidents', 'all')
+        const [nm, det] = await Promise.all([
+          api.get(`/api/sentinel-one/threats/count?${nmParams}`),
+          api.get(`/api/sentinel-one/threats/count?${detParams}`),
+        ])
+        if (cancelled) return
+        if (nm.data?.configured === false) setS1NotMitigatedCount(null)
+        else setS1NotMitigatedCount(typeof nm.data?.count === 'number' ? nm.data.count : null)
+        if (det.data?.configured === false) setS1DetectedThreatCount(null)
+        else setS1DetectedThreatCount(typeof det.data?.count === 'number' ? det.data.count : null)
+      } catch {
+        if (!cancelled) {
+          setS1NotMitigatedCount(null)
+          setS1DetectedThreatCount(null)
+        }
+      } finally {
+        if (!cancelled) setS1ThreatApiLoading(false)
+      }
+    }
+    loadS1ThreatKpis()
+    const iv = setInterval(loadS1ThreatKpis, 60000)
+    return () => {
+      cancelled = true
+      clearInterval(iv)
+    }
+  }, [range])
+
   useEffect(() => {
     if (tab !== 'active') return
     let cancelled = false
@@ -664,7 +721,22 @@ export default function SentinelPage() {
   const showUsbDash = tab === 'usb'
   const showUsbMultiDash = tab === 'usb_dash'
   const showBluetoothDash = tab === 'bluetooth'
+  const showFixThreatsPanel = tab === 'fix_threats'
   const showDashPanel = showOverviewDash || showUsbDash || showUsbMultiDash || showBluetoothDash
+
+  const s1NmKpiValue = useMemo(
+    () =>
+      s1ThreatApiLoading ? '…' : s1NotMitigatedCount != null ? s1NotMitigatedCount.toLocaleString() : '—',
+    [s1ThreatApiLoading, s1NotMitigatedCount],
+  )
+
+  const s1DetectedThreatKpiValue = useMemo(
+    () =>
+      s1ThreatApiLoading ? '…' : s1DetectedThreatCount != null ? s1DetectedThreatCount.toLocaleString() : '—',
+    [s1ThreatApiLoading, s1DetectedThreatCount],
+  )
+
+  const goFixThreatsApi = useCallback(() => setTab('fix_threats'), [])
 
   return (
     <div
@@ -735,7 +807,9 @@ export default function SentinelPage() {
               ))}
             </select>
           </label>
-          {showDashPanel && <RangePicker range={range} onChange={setRange} accentColor={C.accent} />}
+          {(showDashPanel || showFixThreatsPanel) && (
+            <RangePicker range={range} onChange={setRange} accentColor={C.accent} />
+          )}
         </div>
       </div>
 
@@ -772,6 +846,8 @@ export default function SentinelPage() {
               background: tab === t.id ? 'var(--accent)' : 'transparent',
               color: tab === t.id ? 'var(--on-accent)' : C.text2,
               transition: 'all 0.15s',
+              whiteSpace: 'nowrap',
+              flexShrink: 0,
             }}
           >
             {t.label}
@@ -792,11 +868,11 @@ export default function SentinelPage() {
             />
             <KPI
               label="Threats"
-              value={loading ? '…' : dash?.threats?.toLocaleString()}
-              sub="detected"
+              value={s1DetectedThreatKpiValue}
+              sub="resolved & unresolved"
               color="red"
-              onClick={() => goDrill({ q: 'threat' })}
-              title="Threat signals in scope"
+              onClick={goFixThreatsApi}
+              title="All threat incidents in this time range — unresolved, in progress, and resolved. USB and peripheral activity stays under USB events."
             />
             <KPI
               label="Active endpoints"
@@ -812,7 +888,7 @@ export default function SentinelPage() {
               sub="peripheral activity"
               color="orange"
               onClick={() => goDrill({ q: 'USB' })}
-              title="USB / device-control style events"
+              title="USB / removable / device-control style events (broader text match). Event-type donut below is agent connected / disconnected / blocked — not USB-only."
             />
             <KPI
               label="Bluetooth events"
@@ -830,11 +906,12 @@ export default function SentinelPage() {
               onClick={() => goDrill({})}
             />
             <KPI
-              label="Unique users"
-              value={loading ? '…' : dash?.uniqueUsers?.toLocaleString()}
-              sub="active accounts"
+              label="Unresolved threats"
+              value={s1NmKpiValue}
+              sub="Threat Incident"
               color="purple"
-              onClick={() => goDrill({})}
+              onClick={goFixThreatsApi}
+              title="Created in this range · not mitigated · unresolved or in-progress (matches Threat Incident tab defaults). Choose Any mitigation there to include remediated-but-still-open rows."
             />
           </div>
 
@@ -871,7 +948,12 @@ export default function SentinelPage() {
                 )}
               </div>
             </Card>
-            <Card title="Event types" badge="breakdown" onClick={() => goDrill({})} titleHint="Click a slice for event kind, or card for all events">
+            <Card
+              title="Event types"
+              badge="breakdown"
+              onClick={() => goDrill({})}
+              titleHint="Connected / disconnected / blocked across all events (agent & endpoint signals — not the USB KPI). Click a slice or card for Custom log."
+            >
               <div style={{ height: 220, position: 'relative', cursor: 'pointer' }}>
                 <Doughnut
                   data={eventTypeDonut}
@@ -965,11 +1047,12 @@ export default function SentinelPage() {
               onClick={() => usbGoDrill({})}
             />
             <KPI
-              label="Unique users"
-              value={loading ? '…' : dash?.uniqueUsers?.toLocaleString()}
-              sub="active accounts"
+              label="Unresolved threats"
+              value={s1NmKpiValue}
+              sub="Threat Incident"
               color="purple"
-              onClick={() => usbGoDrill({})}
+              onClick={goFixThreatsApi}
+              title="Created in this range · not mitigated · unresolved or in-progress (matches Threat Incident tab defaults). Choose Any mitigation there to include remediated-but-still-open rows."
             />
           </div>
 
@@ -1438,11 +1521,12 @@ export default function SentinelPage() {
                   onClick={() => usbDashGoDrill({})}
                 />
                 <KPI
-                  label="Unique users"
-                  value={loading ? '…' : dash?.uniqueUsers?.toLocaleString()}
-                  sub="active accounts"
+                  label="Unresolved threats"
+                  value={s1NmKpiValue}
+                  sub="Threat Incident"
                   color="purple"
-                  onClick={() => usbDashGoDrill({})}
+                  onClick={goFixThreatsApi}
+                  title="Created in this range · not mitigated · unresolved or in-progress (matches Threat Incident tab defaults). Choose Any mitigation there to include remediated-but-still-open rows."
                 />
               </div>
 
@@ -1624,11 +1708,12 @@ export default function SentinelPage() {
               onClick={() => bluetoothGoDrill({})}
             />
             <KPI
-              label="Unique users"
-              value={loading ? '…' : dash?.uniqueUsers?.toLocaleString()}
-              sub="active accounts"
+              label="Unresolved threats"
+              value={s1NmKpiValue}
+              sub="Threat Incident"
               color="purple"
-              onClick={() => bluetoothGoDrill({})}
+              onClick={goFixThreatsApi}
+              title="Created in this range · not mitigated · unresolved or in-progress (matches Threat Incident tab defaults). Choose Any mitigation there to include remediated-but-still-open rows."
             />
           </div>
 
@@ -1747,16 +1832,18 @@ export default function SentinelPage() {
         </>
       )}
 
+      {tab === 'fix_threats' && <S1FixThreatsPanel range={range} />}
+
       {tab === 'active' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
             <KPI
               label="Detected threats"
-              value={threatsLoading ? '…' : activeThreatTotal != null ? activeThreatTotal.toLocaleString() : '—'}
-              sub="active (range, no USB)"
+              value={s1DetectedThreatKpiValue}
+              sub="resolved & unresolved"
               color="red"
-              onClick={() => goDrill({ q: 'threat' })}
-              title="Open Custom log — threat-related events in this scope"
+              onClick={goFixThreatsApi}
+              title="Same total as Overview Threats (resolved & unresolved). Tables below highlight active vs resolved log rows (USB excluded from those lists)."
             />
             <KPI
               label="Resolved threats"
@@ -1764,7 +1851,23 @@ export default function SentinelPage() {
               sub="mitigated / quarantined / removed"
               color="green"
               onClick={() => goDrill({ q: 'mitigated' })}
-              title="Open Custom log — resolved / mitigated signals"
+              title="Resolved or mitigated signals (opens Custom log)"
+            />
+            <KPI
+              label="USB events"
+              value={loading ? '…' : dash?.usbEvents?.toLocaleString()}
+              sub="peripheral activity"
+              color="orange"
+              onClick={() => goDrill({ q: 'USB' })}
+              title="Same peripheral/USB total as Overview."
+            />
+            <KPI
+              label="Bluetooth events"
+              value={loading ? '…' : dash?.bluetoothEvents?.toLocaleString()}
+              sub="radio / pairing"
+              color="indigo"
+              onClick={() => goDrill({ q: 'Bluetooth' })}
+              title="Same Bluetooth total as Overview."
             />
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>

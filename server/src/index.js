@@ -29,6 +29,7 @@ import alertRoutes from './routes/alerts.js'
 import aiRoutes from './routes/ai.js'
 import statsRoutes from './routes/stats.js'
 import sentinelRoutes from './routes/sentinel.js'
+import sentinelOneRoutes from './routes/sentinelOne.js'
 import zabbixRoutes from './routes/zabbix.js'
 import { errorHandler } from './middleware/errorHandler.js'
 
@@ -77,6 +78,7 @@ app.use('/api/alerts',  alertRoutes)
 app.use('/api/ai',      aiRoutes)
 app.use('/api/stats',   statsRoutes)
 app.use('/api/sentinel', sentinelRoutes)
+app.use('/api/sentinel-one', sentinelOneRoutes)
 app.use('/api/zabbix', zabbixRoutes)
 app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.0.0', ai: process.env.AI_PROVIDER || 'claude' }))
 app.use(errorHandler)
