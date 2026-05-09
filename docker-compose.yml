@@ -10,7 +10,10 @@ services:
       - "3000:3000"
     volumes:
       - ./client:/app
+      # Isolated from the bind mount: install deps inside the container when package.json changes.
       - /app/node_modules
+    # Ensures node_modules (in the volume above) matches mounted package.json / lockfile after git pull.
+    command: sh -c "npm install && npm run dev"
     environment:
       NODE_ENV: development
       # 127.0.0.1 — on Windows, localhost (::1) often hits Docker port-forward bugs (connection reset).
@@ -32,17 +35,49 @@ services:
       - "9229:9229"
     volumes:
       - ./server:/app
+      # Isolated from the bind mount: install deps inside the container when package.json changes.
       - /app/node_modules
       - ./certs:/app/certs:ro
+    # Sync node_modules (in the volume above) with mounted package.json/lockfile, then start.
+    command: sh -c "npm install --no-audit --no-fund --progress=false && npm run dev"
     env_file:
       - .env
     environment:
       NODE_ENV: development
+      # guacd runs as a sibling container on the internal Docker network.
+      # The server talks to it via the service name, not localhost.
+      GUACD_HOST: guacd
+      GUACD_PORT: "4822"
     depends_on:
       mongo:
         condition: service_healthy
       redis:
         condition: service_healthy
+      guacd:
+        condition: service_started
+    networks:
+      - netpulse
+    restart: unless-stopped
+
+  # Apache Guacamole RDP bridge — logs speak TCP-level lifecycle only unless FreeRDP errors surface here.
+  # Interpretation:
+  #   • Two adjacent "Creating new client" before removals → two parallel sessions (two browser tabs,
+  #     dev StrictMode race, or quick reconnect while the prior WS still spins up).
+  #   • Repeated banner "Guacamole proxy daemon … started" → guacd container restarted (crash/OOM,
+  #     compose recreate); kills every active RDP session from Netpulse.
+  # Prefer a pinned tag so pulls don't silently change behaviour (avoid :latest in prod stacks).
+  guacd:
+    image: guacamole/guacd:1.6.0
+    container_name: netpulse-guacd
+    # Port 4822 is only needed if you want to reach guacd from outside Docker.
+    # The server container reaches it via the internal network (GUACD_HOST: guacd).
+    # Uncomment the line below only for debugging:
+    # ports:
+    #   - "4822:4822"
+    environment:
+      # debug surfaces FreeRDP auth/TLS/NLA failures (default = info hides them).
+      # Levels: trace | debug | info | warning | error.
+      GUACD_LOG_LEVEL: debug
     networks:
       - netpulse
     restart: unless-stopped
