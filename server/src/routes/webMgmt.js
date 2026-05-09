@@ -574,40 +574,12 @@ try{
     });
   }
 }catch(e){}
-/* ── 8b. window.open — FortiGate "tools" / diagnostics often open in a new window;
-   without this, the browser loads https://device-ip/… directly (unreachable / wrong cert). */
-try{
-  var _wo=window.open;
-  window.open=function(url,name,features){
-    try{
-      if(url!=null&&String(url)!==''){
-        var s=String(url);
-        if(/^\s*mailto:/i.test(s)||/^\s*tel:/i.test(s)||/^\s*data:/i.test(s))
-          return _wo.apply(window,arguments);
-        var u=fix(s);
-        var abs=/^https?:\/\//i.test(u)?u:((location.origin||'')+(u.charAt(0)==='/'?u:'/'+u));
-        return _wo.call(window,abs,name,features);
-      }
-    }catch(e2){}
-    return _wo.apply(window,arguments);
-  };
-}catch(e){}
 /* ── 9. <a> clicks ──────────────────────────────────────────────────────── */
 document.addEventListener('click',function(ev){
   var el=ev.target&&ev.target.closest('a');if(!el)return;
   var h=el.getAttribute('href');
-  if(!h||h.charAt(0)==='#'||/^\s*javascript:/i.test(h))return;
-  var t=(el.getAttribute('target')||'').toLowerCase();
-  if(t==='_blank'||t==='_new'){
-    if(/^\s*mailto:/i.test(h)||/^\s*tel:/i.test(h)||/^\s*data:/i.test(h))return;
-    ev.preventDefault();
-    var u=fix(h);
-    var abs=/^https?:\/\//i.test(u)?u:((location.origin||'')+(u.charAt(0)==='/'?u:'/'+u));
-    window.open(abs,'_blank','noopener,noreferrer');
-    return;
-  }
-  if(h.charAt(0)==='/'&&h.charAt(1)!=='/'&&h.indexOf(P)!==0){
-    ev.preventDefault();history.pushState(null,'',fix(h));
+  if(h&&h.charAt(0)==='/'&&h.charAt(1)!=='/'&&h.indexOf(P)!==0){
+    ev.preventDefault();history.pushState(null,'',P+h);
   }
 },true);
 /* ── 10. document.write shim ────────────────────────────────────────────── */
