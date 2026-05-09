@@ -4,8 +4,6 @@ db.createCollection('devices')
 db.createCollection('sites')
 db.createCollection('tickets')
 db.createCollection('alertrules')
-db.createCollection('sshsessions')
-db.createCollection('deviceusercredentials')
 db.users.insertOne({
   name: 'Admin',
   email: 'admin@netpulse.local',
