@@ -139,3 +139,10 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Local debug captures (HTTP body dumps from device probes)
+body*.html
+body*.bin
+
+# Editor / IDE
+.vscode/
