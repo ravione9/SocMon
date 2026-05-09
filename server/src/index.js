@@ -31,6 +31,9 @@ import statsRoutes from './routes/stats.js'
 import sentinelRoutes from './routes/sentinel.js'
 import sentinelOneRoutes from './routes/sentinelOne.js'
 import zabbixRoutes from './routes/zabbix.js'
+import sshSessionRoutes from './routes/sshSessions.js'
+import webMgmtRoutes, { proxyWsUpgrade } from './routes/webMgmt.js'
+import rdpRoutes, { proxyRdpWsUpgrade } from './routes/rdp.js'
 import { errorHandler } from './middleware/errorHandler.js'
 
 /** CORS: localhost and 127.0.0.1 are different browser origins; allow both when either is configured. */
@@ -60,13 +63,38 @@ const io = new Server(httpServer, {
   cors: { origin: corsOrigins, methods: ['GET', 'POST'] },
 })
 
-app.use(helmet())
-app.use(compression())
+// WebSocket proxies — registered AFTER Socket.IO so all handlers coexist on the
+// same HTTP server.  Each handler checks its own path prefix and returns early
+// for anything that doesn't match, leaving Socket.IO's handler unaffected.
+httpServer.on('upgrade', proxyWsUpgrade)       // /api/web-mgmt/p/<token>  (FortiGate, Cisco web UI)
+httpServer.on('upgrade', proxyRdpWsUpgrade)    // /api/rdp/ws              (Windows Server RDP via guacd)
+
+// Allow same-origin iframes (the device Web UI proxy renders inside Netpulse).
+app.use(
+  helmet({
+    frameguard: { action: 'sameorigin' },
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginOpenerPolicy: false,
+    crossOriginResourcePolicy: false,
+  }),
+)
+app.use(morgan('dev'))
+// CORS BEFORE the proxy so cross-origin preflight (OPTIONS) carries Access-Control-* headers.
 app.use(cors({ origin: corsOrigins }))
+// Web-mgmt proxy is mounted BEFORE compression / json so streamed device responses pass through untouched.
+app.use('/api/web-mgmt', webMgmtRoutes)
+app.use(compression())
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true, limit: '10mb' }))
-app.use(morgan('dev'))
-app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }))
+app.use(
+  '/api/',
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 500,
+    skip: (req) => req.path.startsWith('/web-mgmt/p/'),
+  }),
+)
 
 app.use('/api/auth',    authRoutes)
 app.use('/api/users',   userRoutes)
@@ -80,7 +108,10 @@ app.use('/api/stats',   statsRoutes)
 app.use('/api/sentinel', sentinelRoutes)
 app.use('/api/sentinel-one', sentinelOneRoutes)
 app.use('/api/zabbix', zabbixRoutes)
+app.use('/api/ssh-sessions', sshSessionRoutes)
+app.use('/api/rdp', rdpRoutes)
 app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.0.0', ai: process.env.AI_PROVIDER || 'claude' }))
+
 app.use(errorHandler)
 
 async function start() {
