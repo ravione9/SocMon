@@ -7,8 +7,11 @@ function absoluteIframeUrl(relative) {
   if (!relative) return null
   if (/^https?:\/\//i.test(relative)) return relative
   const base = resolvedApiBase()
-  if (!base) return relative
-  return base.replace(/\/$/, '') + relative
+  if (base) return base.replace(/\/$/, '') + relative
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return window.location.origin.replace(/\/$/, '') + relative
+  }
+  return relative
 }
 
 export default function WebUiFrame({ device, onClose }) {
