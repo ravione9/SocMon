@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useState, useMemo, useCallback } from 'react'
 import toast from 'react-hot-toast'
 import api from '../../api/client'
-import { formatTimestampIstForCsv } from '../../utils/csvTimestampIst.js'
 import { useSentinelHostGroups } from '../../hooks/useSentinelHostGroups.js'
 import RangePicker from '../ui/RangePicker.jsx'
 import { useResizableColumns, ResizableColGroup, ResizableTh } from '../ui/ResizableTable.jsx'
@@ -242,7 +241,7 @@ export default function SentinelLogSearch({
       return s
     }
     const lines = rows.map(row => {
-      const t = formatTimestampIstForCsv(row['@timestamp'])
+      const t = row['@timestamp'] ? new Date(row['@timestamp']).toISOString() : ''
       return [
         t,
         row.hostGroup ?? '—',

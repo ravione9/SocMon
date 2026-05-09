@@ -173,23 +173,6 @@ export default function AdminPage() {
         if (data.password) payload.password = data.password
         if (data.role !== 'admin' && Array.isArray(data.allowedPages)) payload.allowedPages = data.allowedPages
       }
-      if (_type === 'devices') {
-        payload = {
-          name: data.name,
-          ip: data.ip,
-          type: data.type,
-          site: data.site,
-          status: data.status,
-          syslogPort: data.syslogPort,
-          notes: data.notes,
-          tags: data.tags,
-          mgmtUsername: data.mgmtUsername,
-          sshPort: data.sshPort,
-          httpsPort: data.httpsPort,
-        }
-        if (data.mgmtPassword) payload.mgmtPassword = data.mgmtPassword
-        if (data.savePassword !== undefined) payload.savePassword = data.savePassword
-      }
       if (_id) {
         await api.put(`/api/${_type}/${_id}`, payload)
         toast.success('Updated successfully')
@@ -251,8 +234,7 @@ export default function AdminPage() {
 
   function openCreate(type) {
     const defaults = {
-      devices: { _type:'devices', name:'', ip:'', type:'cisco-switch', site: sites[0]?._id||'', notes:'', tags:'', status:'unknown',
-        mgmtUsername:'', mgmtPassword:'', savePassword:false, sshPort:22, httpsPort:443 },
+      devices: { _type:'devices', name:'', ip:'', type:'cisco-switch', site: sites[0]?._id||'', notes:'', tags:'' },
       sites:   { _type:'sites', name:'', location:'', description:'', timezone:'Asia/Kolkata' },
       users:   { _type:'users', name:'', email:'', password:'', role:'viewer', allowedPages: [...APP_PAGE_KEYS] },
       alerts:  { _type:'alerts', name:'', description:'', type:'threshold', source:'all', severity:'medium', enabled:true },
@@ -263,10 +245,6 @@ export default function AdminPage() {
 
   function openEdit(type, item) {
     const base = { _type:type, _id:item._id, ...item, site: item.site?._id||item.site||'' }
-    if (type === 'devices') {
-      base.mgmtPassword = ''
-      base.savePassword = !!item.hasMgmtPassword
-    }
     if (type === 'users') {
       const pages =
         item.role === 'admin'
@@ -743,17 +721,6 @@ export default function AdminPage() {
             {value:'unknown',label:'Unknown'},
           ]} />
           <Field label="Notes" value={form.notes||''} onChange={f('notes')} />
-          <Field label="Mgmt username" value={form.mgmtUsername||''} onChange={f('mgmtUsername')} />
-          <Field label="SSH port" value={String(form.sshPort ?? 22)} onChange={v => f('sshPort')(v)} />
-          <Field label="HTTPS port" value={String(form.httpsPort ?? 443)} onChange={v => f('httpsPort')(v)} />
-          <Field label="Mgmt password" value={form.mgmtPassword||''} onChange={f('mgmtPassword')} type="password" />
-          <div style={{ marginBottom:16 }}>
-            <label style={{ display:'flex', alignItems:'center', gap:10, cursor:'pointer', fontSize:13, color:'var(--text2)', fontFamily:'var(--sans)' }}>
-              <input type="checkbox" checked={!!form.savePassword} onChange={e => f('savePassword')(e.target.checked)} />
-              Save password on server (encrypted; only you — not shared with other users)
-            </label>
-            <div style={{ fontSize:11, color:'var(--text3)', marginTop:6, fontFamily:'var(--mono)' }}>Leave blank when editing to keep your current password if this stays checked. Uncheck to remove your stored credentials for this device.</div>
-          </div>
           <div style={{ display:'flex', gap:10, justifyContent:'flex-end', marginTop:22, paddingTop:18, borderTop:'1px solid var(--border)' }}>
             <Btn variant="ghost" label="Cancel" onClick={()=>setModal(null)} />
             <Btn label={loading ? 'Saving...' : 'Save device'} onClick={save} />

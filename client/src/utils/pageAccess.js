@@ -13,7 +13,7 @@ export function canAccessPage(user, pageKey) {
   return getEffectiveAllowedPages(user).includes(pageKey)
 }
 
-const NAV_ORDER = ['soc', 'noc', 'sentinel', 'infra', 'network', 'tickets', 'reports', 'ai', 'admin']
+const NAV_ORDER = ['soc', 'noc', 'sentinel', 'infra', 'tickets', 'reports', 'ai', 'admin']
 
 export function getFirstAllowedPath(user) {
   const allowed = getEffectiveAllowedPages(user)

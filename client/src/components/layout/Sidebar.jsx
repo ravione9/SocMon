@@ -7,7 +7,6 @@ const nav = [
   { pageKey:'noc',      to:'/noc',     label:'NOC',     icon:'🌐' },
   { pageKey:'sentinel', to:'/sentinel', label:'XDR',    icon:'🛡️' },
   { pageKey:'infra',    to:'/infra',   label:'Infra',  icon:'📡' },
-  { pageKey:'network',  to:'/network', label:'Net',    icon:'🔌' },
   { pageKey:'tickets',  to:'/tickets', label:'Tickets', icon:'🎫' },
   { pageKey:'ai',       to:'/ai',      label:'AI',      icon:'🤖' },
   { pageKey:'reports',  to:'/reports', label:'Reports', icon:'📊' },

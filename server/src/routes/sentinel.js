@@ -14,7 +14,6 @@ import {
   BLOCKED_OR_MITIGATED_BOOL,
   sentinelScopeClause,
 } from '../utils/sentinelQueries.js'
-import { formatTimestampIstForCsv } from '../utils/csvTimestampIst.js'
 
 const router = Router()
 
@@ -1227,7 +1226,7 @@ async function handleSentinelEventsExport(req, res) {
         const src = h._source || {}
         const row = normalizeSentinelEvent(src, h._id)
         const fullMsg = pickSentinelMessage(src).replace(/\r?\n/g, ' ')
-        const line = [formatTimestampIstForCsv(row['@timestamp']), row.hostGroup, row.host, row.user, row.severity, row.category, row.eventAction, fullMsg]
+        const line = [row['@timestamp'], row.hostGroup, row.host, row.user, row.severity, row.category, row.eventAction, fullMsg]
           .map(csvEscapeSentinel)
           .join(',')
         res.write(line + '\n')

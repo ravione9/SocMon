@@ -1,8 +1,6 @@
 import { getESClient } from '../config/elasticsearch.js'
-import { initWebSsh } from './webSsh.js'
 
 export function initWebSocket(io) {
-  initWebSsh(io)
   io.on('connection', socket => {
     console.log('Client connected:', socket.id)
     socket.on('subscribe', ({ index }) => {

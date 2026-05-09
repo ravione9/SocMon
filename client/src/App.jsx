@@ -14,7 +14,6 @@ const ReportsPage = lazy(() => import('./pages/Reports/ReportsPage.jsx'))
 const AIPage = lazy(() => import('./pages/AI/AIPage.jsx'))
 const SentinelPage = lazy(() => import('./pages/Sentinel/SentinelPage.jsx'))
 const InfraMonitoringPage = lazy(() => import('./pages/Infra/InfraMonitoringPage.jsx'))
-const NetworkAccessPage = lazy(() => import('./pages/Network/NetworkAccessPage.jsx'))
 const NoAccessPage = lazy(() => import('./pages/NoAccess/NoAccessPage.jsx'))
 
 function PrivateRoute({ children }) {
@@ -48,7 +47,6 @@ export default function App() {
           <Route path="reports"  element={<PageRoute pageKey="reports"><ReportsPage /></PageRoute>} />
           <Route path="sentinel" element={<PageRoute pageKey="sentinel"><SentinelPage /></PageRoute>} />
           <Route path="infra"    element={<PageRoute pageKey="infra"><InfraMonitoringPage /></PageRoute>} />
-          <Route path="network"  element={<PageRoute pageKey="network"><NetworkAccessPage /></PageRoute>} />
           <Route path="ai"       element={<PageRoute pageKey="ai"><AIPage /></PageRoute>} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

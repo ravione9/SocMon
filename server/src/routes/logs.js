@@ -3,7 +3,6 @@ import { getESClient } from '../config/elasticsearch.js'
 import { fortigateConfigKind } from '../utils/fortigateConfigKind.js'
 import { fortigateVpnFilterBool } from '../utils/fortigateVpnQuery.js'
 import { fortigateUserLoginFailedBool, ciscoUserLoginFailedBool } from '../utils/loginFailureQuery.js'
-import { formatTimestampIstForCsv } from '../utils/csvTimestampIst.js'
 const router = Router()
 
 const SERVER_TZ = process.env.TZ || 'UTC'
@@ -770,7 +769,7 @@ function searchAfterFromHit(hit, sortLen) {
 
 function exportFirewallCsvLine(src) {
   const f = src.fgt || {}
-  const ts = formatTimestampIstForCsv(src['@timestamp'])
+  const ts = src['@timestamp'] || ''
   const sev = src.syslog_severity_label || ''
   const device =
     (typeof src.device?.name === 'string' && src.device.name) ||
@@ -810,7 +809,7 @@ function ciscoUserFromMessage(msg) {
 }
 
 function exportCiscoCsvLine(src) {
-  const ts = formatTimestampIstForCsv(src['@timestamp'])
+  const ts = src['@timestamp'] || ''
   const sev = src.syslog_severity_label || src.cisco_severity_label || ''
   const device = src.device_name || ''
   const msg = src.cisco_message || ''
