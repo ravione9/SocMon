@@ -1,7 +1,9 @@
 import { Router } from 'express'
 import Site from '../models/Site.js'
+import { authenticate } from '../middleware/auth.js'
 
 const router = Router()
+router.use(authenticate)
 
 router.get('/', async (req, res) => {
   try {

@@ -6,6 +6,7 @@ import RangePicker from './RangePicker.jsx'
 import { getSevCategory } from '../../utils/logSeverity.js'
 import { ciscoLoginFailureUserLabel, fortigateVpnUserLabel, logSearchDeviceLabel } from '../../utils/firewallIdentity.js'
 import { useResizableColumns, ResizableColGroup, ResizableTh } from './ResizableTable.jsx'
+import { formatTimestampIstForCsv } from '../../utils/csvTimestampIst.js'
 
 const C = { accent:'#4f7ef5', accent2:'#7c5cfc', green:'#22d3a0', red:'#f5534f', amber:'#f5a623', cyan:'#22d3ee', text:'var(--text)', text2:'var(--text2)', text3:'var(--text3)', bg2:'var(--bg2)', bg3:'var(--bg3)', bg4:'var(--bg4)', border:'var(--border)', border2:'var(--border2)' }
 
@@ -294,7 +295,7 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
       const wrap = v => `"${String(v||'').replace(/"/g,'""')}"`
       const sev = isFirewall ? getSevCategory(e) : (e.syslog_severity_label || e.cisco_severity_label || '')
       if (isFirewall) return [
-        fmt(e['@timestamp']), sev, logSearchDeviceLabel(e) || '—',
+        formatTimestampIstForCsv(e['@timestamp']), sev, logSearchDeviceLabel(e) || '—',
         fortigateVpnUserLabel(e) || '',
         e.fgt?.action||e['fgt.action']||'',
         e.fgt?.srcip||e['fgt.srcip']||'', e.fgt?.dstip||e['fgt.dstip']||'',
@@ -303,7 +304,7 @@ export default function LogSearch({ type, accentColor, dashboardRange, initialFi
         wrap(e.fgt?.msg || e['fgt.msg'] || e.message || ''),
       ].join(',')
       return [
-        fmt(e['@timestamp']),
+        formatTimestampIstForCsv(e['@timestamp']),
         sev,
         e.device_name || '',
         ciscoLoginFailureUserLabel(e) || '',
