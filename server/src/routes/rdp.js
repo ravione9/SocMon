@@ -195,11 +195,21 @@ const rdpWss = new WebSocketServer({ noServer: true })
 const GUACD_HOST = () => process.env.GUACD_HOST || '127.0.0.1'
 const GUACD_PORT = () => Number(process.env.GUACD_PORT) || 4822
 
-/** none | reconnect | display-update — 'display-update' can drop sessions on some Windows builds right after ready */
+/**
+ * Resize method passed to guacd.  Valid values per Guacamole 1.6.0:
+ *   ''               — no resize (default; safest across Windows versions)
+ *   'reconnect'      — disconnect & reconnect on resize
+ *   'display-update' — RDP Display Update virtual channel (can drop sessions
+ *                      on some Windows builds right after ready)
+ *
+ * NB: 'none' is NOT a valid value — guacd logs it as invalid and on some
+ * FreeRDP builds the worker thread dies after keymap load.  Map any unknown
+ * value (including the legacy 'none') to '' so guacd treats it as no-resize.
+ */
 function rdpResizeMethod(session) {
-  const raw = session?.resizeMethod ?? process.env.RDP_RESIZE_METHOD ?? 'none'
+  const raw = session?.resizeMethod ?? process.env.RDP_RESIZE_METHOD ?? ''
   const v = String(raw).toLowerCase().trim()
-  return ['none', 'reconnect', 'display-update'].includes(v) ? v : 'none'
+  return ['reconnect', 'display-update'].includes(v) ? v : ''
 }
 
 export async function proxyRdpWsUpgrade(req, socket, head) {
@@ -286,15 +296,27 @@ function setupRdpTunnel(ws, session) {
 
       if (!handshakeDone && elems[0] === 'args') {
         // Capture arg names guacd expects so we can fill them at connect time.
-        // Do NOT forward 'args' yet — hold it until we're ready to send connect.
         argNames = elems.slice(1)
         console.log(`${tag} guacd args: [${argNames.slice(0, 8).join(', ')}…] (${argNames.length} total)`)
 
-        // Build and send the real connect instruction immediately.
-        // We never need the browser to send 'connect' — we do it here with real creds.
+        // ── Step 1: send 'size' BEFORE 'connect' ─────────────────────────────
+        // guacd stores the Guacamole client's screen size in user->info.optimal_width/height.
+        // Normally set via the HTTP tunnel handshake; our direct TCP proxy never does it.
+        // Result: optimal_width = 0, which some guacd/FreeRDP code paths divide by →
+        // SIGFPE → child process dies immediately after sending 'ready' with no display data.
+        // Sending 'size' here (after 'args', before 'connect') populates user->info in time
+        // for the RDP plugin to read it safely.  'size' is valid at any point after select.
+        const pw = String(session.width  || 1280)
+        const ph = String(session.height || 800)
+        if (guacd.writable) guacd.write(guacFmt('size', pw, ph, '96'))
+
+        // ── Step 2: send real 'connect' with credentials from encrypted token ─
         const realValues = argNames.map(name => lookupGuacdSetting(rdpSettings, name))
         const realConnect = guacFmt('connect', ...realValues)
-        console.log(`${tag} injecting connect (${argNames.length} args) for ${session.ip}`)
+        const dbg = ['width','height','dpi','security','ignore-cert','color-depth','username','hostname']
+          .map(k => `${k}=${realValues[argNames.indexOf(k)] ?? '(missing)'}`)
+          .join(' | ')
+        console.log(`${tag} injecting connect (${argNames.length} args) for ${session.ip} — ${dbg}`)
         if (guacd.writable) guacd.write(realConnect)
         handshakeDone = true
 
@@ -313,7 +335,11 @@ function setupRdpTunnel(ws, session) {
       }
       if (elems[0] === 'ready') {
         sessionReady = true
-        console.log(`${tag} RDP session ready — streaming display`)
+        // NB: 'ready' is the Guacamole-protocol handshake completing — guacd has
+        // parsed our connect args and is *about to* start the FreeRDP backend.
+        // It does NOT mean the RDP session to Windows is up.  Display data
+        // ('img', 'png', etc.) starting to flow is the real signal.
+        console.log(`${tag} guacamole handshake ready — FreeRDP backend starting`)
       }
 
       // Forward everything else (ready, sync, display instructions, error…) to the browser.
@@ -357,9 +383,12 @@ function setupRdpTunnel(ws, session) {
   guacd.on('connect', () => {
     guacdReady = true
     console.log(`${tag} guacd TCP connected — sending select,rdp`)
-    // SERVER initiates the Guacamole handshake.  Doing this here (not in the
-    // ws.on('message') handler) guarantees guacd is writable before we send.
+
+    // SERVER initiates the Guacamole handshake.  select MUST be the very first
+    // instruction sent to guacd — anything else (including size) causes an
+    // immediate protocol rejection and connection close.
     guacd.write(guacFmt('select', 'rdp'))
+
     // Flush any queued client messages (should rarely be non-empty)
     for (const msg of clientQueue) {
       if (guacd.writable) guacd.write(msg)
@@ -425,10 +454,34 @@ function setupRdpTunnel(ws, session) {
 /**
  * Map guacd arg names (which vary slightly by guacd version) to values from
  * the session token.  Unknown args get an empty string (guacd ignores them).
+ *
+ * RDP_MINIMAL=1 in .env switches to a stripped-down parameter set that mirrors
+ * what `xfreerdp /v: /u: /p: /cert:ignore +auth-only` sends — used as a
+ * bisection tool when libguac-rdp's child crashes during init.  If RDP works
+ * in minimal mode but fails in the default mode, one of the dropped params
+ * is the culprit.
  */
 function buildRdpSettings(s) {
   const ignoreCert = s.ignoreCert !== false
   const certTofu = ignoreCert ? false : (s.certTofu === true)
+
+  if (process.env.RDP_MINIMAL === '1') {
+    // Bare-minimum parameter set — matches what xfreerdp default uses.
+    // Everything else is left to guacd/FreeRDP defaults.
+    return {
+      hostname:      s.ip,
+      port:          String(s.rdpPort),
+      username:      s.username || '',
+      password:      s.password || '',
+      'ignore-cert': 'true',
+      width:         String(s.width  || 1280),
+      height:        String(s.height || 800),
+      dpi:           '96',
+      'color-depth': '32',                // matches xfreerdp default
+      security:      'nla',                // matches what xfreerdp negotiated
+    }
+  }
+
   return {
     // Core connection
     hostname:           s.ip,
@@ -457,6 +510,21 @@ function buildRdpSettings(s) {
     'disable-offscreen-caching': 'false',
     'disable-glyph-caching':     'false',
     'resize-method':             rdpResizeMethod(s),
+    // RDPGFX (RDP Graphics Pipeline) — disabled by default; field-confirmed
+    // SIGFPE in libguac-client-rdp.so otherwise:
+    //
+    //   traps: guacd[N] trap divide error ip:... in libguac-client-rdp.so.0.0.0
+    //
+    // Reproduced on Ubuntu prod (Lenskart, May 2026) with guacd 1.6.0 against
+    // Windows Server 2019/2022.  GFX requires 32-bpp + a compatible FreeRDP ↔
+    // Windows handshake; when that combination fails, libguac-rdp's child does
+    // a divide-by-zero on width/height optimal values and the entire RDP
+    // session is killed immediately after `ready`.  Classic bitmap rendering
+    // (disable-gfx=true) is what mstsc falls back to and works universally.
+    //
+    // Set RDP_DISABLE_GFX=false in env to opt back in (only if you've confirmed
+    // your specific Windows host + guacd version don't hit the SIGFPE).
+    'disable-gfx': process.env.RDP_DISABLE_GFX === 'false' ? 'false' : 'true',
     // Features (disabled by default — enable via env or future UI toggle)
     'enable-audio':              'false',
     'enable-drive':              'false',

@@ -67,7 +67,11 @@ services:
   #     compose recreate); kills every active RDP session from Netpulse.
   # Prefer a pinned tag so pulls don't silently change behaviour (avoid :latest in prod stacks).
   guacd:
-    image: guacamole/guacd:1.6.0
+    # 1.6.0 had a regression where the FreeRDP child segfaults silently after
+    # "User joined / VERSION_1_5_0" against certain Windows Server 2019/2022
+    # hosts (no error instruction, no display data, opcode trail = "ready" only).
+    # 1.5.5 is the most battle-tested release against current Windows builds.
+    image: guacamole/guacd:1.5.5
     container_name: netpulse-guacd
     # Port 4822 is only needed if you want to reach guacd from outside Docker.
     # The server container reaches it via the internal network (GUACD_HOST: guacd).

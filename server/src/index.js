@@ -34,6 +34,7 @@ import zabbixRoutes from './routes/zabbix.js'
 import sshSessionRoutes from './routes/sshSessions.js'
 import webMgmtRoutes, { proxyWsUpgrade } from './routes/webMgmt.js'
 import rdpRoutes, { proxyRdpWsUpgrade } from './routes/rdp.js'
+import idcsRoutes from './routes/idcs.js'
 import { errorHandler } from './middleware/errorHandler.js'
 
 /** CORS: localhost and 127.0.0.1 are different browser origins; allow both when either is configured. */
@@ -109,7 +110,8 @@ app.use('/api/sentinel', sentinelRoutes)
 app.use('/api/sentinel-one', sentinelOneRoutes)
 app.use('/api/zabbix', zabbixRoutes)
 app.use('/api/ssh-sessions', sshSessionRoutes)
-app.use('/api/rdp', rdpRoutes)
+app.use('/api/rdp',  rdpRoutes)
+app.use('/api/idcs', idcsRoutes)
 app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.0.0', ai: process.env.AI_PROVIDER || 'claude' }))
 
 app.use(errorHandler)

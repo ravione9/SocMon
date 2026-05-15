@@ -305,12 +305,18 @@ function Display() {
       // ── Image streaming ───────────────────────────────────────────────────────
 
       case 'img': {
-        // img STREAM MIMETYPE MASK LAYER X Y
+        // Wire format: img STREAM_INDEX COMPOSITE_MODE DST_LAYER X Y MIME_TYPE
+        // args[0] = stream index
+        // args[1] = compositing mode  (integer, e.g. 14 = "over" — ignored by us)
+        // args[2] = destination layer index
+        // args[3] = x position
+        // args[4] = y position
+        // args[5] = MIME type (e.g. "image/jpeg", "image/png")
         streams[args[0]] = {
-          mime:     args[1] || 'image/png',
-          layerIdx: parseInt(args[3], 10),
-          dx:       parseInt(args[4], 10),
-          dy:       parseInt(args[5], 10),
+          mime:     args[5] || 'image/jpeg',
+          layerIdx: parseInt(args[2], 10),
+          dx:       parseInt(args[3], 10),
+          dy:       parseInt(args[4], 10),
           chunks:   [],
         }
         break

@@ -66,7 +66,11 @@ services:
   # internal network (GUACD_HOST: guacd) — port 4822 is intentionally NOT published.
   # Pinned tag avoids surprise behaviour changes from :latest pulls in prod.
   guacd:
-    image: guacamole/guacd:1.6.0
+    # 1.6.0 had a regression where the FreeRDP child segfaults silently after
+    # "User joined / VERSION_1_5_0" against certain Windows Server 2019/2022
+    # hosts (no error instruction, no display data, opcode trail = "ready" only).
+    # 1.5.5 is the most battle-tested release against current Windows builds.
+    image: guacamole/guacd:1.5.5
     container_name: netpulse-prod-guacd
     environment:
       # Levels: trace | debug | info | warning | error.

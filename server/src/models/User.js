@@ -5,8 +5,8 @@ const userSchema = new mongoose.Schema({
   name:      { type: String, required: true },
   email:     { type: String, required: true, unique: true, lowercase: true },
   password:  { type: String, required: true, select: false },
-  role:      { type: String, enum: ['admin', 'analyst', 'viewer'], default: 'viewer' },
-  /** App route keys (soc, noc, …). Omitted or non-array = all pages for non-admin (legacy). Empty array = no pages. */
+  role:      { type: String, enum: ['admin', 'custom_admin', 'analyst', 'viewer'], default: 'viewer' },
+  /** App route keys (soc, noc, …). Full admin ignores this. custom_admin uses only listed keys; omitted = none. Analyst/viewer: omitted or non-array = all pages (legacy). Empty array = no pages. */
   allowedPages: [{ type: String }],
   active:    { type: Boolean, default: true },
   lastLogin: { type: Date },

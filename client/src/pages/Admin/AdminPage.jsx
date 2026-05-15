@@ -106,9 +106,14 @@ function Btn({ label, color='accent', onClick, small, danger, title, variant }) 
 }
 
 function Badge({ label, color }) {
-  const colors = { admin:[C.red,'rgba(245,83,79,0.15)'], analyst:[C.amber,'rgba(245,166,35,0.12)'], viewer:[C.text3,'rgba(85,90,114,0.2)'], active:[C.green,'rgba(34,211,160,0.1)'], inactive:[C.red,'rgba(245,83,79,0.15)'], fortigate:[C.accent,'rgba(79,126,245,0.12)'], 'cisco-switch':[C.cyan,'rgba(34,211,238,0.1)'], 'cisco-router':[C.green,'rgba(34,211,160,0.1)'], other:[C.text3,'rgba(85,90,114,0.2)'], critical:[C.red,'rgba(245,83,79,0.15)'], high:[C.amber,'rgba(245,166,35,0.12)'], medium:[C.accent,'rgba(79,126,245,0.12)'], low:[C.green,'rgba(34,211,160,0.1)'] }
+  const colors = { admin:[C.red,'rgba(245,83,79,0.15)'], 'custom admin':[C.accent2,'rgba(167,139,250,0.14)'], analyst:[C.amber,'rgba(245,166,35,0.12)'], viewer:[C.text3,'rgba(85,90,114,0.2)'], active:[C.green,'rgba(34,211,160,0.1)'], inactive:[C.red,'rgba(245,83,79,0.15)'], fortigate:[C.accent,'rgba(79,126,245,0.12)'], 'cisco-switch':[C.cyan,'rgba(34,211,238,0.1)'], 'cisco-router':[C.green,'rgba(34,211,160,0.1)'], other:[C.text3,'rgba(85,90,114,0.2)'], critical:[C.red,'rgba(245,83,79,0.15)'], high:[C.amber,'rgba(245,166,35,0.12)'], medium:[C.accent,'rgba(79,126,245,0.12)'], low:[C.green,'rgba(34,211,160,0.1)'] }
   const [fg, bg] = colors[label] || [C.text2,'var(--bg4)']
   return <span style={{ fontSize:10, padding:'3px 10px', borderRadius:999, fontFamily:'var(--mono)', fontWeight:600, color:fg, background:bg, border:'1px solid var(--border)' }}>{label}</span>
+}
+
+function roleBadgeLabel(role) {
+  if (role === 'custom_admin') return 'custom admin'
+  return role
 }
 
 export default function AdminPage() {
@@ -268,12 +273,10 @@ export default function AdminPage() {
       base.savePassword = !!item.hasMgmtPassword
     }
     if (type === 'users') {
-      const pages =
-        item.role === 'admin'
-          ? [...APP_PAGE_KEYS]
-          : Array.isArray(item.allowedPages)
-            ? item.allowedPages
-            : [...APP_PAGE_KEYS]
+      let pages
+      if (item.role === 'admin') pages = [...APP_PAGE_KEYS]
+      else if (item.role === 'custom_admin') pages = Array.isArray(item.allowedPages) ? item.allowedPages : []
+      else pages = Array.isArray(item.allowedPages) ? item.allowedPages : [...APP_PAGE_KEYS]
       base.allowedPages = pages
     }
     setForm(base)
@@ -505,12 +508,14 @@ export default function AdminPage() {
                         </div>
                       </TD>
                       <TD>{u.email}</TD>
-                      <TD><Badge label={u.role} /></TD>
+                      <TD><Badge label={roleBadgeLabel(u.role)} /></TD>
                       <TD color="var(--text3)">
                         {u.role === 'admin'
                           ? 'All'
                           : !Array.isArray(u.allowedPages)
-                            ? 'All (default)'
+                            ? u.role === 'custom_admin'
+                              ? 'None'
+                              : 'All (default)'
                             : u.allowedPages.length === 0
                               ? 'None'
                               : `${u.allowedPages.length}: ${u.allowedPages.join(', ')}`}
@@ -786,10 +791,24 @@ export default function AdminPage() {
           <Field label="Email" value={form.email||''} onChange={f('email')} type="email" required />
           {modal.includes('create') && <Field label="Password" value={form.password||''} onChange={f('password')} type="password" required />}
           <Field label="Role" value={form.role||'viewer'} onChange={(v) => {
-            f('role')(v)
-            if (v === 'admin') setForm((p) => ({ ...p, role: v, allowedPages: [...APP_PAGE_KEYS] }))
+            setForm((p) => {
+              const next = { ...p, role: v }
+              if (v === 'admin') {
+                next.allowedPages = [...APP_PAGE_KEYS]
+              } else if (v === 'custom_admin') {
+                if (p.role === 'admin') next.allowedPages = [...APP_PAGE_KEYS]
+                else if (!Array.isArray(p.allowedPages)) next.allowedPages = []
+                else next.allowedPages = [...p.allowedPages]
+              } else {
+                if (p.role === 'admin') next.allowedPages = [...APP_PAGE_KEYS]
+                else if (!Array.isArray(p.allowedPages)) next.allowedPages = [...APP_PAGE_KEYS]
+                else next.allowedPages = [...p.allowedPages]
+              }
+              return next
+            })
           }} options={[
-            {value:'admin',label:'Admin — full access'},
+            {value:'admin',label:'Admin — full access (all pages)'},
+            {value:'custom_admin',label:'Custom admin — pick pages (incl. Admin console if selected)'},
             {value:'analyst',label:'Analyst — can create tickets'},
             {value:'viewer',label:'Viewer — read only'},
           ]} />
@@ -800,6 +819,11 @@ export default function AdminPage() {
           ) : (
             <div style={{ marginBottom: 14 }}>
               <label style={{ fontSize: 10, fontWeight: 600, color: 'var(--text3)', letterSpacing: 1, textTransform: 'uppercase', fontFamily: 'var(--mono)', display: 'block', marginBottom: 8 }}>Page access</label>
+              {form.role === 'custom_admin' && (
+                <div style={{ fontSize: 11, color: 'var(--text2)', fontFamily: 'var(--sans)', marginBottom: 10, lineHeight: 1.45 }}>
+                  Choose exactly which areas this user may open. Grant <strong style={{ color: 'var(--text)' }}>Admin</strong> in the list only if they should manage users, devices, and settings.
+                </div>
+              )}
               <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
                 <Btn label="Select all" small onClick={() => setAllUserPages(true)} />
                 <Btn label="Clear all" small onClick={() => setAllUserPages(false)} />

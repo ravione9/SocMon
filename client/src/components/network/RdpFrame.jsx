@@ -32,6 +32,13 @@ const QUALITY_PRESETS = [
 ]
 
 // ── Component ──────────────────────────────────────────────────────────────────
+// Web RDP feature flag — temporarily disabled while we resolve the libguac
+// instability against Windows Server 2019/2022 hosts (May 2026).  See
+// UBUNTU_DEPLOY_RDP.md for context.  Set VITE_WEB_RDP_ENABLED=true in
+// client/.env and rebuild to re-enable once the backend is fixed.
+const WEB_RDP_ENABLED =
+  String(import.meta?.env?.VITE_WEB_RDP_ENABLED ?? 'false').toLowerCase() === 'true'
+
 export default function RdpFrame({ device, onClose }) {
   const displayWrapRef  = useRef(null)
   const containerRef    = useRef(null)
@@ -43,9 +50,11 @@ export default function RdpFrame({ device, onClose }) {
   // Monotonically-increasing generation counter.  Each startSession call gets
   // a unique generation; every await checkpoint compares against the current
   // value so that a superseded call exits before it can open a WebSocket.
-  // This fixes React StrictMode's intentional double-mount creating two
-  // simultaneous RDP sessions that Windows then immediately terminates.
   const generationRef   = useRef(0)
+  // Current CSS scale applied to the Guacamole display container.
+  // Mouse coordinates from getBoundingClientRect() are in *visual* (scaled) space;
+  // dividing by this factor converts them to the actual remote-desktop coordinate space.
+  const scaleRef        = useRef(1)
 
   const [statusCode,   setStatusCode]   = useState(1)
   const [error,        setError]        = useState(null)
@@ -97,15 +106,6 @@ export default function RdpFrame({ device, onClose }) {
     teardown()   // abort prior AbortController + disconnect prior client
     setError(null)
     setStatusCode(1)
-
-    // ── StrictMode guard ──────────────────────────────────────────────────────
-    // React StrictMode deliberately mounts → unmounts → remounts every component.
-    // Without this delay both mount calls fire their POSTs in ~13 ms (faster than
-    // cleanup), opening two simultaneous guacd sessions; Windows then ECONNRESET
-    // one of them.  A 150 ms pause lets the full mount/unmount/remount cycle
-    // complete so the superseded generation is detected *before* any network call.
-    await new Promise(resolve => setTimeout(resolve, 150))
-    if (gen !== generationRef.current) return   // superseded by StrictMode remount
 
     // AbortController for the axios request so the HTTP call is also cancelled
     // when a newer session supersedes this one.
@@ -171,6 +171,7 @@ export default function RdpFrame({ device, onClose }) {
       const dw    = display.getWidth()  || preset.width
       const dh    = display.getHeight() || preset.height
       const scale = Math.max(0.1, Math.min(cw / dw, ch / dh))
+      scaleRef.current = scale   // keep in sync so mouse handler can correct coordinates
       display.scale(scale)
     }
     const ro = new ResizeObserver(scaleDisplay)
@@ -178,9 +179,19 @@ export default function RdpFrame({ device, onClose }) {
     roRef.current = ro
 
     // 5. Mouse handler
+    // getBoundingClientRect() returns *visual* (CSS-transformed) coordinates.
+    // Divide by the current scale to convert to the remote desktop's coordinate space.
     const mouse = new Guacamole.Mouse(canvas)
     mouseRef.current = mouse
-    const fwd = (state) => { if (clientRef.current) clientRef.current.sendMouseState(state) }
+    const fwd = (state) => {
+      if (!clientRef.current) return
+      const s = scaleRef.current || 1
+      clientRef.current.sendMouseState({
+        ...state,
+        x: state.x / s,
+        y: state.y / s,
+      })
+    }
     mouse.onmousedown = fwd
     mouse.onmouseup   = fwd
     mouse.onmousemove = fwd
@@ -208,8 +219,14 @@ export default function RdpFrame({ device, onClose }) {
 
   }, [device._id, teardown, enableWallpaper, enableFontSmoothing, security, ignoreCert, certTofu])
 
-  // Auto-connect on mount
+  // Auto-connect on mount — gated by feature flag.  When disabled, we render the
+  // "temporarily unavailable" overlay below instead of attempting a connection.
   useEffect(() => {
+    if (!WEB_RDP_ENABLED) {
+      setError(`Web RDP is temporarily disabled in this build.\n\nPlease use mstsc directly: open Remote Desktop Connection on your machine and connect to ${device.ip}${device.rdpPort && device.rdpPort !== 3389 ? `:${device.rdpPort}` : ''}.\n\nWeb RDP will be re-enabled once the upstream Apache Guacamole stability issue against this Windows host configuration is resolved.`)
+      setStatusCode(5)
+      return
+    }
     startSession(QUALITY_PRESETS[qualityIdx])
     return teardown
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -366,7 +383,7 @@ export default function RdpFrame({ device, onClose }) {
                     <option value="nla-ext">NLA Extended</option>
                   </select>
                   <div style={{ fontSize: 10, color: 'var(--text3)', lineHeight: 1.5 }}>
-                    If connection drops instantly: try <b>Classic RDP</b> (shows Windows login) or <b>NLA</b> with saved credentials.
+                    <b>Auto-negotiate</b> works with most Windows servers. Use <b>NLA</b> if Windows requires "Network Level Authentication". <b>Classic RDP</b> shows the Windows login screen but is rejected by servers that enforce NLA.
                   </div>
                 </div>
                 <div style={{ marginTop: 10, borderTop: '1px solid var(--border)', paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -451,7 +468,8 @@ export default function RdpFrame({ device, onClose }) {
             </div>
           )}
 
-          {/* Error overlay */}
+          {/* Error overlay — also shows the "Web RDP temporarily disabled" message
+              when WEB_RDP_ENABLED is false (no actual connection attempt is made). */}
           {error && (
             <div style={{
               position: 'absolute', inset: 0, zIndex: 2,
@@ -460,31 +478,37 @@ export default function RdpFrame({ device, onClose }) {
               fontFamily: 'var(--mono)', fontSize: 13,
               display: 'flex', flexDirection: 'column', gap: 16, overflowY: 'auto',
             }}>
-              <div style={{ color: '#f5534f', fontWeight: 700, fontSize: 14 }}>⚠ RDP connection failed</div>
-              <div style={{ color: '#c06060', lineHeight: 1.6, maxWidth: 680 }}>{error}</div>
-              <div style={{
-                padding: 16, borderRadius: 10,
-                background: 'rgba(79,126,245,0.08)', border: '1px solid rgba(79,126,245,0.2)',
-                fontSize: 11, color: '#8ab4f8', lineHeight: 1.8,
-              }}>
-                {looksLikeTunnelDrop ? (
-                  <>
-                    <div style={{ fontWeight: 700, marginBottom: 6 }}>Tunnel dropped — guacd was usually reachable</div>
-                    <div>If logs show “RDP session ready” then an immediate drop, Windows ended the session or the API restarted (Redis / node --watch). Try Classic RDP or NLA in Settings, a lower resolution preset, and stable Redis. Put a reverse proxy in front? Confirm WebSocket upgrade and idle timeouts for <code style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: 4 }}>/api/rdp/ws</code>.</div>
-                  </>
-                ) : (
-                  <>
-                    <div style={{ fontWeight: 700, marginBottom: 6 }}>guacd setup (required on the Netpulse server):</div>
-                    <div>Docker: <code style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: 4 }}>docker run -d --name guacd -p 4822:4822 guacamole/guacd</code></div>
-                    <div style={{ marginTop: 4 }}>Ubuntu: <code style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: 4 }}>sudo apt-get install -y guacd && sudo systemctl enable --now guacd</code></div>
-                    <div style={{ marginTop: 4 }}>Override: set <code style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: 4 }}>GUACD_HOST</code> / <code style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: 4 }}>GUACD_PORT</code> in .env</div>
-                  </>
-                )}
+              <div style={{ color: '#f5534f', fontWeight: 700, fontSize: 14 }}>
+                {WEB_RDP_ENABLED ? '⚠ RDP connection failed' : 'ⓘ Web RDP temporarily unavailable'}
               </div>
+              <div style={{ color: '#c06060', lineHeight: 1.6, maxWidth: 680, whiteSpace: 'pre-line' }}>{error}</div>
+              {WEB_RDP_ENABLED && (
+                <div style={{
+                  padding: 16, borderRadius: 10,
+                  background: 'rgba(79,126,245,0.08)', border: '1px solid rgba(79,126,245,0.2)',
+                  fontSize: 11, color: '#8ab4f8', lineHeight: 1.8,
+                }}>
+                  {looksLikeTunnelDrop ? (
+                    <>
+                      <div style={{ fontWeight: 700, marginBottom: 6 }}>Tunnel dropped — guacd was usually reachable</div>
+                      <div>If logs show “RDP session ready” then an immediate drop, Windows ended the session or the API restarted (Redis / node --watch). Try Classic RDP or NLA in Settings, a lower resolution preset, and stable Redis. Put a reverse proxy in front? Confirm WebSocket upgrade and idle timeouts for <code style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: 4 }}>/api/rdp/ws</code>.</div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ fontWeight: 700, marginBottom: 6 }}>guacd setup (required on the Netpulse server):</div>
+                      <div>Docker: <code style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: 4 }}>docker run -d --name guacd -p 4822:4822 guacamole/guacd</code></div>
+                      <div style={{ marginTop: 4 }}>Ubuntu: <code style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: 4 }}>sudo apt-get install -y guacd && sudo systemctl enable --now guacd</code></div>
+                      <div style={{ marginTop: 4 }}>Override: set <code style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: 4 }}>GUACD_HOST</code> / <code style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: 4 }}>GUACD_PORT</code> in .env</div>
+                    </>
+                  )}
+                </div>
+              )}
               <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                <button type="button" onClick={() => startSession(quality)} style={{ ...hdrBtn(), background: 'var(--accent)', color: 'var(--on-accent)', border: 'none', padding: '8px 16px' }}>
-                  Retry
-                </button>
+                {WEB_RDP_ENABLED && (
+                  <button type="button" onClick={() => startSession(quality)} style={{ ...hdrBtn(), background: 'var(--accent)', color: 'var(--on-accent)', border: 'none', padding: '8px 16px' }}>
+                    Retry
+                  </button>
+                )}
                 <button type="button" onClick={onClose} style={{ ...hdrBtn(), padding: '8px 16px' }}>Close</button>
               </div>
             </div>
