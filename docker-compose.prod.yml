@@ -6,8 +6,12 @@
 # 3) If you still get 403 after building: host paths must be readable/traversable by the container (nginx user ~101).
 #      chmod -R a+rX client/dist && chmod a+x . client client/dist
 #    SELinux (RHEL/CentOS): append ,Z to the dist volume line (e.g. :ro,Z) or use the baked nginx image below.
-# 4) Start:
+# 4) Start full stack:
 #      docker compose -f docker-compose.prod.yml up -d --build
+#
+# 5) After code/backend changes — rebuild API + nginx only (mongo/redis unchanged).
+#      Requires mongo+redis (+guacd) already running; --build picks up server source.
+#      docker compose -f docker-compose.prod.yml up -d --build --force-recreate --no-deps server nginx
 #
 # UI: port 80. The API is only reachable via nginx, not published directly.
 #
@@ -29,7 +33,7 @@ services:
       - ./client/dist:/usr/share/nginx/html:ro
     depends_on:
       server:
-        condition: service_started
+        condition: service_healthy
     networks:
       - netpulse
     restart: unless-stopped
@@ -61,6 +65,18 @@ services:
     networks:
       - netpulse
     restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 75s
 
   # Apache Guacamole RDP bridge. Reached only from the server container over the
   # internal network (GUACD_HOST: guacd) — port 4822 is intentionally NOT published.
