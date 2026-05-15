@@ -1,4 +1,9 @@
 {
+  "private": true,
+  "scripts": {
+    "build": "npm ci --prefix client && npm run build --prefix client",
+    "build:client": "npm run build --prefix client"
+  },
   "dependencies": {
     "exceljs": "^4.4.0",
     "json2csv": "^6.0.0-alpha.2",
