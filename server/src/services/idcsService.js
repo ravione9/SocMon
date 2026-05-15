@@ -9,11 +9,22 @@ import { getRedis } from '../config/redis.js'
 const REDIS_TOKEN_KEY = 'idcs:access_token'
 const TOKEN_TTL       = 55 * 60
 
-const TENANT_URL    = process.env.IDCS_TENANT_URL    || ''
-const CLIENT_ID     = process.env.IDCS_CLIENT_ID     || ''
-const CLIENT_SECRET = process.env.IDCS_CLIENT_SECRET || ''
-const ADMIN_BASE    = `${TENANT_URL}/admin/v1`
-const TOKEN_URL     = `${TENANT_URL}/oauth2/v1/token`
+const TENANT_URL    = (process.env.IDCS_TENANT_URL || '').trim().replace(/\/+$/, '')
+const CLIENT_ID     = (process.env.IDCS_CLIENT_ID || '').trim()
+const CLIENT_SECRET = (process.env.IDCS_CLIENT_SECRET || '').trim()
+const ADMIN_BASE    = TENANT_URL ? `${TENANT_URL}/admin/v1` : ''
+const TOKEN_URL     = TENANT_URL ? `${TENANT_URL}/oauth2/v1/token` : ''
+
+function assertIdcsConfigured() {
+  if (!TENANT_URL || !CLIENT_ID || !CLIENT_SECRET) {
+    throw Object.assign(
+      new Error(
+        'IDCS is not configured. Set IDCS_TENANT_URL, IDCS_CLIENT_ID, and IDCS_CLIENT_SECRET on the server (see server/.env.example), then restart.',
+      ),
+      { status: 503 },
+    )
+  }
+}
 
 // ─── Token ───────────────────────────────────────────────────────────────────
 
@@ -31,6 +42,7 @@ async function fetchFreshToken() {
 }
 
 export async function getToken() {
+  assertIdcsConfigured()
   const redis = getRedis()
   if (redis) {
     try { const cached = await redis.get(REDIS_TOKEN_KEY); if (cached) return cached } catch (_) {}
