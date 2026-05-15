@@ -35,6 +35,7 @@ import sshSessionRoutes from './routes/sshSessions.js'
 import webMgmtRoutes, { proxyWsUpgrade } from './routes/webMgmt.js'
 import rdpRoutes, { proxyRdpWsUpgrade } from './routes/rdp.js'
 import idcsRoutes from './routes/idcs.js'
+import adRoutes from './routes/ad.js'
 import { errorHandler } from './middleware/errorHandler.js'
 
 /** CORS: localhost and 127.0.0.1 are different browser origins; allow both when either is configured. */
@@ -85,7 +86,15 @@ app.use(morgan('dev'))
 app.use(cors({ origin: corsOrigins }))
 // Web-mgmt proxy is mounted BEFORE compression / json so streamed device responses pass through untouched.
 app.use('/api/web-mgmt', webMgmtRoutes)
-app.use(compression())
+/** IDCS/XLSX export streams ZIP to the client — skip gzip (can corrupt binary). */
+app.use(
+  compression({
+    filter: (req, res) => {
+      if ((req.originalUrl || req.url || '').includes('/api/idcs/export')) return false
+      return compression.filter(req, res)
+    },
+  }),
+)
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 app.use(
@@ -93,7 +102,9 @@ app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 500,
-    skip: (req) => req.path.startsWith('/web-mgmt/p/'),
+    skip: (req) =>
+      req.path.startsWith('/web-mgmt/p/') ||
+      (req.originalUrl || req.url || '').includes('idcs/export'),
   }),
 )
 
@@ -112,9 +123,22 @@ app.use('/api/zabbix', zabbixRoutes)
 app.use('/api/ssh-sessions', sshSessionRoutes)
 app.use('/api/rdp',  rdpRoutes)
 app.use('/api/idcs', idcsRoutes)
+app.use('/api/ad', adRoutes)
 app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.0.0', ai: process.env.AI_PROVIDER || 'claude' }))
 
 app.use(errorHandler)
+
+/**
+ * Last-resort guards: keep the HTTP server alive on stray async errors (e.g. ldapjs Client
+ * emitting 'error' on a dropped socket). Without these, a single bad downstream call
+ * crashes Node and the browser sees ERR_EMPTY_RESPONSE on unrelated requests.
+ */
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason)
+})
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err)
+})
 
 async function start() {
   await connectMongo()

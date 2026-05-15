@@ -49,25 +49,51 @@ export const removeUsersFromGroup = (groupId, userIds) =>
  * Trigger a file download for user export.
  * @param {object} opts - { format: 'csv'|'xlsx'|'json', status: 'active'|'inactive'|'', groupId }
  */
+async function blobErrorMessage(data) {
+  if (!(data instanceof Blob)) return null
+  try {
+    const text = await data.text()
+    const j = JSON.parse(text)
+    return j.error ? String(j.error) : text.slice(0, 500)
+  } catch {
+    return null
+  }
+}
+
 export const exportUsers = async ({ format = 'csv', status = '', groupId = '' } = {}) => {
   const params = new URLSearchParams({ format })
   if (status)  params.set('status', status)
   if (groupId) params.set('groupId', groupId)
 
-  const response = await api.get(`${BASE}/export/users?${params.toString()}`, { responseType: 'blob' })
+  const url = `${BASE}/export/users?${params.toString()}`
+  let response
+  try {
+    response = await api.get(url, { responseType: 'blob', timeout: 600000 })
+  } catch (e) {
+    const blobMsg = await blobErrorMessage(e.response?.data)
+    throw new Error(blobMsg || e.response?.data?.error || e.message || 'Export request failed')
+  }
 
-  const disposition = response.headers['content-disposition'] || ''
-  const match       = disposition.match(/filename="?([^"]+)"?/)
+  const ct = String(response.headers['content-type'] || '')
+  const disposition = String(response.headers['content-disposition'] || '')
+  const hasAttachment = /attachment/i.test(disposition)
+
+  if (!hasAttachment && ct.includes('application/json')) {
+    const msg = await blobErrorMessage(response.data)
+    throw new Error(msg || 'Export failed')
+  }
+
+  const match = disposition.match(/filename="?([^"]+)"?/)
   const filename    = match ? match[1] : `idcs_users_${status || 'all'}.${format}`
 
-  const url  = window.URL.createObjectURL(new Blob([response.data]))
+  const blobUrl  = window.URL.createObjectURL(new Blob([response.data]))
   const link = document.createElement('a')
-  link.href  = url
+  link.href  = blobUrl
   link.setAttribute('download', filename)
   document.body.appendChild(link)
   link.click()
   link.remove()
-  window.URL.revokeObjectURL(url)
+  window.URL.revokeObjectURL(blobUrl)
 }
 // ════════════════════════════════════════════════════════════════════════════
 // AUDIT LOG

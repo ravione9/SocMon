@@ -313,8 +313,17 @@ router.get('/export/users', async (req, res) => {
         audit('EXPORT_USERS', req, null, null, 'SUCCESS', { format, status, groupId, count: rows.length })
         await wb.xlsx.write(res)
         return res.end()
-      } catch (_) {
-        // exceljs not installed — fall through to CSV download
+      } catch (excelErr) {
+        console.error('[idcs export xlsx]', excelErr?.message || excelErr)
+        if (res.headersSent) {
+          try {
+            res.end()
+          } catch {
+            /**/
+          }
+          return
+        }
+        // Fall through: CSV so download still succeeds
       }
     }
 
