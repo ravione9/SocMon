@@ -144,6 +144,121 @@ function DetailRows({ rows }) {
   )
 }
 
+/**
+ * Shown once after a successful AD password reset so the admin can copy the new
+ * password before it leaves the page (the input fields are wiped immediately).
+ * Password is held only in component state — closing the popup drops it.
+ */
+function PasswordSavedPopup({ open, password, userLabel, mustChangeNextLogon, onClose }) {
+  const [show, setShow] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    if (!open) {
+      setShow(false)
+      setCopied(false)
+    }
+  }, [open])
+
+  if (!open) return null
+
+  const masked = '•'.repeat(Math.max(8, password?.length || 0))
+
+  const copy = async () => {
+    if (!password) return
+    try {
+      await navigator.clipboard.writeText(password)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2200)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/55 backdrop-blur-sm p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="ad-pwd-saved-title"
+      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div
+        className={`rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border ${idcsCx.border} ${idcsCx.bg2}`}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div
+          className="px-5 py-4"
+          style={{ background: 'linear-gradient(135deg, var(--green), color-mix(in srgb, var(--green) 60%, var(--accent2)))' }}
+        >
+          <h2 id="ad-pwd-saved-title" className="font-semibold text-base text-[var(--on-accent)]">
+            Password updated
+          </h2>
+          <p className="text-[12px] mt-1 opacity-95 text-[var(--on-accent)]">
+            Copy it now — Netpulse will not show it again.
+          </p>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {userLabel ? (
+            <div className={`text-xs ${idcsCx.text3}`}>
+              For <span className={`font-medium ${idcsCx.text}`}>{userLabel}</span>
+            </div>
+          ) : null}
+
+          <div
+            className={`rounded-lg border ${idcsCx.border} ${idcsCx.bg3} px-3 py-2.5 flex items-center gap-2`}
+          >
+            <code
+              className={`font-mono text-sm break-all flex-1 select-all ${idcsCx.text}`}
+              aria-label="New password"
+            >
+              {show ? password : masked}
+            </code>
+            <button
+              type="button"
+              onClick={() => setShow((s) => !s)}
+              className={`text-xs shrink-0 ${idcsBtnGhost()}`}
+              aria-pressed={show}
+              aria-label={show ? 'Hide password' : 'Show password'}
+              title={show ? 'Hide password' : 'Show password'}
+            >
+              {show ? 'Hide' : 'Show'}
+            </button>
+            <button
+              type="button"
+              onClick={copy}
+              className={`text-xs shrink-0 ${idcsBtnPrimary()}`}
+              aria-live="polite"
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+
+          {mustChangeNextLogon ? (
+            <p
+              className="text-xs rounded-lg border px-3 py-2"
+              style={{
+                borderColor: 'color-mix(in srgb, var(--amber) 40%, var(--border))',
+                background: 'color-mix(in srgb, var(--amber) 12%, var(--bg3))',
+                color: 'var(--amber)',
+              }}
+            >
+              The user must change this password at next sign-in.
+            </p>
+          ) : null}
+
+          <div className="flex justify-end pt-1">
+            <button type="button" onClick={onClose} className={`text-sm ${idcsBtnPrimary()}`}>
+              Done
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function AdUserDetailModal({
   dn,
   preview,
@@ -172,6 +287,8 @@ export default function AdUserDetailModal({
   const [acctNotice, setAcctNotice] = useState(null)
   /** Shown under modal header so password success is visible on every tab */
   const [passwordChangedAck, setPasswordChangedAck] = useState(false)
+  /** One-shot popup with the just-set password so the admin can copy it before fields are wiped. */
+  const [pwdJustSet, setPwdJustSet] = useState(null)
   const baselineRef = useRef(emptyDraft())
 
   const refreshDetail = useCallback(() => {
@@ -193,6 +310,7 @@ export default function AdUserDetailModal({
     setPwdNotice(null)
     setAcctNotice(null)
     setPasswordChangedAck(false)
+    setPwdJustSet(null)
     setPwd1('')
     setPwd2('')
     setPwdMustChange(false)
@@ -357,6 +475,11 @@ export default function AdUserDetailModal({
           : `Password updated in Active Directory for ${userLabel}.`,
         { duration: 5000 },
       )
+      setPwdJustSet({
+        password: pwd1,
+        userLabel,
+        mustChangeNextLogon: pwdMustChange,
+      })
       setPasswordChangedAck(true)
       setPwdNeedsAutoGen(true)
       setPwd1('')
@@ -841,6 +964,7 @@ export default function AdUserDetailModal({
   }
 
   return (
+    <>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-sm p-4"
       role="presentation"
@@ -910,5 +1034,13 @@ export default function AdUserDetailModal({
         </div>
       </div>
     </div>
+    <PasswordSavedPopup
+      open={Boolean(pwdJustSet)}
+      password={pwdJustSet?.password || ''}
+      userLabel={pwdJustSet?.userLabel || ''}
+      mustChangeNextLogon={Boolean(pwdJustSet?.mustChangeNextLogon)}
+      onClose={() => setPwdJustSet(null)}
+    />
+    </>
   )
 }
