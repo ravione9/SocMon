@@ -2,7 +2,19 @@ import { useLocation } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import { useAuthStore } from '../../store/authStore'
 import ThemePreferences from './ThemePreferences'
-const titles = { '/soc':'Security Operations Center', '/noc':'Network Operations Center', '/sentinel':'Sentinel XDR', '/infra':'Infra Monitoring', '/tickets':'Ticket Management', '/ai':'AI Assistant', '/reports':'Reports & Analytics', '/admin':'Administration' }
+const titles = {
+  '/soc': 'Security Operations Center',
+  '/noc': 'Network Operations Center',
+  '/sentinel': 'Sentinel XDR',
+  '/infra': 'Infra Monitoring',
+  '/network': 'Network Access',
+  '/idcs': 'Oracle IDCS',
+  '/ad': 'Active Directory',
+  '/tickets': 'Ticket Management',
+  '/ai': 'AI Assistant',
+  '/reports': 'Reports & Analytics',
+  '/admin': 'Administration',
+}
 export default function Topbar() {
   const { pathname } = useLocation()
   const { user } = useAuthStore()

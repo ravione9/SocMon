@@ -3,8 +3,9 @@ import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../compo
 import api from '../../api/client'
 import toast from 'react-hot-toast'
 import { APP_PAGE_KEYS, APP_PAGES } from '../../config/appPages'
-import { getEffectiveAllowedPages } from '../../utils/pageAccess'
+import { getEffectiveAllowedPages, canWritePage } from '../../utils/pageAccess'
 import { resolvedApiBase } from '../../utils/backendOrigin.js'
+import { useAuthStore } from '../../store/authStore'
 
 const C = {
   accent: 'var(--accent)',
@@ -21,12 +22,29 @@ const C = {
 const TABS = [
   { id:'devices',  label:'Devices',     icon:'🖥', desc:'Firewalls & switches' },
   { id:'sites',    label:'Sites',       icon:'🏢', desc:'Locations & IP ranges' },
-  { id:'users',    label:'Users',       icon:'👥', desc:'Roles & page access' },
+  { id:'custom_roles', label:'Custom roles', icon:'🏷️', desc:'Templates: read-only or full per page' },
+  { id:'users',    label:'Users',       icon:'👥', desc:'Assign roles & templates' },
   { id:'alerts',   label:'Alert Rules', icon:'🔔', desc:'Thresholds & patterns' },
   { id:'system',   label:'System',      icon:'⚙️', desc:'AI, search, stats' },
 ]
 
-function Modal({ title, onClose, children }) {
+function emptyPageTemplateForm() {
+  return Object.fromEntries(APP_PAGE_KEYS.map((k) => [k, 'none']))
+}
+
+function summarizePageAccess(pageAccess) {
+  if (!pageAccess || typeof pageAccess !== 'object') return ''
+  let read = 0
+  let full = 0
+  for (const v of Object.values(pageAccess)) {
+    if (v === 'read') read++
+    else if (v === 'full') full++
+  }
+  if (!read && !full) return ''
+  return `${full} full · ${read} read`
+}
+
+function Modal({ title, onClose, children, width = 500 }) {
   return (
     <div
       role="presentation"
@@ -41,7 +59,7 @@ function Modal({ title, onClose, children }) {
         aria-modal="true"
         onClick={e => e.stopPropagation()}
         style={{
-          background:'var(--bg2)', border:'1px solid var(--border)', borderRadius:16, padding:28, width:500, maxWidth:'100%',
+          background:'var(--bg2)', border:'1px solid var(--border)', borderRadius:16, padding:28, width, maxWidth:'100%',
           maxHeight:'85vh', overflowY:'auto', boxShadow:'0 24px 64px rgba(0,0,0,0.45)',
         }}
       >
@@ -70,7 +88,7 @@ const inputStyle = {
   color:'var(--text)', fontSize:13, fontFamily:'var(--mono)', outline:'none', transition:'border-color 0.15s, box-shadow 0.15s',
 }
 
-function Field({ label, value, onChange, type='text', options, required }) {
+function Field({ label, value, onChange, type='text', options, required, placeholder }) {
   return (
     <div style={{ marginBottom:16 }}>
       <label style={{ fontSize:10, fontWeight:600, color:'var(--text3)', letterSpacing:1, textTransform:'uppercase', fontFamily:'var(--mono)', display:'block', marginBottom:6 }}>{label}{required && ' *'}</label>
@@ -78,58 +96,71 @@ function Field({ label, value, onChange, type='text', options, required }) {
         ? <select value={value} onChange={e=>onChange(e.target.value)} style={{ ...inputStyle, cursor:'pointer' }}>
             {options.map(o => <option key={o.value||o} value={o.value||o}>{o.label||o}</option>)}
           </select>
-        : <input type={type} value={value} onChange={e=>onChange(e.target.value)} required={required} style={inputStyle} />
+        : <input type={type} value={value} placeholder={placeholder || ''} onChange={e=>onChange(e.target.value)} required={required} style={inputStyle} />
       }
     </div>
   )
 }
 
-function Btn({ label, color='accent', onClick, small, danger, title, variant }) {
+function Btn({ label, color='accent', onClick, small, danger, title, variant, disabled }) {
   if (variant === 'ghost') {
     return (
-      <button type="button" title={title} onClick={onClick} style={{
+      <button type="button" title={title} disabled={disabled} onClick={onClick} style={{
         padding: small ? '6px 12px' : '10px 18px', borderRadius:10, border:'1px solid var(--border)', background:'transparent',
-        color:'var(--text2)', fontSize: small ? 11 : 13, fontWeight:600, fontFamily:'var(--sans)', cursor:'pointer',
+        color:'var(--text2)', fontSize: small ? 11 : 13, fontWeight:600, fontFamily:'var(--sans)', cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.45 : 1,
       }}>{label}</button>
     )
   }
   const bg = danger ? C.red : color==='green' ? C.green : color==='amber' ? C.amber : `linear-gradient(135deg, ${C.accent}, ${C.accent2})`
   const solidFg = danger || color === 'accent' || color === 'green' || color === 'amber' ? 'var(--on-accent)' : 'var(--text)'
   return (
-    <button type="button" title={title} onClick={onClick} style={{
+    <button type="button" title={title} disabled={disabled} onClick={onClick} style={{
       padding: small ? '6px 12px' : '10px 18px',
       borderRadius:10, border:'none', background:bg, color: solidFg,
-      fontSize: small ? 11 : 13, fontWeight:600, fontFamily:'var(--sans)', cursor:'pointer',
+      fontSize: small ? 11 : 13, fontWeight:600, fontFamily:'var(--sans)', cursor: disabled ? 'not-allowed' : 'pointer',
       boxShadow: danger ? 'none' : color==='accent' ? '0 4px 20px rgba(79,126,245,0.25)' : 'none',
+      opacity: disabled ? 0.45 : 1,
     }}>{label}</button>
   )
 }
 
 function Badge({ label, color }) {
-  const colors = { admin:[C.red,'rgba(245,83,79,0.15)'], 'custom admin':[C.accent2,'rgba(167,139,250,0.14)'], analyst:[C.amber,'rgba(245,166,35,0.12)'], viewer:[C.text3,'rgba(85,90,114,0.2)'], active:[C.green,'rgba(34,211,160,0.1)'], inactive:[C.red,'rgba(245,83,79,0.15)'], fortigate:[C.accent,'rgba(79,126,245,0.12)'], 'cisco-switch':[C.cyan,'rgba(34,211,238,0.1)'], 'cisco-router':[C.green,'rgba(34,211,160,0.1)'], other:[C.text3,'rgba(85,90,114,0.2)'], critical:[C.red,'rgba(245,83,79,0.15)'], high:[C.amber,'rgba(245,166,35,0.12)'], medium:[C.accent,'rgba(79,126,245,0.12)'], low:[C.green,'rgba(34,211,160,0.1)'] }
+  const colors = { admin:[C.red,'rgba(245,83,79,0.15)'], 'custom admin':[C.accent2,'rgba(167,139,250,0.14)'], 'custom role':[C.accent2,'rgba(167,139,250,0.12)'], analyst:[C.amber,'rgba(245,166,35,0.12)'], viewer:[C.text3,'rgba(85,90,114,0.2)'], active:[C.green,'rgba(34,211,160,0.1)'], inactive:[C.red,'rgba(245,83,79,0.15)'], fortigate:[C.accent,'rgba(79,126,245,0.12)'], 'cisco-switch':[C.cyan,'rgba(34,211,238,0.1)'], 'cisco-router':[C.green,'rgba(34,211,160,0.1)'], other:[C.text3,'rgba(85,90,114,0.2)'], critical:[C.red,'rgba(245,83,79,0.15)'], high:[C.amber,'rgba(245,166,35,0.12)'], medium:[C.accent,'rgba(79,126,245,0.12)'], low:[C.green,'rgba(34,211,160,0.1)'] }
   const [fg, bg] = colors[label] || [C.text2,'var(--bg4)']
   return <span style={{ fontSize:10, padding:'3px 10px', borderRadius:999, fontFamily:'var(--mono)', fontWeight:600, color:fg, background:bg, border:'1px solid var(--border)' }}>{label}</span>
 }
 
 function roleBadgeLabel(role) {
   if (role === 'custom_admin') return 'custom admin'
+  if (role === 'role_template') return 'custom role'
   return role
 }
 
 export default function AdminPage() {
+  const sessionUser = useAuthStore((s) => s.user)
+  const adminEditable = canWritePage(sessionUser, 'admin')
+
   const [tab, setTab]         = useState('devices')
   const [devices, setDevices] = useState([])
   const [sites, setSites]     = useState([])
   const [users, setUsers]     = useState([])
+  const [customRoles, setCustomRoles] = useState([])
   const [alerts, setAlerts]   = useState([])
   const [modal, setModal]     = useState(null)
   const [form, setForm]       = useState({})
+  const [crForm, setCrForm]   = useState(() => ({
+    _id: null,
+    name: '',
+    description: '',
+    pages: emptyPageTemplateForm(),
+  }))
   const [loading, setLoading] = useState(false)
 
   const f = key => val => setForm(p => ({ ...p, [key]: val }))
 
   const ADMIN_DEVICE_COLS = [160, 130, 100, 140, 88, 200, 128]
-  const ADMIN_USER_COLS = [200, 220, 88, 220, 88, 180, 220]
+  const ADMIN_USER_COLS = [196, 196, 76, 92, 196, 84, 168, 216]
   const deviceResize = useResizableColumns('admin-devices', ADMIN_DEVICE_COLS)
   const userResize = useResizableColumns('admin-users', ADMIN_USER_COLS)
   const adminTh = {
@@ -148,35 +179,62 @@ export default function AdminPage() {
 
   async function loadAll() {
     try {
-      const [d, s, u, a] = await Promise.all([
+      const [d, s, u, a, crRes] = await Promise.all([
         api.get('/api/devices'),
         api.get('/api/sites'),
         api.get('/api/users'),
         api.get('/api/alerts'),
+        api.get('/api/custom-roles').catch(() => ({ data: [] })),
       ])
       setDevices(d.data)
       setSites(s.data)
       setUsers(u.data)
       setAlerts(a.data)
+      setCustomRoles(Array.isArray(crRes.data) ? crRes.data : [])
     } catch(err) { console.error(err) }
   }
 
   useEffect(() => { loadAll() }, [])
 
   async function save() {
+    if (!adminEditable) {
+      toast.error('You need full Admin access to save changes.')
+      return
+    }
     setLoading(true)
     try {
       const { _type, _id, ...data } = form
       let payload = data
       if (_type === 'users') {
+        if (!_id && data.authKind !== 'ad') {
+          const pw = (data.password || '').trim()
+          if (pw.length < 8) {
+            toast.error('Password must be at least 8 characters')
+            setLoading(false)
+            return
+          }
+        }
         payload = {
           name: data.name,
           email: data.email,
           role: data.role,
           active: data.active,
         }
-        if (data.password) payload.password = data.password
-        if (data.role !== 'admin' && Array.isArray(data.allowedPages)) payload.allowedPages = data.allowedPages
+        if (!_id) {
+          if (data.authKind === 'ad') {
+            payload.authKind = 'ad'
+            payload.adLoginIdentity = (data.adLoginIdentity || '').trim()
+          } else {
+            payload.password = data.password
+          }
+        } else if (data.authKind === 'ad') {
+          payload.adLoginIdentity = (data.adLoginIdentity || '').trim()
+        }
+        if (data.role === 'role_template') {
+          payload.customRoleId = data.customRoleId || ''
+        } else if (data.role !== 'admin' && Array.isArray(data.allowedPages)) {
+          payload.allowedPages = data.allowedPages
+        }
       }
       if (_type === 'devices') {
         payload = {
@@ -210,12 +268,95 @@ export default function AdminPage() {
   }
 
   async function remove(type, id, name) {
+    if (!adminEditable) {
+      toast.error('You need full Admin access to delete.')
+      return
+    }
     if (!confirm(`Delete ${name}?`)) return
     try {
       await api.delete(`/api/${type}/${id}`)
       toast.success('Deleted')
       loadAll()
     } catch(err) { toast.error('Delete failed') }
+  }
+
+  function openCustomRoleCreate() {
+    setCrForm({
+      _id: null,
+      name: '',
+      description: '',
+      pages: emptyPageTemplateForm(),
+    })
+    setModal('custom-role')
+  }
+
+  function openCustomRoleEdit(roleDoc) {
+    const pages = emptyPageTemplateForm()
+    for (const row of roleDoc.pages || []) {
+      if (row.pageKey && pages[row.pageKey] !== undefined) pages[row.pageKey] = row.access
+    }
+    setCrForm({
+      _id: roleDoc._id,
+      name: roleDoc.name || '',
+      description: roleDoc.description || '',
+      pages,
+    })
+    setModal('custom-role')
+  }
+
+  async function saveCustomRole() {
+    if (!adminEditable) {
+      toast.error('You need full Admin access to save custom roles.')
+      return
+    }
+    const name = (crForm.name || '').trim()
+    if (!name) {
+      toast.error('Name is required')
+      return
+    }
+    const pages = APP_PAGE_KEYS.filter((k) => crForm.pages[k] === 'read' || crForm.pages[k] === 'full').map((k) => ({
+      pageKey: k,
+      access: crForm.pages[k],
+    }))
+    if (!pages.length) {
+      toast.error('Select at least one page with Read only or Full access')
+      return
+    }
+    setLoading(true)
+    try {
+      const body = {
+        name,
+        description: (crForm.description || '').trim(),
+        pages,
+      }
+      if (crForm._id) {
+        await api.put(`/api/custom-roles/${crForm._id}`, body)
+      } else {
+        await api.post('/api/custom-roles', body)
+      }
+      toast.success('Saved')
+      setModal(null)
+      loadAll()
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Save failed')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function removeCustomRole(roleDoc) {
+    if (!adminEditable) {
+      toast.error('You need full Admin access to delete roles.')
+      return
+    }
+    if (!confirm(`Delete custom role "${roleDoc.name}"?`)) return
+    try {
+      await api.delete(`/api/custom-roles/${roleDoc._id}`)
+      toast.success('Deleted')
+      loadAll()
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Delete failed')
+    }
   }
 
   function openResetPassword(user) {
@@ -230,6 +371,10 @@ export default function AdminPage() {
   }
 
   async function savePasswordReset() {
+    if (!adminEditable) {
+      toast.error('You need full Admin access to reset passwords.')
+      return
+    }
     const pw = (form.newPassword || '').trim()
     const cf = (form.confirmPassword || '').trim()
     if (pw.length < 8) {
@@ -259,7 +404,7 @@ export default function AdminPage() {
       devices: { _type:'devices', name:'', ip:'', type:'cisco-switch', site: sites[0]?._id||'', notes:'', tags:'', status:'unknown',
         mgmtUsername:'', mgmtPassword:'', savePassword:false, sshPort:22, httpsPort:443 },
       sites:   { _type:'sites', name:'', location:'', description:'', timezone:'Asia/Kolkata' },
-      users:   { _type:'users', name:'', email:'', password:'', role:'viewer', allowedPages: [...APP_PAGE_KEYS] },
+      users:   { _type:'users', name:'', email:'', password:'', authKind:'local', adLoginIdentity:'', role:'viewer', allowedPages: [...APP_PAGE_KEYS], customRoleId: '' },
       alerts:  { _type:'alerts', name:'', description:'', type:'threshold', source:'all', severity:'medium', enabled:true },
     }
     setForm(defaults[type])
@@ -276,8 +421,12 @@ export default function AdminPage() {
       let pages
       if (item.role === 'admin') pages = [...APP_PAGE_KEYS]
       else if (item.role === 'custom_admin') pages = Array.isArray(item.allowedPages) ? item.allowedPages : []
+      else if (item.role === 'role_template') pages = []
       else pages = Array.isArray(item.allowedPages) ? item.allowedPages : [...APP_PAGE_KEYS]
       base.allowedPages = pages
+      base.customRoleId = item.customRoleId ? String(item.customRoleId) : ''
+      base.authKind = item.authKind === 'ad' ? 'ad' : 'local'
+      base.adLoginIdentity = item.authKind === 'ad' ? (item.adLoginIdentity || '') : ''
     }
     setForm(base)
     setModal(`edit-${type}`)
@@ -343,6 +492,23 @@ export default function AdminPage() {
           <p style={{ margin:'14px 0 0', fontSize:12, color:'var(--text3)', fontFamily:'var(--mono)' }}>
             <span style={{ color:'var(--accent)' }}>●</span> {activeTabMeta.desc}
           </p>
+        )}
+        {(tab === 'users' || tab === 'custom_roles') && !adminEditable && (
+          <div
+            style={{
+              marginTop: 14,
+              padding: '12px 14px',
+              borderRadius: 10,
+              border: '1px solid var(--border)',
+              background: 'rgba(245,166,35,0.08)',
+              fontSize: 12,
+              fontFamily: 'var(--mono)',
+              color: 'var(--text2)',
+              lineHeight: 1.45,
+            }}
+          >
+            <strong style={{ color: 'var(--amber)' }}>View only</strong> — Your access to the Admin console is read-only on this tab. Ask someone with full Admin rights to change users or custom roles.
+          </div>
         )}
       </div>
 
@@ -460,6 +626,82 @@ export default function AdminPage() {
         </div>
       )}
 
+      {/* -- CUSTOM ROLES -- */}
+      {tab === 'custom_roles' && (
+        <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:14, padding:'16px 20px', background:'linear-gradient(165deg, var(--bg3), var(--bg2))', border:'1px solid var(--border)', borderRadius:14 }}>
+            <div>
+              <div style={{ fontSize:11, fontFamily:'var(--mono)', color:'var(--text3)', textTransform:'uppercase', letterSpacing:0.8 }}>Templates</div>
+              <div style={{ fontSize:20, fontWeight:700, color:'var(--text)', fontFamily:'var(--sans)', marginTop:4 }}>
+                {customRoles.length} <span style={{ fontSize:13, fontWeight:500, color:'var(--text3)' }}>saved roles</span>
+              </div>
+              <div style={{ fontSize:12, color:'var(--text3)', fontFamily:'var(--sans)', marginTop:8, maxWidth:520, lineHeight:1.45 }}>
+                Define page-by-page access as <strong style={{ color:'var(--text)' }}>Read only</strong> (view dashboards and data) or <strong style={{ color:'var(--text)' }}>Full</strong> (normal actions). Assign templates under <strong style={{ color:'var(--text)' }}>Users</strong>.
+              </div>
+            </div>
+            <Btn label="+ Create custom role" color="accent" onClick={() => openCustomRoleCreate()} />
+          </div>
+          <div className="card" style={{ borderRadius:14, overflow:'hidden', border:'1px solid var(--border)', boxShadow:'0 8px 32px rgba(0,0,0,0.12)' }}>
+            <div className="card-header" style={{ background:'var(--bg3)' }}>
+              <span className="card-title">Role templates</span>
+              <span className="badge badge-purple">{customRoles.length}</span>
+            </div>
+            <div style={{ overflowX:'auto' }}>
+              <table style={{ width:'100%', borderCollapse:'collapse' }}>
+                <thead>
+                  <tr>
+                    {['Name', 'Summary', 'Actions'].map((label) => (
+                      <th key={label} style={{ ...adminTh, width: label === 'Summary' ? '55%' : undefined }}>{label}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {customRoles.map((cr) => {
+                    const pa = {}
+                    for (const row of cr.pages || []) {
+                      pa[row.pageKey] = row.access
+                    }
+                    const summary = summarizePageAccess(pa)
+                    const labels = (cr.pages || []).map((r) => `${APP_PAGES.find((p) => p.key === r.pageKey)?.label || r.pageKey}:${r.access === 'full' ? 'full' : 'read'}`)
+                    return (
+                      <tr key={cr._id} style={{ background:'transparent' }}>
+                        <TD color="var(--text)">
+                          <strong>{cr.name}</strong>
+                          {cr.description ? (
+                            <div style={{ fontSize:11, color:'var(--text3)', marginTop:6, whiteSpace:'pre-wrap', fontFamily:'var(--sans)' }}>{cr.description}</div>
+                          ) : null}
+                        </TD>
+                        <TD color="var(--text3)" style={{ fontSize:11, lineHeight:1.5 }}>
+                          <span style={{ color:'var(--accent)' }}>{summary}</span>
+                          {labels.length ? (
+                            <div style={{ marginTop:8 }}>{labels.join(' · ')}</div>
+                          ) : (
+                            <div style={{ marginTop:8 }}>No pages configured</div>
+                          )}
+                        </TD>
+                        <td style={{ padding:'10px 14px', borderBottom:'1px solid var(--border)', verticalAlign:'middle' }}>
+                          <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+                            <Btn label="Edit" small onClick={() => openCustomRoleEdit(cr)} />
+                            <Btn label="Delete" small danger onClick={() => removeCustomRole(cr)} />
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                  {customRoles.length === 0 && (
+                    <tr>
+                      <td colSpan={3} style={{ padding:48, textAlign:'center', color:'var(--text3)', fontFamily:'var(--mono)', fontSize:13 }}>
+                        No custom roles yet. Create one to mix read-only and full access across modules.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* -- USERS -- */}
       {tab==='users' && (
         <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
@@ -480,8 +722,8 @@ export default function AdminPage() {
                 <ResizableColGroup widths={userResize.widths} />
                 <thead>
                   <tr>
-                    {['Name', 'Email', 'Role', 'Pages', 'Status', 'Last Login', 'Actions'].map((label, i) => (
-                      <ResizableTh key={label} columnIndex={i} columnCount={7} startResize={userResize.startResize} style={adminTh}>
+                    {['Name', 'Email', 'Sign-in', 'Role', 'Pages', 'Status', 'Last Login', 'Actions'].map((label, i) => (
+                      <ResizableTh key={label} columnIndex={i} columnCount={8} startResize={userResize.startResize} style={adminTh}>
                         {label}
                       </ResizableTh>
                     ))}
@@ -508,10 +750,15 @@ export default function AdminPage() {
                         </div>
                       </TD>
                       <TD>{u.email}</TD>
+                      <TD color="var(--text3)">
+                        <Badge label={u.authKind === 'ad' ? 'AD' : 'local'} />
+                      </TD>
                       <TD><Badge label={roleBadgeLabel(u.role)} /></TD>
                       <TD color="var(--text3)">
                         {u.role === 'admin'
                           ? 'All'
+                          : u.role === 'role_template'
+                            ? `${u.customRoleName || 'Template'} — ${summarizePageAccess(u.pageAccess) || 'no pages'}`
                           : !Array.isArray(u.allowedPages)
                             ? u.role === 'custom_admin'
                               ? 'None'
@@ -525,7 +772,9 @@ export default function AdminPage() {
                       <td style={{ padding:'10px 14px', borderBottom:'1px solid var(--border)', verticalAlign:'middle' }}>
                         <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
                           <Btn label="Edit" small onClick={()=>openEdit('users',u)} />
+                          {u.authKind !== 'ad' && (
                           <Btn label="Password" small color="amber" title="Set a new password for this user" onClick={()=>openResetPassword(u)} />
+                          )}
                           <Btn label="Delete" small danger onClick={()=>remove('users',u._id,u.name)} />
                         </div>
                       </td>
@@ -533,7 +782,7 @@ export default function AdminPage() {
                   ))}
                   {users.length === 0 && (
                     <tr>
-                      <td colSpan={7} style={{ padding:48, textAlign:'center', color:'var(--text3)', fontFamily:'var(--mono)', fontSize:13 }}>
+                      <td colSpan={8} style={{ padding:48, textAlign:'center', color:'var(--text3)', fontFamily:'var(--mono)', fontSize:13 }}>
                         No users yet. Invite teammates with the right roles and page access.
                       </td>
                     </tr>
@@ -606,7 +855,14 @@ export default function AdminPage() {
                         label={a.enabled ? 'Disable' : 'Enable'}
                         small
                         color={a.enabled ? 'amber' : 'green'}
-                        onClick={async () => { await api.put(`/api/alerts/${a._id}`, { enabled: !a.enabled }); loadAll() }}
+                        onClick={async () => {
+                          if (!adminEditable) {
+                            toast.error('You need full Admin access to change alert rules.')
+                            return
+                          }
+                          await api.put(`/api/alerts/${a._id}`, { enabled: !a.enabled })
+                          loadAll()
+                        }}
                       />
                       <Btn label="Edit" small onClick={() => openEdit('alerts', a)} />
                       <Btn label="Delete" small danger onClick={() => remove('alerts', a._id, a.name)} />
@@ -789,17 +1045,59 @@ export default function AdminPage() {
         <Modal title={modal.includes('create') ? 'Add User' : 'Edit User'} onClose={()=>setModal(null)}>
           <Field label="Full Name" value={form.name||''} onChange={f('name')} required />
           <Field label="Email" value={form.email||''} onChange={f('email')} type="email" required />
-          {modal.includes('create') && <Field label="Password" value={form.password||''} onChange={f('password')} type="password" required />}
+          {modal.includes('create') && (
+            <Field
+              label="Sign-in"
+              value={form.authKind || 'local'}
+              onChange={(v) => setForm((p) => ({ ...p, authKind: v, password: v === 'ad' ? '' : p.password }))}
+              options={[
+                { value: 'local', label: 'Local — portal password' },
+                { value: 'ad', label: 'Active Directory — domain password' },
+              ]}
+            />
+          )}
+          {modal.includes('edit') && (
+            <div style={{ marginBottom: 12, padding: '10px 12px', background: 'var(--bg3)', borderRadius: 10, border: '1px solid var(--border)', fontSize: 12, color: 'var(--text2)', lineHeight: 1.45 }}>
+              Sign-in type is fixed after creation:{' '}
+              <strong style={{ color: 'var(--text)' }}>{form.authKind === 'ad' ? 'Active Directory' : 'Local account'}</strong>
+              {form.authKind === 'ad' ? ' — password is checked against the domain on each login.' : ''}
+            </div>
+          )}
+          {modal.includes('create') && form.authKind === 'local' && (
+            <Field label="Password" value={form.password || ''} onChange={f('password')} type="password" required />
+          )}
+          {((modal.includes('create') && form.authKind === 'ad') || (modal.includes('edit') && form.authKind === 'ad')) && (
+            <>
+              <Field
+                label="Directory login name (optional)"
+                value={form.adLoginIdentity || ''}
+                onChange={f('adLoginIdentity')}
+                placeholder="UPN or DOMAIN\\user — leave blank to use email"
+              />
+              <div style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 12, lineHeight: 1.45 }}>
+                Must match the LDAP bind name for this user (often the same as email when UPN matches email).
+              </div>
+            </>
+          )}
           <Field label="Role" value={form.role||'viewer'} onChange={(v) => {
             setForm((p) => {
               const next = { ...p, role: v }
               if (v === 'admin') {
                 next.allowedPages = [...APP_PAGE_KEYS]
+                next.customRoleId = ''
               } else if (v === 'custom_admin') {
+                next.customRoleId = ''
                 if (p.role === 'admin') next.allowedPages = [...APP_PAGE_KEYS]
                 else if (!Array.isArray(p.allowedPages)) next.allowedPages = []
                 else next.allowedPages = [...p.allowedPages]
+              } else if (v === 'role_template') {
+                next.allowedPages = []
+                const keep =
+                  p.customRoleId &&
+                  customRoles.some((c) => String(c._id) === String(p.customRoleId))
+                next.customRoleId = keep ? p.customRoleId : (customRoles[0]?._id || '')
               } else {
+                next.customRoleId = ''
                 if (p.role === 'admin') next.allowedPages = [...APP_PAGE_KEYS]
                 else if (!Array.isArray(p.allowedPages)) next.allowedPages = [...APP_PAGE_KEYS]
                 else next.allowedPages = [...p.allowedPages]
@@ -809,12 +1107,28 @@ export default function AdminPage() {
           }} options={[
             {value:'admin',label:'Admin — full access (all pages)'},
             {value:'custom_admin',label:'Custom admin — pick pages (incl. Admin console if selected)'},
+            {value:'role_template',label:'Custom role — saved template (read/full per page)'},
             {value:'analyst',label:'Analyst — can create tickets'},
             {value:'viewer',label:'Viewer — read only'},
           ]} />
+          {form.role === 'role_template' && (
+            <Field
+              label="Role template"
+              value={form.customRoleId || ''}
+              onChange={f('customRoleId')}
+              options={[
+                { value: '', label: customRoles.length ? '-- Select template --' : 'Create a template first (Custom roles tab)' },
+                ...customRoles.map((cr) => ({ value: cr._id, label: cr.name })),
+              ]}
+            />
+          )}
           {form.role === 'admin' ? (
             <div style={{ marginBottom: 14, padding: '12px 14px', background: 'var(--bg3)', borderRadius: 10, border: '1px solid var(--border)', fontSize: 12, color: 'var(--text2)', lineHeight: 1.5 }}>
               Admin accounts always have access to every page. Page checklists do not apply.
+            </div>
+          ) : form.role === 'role_template' ? (
+            <div style={{ marginBottom: 14, padding: '12px 14px', background: 'var(--bg3)', borderRadius: 10, border: '1px solid var(--border)', fontSize: 12, color: 'var(--text2)', lineHeight: 1.5 }}>
+              Permissions come from the template (mix <strong style={{ color: 'var(--text)' }}>Read only</strong> and <strong style={{ color: 'var(--text)' }}>Full</strong> per module). Manage templates under <strong style={{ color: 'var(--text)' }}>Custom roles</strong>.
             </div>
           ) : (
             <div style={{ marginBottom: 14 }}>
@@ -869,6 +1183,36 @@ export default function AdminPage() {
           <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 22, paddingTop: 18, borderTop: '1px solid var(--border)' }}>
             <Btn variant="ghost" label="Cancel" onClick={() => { setModal(null); setForm({}) }} />
             <Btn label={loading ? 'Saving...' : 'Update password'} onClick={savePasswordReset} color="green" />
+          </div>
+        </Modal>
+      )}
+
+      {modal === 'custom-role' && (
+        <Modal title={crForm._id ? 'Edit custom role' : 'Create custom role'} width={620} onClose={() => setModal(null)}>
+          <Field label="Role name" value={crForm.name || ''} onChange={(v) => setCrForm((p) => ({ ...p, name: v }))} required />
+          <Field label="Description (optional)" value={crForm.description || ''} onChange={(v) => setCrForm((p) => ({ ...p, description: v }))} />
+          <label style={{ fontSize:10, fontWeight:600, color:'var(--text3)', letterSpacing:1, textTransform:'uppercase', fontFamily:'var(--mono)', display:'block', marginBottom:8 }}>Pages</label>
+          <div style={{ fontSize:11, color:'var(--text2)', marginBottom:12, lineHeight:1.45 }}>
+            For each module choose <strong style={{ color:'var(--text)' }}>No access</strong>, <strong style={{ color:'var(--text)' }}>Read only</strong>, or <strong style={{ color:'var(--text)' }}>Full</strong> (create/update/delete as that screen normally allows).
+          </div>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
+            {APP_PAGES.map((p) => (
+              <Field
+                key={p.key}
+                label={p.label}
+                value={crForm.pages[p.key] || 'none'}
+                onChange={(v) => setCrForm((s) => ({ ...s, pages: { ...s.pages, [p.key]: v } }))}
+                options={[
+                  { value: 'none', label: 'No access' },
+                  { value: 'read', label: 'Read only' },
+                  { value: 'full', label: 'Full access' },
+                ]}
+              />
+            ))}
+          </div>
+          <div style={{ display:'flex', gap:10, justifyContent:'flex-end', marginTop:22, paddingTop:18, borderTop:'1px solid var(--border)' }}>
+            <Btn variant="ghost" label="Cancel" onClick={() => setModal(null)} />
+            <Btn label={loading ? 'Saving...' : 'Save role'} onClick={() => saveCustomRole()} />
           </div>
         </Modal>
       )}

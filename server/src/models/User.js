@@ -4,9 +4,16 @@ import bcrypt from 'bcryptjs'
 const userSchema = new mongoose.Schema({
   name:      { type: String, required: true },
   email:     { type: String, required: true, unique: true, lowercase: true },
-  password:  { type: String, required: true, select: false },
-  role:      { type: String, enum: ['admin', 'custom_admin', 'analyst', 'viewer'], default: 'viewer' },
-  /** App route keys (soc, noc, …). Full admin ignores this. custom_admin uses only listed keys; omitted = none. Analyst/viewer: omitted or non-array = all pages (legacy). Empty array = no pages. */
+  /** Omit for portal users who authenticate against Active Directory (see authKind). */
+  password:  { type: String, required: false, select: false },
+  /** Local = bcrypt portal password; ad = LDAP bind against the configured domain (still requires a Mongo row + access grants). */
+  authKind:  { type: String, enum: ['local', 'ad'], default: 'local' },
+  /** When authKind is ad: UPN / DOMAIN\samAccount / DN — leave empty to bind with portal email as the LDAP user name (typical when UPN matches email). */
+  adLoginIdentity: { type: String, default: '' },
+  role:      { type: String, enum: ['admin', 'custom_admin', 'role_template', 'analyst', 'viewer'], default: 'viewer' },
+  /** When role is role_template, ACL comes from CustomRole only. */
+  customRoleId: { type: mongoose.Schema.Types.ObjectId, ref: 'CustomRole', default: null },
+  /** App route keys (soc, noc, …). Full admin ignores this. role_template ignores stored values (computed). custom_admin uses only listed keys; omitted = none. Analyst/viewer: omitted or non-array = all pages (legacy). Empty array = no pages. */
   allowedPages: [{ type: String }],
   active:    { type: Boolean, default: true },
   lastLogin: { type: Date },
@@ -16,13 +23,32 @@ const userSchema = new mongoose.Schema({
   themeSaveToProfile: { type: Boolean, default: false },
 }, { timestamps: true })
 
+userSchema.pre('validate', function(next) {
+  if (this.authKind === 'ad') {
+    return next()
+  }
+  const needPw = this.isNew || this.isModified('password')
+  if (needPw) {
+    const p = this.password
+    if (!p || String(p).length < 1) {
+      return next(new Error('Password is required for local accounts'))
+    }
+    if (String(p).length < 8) {
+      return next(new Error('Password must be at least 8 characters'))
+    }
+  }
+  next()
+})
+
 userSchema.pre('save', async function(next) {
   if (!this.isModified('password')) return next()
+  if (!this.password) return next()
   this.password = await bcrypt.hash(this.password, 12)
   next()
 })
 
 userSchema.methods.comparePassword = async function(candidate) {
+  if (!this.password) return false
   return bcrypt.compare(candidate, this.password)
 }
 

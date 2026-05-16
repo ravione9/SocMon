@@ -53,6 +53,9 @@ export default function LoginPage() {
             {loading ? 'Signing in...' : 'Sign in'}
           </button>
         </form>
+        <div style={{ marginTop:18, paddingTop:14, borderTop:'1px solid var(--border)', textAlign:'center', fontSize:11, color:'var(--text3)', fontFamily:'var(--mono)', lineHeight:1.5 }}>
+          Local accounts use the password set in Admin. AD-linked accounts use the same domain password as corporate login (account must exist here with access).
+        </div>
         <div style={{ marginTop:20, textAlign:'center', fontSize:11, color:'var(--text3)', fontFamily:'var(--mono)' }}>Lenskart v1.0.0 · Lenskart Security Team</div>
       </div>
     </div>

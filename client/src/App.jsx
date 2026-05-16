@@ -17,6 +17,7 @@ const InfraMonitoringPage = lazy(() => import('./pages/Infra/InfraMonitoringPage
 const NetworkAccessPage = lazy(() => import('./pages/Network/NetworkAccessPage.jsx'))
 const NoAccessPage = lazy(() => import('./pages/NoAccess/NoAccessPage.jsx'))
 const IdcsPage     = lazy(() => import('./pages/IdcsManagement.jsx'))
+const ActiveDirectoryPage = lazy(() => import('./pages/ActiveDirectoryManagement.jsx'))
 
 function PrivateRoute({ children }) {
   const token = useAuthStore(s => s.token)
@@ -52,6 +53,7 @@ export default function App() {
           <Route path="network"  element={<PageRoute pageKey="network"><NetworkAccessPage /></PageRoute>} />
           <Route path="ai"       element={<PageRoute pageKey="ai"><AIPage /></PageRoute>} />
           <Route path="idcs"     element={<PageRoute pageKey="idcs"><IdcsPage /></PageRoute>} />
+          <Route path="ad"       element={<PageRoute pageKey="ad"><ActiveDirectoryPage /></PageRoute>} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

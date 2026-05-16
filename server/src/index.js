@@ -36,6 +36,7 @@ import webMgmtRoutes, { proxyWsUpgrade } from './routes/webMgmt.js'
 import rdpRoutes, { proxyRdpWsUpgrade } from './routes/rdp.js'
 import idcsRoutes from './routes/idcs.js'
 import adRoutes from './routes/ad.js'
+import customRoleRoutes from './routes/customRoles.js'
 import { errorHandler } from './middleware/errorHandler.js'
 
 /** CORS: localhost and 127.0.0.1 are different browser origins; allow both when either is configured. */
@@ -110,6 +111,7 @@ app.use(
 
 app.use('/api/auth',    authRoutes)
 app.use('/api/users',   userRoutes)
+app.use('/api/custom-roles', customRoleRoutes)
 app.use('/api/devices', deviceRoutes)
 app.use('/api/sites',   siteRoutes)
 app.use('/api/tickets', ticketRoutes)

@@ -16,9 +16,11 @@ services:
     command: sh -c "npm install && npm run dev"
     environment:
       NODE_ENV: development
-      # 127.0.0.1 — on Windows, localhost (::1) often hits Docker port-forward bugs (connection reset).
-      VITE_API_URL: http://127.0.0.1:5000
-      VITE_WS_URL: ws://127.0.0.1:5000
+      # Proxy /api and /socket.io inside the compose network (browser must NOT call 127.0.0.1 — that
+      # targets each client machine and breaks when you open the UI via LAN IP or another hostname).
+      VITE_DEV_PROXY_TARGET: http://server:5000
+      VITE_API_URL: ""
+      VITE_WS_URL: ""
     depends_on:
       - server
     networks:
