@@ -21,6 +21,7 @@ import { useSentinelHostGroups } from '../../hooks/useSentinelHostGroups.js'
 import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../components/ui/ResizableTable.jsx'
 import { useThemeStore } from '../../store/themeStore.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
+import { useSmartPolling, pollIntervalForRange } from '../../hooks/useSmartPolling.js'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, ArcElement, Tooltip, Legend, Filler)
 
@@ -453,123 +454,105 @@ export default function SentinelPage() {
     return `&usbDevices=${encodeURIComponent(usbDashUsbDevicesParam)}`
   }, [tab, usbDashUsbDevicesParam])
 
+  const sentinelDashEnabled =
+    ['overview', 'active', 'usb', 'usb_dash', 'bluetooth'].includes(tab) &&
+    !(tab === 'usb_dash' && usbDashSelectedHosts.length === 0 && usbDashSelectedDevices.length === 0)
+
   useEffect(() => {
-    if (!['overview', 'active', 'usb', 'usb_dash', 'bluetooth'].includes(tab)) return
+    if (sentinelDashEnabled) return
     if (tab === 'usb_dash' && usbDashSelectedHosts.length === 0 && usbDashSelectedDevices.length === 0) {
       setDash(null)
       setLoading(false)
-      return
     }
-    let cancelled = false
-    async function load() {
-      setLoading(true)
-      setError(null)
-      try {
-        const rp = `range=${range?.value || ''}&from=${range?.from || ''}&to=${range?.to || ''}`
-        const sc = scopeForTab(tab)
-        const { data } = await api.get(`/api/sentinel/dashboard?${rp}&scope=${sc}${hostGroupQuery}${usbDashEndpointsQuery}${usbDashUsbDevicesQuery}`)
-        if (!cancelled) setDash(data)
-      } catch (e) {
-        if (!cancelled) {
-          setError(e.response?.data?.error || e.message || 'Failed to load')
-          setDash(null)
-        }
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
+  }, [sentinelDashEnabled, tab, usbDashSelectedHosts.length, usbDashSelectedDevices.length])
+
+  const sentinelLoad = useCallback(async () => {
+    if (!sentinelDashEnabled) return
+    setLoading(true)
+    setError(null)
+    try {
+      const rp = `range=${range?.value || ''}&from=${range?.from || ''}&to=${range?.to || ''}`
+      const sc = scopeForTab(tab)
+      const { data } = await api.get(`/api/sentinel/dashboard?${rp}&scope=${sc}${hostGroupQuery}${usbDashEndpointsQuery}${usbDashUsbDevicesQuery}`)
+      setDash(data)
+    } catch (e) {
+      setError(e.response?.data?.error || e.message || 'Failed to load')
+      setDash(null)
+    } finally {
+      setLoading(false)
     }
-    load()
-    const iv = setInterval(load, 45000)
-    return () => {
-      cancelled = true
-      clearInterval(iv)
-    }
-  }, [range, tab, hostGroupQuery, usbDashEndpointsQuery, usbDashUsbDevicesQuery, usbDashSelectedHosts.length, usbDashSelectedDevices.length])
+  }, [sentinelDashEnabled, range, tab, hostGroupQuery, usbDashEndpointsQuery, usbDashUsbDevicesQuery])
+
+  // Polling cadence scales with the time-window (small window = more responsive,
+  // 30d window = chill so the same expensive aggregation doesn't run every 45s).
+  const sentinelPollMs = Math.max(45_000, pollIntervalForRange(range))
+  useSmartPolling(sentinelLoad, sentinelPollMs, [sentinelLoad], { enabled: sentinelDashEnabled })
 
   /**
    * Parallel counts: (1) Threat Incident-style unresolved KPI (not mitigated · unresolved + in-progress).
    * (2) Threats KPI — full incident count (omit incidentStatuses filter via incidents=all; mitigation=all).
    */
-  useEffect(() => {
-    let cancelled = false
-    async function loadS1ThreatKpis() {
-      setS1ThreatApiLoading(true)
-      try {
-        const base = () => {
-          const p = new URLSearchParams()
-          if (range?.type === 'custom' && range.from && range.to) {
-            p.set('from', range.from)
-            p.set('to', range.to)
-          } else {
-            p.set('range', range?.value || DEFAULT_RANGE_VALUE)
-          }
-          return p
+  const loadS1ThreatKpis = useCallback(async () => {
+    setS1ThreatApiLoading(true)
+    try {
+      const base = () => {
+        const p = new URLSearchParams()
+        if (range?.type === 'custom' && range.from && range.to) {
+          p.set('from', range.from)
+          p.set('to', range.to)
+        } else {
+          p.set('range', range?.value || DEFAULT_RANGE_VALUE)
         }
-        const nmParams = base()
-        const detParams = base()
-        detParams.set('mitigation', 'all')
-        detParams.set('incidents', 'all')
-        const [nm, det] = await Promise.all([
-          api.get(`/api/sentinel-one/threats/count?${nmParams}`),
-          api.get(`/api/sentinel-one/threats/count?${detParams}`),
-        ])
-        if (cancelled) return
-        if (nm.data?.configured === false) setS1NotMitigatedCount(null)
-        else setS1NotMitigatedCount(typeof nm.data?.count === 'number' ? nm.data.count : null)
-        if (det.data?.configured === false) setS1DetectedThreatCount(null)
-        else setS1DetectedThreatCount(typeof det.data?.count === 'number' ? det.data.count : null)
-      } catch {
-        if (!cancelled) {
-          setS1NotMitigatedCount(null)
-          setS1DetectedThreatCount(null)
-        }
-      } finally {
-        if (!cancelled) setS1ThreatApiLoading(false)
+        return p
       }
-    }
-    loadS1ThreatKpis()
-    const iv = setInterval(loadS1ThreatKpis, 60000)
-    return () => {
-      cancelled = true
-      clearInterval(iv)
+      const nmParams = base()
+      const detParams = base()
+      detParams.set('mitigation', 'all')
+      detParams.set('incidents', 'all')
+      const [nm, det] = await Promise.all([
+        api.get(`/api/sentinel-one/threats/count?${nmParams}`),
+        api.get(`/api/sentinel-one/threats/count?${detParams}`),
+      ])
+      if (nm.data?.configured === false) setS1NotMitigatedCount(null)
+      else setS1NotMitigatedCount(typeof nm.data?.count === 'number' ? nm.data.count : null)
+      if (det.data?.configured === false) setS1DetectedThreatCount(null)
+      else setS1DetectedThreatCount(typeof det.data?.count === 'number' ? det.data.count : null)
+    } catch {
+      setS1NotMitigatedCount(null)
+      setS1DetectedThreatCount(null)
+    } finally {
+      setS1ThreatApiLoading(false)
     }
   }, [range])
+  useSmartPolling(loadS1ThreatKpis, Math.max(60_000, pollIntervalForRange(range)), [loadS1ThreatKpis])
 
-  useEffect(() => {
-    if (tab !== 'active') return
-    let cancelled = false
-    async function loadT() {
-      setThreatsLoading(true)
-      try {
-        const rp = `range=${range?.value || ''}&from=${range?.from || ''}&to=${range?.to || ''}`
-        const [a, r] = await Promise.all([
-          api.get(`/api/sentinel/threats?status=active&excludeUsb=1&size=120&${rp}${hostGroupQuery}`),
-          api.get(`/api/sentinel/threats?status=resolved&excludeUsb=1&size=120&${rp}${hostGroupQuery}`),
-        ])
-        if (!cancelled) {
-          setActiveHits(a.data?.hits || [])
-          setResolvedHits(r.data?.hits || [])
-          setActiveThreatTotal(typeof a.data?.total === 'number' ? a.data.total : null)
-          setResolvedThreatTotal(typeof r.data?.total === 'number' ? r.data.total : null)
-        }
-      } catch {
-        if (!cancelled) {
-          setActiveHits([])
-          setResolvedHits([])
-          setActiveThreatTotal(null)
-          setResolvedThreatTotal(null)
-        }
-      } finally {
-        if (!cancelled) setThreatsLoading(false)
-      }
+  const loadActiveThreats = useCallback(async () => {
+    setThreatsLoading(true)
+    try {
+      const rp = `range=${range?.value || ''}&from=${range?.from || ''}&to=${range?.to || ''}`
+      const [a, r] = await Promise.all([
+        api.get(`/api/sentinel/threats?status=active&excludeUsb=1&size=120&${rp}${hostGroupQuery}`),
+        api.get(`/api/sentinel/threats?status=resolved&excludeUsb=1&size=120&${rp}${hostGroupQuery}`),
+      ])
+      setActiveHits(a.data?.hits || [])
+      setResolvedHits(r.data?.hits || [])
+      setActiveThreatTotal(typeof a.data?.total === 'number' ? a.data.total : null)
+      setResolvedThreatTotal(typeof r.data?.total === 'number' ? r.data.total : null)
+    } catch {
+      setActiveHits([])
+      setResolvedHits([])
+      setActiveThreatTotal(null)
+      setResolvedThreatTotal(null)
+    } finally {
+      setThreatsLoading(false)
     }
-    loadT()
-    const iv = setInterval(loadT, 60000)
-    return () => {
-      cancelled = true
-      clearInterval(iv)
-    }
-  }, [range, tab, hostGroupQuery])
+  }, [range, hostGroupQuery])
+  useSmartPolling(
+    loadActiveThreats,
+    Math.max(60_000, pollIntervalForRange(range)),
+    [loadActiveThreats],
+    { enabled: tab === 'active' },
+  )
 
   const sentActiveTbl = useResizableColumns('sentinel-active-threats', [160, 240, 120, 88, 88])
   const sentResolvedTbl = useResizableColumns('sentinel-resolved-threats', [160, 260, 120, 100])

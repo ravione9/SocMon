@@ -5,10 +5,11 @@ export function startAlertEngine(io) {
   console.log('Alert engine started')
   setInterval(async () => {
     try {
-      const rules = await AlertRule.find({ enabled: true })
-      for (const rule of rules) {
-        await evaluateRule(rule, io)
-      }
+      // .lean() — we only read the fields, no save() calls on these copies.
+      // Indexed by { enabled: 1, source: 1 } in AlertRule.js.
+      const rules = await AlertRule.find({ enabled: true }).lean()
+      // Evaluate rules in parallel — independent ES counts, no shared state.
+      await Promise.all(rules.map((rule) => evaluateRule(rule, io)))
     } catch (err) {
       console.error('Alert engine error:', err.message)
     }

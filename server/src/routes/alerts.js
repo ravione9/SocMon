@@ -5,7 +5,7 @@ const router = Router()
 
 router.get('/', async (req, res) => {
   try {
-    const rules = await AlertRule.find()
+    const rules = await AlertRule.find().lean()
     res.json(rules)
   } catch (err) { res.status(500).json({ error: err.message }) }
 })

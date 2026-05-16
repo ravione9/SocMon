@@ -63,7 +63,8 @@ function buildDevicePayload(body) {
 
 router.get('/', async (req, res) => {
   try {
-    const devices = await Device.find().populate('site', 'name location').sort({ name: 1 })
+    // .lean() returns plain objects so toDeviceDto's `doc.toObject ? ... : { ...doc }` branch kicks in.
+    const devices = await Device.find().populate('site', 'name location').sort({ name: 1 }).lean()
     const uid = req.user._id
     const credMap = await credentialsByDeviceForUser(uid, devices.map((d) => d._id))
     res.json(devices.map((d) => toDeviceDto(d, credMap.get(String(d._id)))))

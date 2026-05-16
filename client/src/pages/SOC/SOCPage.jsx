@@ -1,6 +1,6 @@
 import RangePicker from '../../components/ui/RangePicker.jsx'
 import LogSearch from '../../components/ui/LogSearch.jsx'
-import { useEffect, useState, useRef, useMemo } from 'react'
+import { useEffect, useState, useRef, useMemo, useCallback } from 'react'
 import { Line, Bar, Doughnut } from 'react-chartjs-2'
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, BarElement, ArcElement, Tooltip, Legend, Filler } from 'chart.js'
 import api from '../../api/client'
@@ -12,6 +12,7 @@ import { getThemeCssColors } from '../../utils/themeCssColors.js'
 import { SOC_DEFAULT_RANGE_PRESET, SOC_DEFAULT_RANGE_VALUE } from '../../constants/timeRange.js'
 import { getSevCategory } from '../../utils/logSeverity.js'
 import { firewallIdentityFromEvent, fortigateVpnUserLabel, logSearchDeviceLabel } from '../../utils/firewallIdentity.js'
+import { useSmartPolling, pollIntervalForRange } from '../../hooks/useSmartPolling.js'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, ArcElement, Tooltip, Legend, Filler)
 
@@ -340,50 +341,111 @@ export default function SOCPage() {
     return () => socketRef.current?.disconnect()
   }, [])
 
-  useEffect(() => {
-    async function load() {
-      try {
-        const rp = `range=${range?.value || ''}&from=${range?.from || ''}&to=${range?.to || ''}`
-        const [s, t, th, d, e, evpn, se] = await Promise.all([
-          api.get(`/api/stats/soc?${rp}`),
-          api.get(`/api/logs/traffic/timeline?${rp}`),
-          api.get(`/api/logs/threats/top?${rp}`),
-          api.get(`/api/logs/denied?${rp}`),
-          api.get(`/api/logs/search?type=firewall&size=500&page=0&${rp}`, { timeout: 120000 }),
-          api.get(`/api/logs/search?type=firewall&logtype=vpn&size=250&page=0&${rp}`, { timeout: 120000 }),
-          api.get(`/api/logs/sessions?${rp}`),
-        ])
-        setStats(s.data); setTimeline(t.data); setThreats(th.data)
-        setDenied(d.data)
-        setEvents(mergeFirewallEventSamples(evpn.data?.hits || [], e.data?.hits || []))
-        setSessions(se.data)
-      } catch(err){ console.error(err) }
-    }
-    load()
-    const t = setInterval(load, 30000)
-    return () => clearInterval(t)
+  /** Wide-window sizing: a 30-day "Top events" sample of 500 forces ES to do far
+   *  more work than the dashboard actually consumes. Cap it for long ranges so
+   *  re-fetches don't time out, but keep the full sample for short windows where
+   *  the user wants high-resolution event detail.
+   */
+  const eventSampleSizes = useMemo(() => {
+    const ms = range?.from && range?.to
+      ? new Date(range.to) - new Date(range.from)
+      : ({ '15m': 9e5, '1h': 3.6e6, '6h': 2.16e7, '12h': 4.32e7, '24h': 8.64e7, '3d': 2.592e8, '7d': 6.048e8, '30d': 2.592e9 }[range?.value] || 0)
+    if (ms > 7 * 86_400_000) return { all: 200, vpn: 100 }
+    if (ms > 86_400_000) return { all: 350, vpn: 150 }
+    return { all: 500, vpn: 250 }
   }, [range])
 
-  useEffect(() => {
-    if (tab !== 'config') return
-    let cancelled = false
-    async function loadCfg() {
-      try {
-        setConfigErr(null)
-        const rp = `range=${range?.value || ''}&from=${range?.from || ''}&to=${range?.to || ''}`
-        const { data } = await api.get(`/api/logs/config/changes?${rp}&size=250&scope=firewall`)
-        if (!cancelled) setConfigChanges(data)
-      } catch (err) {
-        if (!cancelled) {
-          setConfigErr(err.response?.data?.error || err.message || 'Failed to load')
-          setConfigChanges({ cisco: { hits: [], total: 0, by_device: [] }, firewall: { hits: [], total: 0 } })
-        }
-      }
+  const abortRef = useRef(null)
+  const initialLoadRef = useRef(true)
+
+  const loadDashboard = useCallback(async () => {
+    // Cancel any prior in-flight burst so a slow 30d query doesn't clobber a faster newer one.
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+    const signal = controller.signal
+    try {
+      const rp = `range=${range?.value || ''}&from=${range?.from || ''}&to=${range?.to || ''}`
+      const [s, t, th, d, e, evpn, se] = await Promise.all([
+        api.get(`/api/stats/soc?${rp}`, { signal }),
+        api.get(`/api/logs/traffic/timeline?${rp}`, { signal }),
+        api.get(`/api/logs/threats/top?${rp}`, { signal }),
+        api.get(`/api/logs/denied?${rp}`, { signal }),
+        api.get(`/api/logs/search?type=firewall&size=${eventSampleSizes.all}&page=0&${rp}`, { timeout: 120000, signal }),
+        api.get(`/api/logs/search?type=firewall&logtype=vpn&size=${eventSampleSizes.vpn}&page=0&${rp}`, { timeout: 120000, signal }),
+        api.get(`/api/logs/sessions?${rp}`, { signal }),
+      ])
+      if (signal.aborted) return
+      setStats(s.data); setTimeline(t.data); setThreats(th.data)
+      setDenied(d.data)
+      setEvents(mergeFirewallEventSamples(evpn.data?.hits || [], e.data?.hits || []))
+      setSessions(se.data)
+    } catch (err) {
+      // Ignore aborted requests — they're an intentional cancel, not a user-facing error.
+      if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') return
+      console.error(err)
     }
-    loadCfg()
-    const iv = setInterval(loadCfg, 60000)
-    return () => { cancelled = true; clearInterval(iv) }
-  }, [range, tab])
+  }, [range, eventSampleSizes])
+
+  /** Stats-only refresh used for periodic polls on long ranges. Skips the heavy
+   *  500-row firewall sample because for a multi-day window the recent events
+   *  don't change meaningfully every 30s — only the counts/timeline/aggregations do.
+   */
+  const loadStatsOnly = useCallback(async () => {
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+    const signal = controller.signal
+    try {
+      const rp = `range=${range?.value || ''}&from=${range?.from || ''}&to=${range?.to || ''}`
+      const [s, t, th, d] = await Promise.all([
+        api.get(`/api/stats/soc?${rp}`, { signal }),
+        api.get(`/api/logs/traffic/timeline?${rp}`, { signal }),
+        api.get(`/api/logs/threats/top?${rp}`, { signal }),
+        api.get(`/api/logs/denied?${rp}`, { signal }),
+      ])
+      if (signal.aborted) return
+      setStats(s.data); setTimeline(t.data); setThreats(th.data); setDenied(d.data)
+    } catch (err) {
+      if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') return
+      console.error(err)
+    }
+  }, [range])
+
+  // Full reload whenever the range changes (covers initial mount too).
+  useEffect(() => {
+    initialLoadRef.current = true
+    loadDashboard()
+    return () => abortRef.current?.abort()
+  }, [loadDashboard])
+
+  // Periodic refresh: for long ranges only refresh the cheap stats; for short
+  // ranges keep doing the full reload so the live event log stays current.
+  // skipImmediate=true so the loader doesn't double-fire alongside the range-change effect.
+  const pollMs = pollIntervalForRange(range)
+  const isWideRange = pollMs >= 180_000
+  useSmartPolling(
+    isWideRange ? loadStatsOnly : loadDashboard,
+    pollMs,
+    [isWideRange, range],
+    { skipImmediate: true },
+  )
+
+  // Config-changes tab: less time-sensitive, keep a generous baseline interval and
+  // pause it when the tab/page isn't visible.
+  const configEnabled = tab === 'config'
+  const configLoad = useCallback(async () => {
+    try {
+      setConfigErr(null)
+      const rp = `range=${range?.value || ''}&from=${range?.from || ''}&to=${range?.to || ''}`
+      const { data } = await api.get(`/api/logs/config/changes?${rp}&size=250&scope=firewall`)
+      setConfigChanges(data)
+    } catch (err) {
+      setConfigErr(err.response?.data?.error || err.message || 'Failed to load')
+      setConfigChanges({ cisco: { hits: [], total: 0, by_device: [] }, firewall: { hits: [], total: 0 } })
+    }
+  }, [range])
+  useSmartPolling(configLoad, Math.max(120_000, pollMs), [range, tab], { enabled: configEnabled })
 
   const socSessionTbl = useResizableColumns('soc-session-log', [72, 110, 52, 110, 52, 56, 72, 100, 56, 56, 80, 88])
   const socDeniedSrcTbl = useResizableColumns('soc-blocked-src', [52, 140, 100, 220])

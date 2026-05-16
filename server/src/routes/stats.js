@@ -4,6 +4,7 @@ import Ticket from '../models/Ticket.js'
 import { fortigateVpnFilterBool } from '../utils/fortigateVpnQuery.js'
 import { fortigateUserLoginFailedBool, ciscoUserLoginFailedBool } from '../utils/loginFailureQuery.js'
 import { FIREWALL_DEVICE_LABEL_SCRIPT } from '../utils/firewallDeviceRuntimeScript.js'
+import { withCache, ttlForRange } from '../utils/cache.js'
 
 const router = Router()
 
@@ -148,76 +149,84 @@ function buildHighlights(soc, noc, denied, threats, tickets, filterNote) {
 
 router.get('/soc', async (req, res) => {
   try {
-    const es = getESClient()
     const tr = getTimeRange(req)
-    const [totalHits, deniedHits, ipsHits, authHits, utmHits, vpnHits, fwLoginFailedHits] = await Promise.all([
-      es.count({ index: 'firewall-*', body: { query: { range: { '@timestamp': tr } } } }),
-      es.count({ index: 'firewall-*', body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, { term: { 'fgt.action.keyword': 'deny' } }] } } } }),
-      es.count({ index: 'firewall-*', body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, { term: { 'fgt.subtype.keyword': 'ips' } }] } } } }),
-      es.count({ index: 'cisco-*', body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, { terms: { 'cisco_mnemonic.keyword': ['LOGIN_SUCCESS','LOGOUT','SSH2_USERAUTH','SSH2_SESSION'] } }] } } } }),
-      es.count({ index: 'firewall-*', body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, { term: { 'fgt.type.keyword': 'utm' } }] } } } }),
-      es.count({
-        index: 'firewall-*',
-        body: {
-          query: {
-            bool: {
-              must: [{ range: { '@timestamp': tr } }, fortigateVpnFilterBool()],
-            },
-          },
-        },
-      }),
-      es.count({
-        index: 'firewall-*',
-        body: {
-          query: {
-            bool: {
-              must: [{ range: { '@timestamp': tr } }, fortigateUserLoginFailedBool()],
-            },
-          },
-        },
-      }),
-    ])
-    res.json({
-      total:  totalHits.count,
-      denied: deniedHits.count,
-      ips:    ipsHits.count,
-      auth:   authHits.count,
-      utm:    utmHits.count,
-      vpn:    vpnHits.count,
-      loginFailed: fwLoginFailedHits.count,
-    })
+    const { ttl, stale } = ttlForRange({ range: req.query.range, from: req.query.from, to: req.query.to })
+    const { value, cached, fresh } = await withCache(
+      {
+        namespace: 'stats:soc',
+        keyParts: [tr],
+        ttlSeconds: ttl,
+        staleSeconds: stale,
+      },
+      async () => {
+        const es = getESClient()
+        const [totalHits, deniedHits, ipsHits, authHits, utmHits, vpnHits, fwLoginFailedHits] = await Promise.all([
+          es.count({ index: 'firewall-*', body: { query: { range: { '@timestamp': tr } } } }),
+          es.count({ index: 'firewall-*', body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, { term: { 'fgt.action.keyword': 'deny' } }] } } } }),
+          es.count({ index: 'firewall-*', body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, { term: { 'fgt.subtype.keyword': 'ips' } }] } } } }),
+          es.count({ index: 'cisco-*', body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, { terms: { 'cisco_mnemonic.keyword': ['LOGIN_SUCCESS','LOGOUT','SSH2_USERAUTH','SSH2_SESSION'] } }] } } } }),
+          es.count({ index: 'firewall-*', body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, { term: { 'fgt.type.keyword': 'utm' } }] } } } }),
+          es.count({
+            index: 'firewall-*',
+            body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, fortigateVpnFilterBool()] } } },
+          }),
+          es.count({
+            index: 'firewall-*',
+            body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, fortigateUserLoginFailedBool()] } } },
+          }),
+        ])
+        return {
+          total:  totalHits.count,
+          denied: deniedHits.count,
+          ips:    ipsHits.count,
+          auth:   authHits.count,
+          utm:    utmHits.count,
+          vpn:    vpnHits.count,
+          loginFailed: fwLoginFailedHits.count,
+        }
+      },
+    )
+    if (cached) res.set('X-Cache', fresh ? 'HIT' : 'STALE')
+    res.json(value)
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
 router.get('/noc', async (req, res) => {
   try {
-    const es = getESClient()
     const tr = getTimeRange(req)
-    const [total, updown, macflap, vlanmismatch, sites, loginFailedHits] = await Promise.all([
-      es.count({ index: 'cisco-*', body: { query: { range: { '@timestamp': tr } } } }),
-      es.count({ index: 'cisco-*', body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, { term: { 'cisco_mnemonic.keyword': 'UPDOWN' } }] } } } }),
-      es.count({ index: 'cisco-*', body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, { term: { 'cisco_mnemonic.keyword': 'MACFLAP_NOTIF' } }] } } } }),
-      es.count({ index: 'cisco-*', body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, { term: { 'cisco_mnemonic.keyword': 'NATIVE_VLAN_MISMATCH' } }] } } } }),
-      es.search({ index: 'cisco-*,firewall-*', body: { size: 0, query: { range: { '@timestamp': tr } }, aggs: { sites: { terms: { field: 'site_name.keyword', size: 10 } } } } }),
-      es.count({
-        index: 'cisco-*',
-        body: {
-          query: {
-            bool: {
-              must: [{ range: { '@timestamp': tr } }, ciscoUserLoginFailedBool()],
-            },
-          },
-        },
-      }),
-    ])
-    res.json({
-      total:        total.count,
-      updown:       updown.count,
-      macflap:      macflap.count,
-      vlanmismatch: vlanmismatch.count,
-      sites:        sites.aggregations.sites.buckets,
-      loginFailed:  loginFailedHits.count,
-    })
+    const { ttl, stale } = ttlForRange({ range: req.query.range, from: req.query.from, to: req.query.to })
+    const { value, cached, fresh } = await withCache(
+      {
+        namespace: 'stats:noc',
+        keyParts: [tr],
+        ttlSeconds: ttl,
+        staleSeconds: stale,
+      },
+      async () => {
+        const es = getESClient()
+        const [total, updown, macflap, vlanmismatch, sites, loginFailedHits] = await Promise.all([
+          es.count({ index: 'cisco-*', body: { query: { range: { '@timestamp': tr } } } }),
+          es.count({ index: 'cisco-*', body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, { term: { 'cisco_mnemonic.keyword': 'UPDOWN' } }] } } } }),
+          es.count({ index: 'cisco-*', body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, { term: { 'cisco_mnemonic.keyword': 'MACFLAP_NOTIF' } }] } } } }),
+          es.count({ index: 'cisco-*', body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, { term: { 'cisco_mnemonic.keyword': 'NATIVE_VLAN_MISMATCH' } }] } } } }),
+          es.search({ index: 'cisco-*,firewall-*', body: { size: 0, query: { range: { '@timestamp': tr } }, aggs: { sites: { terms: { field: 'site_name.keyword', size: 10 } } } } }),
+          es.count({
+            index: 'cisco-*',
+            body: { query: { bool: { must: [{ range: { '@timestamp': tr } }, ciscoUserLoginFailedBool()] } } },
+          }),
+        ])
+        return {
+          total:        total.count,
+          updown:       updown.count,
+          macflap:      macflap.count,
+          vlanmismatch: vlanmismatch.count,
+          sites:        sites.aggregations.sites.buckets,
+          loginFailed:  loginFailedHits.count,
+        }
+      },
+    )
+    if (cached) res.set('X-Cache', fresh ? 'HIT' : 'STALE')
+    res.json(value)
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
@@ -299,7 +308,16 @@ router.get('/report', async (req, res) => {
 
     const deviceStr = String(req.query.device || '').trim()
     const eventType = String(req.query.eventType || 'all').toLowerCase()
+    const { ttl: reportTtl, stale: reportStale } = ttlForRange({ from: meta.from, to: meta.to })
 
+    const { value: built, cached: reportCached, fresh: reportFresh } = await withCache(
+      {
+        namespace: 'stats:report',
+        keyParts: [tr, deviceStr, eventType],
+        ttlSeconds: reportTtl,
+        staleSeconds: reportStale,
+      },
+      async () => {
     const rangeQ = { range: { '@timestamp': tr } }
     const fwMust = [rangeQ]
     const ciscoMust = [rangeQ]
@@ -465,6 +483,21 @@ router.get('/report', async (req, res) => {
 
     const highlights = buildHighlights(soc, noc, denied, threats, tickets, filterNote)
 
+    return {
+      soc,
+      noc,
+      denied,
+      threats,
+      tickets,
+      breakdown,
+      highlights,
+      filters: { device: deviceStr || null, eventType: eventType === 'all' ? null : eventType },
+    }
+      },
+    )
+
+    if (reportCached) res.set('X-Cache', reportFresh ? 'HIT' : 'STALE')
+
     res.json({
       meta: {
         ...meta,
@@ -472,18 +505,15 @@ router.get('/report', async (req, res) => {
         title: 'Lenskart Security & Operations Report',
         timezoneNote:
           'Log timestamps follow your Elasticsearch @timestamp field. Preset daily/weekly windows use UTC calendar boundaries.',
-        filters: {
-          device: deviceStr || null,
-          eventType: eventType === 'all' ? null : eventType,
-        },
+        filters: built.filters,
       },
-      highlights,
-      soc,
-      noc,
-      denied,
-      threats,
-      tickets,
-      breakdown,
+      highlights: built.highlights,
+      soc: built.soc,
+      noc: built.noc,
+      denied: built.denied,
+      threats: built.threats,
+      tickets: built.tickets,
+      breakdown: built.breakdown,
     })
   } catch (err) {
     res.status(500).json({ error: err.message })

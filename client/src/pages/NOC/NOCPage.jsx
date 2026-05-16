@@ -1,6 +1,6 @@
 import RangePicker from '../../components/ui/RangePicker.jsx'
 import LogSearch from '../../components/ui/LogSearch.jsx'
-import { useEffect, useState, useRef, useMemo } from 'react'
+import { useEffect, useState, useRef, useMemo, useCallback } from 'react'
 import { Line, Bar, Doughnut } from 'react-chartjs-2'
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, BarElement, ArcElement, Tooltip, Legend, Filler } from 'chart.js'
 import api from '../../api/client'
@@ -10,6 +10,7 @@ import { resolvedWsUrl } from '../../utils/backendOrigin.js'
 import { useThemeStore } from '../../store/themeStore.js'
 import { DEFAULT_RANGE_PRESET, DEFAULT_RANGE_VALUE } from '../../constants/timeRange.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
+import { useSmartPolling, pollIntervalForRange } from '../../hooks/useSmartPolling.js'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, ArcElement, Tooltip, Legend, Filler)
 
@@ -166,47 +167,91 @@ export default function NOCPage() {
     return () => socketRef.current?.disconnect()
   }, [])
 
-  useEffect(() => {
-    async function load() {
-      try {
-        const rp = `range=${range?.value||''}&from=${range?.from||''}&to=${range?.to||''}`
-        const [s, e, iface, mac] = await Promise.all([
-          api.get(`/api/stats/noc?${rp}`),
-          api.get(`/api/logs/search?type=cisco&size=500&page=0&${rp}`, { timeout: 120000 }),
-          api.get(`/api/logs/interfaces?${rp}`),
-          api.get(`/api/logs/macflap?${rp}`),
-        ])
-        setStats(s.data)
-        setEvents(e.data?.hits || [])
-        setIfaceData(iface.data)
-        setMacData(mac.data)
-      } catch(err) { console.error(err) }
+  // Cap the cisco event sample on long ranges — the dashboard barely consumes it.
+  const eventSampleSize = useMemo(() => {
+    const ms = range?.from && range?.to
+      ? new Date(range.to) - new Date(range.from)
+      : ({ '15m': 9e5, '1h': 3.6e6, '6h': 2.16e7, '12h': 4.32e7, '24h': 8.64e7, '3d': 2.592e8, '7d': 6.048e8, '30d': 2.592e9 }[range?.value] || 0)
+    if (ms > 7 * 86_400_000) return 200
+    if (ms > 86_400_000) return 350
+    return 500
+  }, [range])
+
+  const abortRef = useRef(null)
+  const loadDashboard = useCallback(async () => {
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+    const signal = controller.signal
+    try {
+      const rp = `range=${range?.value || ''}&from=${range?.from || ''}&to=${range?.to || ''}`
+      const [s, e, iface, mac] = await Promise.all([
+        api.get(`/api/stats/noc?${rp}`, { signal }),
+        api.get(`/api/logs/search?type=cisco&size=${eventSampleSize}&page=0&${rp}`, { timeout: 120000, signal }),
+        api.get(`/api/logs/interfaces?${rp}`, { signal }),
+        api.get(`/api/logs/macflap?${rp}`, { signal }),
+      ])
+      if (signal.aborted) return
+      setStats(s.data)
+      setEvents(e.data?.hits || [])
+      setIfaceData(iface.data)
+      setMacData(mac.data)
+    } catch (err) {
+      if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') return
+      console.error(err)
     }
-    load()
-    const t = setInterval(load, 30000)
-    return () => clearInterval(t)
+  }, [range, eventSampleSize])
+
+  /** Long-range periodic ticks: only refresh stats/iface/mac aggregates and skip the cisco sample. */
+  const loadStatsOnly = useCallback(async () => {
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+    const signal = controller.signal
+    try {
+      const rp = `range=${range?.value || ''}&from=${range?.from || ''}&to=${range?.to || ''}`
+      const [s, iface, mac] = await Promise.all([
+        api.get(`/api/stats/noc?${rp}`, { signal }),
+        api.get(`/api/logs/interfaces?${rp}`, { signal }),
+        api.get(`/api/logs/macflap?${rp}`, { signal }),
+      ])
+      if (signal.aborted) return
+      setStats(s.data)
+      setIfaceData(iface.data)
+      setMacData(mac.data)
+    } catch (err) {
+      if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') return
+      console.error(err)
+    }
   }, [range])
 
   useEffect(() => {
-    if (tab !== 'config') return
-    let cancelled = false
-    async function loadCfg() {
-      try {
-        setConfigErr(null)
-        const rp = `range=${range?.value || ''}&from=${range?.from || ''}&to=${range?.to || ''}`
-        const { data } = await api.get(`/api/logs/config/changes?${rp}&size=250&scope=cisco`)
-        if (!cancelled) setConfigChanges(data)
-      } catch (err) {
-        if (!cancelled) {
-          setConfigErr(err.response?.data?.error || err.message || 'Failed to load')
-          setConfigChanges({ cisco: { hits: [], total: 0, by_device: [] }, firewall: { hits: [], total: 0 } })
-        }
-      }
+    loadDashboard()
+    return () => abortRef.current?.abort()
+  }, [loadDashboard])
+
+  const pollMs = pollIntervalForRange(range)
+  const isWideRange = pollMs >= 180_000
+  useSmartPolling(
+    isWideRange ? loadStatsOnly : loadDashboard,
+    pollMs,
+    [isWideRange, range],
+    { skipImmediate: true },
+  )
+
+  const configEnabled = tab === 'config'
+  const configLoad = useCallback(async () => {
+    try {
+      setConfigErr(null)
+      const rp = `range=${range?.value || ''}&from=${range?.from || ''}&to=${range?.to || ''}`
+      const { data } = await api.get(`/api/logs/config/changes?${rp}&size=250&scope=cisco`)
+      setConfigChanges(data)
+    } catch (err) {
+      setConfigErr(err.response?.data?.error || err.message || 'Failed to load')
+      setConfigChanges({ cisco: { hits: [], total: 0, by_device: [] }, firewall: { hits: [], total: 0 } })
     }
-    loadCfg()
-    const iv = setInterval(loadCfg, 60000)
-    return () => { cancelled = true; clearInterval(iv) }
-  }, [range, tab])
+  }, [range])
+  useSmartPolling(configLoad, Math.max(120_000, pollMs), [range, tab], { enabled: configEnabled })
 
   const nocDeviceTbl = useResizableColumns('noc-device-activity', [160, 120, 100, 88, 88, 88, 88, 120])
   const nocMacTbl = useResizableColumns('noc-macflap-events', [88, 140, 88, 88, 88, 160, 120])

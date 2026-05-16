@@ -13,4 +13,7 @@ const alertRuleSchema = new mongoose.Schema({
   lastFired:   { type: Date },
 }, { timestamps: true })
 
+// Alert engine filters by enabled + source on every tick; index speeds it up cheaply.
+alertRuleSchema.index({ enabled: 1, source: 1 })
+
 export default mongoose.model('AlertRule', alertRuleSchema)

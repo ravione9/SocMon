@@ -18,4 +18,8 @@ const deviceSchema = new mongoose.Schema({
   tags:       [String],
 }, { timestamps: true })
 
+// Site-scoped device listings (Devices/Sites pages, NOC site comparison) are common.
+deviceSchema.index({ site: 1, name: 1 })
+deviceSchema.index({ type: 1 })
+
 export default mongoose.model('Device', deviceSchema)

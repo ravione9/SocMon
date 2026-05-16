@@ -2,7 +2,8 @@ import { Router } from 'express'
 import mongoose from 'mongoose'
 import bcrypt from 'bcryptjs'
 import User from '../models/User.js'
-import { sanitizeAllowedPages } from '../constants/appPages.js'
+import CustomRole from '../models/CustomRole.js'
+import { sanitizeAllowedPages, APP_PAGE_KEY_SET, APP_PAGE_KEYS } from '../constants/appPages.js'
 import { toClientUserPayload } from '../utils/computeUserPageAccess.js'
 
 const router = Router()
@@ -71,8 +72,80 @@ function pickUserPayload(body, opts = {}) {
 
 router.get('/', async (_req, res) => {
   try {
-    const users = await User.find()
-    const list = await Promise.all(users.map((u) => toClientUserPayload(u)))
+    // .lean() avoids per-doc Mongoose hydration; toClientUserPayload tolerates plain objects.
+    const users = await User.find().lean()
+    // Pre-fetch all referenced custom roles in a single query (instead of N findById in toClientUserPayload).
+    const roleIds = [
+      ...new Set(
+        users
+          .filter((u) => u.role === 'role_template' && u.customRoleId)
+          .map((u) => String(u.customRoleId)),
+      ),
+    ]
+    const roles = roleIds.length
+      ? await CustomRole.find({ _id: { $in: roleIds } }).select('name pages').lean()
+      : []
+    const roleMap = new Map(roles.map((r) => [String(r._id), r]))
+
+    const ALL = [...APP_PAGE_KEYS]
+    const list = users.map((u) => {
+      const out = {
+        _id: u._id,
+        id: u._id,
+        name: u.name,
+        email: u.email,
+        authKind: u.authKind || 'local',
+        adLoginIdentity: u.authKind === 'ad' ? u.adLoginIdentity || '' : '',
+        role: u.role,
+        active: u.active,
+        lastLogin: u.lastLogin,
+        avatar: u.avatar,
+        customRoleId: u.customRoleId,
+        customRoleName: null,
+        theme: u.theme,
+        themeSaveToProfile: u.themeSaveToProfile,
+        createdAt: u.createdAt,
+        updatedAt: u.updatedAt,
+      }
+      if (u.role === 'admin') {
+        out.allowedPages = [...ALL]
+        out.pageAccess = Object.fromEntries(ALL.map((k) => [k, 'full']))
+        return out
+      }
+      if (u.role === 'role_template') {
+        const cr = u.customRoleId ? roleMap.get(String(u.customRoleId)) : null
+        out.customRoleName = cr?.name ?? null
+        const pageAccess = {}
+        if (cr?.pages?.length) {
+          for (const { pageKey, access } of cr.pages) {
+            if (APP_PAGE_KEY_SET.has(pageKey) && (access === 'read' || access === 'full')) {
+              pageAccess[pageKey] = access
+            }
+          }
+        }
+        out.pageAccess = pageAccess
+        out.allowedPages = Object.keys(pageAccess)
+        return out
+      }
+      if (u.role === 'custom_admin') {
+        const allowed = Array.isArray(u.allowedPages)
+          ? [...new Set(u.allowedPages.filter((k) => APP_PAGE_KEY_SET.has(k)))]
+          : []
+        out.allowedPages = allowed
+        out.pageAccess = Object.fromEntries(allowed.map((k) => [k, 'full']))
+        return out
+      }
+      // analyst / viewer fallback (legacy implicit-grant semantics live in computeUserPageAccess.js;
+      // for the list view we return the stored allowedPages — admin UI never needs the implicit grant
+      // behaviour and bulk-list perf matters more here).
+      const allowed = Array.isArray(u.allowedPages)
+        ? [...new Set(u.allowedPages.filter((k) => APP_PAGE_KEY_SET.has(k)))]
+        : [...ALL]
+      const level = u.role === 'viewer' ? 'read' : 'full'
+      out.allowedPages = allowed
+      out.pageAccess = Object.fromEntries(allowed.map((k) => [k, level]))
+      return out
+    })
     res.json(list)
   } catch (err) {
     res.status(500).json({ error: err.message })

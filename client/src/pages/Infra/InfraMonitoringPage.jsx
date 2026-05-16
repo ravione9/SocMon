@@ -17,6 +17,7 @@ import api from '../../api/client'
 import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../components/ui/ResizableTable.jsx'
 import { useThemeStore } from '../../store/themeStore.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
+import { useSmartPolling } from '../../hooks/useSmartPolling.js'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, BarController, ArcElement, Tooltip, Legend, Filler)
 
@@ -1017,14 +1018,21 @@ export default function InfraMonitoringPage() {
     return () => { cancelled = true }
   }, [config?.configured, tab, dashboardGroupFilter, dashboardSearch, loadOverview, parseErr])
 
-  useEffect(() => {
-    if (!config?.configured) return
-    const t = setInterval(() => {
-      loadConfigAndOverview().catch(() => {})
-      if (tab === 'overview') loadOverview().catch(() => {})
-    }, 60_000)
-    return () => clearInterval(t)
-  }, [config?.configured, tab, loadConfigAndOverview, loadOverview])
+  // Background refresh of Zabbix config + overview. useSmartPolling pauses when the
+  // tab is hidden (no point polling Zabbix while the user is on another browser tab).
+  // skipImmediate — config and overview already load via dedicated effects on mount/tab-change.
+  const infraRefresh = useCallback(async () => {
+    try { await loadConfigAndOverview() } catch { /* ignore */ }
+    if (tab === 'overview') {
+      try { await loadOverview() } catch { /* ignore */ }
+    }
+  }, [loadConfigAndOverview, loadOverview, tab])
+  useSmartPolling(
+    infraRefresh,
+    60_000,
+    [infraRefresh],
+    { enabled: !!config?.configured, skipImmediate: true },
+  )
 
   useEffect(() => {
     if (!config?.configured || tab === 'overview') return

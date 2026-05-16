@@ -7,7 +7,8 @@ router.use(authenticate)
 
 router.get('/', async (req, res) => {
   try {
-    const sites = await Site.find()
+    // .lean() skips Mongoose hydration — returns plain JSON ~3-5x faster.
+    const sites = await Site.find().lean()
     res.json(sites)
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
