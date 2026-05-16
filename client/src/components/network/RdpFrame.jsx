@@ -306,7 +306,7 @@ export default function RdpFrame({ device, onClose }) {
         onClick={e => e.stopPropagation()}
         style={{
           width:  fullscreen ? '100vw' : 'min(1440px, 100%)',
-          height: fullscreen ? '100vh' : 'min(920px, 96vh)',
+          height: fullscreen ? 'var(--app-vh, 100vh)' : 'min(920px, 96vh)',
           background: '#111',
           border: fullscreen ? 'none' : '1px solid var(--border)',
           borderRadius: fullscreen ? 0 : 14,

@@ -38,7 +38,7 @@ export default function Layout() {
   const accessLevel = pageKey && user ? getPageAccessLevel(user, pageKey) : null
 
   return (
-    <div style={{ display:'flex', height:'100vh', overflow:'hidden', background:'var(--bg)' }}>
+    <div style={{ display:'flex', height:'var(--app-vh, 100vh)', overflow:'hidden', background:'var(--bg)' }}>
       <Sidebar />
       <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
         <Topbar />

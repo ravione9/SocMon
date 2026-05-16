@@ -8,6 +8,12 @@
   --on-accent: #ffffff;
   /* Dark text on bright cyan chips (NOC tabs, etc.) */
   --on-cyan: #0a1620;
+  /* The whole document is rendered at --app-zoom on <html>. Layout shells
+     should size against --app-vh (not 100vh) so the page fully fills the
+     visible viewport instead of leaving --app-zoom worth of empty space
+     at the bottom. Bump these together if the global zoom changes. */
+  --app-zoom: 0.9;
+  --app-vh: calc(100vh / 0.9);
 }
 
 :root, [data-theme="midnight"] {
@@ -132,11 +138,13 @@ html:not([data-theme="paper"]):not([data-theme="sand"]) {
   color-scheme: dark;
 }
 /* Default view is rendered at 90% so dense pages (AD, NOC, SOC tables) fit
-   in a normal 1080p window without the user manually zooming the browser. */
+   in a normal 1080p window without the user manually zooming the browser.
+   Body uses --app-vh so the layout shell still fills the entire visible
+   viewport after the zoom (otherwise the bottom 10% shows as empty). */
 html {
   background: var(--bg);
   color: var(--text);
-  zoom: 0.9;
+  zoom: var(--app-zoom);
 }
 body {
   background: var(--bg);
@@ -144,6 +152,7 @@ body {
   font-family: var(--sans);
   font-size: 14px;
   line-height: 1.45;
+  min-height: var(--app-vh);
   font-feature-settings: "cv11", "ss01", "ss03", "kern", "calt";
   font-variant-ligatures: common-ligatures;
   text-rendering: optimizeLegibility;

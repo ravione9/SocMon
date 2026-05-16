@@ -23,7 +23,7 @@ export default function LoginPage() {
     finally { setLoading(false) }
   }
   return (
-    <div style={{ minHeight:'100vh', background:'var(--bg)', display:'flex', alignItems:'center', justifyContent:'center' }}>
+    <div style={{ minHeight:'var(--app-vh, 100vh)', background:'var(--bg)', display:'flex', alignItems:'center', justifyContent:'center' }}>
       <div style={{ width:380, background:'var(--bg2)', border:'1px solid var(--border)', borderRadius:16, padding:40 }}>
         <div style={{ textAlign:'center', marginBottom:32 }}>
           <div style={{ width:48, height:48, margin:'0 auto 12px', background:'linear-gradient(135deg, var(--accent), var(--accent2))', borderRadius:12, display:'flex', alignItems:'center', justifyContent:'center', fontSize:20, fontWeight:800, color:'var(--on-accent)', fontFamily:'var(--mono)' }}>LK</div>
