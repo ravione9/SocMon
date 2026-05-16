@@ -29,6 +29,90 @@ function StatusBadge({ active }) {
   );
 }
 
+// ─── After password is set: show value + copy (one-time) ─────────────────────
+function PasswordSavedPanel({ password, mustChange, user, email, groupStr, onDone }) {
+  const [visible, setVisible] = useState(true);
+  const [copied, setCopied]     = useState(false);
+
+  const copyPw = async () => {
+    try {
+      await navigator.clipboard.writeText(password);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    } catch {
+      window.prompt('Copy this password (Ctrl+C):', password);
+    }
+  };
+
+  return (
+    <>
+      <div
+        className="px-6 py-4 flex items-center justify-between"
+        style={{ background: 'linear-gradient(135deg, var(--green), color-mix(in srgb, var(--green) 70%, var(--accent)))' }}
+      >
+        <div className="min-w-0 pr-2">
+          <h2 className="font-semibold text-base text-[var(--on-accent)]">Password set</h2>
+          <p className="text-xs mt-0.5 opacity-90 text-[var(--on-accent)] break-words">
+            {user.displayName || user.userName} · {email}
+          </p>
+          {groupStr ? (
+            <p className="text-[11px] mt-1 opacity-85 text-[var(--on-accent)] leading-snug">
+              Groups: <span className="font-normal">{groupStr}</span>
+            </p>
+          ) : null}
+        </div>
+        <button type="button" onClick={onDone} className="text-[var(--on-accent)] opacity-80 hover:opacity-100 text-xl leading-none">✕</button>
+      </div>
+      <div className="p-6 space-y-5">
+        <p className={`text-sm ${idcsCx.text2}`}>
+          Copy the password below and share it securely. This dialog does not store it — close when done.
+        </p>
+        {mustChange && (
+          <div
+            className={`text-sm rounded-lg px-3 py-2 border ${idcsCx.border}`}
+            style={{ background: 'color-mix(in srgb, var(--amber) 14%, var(--bg3))', color: 'var(--amber)' }}
+          >
+            User must change password on next login.
+          </div>
+        )}
+        <div>
+          <label className={`block text-sm font-medium mb-2 ${idcsCx.text}`}>New password</label>
+          <div className="flex flex-wrap gap-2 items-stretch">
+            <div className="flex-1 min-w-0">
+              <input
+                readOnly
+                type={visible ? 'text' : 'password'}
+                value={password}
+                className={`${idcsInputClass('font-mono')} w-full`}
+                onFocus={(e) => e.target.select()}
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => setVisible((v) => !v)}
+              className={`shrink-0 px-3 rounded-lg border self-stretch ${idcsCx.border} ${idcsCx.bg3}`}
+              style={{ color: 'var(--text2)' }}
+              title={visible ? 'Hide' : 'Show'}
+            >
+              {visible ? '🙈' : '👁'}
+            </button>
+            <button
+              type="button"
+              onClick={copyPw}
+              className={`shrink-0 px-4 rounded-lg text-sm font-semibold self-stretch ${idcsBtnPrimary()}`}
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+        </div>
+        <button type="button" onClick={onDone} className={`w-full text-sm ${idcsBtnPrimary()}`}>
+          Done
+        </button>
+      </div>
+    </>
+  );
+}
+
 // ─── Set Password Modal ───────────────────────────────────────────────────────
 function SetPasswordModal({ user, onClose, onSuccess }) {
   const [newPassword, setNewPassword]           = useState('');
@@ -37,6 +121,7 @@ function SetPasswordModal({ user, onClose, onSuccess }) {
   const [showPwd, setShowPwd]                   = useState(true);
   const [loading, setLoading]                   = useState(false);
   const [error, setError]                       = useState('');
+  const [savedPassword, setSavedPassword]       = useState(null);
 
   const applyEasyPassword = useCallback(() => {
     const pw = generateRandomPassword();
@@ -65,7 +150,7 @@ function SetPasswordModal({ user, onClose, onSuccess }) {
     setError('');
     try {
       await setPassword(user.id, newPassword, mustChange);
-      onSuccess(mustChange);
+      setSavedPassword(newPassword);
     } catch (ex) {
       setError(ex.response?.data?.error || ex.message);
     } finally {
@@ -79,9 +164,25 @@ function SetPasswordModal({ user, onClose, onSuccess }) {
   const email = user.emails?.find((e) => e.primary)?.value || user.emails?.[0]?.value || user.userName;
   const groupStr = formatUserGroups(user);
 
+  const finishFlow = () => {
+    onSuccess(mustChange);
+    onClose();
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
       <div className={`rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden border ${idcsCx.border} ${idcsCx.bg2}`}>
+        {savedPassword ? (
+          <PasswordSavedPanel
+            password={savedPassword}
+            mustChange={mustChange}
+            user={user}
+            email={email}
+            groupStr={groupStr}
+            onDone={finishFlow}
+          />
+        ) : (
+          <>
         {/* Header */}
         <div
           className="px-6 py-4 flex items-center justify-between"
@@ -231,6 +332,8 @@ function SetPasswordModal({ user, onClose, onSuccess }) {
             </button>
           </div>
         </form>
+          </>
+        )}
       </div>
     </div>
   );
