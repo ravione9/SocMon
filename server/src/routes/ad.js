@@ -5,6 +5,8 @@
 
 import { Router } from 'express'
 import { authenticate } from '../middleware/auth.js'
+import { logAdAudit } from '../utils/adAudit.js'
+import AdAuditLog, { AD_AUDIT_ACTIONS } from '../models/AdAuditLog.js'
 import {
   adIntegrationConfigured,
   adCredentialsConfigured,
@@ -281,10 +283,10 @@ router.get('/users/detail', requireAdReady, async (req, res) => {
 })
 
 router.post('/users/password', requireAdReady, requireAdWrites, async (req, res) => {
+  const dn = String(req.body?.dn || '').trim()
+  const mustChangeNextLogon = Boolean(req.body?.mustChangeNextLogon)
   try {
-    const dn = String(req.body?.dn || '').trim()
     const newPassword = req.body?.newPassword ?? req.body?.password ?? ''
-    const mustChangeNextLogon = Boolean(req.body?.mustChangeNextLogon)
     if (!dn || !newPassword) {
       return res.status(400).json({
         ok: false,
@@ -293,16 +295,29 @@ router.post('/users/password', requireAdReady, requireAdWrites, async (req, res)
       })
     }
     await resetAdUserPassword({ dn, newPassword, mustChangeNextLogon })
+    logAdAudit(req, {
+      action: 'AD_USER_PASSWORD_RESET',
+      status: 'SUCCESS',
+      target: { kind: 'user', dn },
+      details: { mustChangeNextLogon },
+    })
     res.json({ ok: true })
   } catch (e) {
+    logAdAudit(req, {
+      action: 'AD_USER_PASSWORD_RESET',
+      status: 'FAILED',
+      target: { kind: 'user', dn },
+      details: { mustChangeNextLogon, error: e.message },
+      errorCode: e.code,
+    })
     sendAdModifyError(res, e)
   }
 })
 
 router.post('/users/modify', requireAdReady, requireAdWrites, async (req, res) => {
+  const dn = String(req.body?.dn || '').trim()
+  const patch = req.body?.patch
   try {
-    const dn = String(req.body?.dn || '').trim()
-    const patch = req.body?.patch
     if (!dn || !patch || typeof patch !== 'object' || Array.isArray(patch)) {
       return res.status(400).json({
         ok: false,
@@ -311,49 +326,89 @@ router.post('/users/modify', requireAdReady, requireAdWrites, async (req, res) =
       })
     }
     await modifyAdUserPatch({ dn, patch })
+    logAdAudit(req, {
+      action: 'AD_USER_MODIFY',
+      status: 'SUCCESS',
+      target: { kind: 'user', dn },
+      details: { fields: Object.keys(patch) },
+    })
     res.json({ ok: true })
   } catch (e) {
+    logAdAudit(req, {
+      action: 'AD_USER_MODIFY',
+      status: 'FAILED',
+      target: { kind: 'user', dn },
+      details: { fields: patch && typeof patch === 'object' ? Object.keys(patch) : [], error: e.message },
+      errorCode: e.code,
+    })
     sendAdModifyError(res, e)
   }
 })
 
 router.post('/users/account', requireAdReady, requireAdWrites, async (req, res) => {
+  const dn = String(req.body?.dn || '').trim()
+  const unlock = req.body?.unlock === true
+  const disabled = typeof req.body?.disabled === 'boolean' ? req.body.disabled : undefined
+  const mustChangePassword = req.body?.mustChangePassword === true
+  const dontExpirePassword =
+    typeof req.body?.dontExpirePassword === 'boolean' ? req.body.dontExpirePassword : undefined
+  const flagSnapshot = { unlock, disabled, mustChangePassword, dontExpirePassword }
   try {
-    const dn = String(req.body?.dn || '').trim()
     if (!dn) {
       return res.status(400).json({ ok: false, code: 'AD_BODY_INVALID', error: 'dn is required.' })
     }
-    const unlock = req.body?.unlock === true
-    const disabled = typeof req.body?.disabled === 'boolean' ? req.body.disabled : undefined
-    const mustChangePassword = req.body?.mustChangePassword === true
-    const dontExpirePassword =
-      typeof req.body?.dontExpirePassword === 'boolean' ? req.body.dontExpirePassword : undefined
     await setAdUserAccountFlags({ dn, unlock, disabled, mustChangePassword, dontExpirePassword })
+    logAdAudit(req, {
+      action: 'AD_USER_ACCOUNT_FLAGS',
+      status: 'SUCCESS',
+      target: { kind: 'user', dn },
+      details: flagSnapshot,
+    })
     res.json({ ok: true })
   } catch (e) {
+    logAdAudit(req, {
+      action: 'AD_USER_ACCOUNT_FLAGS',
+      status: 'FAILED',
+      target: { kind: 'user', dn },
+      details: { ...flagSnapshot, error: e.message },
+      errorCode: e.code,
+    })
     sendAdModifyError(res, e)
   }
 })
 
 router.post('/users/move', requireAdReady, requireAdWrites, async (req, res) => {
+  const dn = String(req.body?.dn || '').trim()
+  const newParentDn = String(req.body?.newParentDn || '').trim()
   try {
-    const dn = String(req.body?.dn || '').trim()
-    const newParentDn = String(req.body?.newParentDn || '').trim()
     if (!dn || !newParentDn) {
       return res
         .status(400)
         .json({ ok: false, code: 'AD_BODY_INVALID', error: 'dn and newParentDn are required.' })
     }
     const result = await moveAdUser({ dn, newParentDn })
+    logAdAudit(req, {
+      action: 'AD_USER_MOVE',
+      status: 'SUCCESS',
+      target: { kind: 'user', dn: result?.newDn || dn, parentDn: newParentDn },
+      details: { fromDn: dn, toParent: newParentDn, newDn: result?.newDn || null },
+    })
     res.json({ ok: true, ...result })
   } catch (e) {
+    logAdAudit(req, {
+      action: 'AD_USER_MOVE',
+      status: 'FAILED',
+      target: { kind: 'user', dn, parentDn: newParentDn },
+      details: { fromDn: dn, toParent: newParentDn, error: e.message },
+      errorCode: e.code,
+    })
     sendAdModifyError(res, e)
   }
 })
 
 router.post('/users/create', requireAdReady, requireAdWrites, async (req, res) => {
+  const body = req.body || {}
   try {
-    const body = req.body || {}
     const result = await createAdUser({
       parentDn: body.parentDn,
       samAccountName: body.samAccountName,
@@ -369,8 +424,33 @@ router.post('/users/create', requireAdReady, requireAdWrites, async (req, res) =
       mustChangeNextLogon: body.mustChangeNextLogon === true,
       enabled: body.enabled !== false,
     })
+    logAdAudit(req, {
+      action: 'AD_USER_CREATE',
+      status: 'SUCCESS',
+      target: { kind: 'user', dn: result?.dn, name: body.samAccountName || body.cn, parentDn: body.parentDn },
+      details: {
+        samAccountName: body.samAccountName,
+        userPrincipalName: body.userPrincipalName,
+        displayName: body.displayName,
+        mail: body.mail,
+        enabled: body.enabled !== false,
+        mustChangeNextLogon: body.mustChangeNextLogon === true,
+        dontExpirePassword: body.dontExpirePassword === true,
+      },
+    })
     res.json({ ok: true, ...result })
   } catch (e) {
+    logAdAudit(req, {
+      action: 'AD_USER_CREATE',
+      status: 'FAILED',
+      target: { kind: 'user', name: body.samAccountName || body.cn, parentDn: body.parentDn },
+      details: {
+        samAccountName: body.samAccountName,
+        userPrincipalName: body.userPrincipalName,
+        error: e.message,
+      },
+      errorCode: e.code,
+    })
     sendAdModifyError(res, e)
   }
 })
@@ -400,36 +480,63 @@ router.get('/groups/detail', requireAdReady, async (req, res) => {
 })
 
 router.post('/groups/modify', requireAdReady, requireAdWrites, async (req, res) => {
+  const dn = String(req.body?.dn || '').trim()
+  const patch = req.body?.patch
   try {
-    const dn = String(req.body?.dn || '').trim()
-    const patch = req.body?.patch
     if (!dn || !patch || typeof patch !== 'object' || Array.isArray(patch)) {
       return res.status(400).json({ ok: false, code: 'AD_BODY_INVALID', error: 'dn and patch object required.' })
     }
     await modifyAdGroupPatch({ dn, patch })
+    logAdAudit(req, {
+      action: 'AD_GROUP_MODIFY',
+      status: 'SUCCESS',
+      target: { kind: 'group', dn },
+      details: { fields: Object.keys(patch) },
+    })
     res.json({ ok: true })
   } catch (e) {
+    logAdAudit(req, {
+      action: 'AD_GROUP_MODIFY',
+      status: 'FAILED',
+      target: { kind: 'group', dn },
+      details: { fields: patch && typeof patch === 'object' ? Object.keys(patch) : [], error: e.message },
+      errorCode: e.code,
+    })
     sendAdModifyError(res, e)
   }
 })
 
 router.post('/groups/members/add', requireAdReady, requireAdWrites, async (req, res) => {
+  const dn = String(req.body?.dn || '').trim()
+  const members = req.body?.members
+  const memberCount = Array.isArray(members) ? members.length : (members ? 1 : 0)
   try {
-    const dn = String(req.body?.dn || '').trim()
-    const members = req.body?.members
     if (!dn || !members) {
       return res.status(400).json({ ok: false, code: 'AD_BODY_INVALID', error: 'dn and members required.' })
     }
     const result = await addAdGroupMembers({ dn, members })
+    logAdAudit(req, {
+      action: 'AD_GROUP_MEMBER_ADD',
+      status: 'SUCCESS',
+      target: { kind: 'group', dn },
+      details: { members: Array.isArray(members) ? members : [members], count: memberCount },
+    })
     res.json({ ok: true, ...result })
   } catch (e) {
+    logAdAudit(req, {
+      action: 'AD_GROUP_MEMBER_ADD',
+      status: 'FAILED',
+      target: { kind: 'group', dn },
+      details: { members: Array.isArray(members) ? members : (members ? [members] : []), count: memberCount, error: e.message },
+      errorCode: e.code,
+    })
     sendAdModifyError(res, e)
   }
 })
 
 router.post('/groups/create', requireAdReady, requireAdWrites, async (req, res) => {
+  const body = req.body || {}
   try {
-    const body = req.body || {}
     const result = await createAdGroup({
       parentDn: body.parentDn,
       cn: body.cn,
@@ -439,22 +546,55 @@ router.post('/groups/create', requireAdReady, requireAdWrites, async (req, res) 
       groupCategory: body.groupCategory,
       groupScope: body.groupScope,
     })
+    logAdAudit(req, {
+      action: 'AD_GROUP_CREATE',
+      status: 'SUCCESS',
+      target: { kind: 'group', dn: result?.dn, name: body.samAccountName || body.cn, parentDn: body.parentDn },
+      details: {
+        samAccountName: body.samAccountName,
+        cn: body.cn,
+        groupCategory: body.groupCategory,
+        groupScope: body.groupScope,
+        mail: body.mail,
+      },
+    })
     res.json({ ok: true, ...result })
   } catch (e) {
+    logAdAudit(req, {
+      action: 'AD_GROUP_CREATE',
+      status: 'FAILED',
+      target: { kind: 'group', name: body.samAccountName || body.cn, parentDn: body.parentDn },
+      details: { samAccountName: body.samAccountName, cn: body.cn, error: e.message },
+      errorCode: e.code,
+    })
     sendAdModifyError(res, e)
   }
 })
 
 router.post('/groups/members/remove', requireAdReady, requireAdWrites, async (req, res) => {
+  const dn = String(req.body?.dn || '').trim()
+  const members = req.body?.members
+  const memberCount = Array.isArray(members) ? members.length : (members ? 1 : 0)
   try {
-    const dn = String(req.body?.dn || '').trim()
-    const members = req.body?.members
     if (!dn || !members) {
       return res.status(400).json({ ok: false, code: 'AD_BODY_INVALID', error: 'dn and members required.' })
     }
     const result = await removeAdGroupMembers({ dn, members })
+    logAdAudit(req, {
+      action: 'AD_GROUP_MEMBER_REMOVE',
+      status: 'SUCCESS',
+      target: { kind: 'group', dn },
+      details: { members: Array.isArray(members) ? members : [members], count: memberCount },
+    })
     res.json({ ok: true, ...result })
   } catch (e) {
+    logAdAudit(req, {
+      action: 'AD_GROUP_MEMBER_REMOVE',
+      status: 'FAILED',
+      target: { kind: 'group', dn },
+      details: { members: Array.isArray(members) ? members : (members ? [members] : []), count: memberCount, error: e.message },
+      errorCode: e.code,
+    })
     sendAdModifyError(res, e)
   }
 })
@@ -484,28 +624,55 @@ router.get('/computers/detail', requireAdReady, async (req, res) => {
 })
 
 router.post('/computers/modify', requireAdReady, requireAdWrites, async (req, res) => {
+  const dn = String(req.body?.dn || '').trim()
+  const patch = req.body?.patch
   try {
-    const dn = String(req.body?.dn || '').trim()
-    const patch = req.body?.patch
     if (!dn || !patch || typeof patch !== 'object' || Array.isArray(patch)) {
       return res.status(400).json({ ok: false, code: 'AD_BODY_INVALID', error: 'dn and patch object required.' })
     }
     await modifyAdComputerPatch({ dn, patch })
+    logAdAudit(req, {
+      action: 'AD_COMPUTER_MODIFY',
+      status: 'SUCCESS',
+      target: { kind: 'computer', dn },
+      details: { fields: Object.keys(patch) },
+    })
     res.json({ ok: true })
   } catch (e) {
+    logAdAudit(req, {
+      action: 'AD_COMPUTER_MODIFY',
+      status: 'FAILED',
+      target: { kind: 'computer', dn },
+      details: { fields: patch && typeof patch === 'object' ? Object.keys(patch) : [], error: e.message },
+      errorCode: e.code,
+    })
     sendAdModifyError(res, e)
   }
 })
 
 router.post('/computers/account', requireAdReady, requireAdWrites, async (req, res) => {
+  const dn = String(req.body?.dn || '').trim()
+  const disabled = req.body?.disabled
   try {
-    const dn = String(req.body?.dn || '').trim()
-    if (!dn || typeof req.body?.disabled !== 'boolean') {
+    if (!dn || typeof disabled !== 'boolean') {
       return res.status(400).json({ ok: false, code: 'AD_BODY_INVALID', error: 'dn and disabled (boolean) required.' })
     }
-    await setAdComputerAccountFlags({ dn, disabled: req.body.disabled })
+    await setAdComputerAccountFlags({ dn, disabled })
+    logAdAudit(req, {
+      action: 'AD_COMPUTER_ACCOUNT_FLAGS',
+      status: 'SUCCESS',
+      target: { kind: 'computer', dn },
+      details: { disabled },
+    })
     res.json({ ok: true })
   } catch (e) {
+    logAdAudit(req, {
+      action: 'AD_COMPUTER_ACCOUNT_FLAGS',
+      status: 'FAILED',
+      target: { kind: 'computer', dn },
+      details: { disabled, error: e.message },
+      errorCode: e.code,
+    })
     sendAdModifyError(res, e)
   }
 })
@@ -534,30 +701,56 @@ router.get('/ous/detail', requireAdReady, async (req, res) => {
 })
 
 router.post('/ous/create', requireAdReady, requireAdWrites, async (req, res) => {
+  const body = req.body || {}
   try {
-    const body = req.body || {}
     const result = await createAdOu({
       parentDn: body.parentDn,
       name: body.name,
       description: body.description,
       managedBy: body.managedBy,
     })
+    logAdAudit(req, {
+      action: 'AD_OU_CREATE',
+      status: 'SUCCESS',
+      target: { kind: 'ou', dn: result?.dn, name: body.name, parentDn: body.parentDn },
+      details: { name: body.name, description: body.description, managedBy: body.managedBy },
+    })
     res.json({ ok: true, ...result })
   } catch (e) {
+    logAdAudit(req, {
+      action: 'AD_OU_CREATE',
+      status: 'FAILED',
+      target: { kind: 'ou', name: body.name, parentDn: body.parentDn },
+      details: { name: body.name, error: e.message },
+      errorCode: e.code,
+    })
     sendAdModifyError(res, e)
   }
 })
 
 router.post('/ous/modify', requireAdReady, requireAdWrites, async (req, res) => {
+  const dn = String(req.body?.dn || '').trim()
+  const patch = req.body?.patch
   try {
-    const dn = String(req.body?.dn || '').trim()
-    const patch = req.body?.patch
     if (!dn || !patch || typeof patch !== 'object' || Array.isArray(patch)) {
       return res.status(400).json({ ok: false, code: 'AD_BODY_INVALID', error: 'dn and patch object required.' })
     }
     await modifyAdOuPatch({ dn, patch })
+    logAdAudit(req, {
+      action: 'AD_OU_MODIFY',
+      status: 'SUCCESS',
+      target: { kind: 'ou', dn },
+      details: { fields: Object.keys(patch) },
+    })
     res.json({ ok: true })
   } catch (e) {
+    logAdAudit(req, {
+      action: 'AD_OU_MODIFY',
+      status: 'FAILED',
+      target: { kind: 'ou', dn },
+      details: { fields: patch && typeof patch === 'object' ? Object.keys(patch) : [], error: e.message },
+      errorCode: e.code,
+    })
     sendAdModifyError(res, e)
   }
 })
@@ -605,6 +798,64 @@ router.post('/test-user-bind', async (req, res) => {
             : 502
     console.warn('[ad/test-user-bind]', code, e.message || e)
     res.status(status).json({ ok: false, code, error: e.message || 'Bind test failed' })
+  }
+})
+
+/**
+ * List recent AD audit entries. Filters are all optional and additive.
+ *
+ *   GET /api/ad/audit
+ *     ?action=AD_USER_PASSWORD_RESET
+ *     &status=SUCCESS|FAILED
+ *     &email=actor@example.com
+ *     &dn=CN=Jane,OU=...,DC=...
+ *     &q=free-text (matched against actor email, target dn, target name)
+ *     &from=2025-01-01T00:00:00Z&to=2025-12-31T23:59:59Z
+ *     &page=1&limit=50
+ */
+router.get('/audit', async (req, res) => {
+  try {
+    const { action, status, email, dn, q, from, to } = req.query || {}
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1)
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50))
+
+    const query = {}
+    if (action && AD_AUDIT_ACTIONS.includes(String(action))) query.action = String(action)
+    if (status === 'SUCCESS' || status === 'FAILED') query.status = status
+    if (email) query['performedBy.email'] = String(email)
+    if (dn)    query['target.dn'] = String(dn)
+    if (from || to) {
+      query.createdAt = {}
+      if (from) {
+        const d = new Date(String(from))
+        if (!Number.isNaN(d.valueOf())) query.createdAt.$gte = d
+      }
+      if (to) {
+        const d = new Date(String(to))
+        if (!Number.isNaN(d.valueOf())) query.createdAt.$lte = d
+      }
+      if (!Object.keys(query.createdAt).length) delete query.createdAt
+    }
+    if (q) {
+      const safe = String(q).slice(0, 120).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const rx = new RegExp(safe, 'i')
+      query.$or = [
+        { 'performedBy.email':    rx },
+        { 'performedBy.username': rx },
+        { 'target.dn':            rx },
+        { 'target.name':          rx },
+      ]
+    }
+
+    const skip = (page - 1) * limit
+    const [logs, total] = await Promise.all([
+      AdAuditLog.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      AdAuditLog.countDocuments(query),
+    ])
+    res.json({ ok: true, logs, total, page, limit, actions: AD_AUDIT_ACTIONS })
+  } catch (e) {
+    console.error('[ad/audit]', e.message)
+    res.status(500).json({ ok: false, error: e.message })
   }
 })
 

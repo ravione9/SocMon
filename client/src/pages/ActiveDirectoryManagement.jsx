@@ -28,6 +28,7 @@ import AdGroupCreateModal from '../components/ad/AdGroupCreateModal.jsx'
 import AdOuCreateModal from '../components/ad/AdOuCreateModal.jsx'
 import AdBulkPanel from '../components/ad/AdBulkPanel.jsx'
 import AdReportsPanel from '../components/ad/AdReportsPanel.jsx'
+import AdAuditPanel from '../components/ad/AdAuditPanel.jsx'
 
 const NAV_GROUPS = [
   {
@@ -1703,11 +1704,7 @@ export default function ActiveDirectoryManagement() {
     main = (
       <>
         {panelTitle('Audit trail')}
-        <PlaceholderTable
-          columns={['Time', 'Actor', 'Action', 'Target', 'Status']}
-          emptyTitle="No audit entries yet"
-          emptyBody="Directory change events from Netpulse will appear here when auditing is available."
-        />
+        <AdAuditPanel />
       </>
     )
   }
