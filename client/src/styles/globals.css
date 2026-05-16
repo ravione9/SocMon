@@ -16,7 +16,8 @@
   --accent: #4f7ef5; --accent2: #7c5cfc;
   --green: #22d3a0; --red: #f5534f; --amber: #f5a623; --cyan: #22d3ee;
   --text: #e8eaf2; --text2: #8b90aa; --text3: #555a72;
-  --mono: "JetBrains Mono", monospace; --sans: "Syne", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 [data-theme="ocean"] {
   --bg: #061016; --bg2: #0a1820; --bg3: #0f2430; --bg4: #153040;
@@ -130,11 +131,25 @@
 html:not([data-theme="paper"]):not([data-theme="sand"]) {
   color-scheme: dark;
 }
+/* Default view is rendered at 90% so dense pages (AD, NOC, SOC tables) fit
+   in a normal 1080p window without the user manually zooming the browser. */
 html {
   background: var(--bg);
   color: var(--text);
+  zoom: 0.9;
 }
-body { background: var(--bg); color: var(--text); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.45;
+  font-feature-settings: "cv11", "ss01", "ss03", "kern", "calt";
+  font-variant-ligatures: common-ligatures;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
 
 #root {
   color: var(--text);
