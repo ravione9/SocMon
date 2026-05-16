@@ -103,20 +103,3 @@ export const createAdOu = (body) =>
  */
 export const listAdAudit = (params = {}) =>
   api.get(`${BASE}/audit`, { params }).then((r) => r.data)
-
-/**
- * List recent AD audit entries. All filters are optional.
- * @param {{
- *   action?: string,
- *   status?: 'SUCCESS'|'FAILED',
- *   email?: string,
- *   dn?: string,
- *   q?: string,
- *   from?: string,
- *   to?: string,
- *   page?: number,
- *   limit?: number,
- * }} [params]
- */
-export const listAdAudit = (params = {}) =>
-  api.get(`${BASE}/audit`, { params }).then((r) => r.data)
