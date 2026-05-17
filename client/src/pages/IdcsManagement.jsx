@@ -197,8 +197,36 @@ function StatsDashboard({ onTabSwitch, refreshTrigger }) {
 }
 
 // ─── Create User form ────────────────────────────────────────────────────────
+// NOTE: defined OUTSIDE CreateUserForm so it doesn't get recreated on every keystroke
+// (a new function identity would unmount/remount the inputs and steal focus).
+function CreateUserField({ label, name, type = 'text', required = false, placeholder = '', hint, value, onChange }) {
+  return (
+    <div>
+      <label className={`block text-sm font-medium mb-1 ${idcsCx.text}`}>
+        {label} {required && <span className="text-[var(--red)]">*</span>}
+      </label>
+      <input
+        type={type}
+        value={value}
+        onChange={onChange}
+        placeholder={placeholder}
+        className={idcsInputClass()}
+      />
+      {hint && <p className={`text-[11px] mt-1 ${idcsCx.text3}`}>{hint}</p>}
+    </div>
+  );
+}
+
 function CreateUserForm({ onCreated }) {
-  const EMPTY = { firstName: '', lastName: '', email: '', userName: '', mobileNumber: '', password: '' };
+  const EMPTY = {
+    firstName: '',
+    lastName: '',
+    email: '',
+    recoveryEmail: '',
+    userName: '',
+    mobileNumber: '',
+    password: '',
+  };
   const [form, setForm] = useState(EMPTY);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -210,6 +238,10 @@ function CreateUserForm({ onCreated }) {
     ev.preventDefault();
     if (!form.email || !form.firstName || !form.lastName) {
       setError('First name, last name, and email are required');
+      return;
+    }
+    if (form.recoveryEmail && !/^\S+@\S+\.\S+$/.test(form.recoveryEmail.trim())) {
+      setError('Recovery email is not valid');
       return;
     }
     setLoading(true);
@@ -227,31 +259,25 @@ function CreateUserForm({ onCreated }) {
     }
   };
 
-  const Field = ({ label, name, type = 'text', required = false, placeholder = '' }) => (
-    <div>
-      <label className={`block text-sm font-medium mb-1 ${idcsCx.text}`}>
-        {label} {required && <span className="text-[var(--red)]">*</span>}
-      </label>
-      <input
-        type={type}
-        value={form[name]}
-        onChange={set(name)}
-        placeholder={placeholder}
-        className={idcsInputClass()}
-      />
-    </div>
-  );
-
   return (
     <form onSubmit={handleSubmit} className="max-w-lg space-y-4">
       <div className="grid grid-cols-2 gap-4">
-        <Field label="First Name" name="firstName" required placeholder="John" />
-        <Field label="Last Name" name="lastName" required placeholder="Doe" />
+        <CreateUserField label="First Name" name="firstName" required placeholder="John" value={form.firstName} onChange={set('firstName')} />
+        <CreateUserField label="Last Name"  name="lastName"  required placeholder="Doe"  value={form.lastName}  onChange={set('lastName')} />
       </div>
-      <Field label="Email" name="email" type="email" required placeholder="john.doe@lenskart.com" />
-      <Field label="User Name" name="userName" placeholder="Leave blank to use email" />
-      <Field label="Mobile Number" name="mobileNumber" placeholder="+911234567890" />
-      <Field label="Initial Password" name="password" type="password" placeholder="Leave blank to trigger reset email" />
+      <CreateUserField label="Email" name="email" type="email" required placeholder="john.doe@lenskart.com" value={form.email} onChange={set('email')} />
+      <CreateUserField
+        label="Recovery Email"
+        name="recoveryEmail"
+        type="email"
+        placeholder="backup@example.com"
+        hint="Optional. Used by Oracle IDCS to send password recovery messages."
+        value={form.recoveryEmail}
+        onChange={set('recoveryEmail')}
+      />
+      <CreateUserField label="User Name"     name="userName"     placeholder="Leave blank to use email"       value={form.userName}     onChange={set('userName')} />
+      <CreateUserField label="Mobile Number" name="mobileNumber" placeholder="+911234567890"                  value={form.mobileNumber} onChange={set('mobileNumber')} />
+      <CreateUserField label="Initial Password" name="password" type="password" placeholder="Leave blank to trigger reset email" value={form.password} onChange={set('password')} />
 
       {error && (
         <div

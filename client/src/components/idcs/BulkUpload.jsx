@@ -11,10 +11,11 @@ import { bulkCreateUsers, bulkDeleteUsers } from '../../api/idcs';
 import { idcsCx, idcsBtnPrimary, idcsBtnDanger } from './idcsTheme';
 
 const REQUIRED_FIELDS = ['firstName', 'lastName', 'email'];
-
-const CSV_TEMPLATE = `firstName,lastName,email,mobileNumber,password
-John,Doe,john.doe@example.com,+911234567890,
-Jane,Smith,jane.smith@example.com,,`;
+// `recoveryEmail` is optional; if present in the CSV/JSON it's forwarded to IDCS
+// and stored as a SCIM emails[type=recovery] entry on the user.
+const CSV_TEMPLATE = `firstName,lastName,email,recoveryEmail,mobileNumber,password
+John,Doe,john.doe@example.com,john.personal@gmail.com,+911234567890,
+Jane,Smith,jane.smith@example.com,,,`;
 
 function parseCSV(text) {
   const lines = text.trim().split('\n').filter(Boolean);

@@ -188,12 +188,16 @@ export async function updateUser(id, patch = {}) {
   return getUserById(id)
 }
 
-export async function createUser({ userName, firstName, lastName, email, mobileNumber, password }) {
+export async function createUser({ userName, firstName, lastName, email, recoveryEmail, mobileNumber, password }) {
+  const emails = [{ value: email, type: 'work', primary: true }]
+  if (recoveryEmail && String(recoveryEmail).trim() && String(recoveryEmail).trim() !== email) {
+    emails.push({ value: String(recoveryEmail).trim(), type: 'recovery', primary: false })
+  }
   const body = {
     schemas:  ['urn:ietf:params:scim:schemas:core:2.0:User'],
     userName: userName || email,
     name:     { givenName: firstName, familyName: lastName },
-    emails:   [{ value: email, type: 'work', primary: true }],
+    emails,
     active:   true,
   }
   if (mobileNumber) body.phoneNumbers = [{ value: mobileNumber, type: 'mobile' }]
