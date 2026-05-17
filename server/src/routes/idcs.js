@@ -98,6 +98,30 @@ router.post('/users', async (req, res) => {
   }
 })
 
+router.patch('/users/:id', async (req, res) => {
+  try {
+    const allowed = ['displayName', 'firstName', 'lastName', 'email', 'recoveryEmail', 'mobileNumber', 'active']
+    const patch = {}
+    for (const k of allowed) {
+      if (Object.prototype.hasOwnProperty.call(req.body, k)) patch[k] = req.body[k]
+    }
+    if (!Object.keys(patch).length) return res.status(400).json({ error: 'No editable fields supplied' })
+    const updated = await idcs.updateUser(req.params.id, patch)
+    audit(
+      'UPDATE_USER',
+      req,
+      { idcsId: updated.id, userName: updated.userName, email: updated.emails?.find((e) => e.primary)?.value, displayName: updated.displayName },
+      null,
+      'SUCCESS',
+      { fields: Object.keys(patch) },
+    )
+    res.json(updated)
+  } catch (e) {
+    audit('UPDATE_USER', req, { idcsId: req.params.id }, null, 'FAILED', { error: e.message, fields: Object.keys(req.body || {}) })
+    res.status(idcsStatus(e)).json({ error: e.message })
+  }
+})
+
 router.delete('/users/:id', async (req, res) => {
   try {
     let info = { idcsId: req.params.id }

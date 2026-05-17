@@ -96,9 +96,96 @@ export async function getUserById(id) {
   const safe = encodeURIComponent(id)
   const attributes = [
     'id', 'userName', 'displayName', 'name', 'emails', 'phoneNumbers',
-    'active', 'groups', 'meta',
+    'active', 'groups', 'meta', 'nickName', 'title', 'userType',
+    'preferredLanguage', 'locale', 'timezone',
   ].join(',')
   return api('get', `/Users/${safe}`, null, { attributes })
+}
+
+/**
+ * Update IDCS user via SCIM PATCH.
+ *
+ * `patch` accepts a subset of profile fields. We fetch the current record so multi-valued
+ * arrays (emails, phoneNumbers) can be re-sent intact when only one slot changes — this avoids
+ * accidentally wiping the primary work email when an admin updates the recovery email.
+ *
+ * Recovery email lives in `emails` with `type: "recovery"` (Oracle IDCS convention on top of SCIM 2.0).
+ *
+ * @param {string} id
+ * @param {object} patch
+ * @param {string} [patch.displayName]
+ * @param {string} [patch.firstName]
+ * @param {string} [patch.lastName]
+ * @param {string} [patch.email]            Primary work email (replaces the existing primary).
+ * @param {string} [patch.recoveryEmail]    Empty string removes the recovery email entry.
+ * @param {string} [patch.mobileNumber]     Empty string removes the mobile phone entry.
+ * @param {boolean} [patch.active]
+ */
+export async function updateUser(id, patch = {}) {
+  const current = await getUserById(id)
+  const ops = []
+
+  if (typeof patch.displayName === 'string') {
+    ops.push({ op: 'replace', path: 'displayName', value: patch.displayName })
+  }
+  if (typeof patch.firstName === 'string') {
+    ops.push({ op: 'replace', path: 'name.givenName', value: patch.firstName })
+  }
+  if (typeof patch.lastName === 'string') {
+    ops.push({ op: 'replace', path: 'name.familyName', value: patch.lastName })
+  }
+  if (typeof patch.active === 'boolean') {
+    ops.push({ op: 'replace', path: 'active', value: patch.active })
+  }
+
+  const wantsEmailEdit = patch.email !== undefined || patch.recoveryEmail !== undefined
+  if (wantsEmailEdit) {
+    const emails = (current.emails || []).map((e) => ({ ...e }))
+
+    if (patch.email !== undefined) {
+      const val = String(patch.email || '').trim()
+      const primaryIdx = emails.findIndex((e) => e.primary === true)
+      if (val) {
+        if (primaryIdx >= 0) emails[primaryIdx].value = val
+        else emails.push({ value: val, type: 'work', primary: true })
+      }
+    }
+
+    if (patch.recoveryEmail !== undefined) {
+      const recIdx = emails.findIndex((e) => String(e.type || '').toLowerCase() === 'recovery')
+      const val = String(patch.recoveryEmail || '').trim()
+      if (val) {
+        if (recIdx >= 0) emails[recIdx].value = val
+        else emails.push({ value: val, type: 'recovery', primary: false })
+      } else if (recIdx >= 0) {
+        emails.splice(recIdx, 1)
+      }
+    }
+
+    ops.push({ op: 'replace', path: 'emails', value: emails })
+  }
+
+  if (patch.mobileNumber !== undefined) {
+    const phones = (current.phoneNumbers || []).map((p) => ({ ...p }))
+    const mobIdx = phones.findIndex((p) => String(p.type || '').toLowerCase() === 'mobile')
+    const val = String(patch.mobileNumber || '').trim()
+    if (val) {
+      if (mobIdx >= 0) phones[mobIdx].value = val
+      else phones.push({ value: val, type: 'mobile' })
+    } else if (mobIdx >= 0) {
+      phones.splice(mobIdx, 1)
+    }
+    ops.push({ op: 'replace', path: 'phoneNumbers', value: phones })
+  }
+
+  if (!ops.length) return current
+
+  await api('patch', `/Users/${encodeURIComponent(id)}`, {
+    schemas:    ['urn:ietf:params:scim:api:messages:2.0:PatchOp'],
+    Operations: ops,
+  })
+
+  return getUserById(id)
 }
 
 export async function createUser({ userName, firstName, lastName, email, mobileNumber, password }) {

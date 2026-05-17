@@ -15,6 +15,8 @@ export const getUser = (id) =>
   api.get(`${BASE}/users/${id}`).then((r) => r.data)
 export const createUser = (data) =>
   api.post(`${BASE}/users`, data).then((r) => r.data)
+export const updateUser = (id, patch) =>
+  api.patch(`${BASE}/users/${encodeURIComponent(id)}`, patch).then((r) => r.data)
 export const deleteUser = (id) =>
   api.delete(`${BASE}/users/${id}`).then((r) => r.data)
 export const resetPassword = (id) =>

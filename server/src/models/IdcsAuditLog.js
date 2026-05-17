@@ -6,7 +6,7 @@ const idcsAuditLogSchema = new mongoose.Schema(
       type: String,
       required: true,
       enum: [
-        'CREATE_USER', 'DELETE_USER',
+        'CREATE_USER', 'UPDATE_USER', 'DELETE_USER',
         'BULK_CREATE_USERS', 'BULK_DELETE_USERS',
         'PASSWORD_RESET', 'ADD_TO_GROUP',
         'REMOVE_FROM_GROUP', 'EXPORT_USERS',
