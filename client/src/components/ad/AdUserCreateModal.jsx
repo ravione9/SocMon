@@ -181,12 +181,9 @@ export default function AdUserCreateModal({ defaultParentDn = '', domainFqdn = '
               className={`text-xs font-semibold px-2 py-1 rounded-md border ${idcsCx.border} ${idcsCx.bg2} hover:opacity-90 disabled:opacity-50`}
               style={{ color: 'var(--accent)' }}
             >
-              Generate password (IDCS-style)
+              Generate password
             </button>
           </div>
-          <p className={`text-[11px] ${idcsCx.text3}`}>
-            Same generator as IDCS: two words + 3 digits + one uppercase + @ / # / $. Required for enabled accounts.
-          </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             <div className="relative">
               <input
