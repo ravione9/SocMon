@@ -88,15 +88,17 @@ export default function UserDetailModal({
   const r = useMemo(() => readableUser(user), [user]);
 
   const startEdit = () => {
-    if (!user) return;
+    const src = user || previewUser;
+    if (!src) return;
+    const sr = readableUser(src);
     setForm({
-      displayName: user.displayName || '',
-      firstName:   user.name?.givenName || '',
-      lastName:    user.name?.familyName || '',
-      email:       r?.primary || '',
-      recoveryEmail: r?.recovery || '',
-      mobileNumber: r?.mobile || '',
-      active:      user.active !== false,
+      displayName: src.displayName || '',
+      firstName:   src.name?.givenName || '',
+      lastName:    src.name?.familyName || '',
+      email:       sr?.primary || '',
+      recoveryEmail: sr?.recovery || '',
+      mobileNumber: sr?.mobile || '',
+      active:      src.active !== false,
     });
     setError('');
     setEditMode(true);
@@ -109,17 +111,19 @@ export default function UserDetailModal({
 
   const handleSave = async (e) => {
     e?.preventDefault?.();
-    if (!user) return;
+    const src = user || previewUser;
+    if (!src) return;
+    const sr = readableUser(src);
 
     const trimmed = (v) => (typeof v === 'string' ? v.trim() : v);
     const patch = {};
-    if (trimmed(form.displayName) !== (user.displayName || '')) patch.displayName = trimmed(form.displayName);
-    if (trimmed(form.firstName)   !== (user.name?.givenName || '')) patch.firstName = trimmed(form.firstName);
-    if (trimmed(form.lastName)    !== (user.name?.familyName || '')) patch.lastName  = trimmed(form.lastName);
-    if (trimmed(form.email)       !== (r?.primary || ''))           patch.email      = trimmed(form.email);
-    if (trimmed(form.recoveryEmail) !== (r?.recovery || ''))        patch.recoveryEmail = trimmed(form.recoveryEmail);
-    if (trimmed(form.mobileNumber) !== (r?.mobile || ''))           patch.mobileNumber  = trimmed(form.mobileNumber);
-    if (!!form.active !== (user.active !== false))                   patch.active = !!form.active;
+    if (trimmed(form.displayName) !== (src.displayName || '')) patch.displayName = trimmed(form.displayName);
+    if (trimmed(form.firstName)   !== (src.name?.givenName || '')) patch.firstName = trimmed(form.firstName);
+    if (trimmed(form.lastName)    !== (src.name?.familyName || '')) patch.lastName  = trimmed(form.lastName);
+    if (trimmed(form.email)       !== (sr?.primary || ''))         patch.email      = trimmed(form.email);
+    if (trimmed(form.recoveryEmail) !== (sr?.recovery || ''))      patch.recoveryEmail = trimmed(form.recoveryEmail);
+    if (trimmed(form.mobileNumber) !== (sr?.mobile || ''))         patch.mobileNumber  = trimmed(form.mobileNumber);
+    if (!!form.active !== (src.active !== false))                   patch.active = !!form.active;
 
     if (form.email && !/^\S+@\S+\.\S+$/.test(form.email.trim())) {
       setError('Primary email is not valid');
@@ -278,7 +282,7 @@ export default function UserDetailModal({
             </dl>
           )}
 
-          {!loading && user && editMode && (
+          {editMode && (user || previewUser) && (
             <form id="idcs-user-edit-form" onSubmit={handleSave} className="space-y-3">
               <div>
                 <label className={`block text-xs font-medium mb-1 ${idcsCx.text3}`}>Display name</label>
@@ -372,7 +376,7 @@ export default function UserDetailModal({
               <button
                 type="button"
                 onClick={startEdit}
-                disabled={!user || loading}
+                disabled={!user && !previewUser}
                 className={`text-sm ${idcsBtnPrimary()}`}
               >
                 Edit
