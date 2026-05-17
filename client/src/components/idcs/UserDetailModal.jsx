@@ -356,10 +356,14 @@ export default function UserDetailModal({
           )}
         </div>
 
-        <div className={`px-5 py-4 flex flex-wrap gap-2 border-t shrink-0 ${idcsCx.border} ${idcsCx.bg3}`}>
+        <div
+          key={editMode ? 'footer-edit' : 'footer-view'}
+          className={`px-5 py-4 flex flex-wrap gap-2 border-t shrink-0 ${idcsCx.border} ${idcsCx.bg3}`}
+        >
           {editMode ? (
             <>
               <button
+                key="btn-save"
                 type="submit"
                 form="idcs-user-edit-form"
                 disabled={saving}
@@ -367,13 +371,14 @@ export default function UserDetailModal({
               >
                 {saving ? 'Saving…' : 'Save changes'}
               </button>
-              <button type="button" onClick={cancelEdit} className={`text-sm ${idcsBtnGhost()}`}>
+              <button key="btn-cancel" type="button" onClick={cancelEdit} className={`text-sm ${idcsBtnGhost()}`}>
                 Cancel
               </button>
             </>
           ) : (
             <>
               <button
+                key="btn-edit"
                 type="button"
                 onClick={startEdit}
                 disabled={!user && !previewUser}
