@@ -29,10 +29,21 @@ export const setPassword = (id, newPassword, mustChangePassword = false) =>
 
 export const bulkCreateUsers = (users) =>
   api.post(`${BASE}/users/bulk`, { users }).then((r) => r.data)
-export const bulkDeleteUsers = (userIds) =>
-  api.post(`${BASE}/users/bulk-delete`, { userIds }).then((r) => r.data)
-export const bulkSetActive = (userIds, active) =>
-  api.post(`${BASE}/users/bulk-set-active`, { userIds, active }).then((r) => r.data)
+
+/**
+ * Either an array of IDCS user-id strings or an array of objects
+ * `[{ email | userName | idcsId }]` is accepted. The server resolves emails to IDs.
+ */
+function userListBody(list) {
+  if (Array.isArray(list) && list.length && typeof list[0] === 'string') {
+    return { userIds: list }
+  }
+  return { users: list }
+}
+export const bulkDeleteUsers = (idsOrUsers) =>
+  api.post(`${BASE}/users/bulk-delete`, userListBody(idsOrUsers)).then((r) => r.data)
+export const bulkSetActive = (idsOrUsers, active) =>
+  api.post(`${BASE}/users/bulk-set-active`, { ...userListBody(idsOrUsers), active }).then((r) => r.data)
 /**
  * Direct admin password set, in bulk (no email link).
  *  - Per-user:  bulkSetPassword({ users: [{ idcsId, newPassword, mustChangePassword? }] })

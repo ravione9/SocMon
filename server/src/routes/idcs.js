@@ -25,6 +25,24 @@ function audit(action, req, targetUser, targetGroup, status, details) {
   }).catch((e) => console.error('[idcs audit]', e.message))
 }
 
+/**
+ * Resolve one identifier (idcsId | email | userName) → IDCS user id.
+ * Caches lookups within this request so a repeated email is only queried once.
+ */
+function makeUserResolver() {
+  const cache = new Map()
+  return async function resolveId({ idcsId, id, email, userName }) {
+    if (idcsId) return idcsId
+    if (id)     return id
+    const key = email || userName
+    if (!key) throw Object.assign(new Error('Each item needs idcsId, email or userName'), { status: 400 })
+    if (cache.has(key)) return cache.get(key)
+    const u = await idcs.findUserByEmailOrUserName(key)
+    cache.set(key, u.id)
+    return u.id
+  }
+}
+
 // ─── Safe status helper ───────────────────────────────────────────────────────
 // Never forward a raw IDCS 401/403 to the browser — our axios interceptor
 // treats any backend 401 as NetPulse session expiry and logs the admin out.
@@ -135,7 +153,7 @@ router.patch('/users/:id', async (req, res) => {
  * Direct admin password set, in bulk. No password-reset emails are sent.
  *
  * Two input shapes are accepted so the same endpoint serves both UI paths:
- *  - Per-user passwords (CSV upload):  { users: [{ idcsId, newPassword, mustChangePassword? }, ...] }
+ *  - Per-user passwords (CSV upload):  { users: [{ idcsId|email|userName, newPassword, mustChangePassword? }, ...] }
  *  - Shared password (toolbar modal):  { userIds: [...], newPassword, mustChangePassword? }
  */
 router.post('/users/bulk-set-password', async (req, res) => {
@@ -145,22 +163,23 @@ router.post('/users/bulk-set-password', async (req, res) => {
 
     if (Array.isArray(body.users) && body.users.length) {
       entries = body.users.map((u) => ({
-        id: u.idcsId || u.id,
+        ref: { idcsId: u.idcsId || u.id, email: u.email, userName: u.userName },
         newPassword: u.newPassword,
         mustChangePassword: !!u.mustChangePassword,
       }))
     } else if (Array.isArray(body.userIds) && body.userIds.length && body.newPassword) {
       const shared = String(body.newPassword)
       const must = !!body.mustChangePassword
-      entries = body.userIds.map((id) => ({ id, newPassword: shared, mustChangePassword: must }))
+      entries = body.userIds.map((id) => ({ ref: { idcsId: id }, newPassword: shared, mustChangePassword: must }))
     } else {
       return res.status(400).json({
-        error: 'Provide either users[{idcsId,newPassword,mustChangePassword?}] or userIds[]+newPassword+mustChangePassword?',
+        error: 'Provide either users[{idcsId|email,newPassword,mustChangePassword?}] or userIds[]+newPassword+mustChangePassword?',
       })
     }
 
     if (entries.length > 500) return res.status(400).json({ error: 'Max 500 per request' })
 
+    const resolve = makeUserResolver()
     const succeeded = []
     const failed = []
     const CHUNK = 10
@@ -168,15 +187,20 @@ router.post('/users/bulk-set-password', async (req, res) => {
       const chunk = entries.slice(i, i + CHUNK)
       const results = await Promise.allSettled(
         chunk.map(async (e) => {
-          if (!e.id) throw new Error('idcsId required')
-          if (!e.newPassword) throw new Error('newPassword required')
-          return idcs.setPassword(e.id, e.newPassword, !!e.mustChangePassword)
+          const label = e.ref.idcsId || e.ref.email || e.ref.userName
+          try {
+            if (!e.newPassword) throw new Error('newPassword required')
+            const id = await resolve(e.ref)
+            await idcs.setPassword(id, e.newPassword, !!e.mustChangePassword)
+            return { id, label }
+          } catch (err) {
+            throw Object.assign(err, { label })
+          }
         }),
       )
-      results.forEach((r, idx) => {
-        r.status === 'fulfilled'
-          ? succeeded.push(chunk[idx].id)
-          : failed.push({ id: chunk[idx].id, error: r.reason?.message })
+      results.forEach((r) => {
+        if (r.status === 'fulfilled') succeeded.push(r.value.id)
+        else failed.push({ id: r.reason?.label, error: r.reason?.message })
       })
     }
     const status = failed.length === 0 ? 'SUCCESS' : succeeded.length > 0 ? 'PARTIAL' : 'FAILED'
@@ -194,30 +218,48 @@ router.post('/users/bulk-set-password', async (req, res) => {
 
 router.post('/users/bulk-set-active', async (req, res) => {
   try {
-    const { userIds, active } = req.body
-    if (!Array.isArray(userIds) || !userIds.length) return res.status(400).json({ error: 'userIds[] required' })
-    if (typeof active !== 'boolean') return res.status(400).json({ error: 'active boolean required' })
+    const body = req.body || {}
+    if (typeof body.active !== 'boolean') return res.status(400).json({ error: 'active boolean required' })
 
+    let refs = []
+    if (Array.isArray(body.users) && body.users.length) {
+      refs = body.users.map((u) => ({ idcsId: u.idcsId || u.id, email: u.email, userName: u.userName }))
+    } else if (Array.isArray(body.userIds) && body.userIds.length) {
+      refs = body.userIds.map((id) => ({ idcsId: id }))
+    } else {
+      return res.status(400).json({ error: 'Provide users[{idcsId|email}] or userIds[]' })
+    }
+    if (refs.length > 500) return res.status(400).json({ error: 'Max 500 per request' })
+
+    const resolve = makeUserResolver()
     const succeeded = []
     const failed = []
     const CHUNK = 10
-    for (let i = 0; i < userIds.length; i += CHUNK) {
-      const chunk = userIds.slice(i, i + CHUNK)
-      const results = await Promise.allSettled(chunk.map((id) => idcs.updateUser(id, { active })))
-      results.forEach((r, idx) => {
-        r.status === 'fulfilled'
-          ? succeeded.push(chunk[idx])
-          : failed.push({ id: chunk[idx], error: r.reason?.message })
+    for (let i = 0; i < refs.length; i += CHUNK) {
+      const chunk = refs.slice(i, i + CHUNK)
+      const results = await Promise.allSettled(
+        chunk.map(async (ref) => {
+          const label = ref.idcsId || ref.email || ref.userName
+          try {
+            const id = await resolve(ref)
+            await idcs.updateUser(id, { active: body.active })
+            return { id }
+          } catch (err) { throw Object.assign(err, { label }) }
+        }),
+      )
+      results.forEach((r) => {
+        if (r.status === 'fulfilled') succeeded.push(r.value.id)
+        else failed.push({ id: r.reason?.label, error: r.reason?.message })
       })
     }
     const status = failed.length === 0 ? 'SUCCESS' : succeeded.length > 0 ? 'PARTIAL' : 'FAILED'
     audit(
-      active ? 'BULK_ACTIVATE_USERS' : 'BULK_SUSPEND_USERS',
+      body.active ? 'BULK_ACTIVATE_USERS' : 'BULK_SUSPEND_USERS',
       req,
       null,
       null,
       status,
-      { total: userIds.length, succeeded: succeeded.length, failed: failed.length },
+      { total: refs.length, succeeded: succeeded.length, failed: failed.length },
     )
     res.json({ succeeded, failed })
   } catch (e) {
@@ -291,15 +333,29 @@ router.post('/users/bulk', async (req, res) => {
 
 router.post('/users/bulk-delete', async (req, res) => {
   try {
-    const { userIds } = req.body
-    if (!Array.isArray(userIds) || !userIds.length) return res.status(400).json({ error: 'userIds[] required' })
+    const body = req.body || {}
+    let refs = []
+    if (Array.isArray(body.users) && body.users.length) {
+      refs = body.users.map((u) => ({ idcsId: u.idcsId || u.id, email: u.email, userName: u.userName }))
+    } else if (Array.isArray(body.userIds) && body.userIds.length) {
+      refs = body.userIds.map((id) => ({ idcsId: id }))
+    } else {
+      return res.status(400).json({ error: 'Provide users[{idcsId|email}] or userIds[]' })
+    }
+    if (refs.length > 500) return res.status(400).json({ error: 'Max 500 per request' })
+
+    const resolve = makeUserResolver()
     const succeeded = [], failed = []
-    await Promise.allSettled(userIds.map(async (id) => {
-      try { await idcs.deleteUser(id); succeeded.push(id) }
-      catch (e) { failed.push({ id, error: e.message }) }
+    await Promise.allSettled(refs.map(async (ref) => {
+      const label = ref.idcsId || ref.email || ref.userName
+      try {
+        const id = await resolve(ref)
+        await idcs.deleteUser(id)
+        succeeded.push(id)
+      } catch (e) { failed.push({ id: label, error: e.message }) }
     }))
     const status = failed.length === 0 ? 'SUCCESS' : succeeded.length > 0 ? 'PARTIAL' : 'FAILED'
-    audit('BULK_DELETE_USERS', req, null, null, status, { total: userIds.length, succeeded: succeeded.length, failed: failed.length })
+    audit('BULK_DELETE_USERS', req, null, null, status, { total: refs.length, succeeded: succeeded.length, failed: failed.length })
     res.json({ succeeded, failed })
   } catch (e) { res.status(500).json({ error: e.message }) }
 })

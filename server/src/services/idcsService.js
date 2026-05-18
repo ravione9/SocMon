@@ -274,6 +274,33 @@ export async function setPassword(id, newPassword, mustChangePassword = false) {
   return { success: true, mustChangePassword: !!mustChangePassword }
 }
 
+/**
+ * Look up a single IDCS user by email or userName.
+ * Tries email match first, then userName. Returns the user object (with `id`).
+ * Throws with .status set to 404 (not found) or 409 (multiple matches).
+ */
+export async function findUserByEmailOrUserName(identifier) {
+  const raw = String(identifier ?? '').trim()
+  if (!raw) {
+    throw Object.assign(new Error('email/userName required'), { status: 400 })
+  }
+  const safe = raw.replace(/"/g, '\\"')
+  const filter = `emails.value eq "${safe}" or userName eq "${safe}"`
+  const res = await listUsers({
+    filter,
+    count: 2,
+    attributes: 'id,userName,displayName,emails,active',
+  })
+  const list = Array.isArray(res?.Resources) ? res.Resources : []
+  if (list.length === 0) {
+    throw Object.assign(new Error(`No IDCS user matches "${raw}"`), { status: 404 })
+  }
+  if (list.length > 1) {
+    throw Object.assign(new Error(`Multiple IDCS users match "${raw}"`), { status: 409 })
+  }
+  return list[0]
+}
+
 // ─── Groups ──────────────────────────────────────────────────────────────────
 
 export async function listGroups({ startIndex = 1, count = 200, filter = '', attributes = 'id,displayName' } = {}) {

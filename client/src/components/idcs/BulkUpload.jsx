@@ -16,15 +16,18 @@ const REQUIRED_FIELDS = ['firstName', 'lastName', 'email'];
 const CREATE_CSV_TEMPLATE = `firstName,lastName,email,recoveryEmail,mobileNumber,password
 John,Doe,john.doe@example.com,john.personal@gmail.com,+911234567890,
 Jane,Smith,jane.smith@example.com,,,`;
-// Suspend / Activate / Delete — only IDCS user IDs are needed.
-const IDCS_ID_CSV_TEMPLATE = `idcsId
-ffffab6d220d414cad673a2d9fb995ab
-abcd1234ef567890abcd1234ef567890`;
+// Suspend / Activate / Delete — provide a primary email (or username) per user.
+// idcsId is also accepted as a column for backward compatibility.
+const IDENTIFIER_CSV_TEMPLATE = `email
+john.doe@example.com
+jane.smith@example.com`;
 // Reset Password — admin sets the actual password per row; no email sent.
 // mustChangePassword is optional (true/false/1/0/yes/no). Defaults to false.
-const RESET_PWD_CSV_TEMPLATE = `idcsId,newPassword,mustChangePassword
-ffffab6d220d414cad673a2d9fb995ab,SecurePass!12,true
-abcd1234ef567890abcd1234ef567890,AnotherP@ss34,false`;
+const RESET_PWD_CSV_TEMPLATE = `email,newPassword,mustChangePassword
+john.doe@example.com,SecurePass!12,true
+jane.smith@example.com,AnotherP@ss34,false`;
+
+const userIdentifier = (r) => r.email || r.userName || r.idcsId || '';
 
 const MODES = [
   { id: 'create',        label: 'Bulk Create',         needsIdcsId: false, danger: false },
@@ -88,15 +91,15 @@ export default function BulkUpload({ onComplete }) {
             setParseError(`${missing.length} row(s) are missing required fields (firstName, lastName, email)`);
           }
         } else if (mode === 'reset-password') {
-          const bad = parsed.filter((r) => !r.idcsId || !r.newPassword);
+          const bad = parsed.filter((r) => !userIdentifier(r) || !r.newPassword);
           if (bad.length > 0) {
-            setParseError(`${bad.length} row(s) are missing required fields (idcsId, newPassword)`);
+            setParseError(`${bad.length} row(s) are missing required fields (email and newPassword; idcsId or userName also accepted in place of email)`);
           }
         } else {
-          // suspend / activate / delete: idcsId per row
-          const hasIdcsId = parsed.every((r) => r.idcsId);
-          if (!hasIdcsId) {
-            setParseError(`Each row must include an "idcsId" column for ${mode}. (Tip: download the template.)`);
+          // suspend / activate / delete: email (or userName / idcsId) per row
+          const hasRef = parsed.every((r) => userIdentifier(r));
+          if (!hasRef) {
+            setParseError(`Each row must include an "email" column (or "userName" / "idcsId") for ${mode}.`);
           }
         }
 
@@ -125,29 +128,37 @@ export default function BulkUpload({ onComplete }) {
         res = await bulkCreateUsers(rows);
       } else if (mode === 'reset-password') {
         const users = rows
-          .filter((r) => r.idcsId && r.newPassword)
+          .filter((r) => userIdentifier(r) && r.newPassword)
           .map((r) => ({
-            idcsId: r.idcsId,
+            email: r.email || undefined,
+            userName: r.userName || undefined,
+            idcsId: r.idcsId || undefined,
             newPassword: r.newPassword,
             mustChangePassword: parseTruthy(r.mustChangePassword),
           }));
         if (users.length === 0) {
-          setResult({ error: 'No usable rows. Each row needs idcsId and newPassword.' });
+          setResult({ error: 'No usable rows. Each row needs an identifier (email / userName / idcsId) and newPassword.' });
           setSubmitting(false);
           return;
         }
         res = await bulkSetPassword({ users });
       } else {
-        const userIds = rows.map((r) => r.idcsId).filter(Boolean);
-        if (userIds.length === 0) {
-          setResult({ error: 'No idcsId column found. Please include the IDCS ID for each user.' });
+        const users = rows
+          .map((r) => ({
+            email: r.email || undefined,
+            userName: r.userName || undefined,
+            idcsId: r.idcsId || undefined,
+          }))
+          .filter((u) => u.email || u.userName || u.idcsId);
+        if (users.length === 0) {
+          setResult({ error: 'No usable rows. Each row needs an email (or userName / idcsId).' });
           setSubmitting(false);
           return;
         }
         if (mode === 'delete') {
-          res = await bulkDeleteUsers(userIds);
+          res = await bulkDeleteUsers(users);
         } else if (mode === 'suspend' || mode === 'activate') {
-          res = await bulkSetActive(userIds, mode === 'activate');
+          res = await bulkSetActive(users, mode === 'activate');
         }
       }
       setResult(res);
@@ -160,7 +171,7 @@ export default function BulkUpload({ onComplete }) {
   };
 
   const downloadTemplate = () => {
-    let template = IDCS_ID_CSV_TEMPLATE;
+    let template = IDENTIFIER_CSV_TEMPLATE;
     if (mode === 'create') template = CREATE_CSV_TEMPLATE;
     else if (mode === 'reset-password') template = RESET_PWD_CSV_TEMPLATE;
     const blob = new Blob([template], { type: 'text/csv' });
@@ -205,10 +216,10 @@ export default function BulkUpload({ onComplete }) {
       {/* Mode helper */}
       <div className={`text-xs ${idcsCx.text3}`}>
         {mode === 'create' && 'Upload users to create. Required: firstName, lastName, email. Optional: recoveryEmail, mobileNumber, password.'}
-        {mode === 'delete' && 'Upload an idcsId column. Each user will be permanently deleted from Oracle IDCS.'}
-        {mode === 'suspend' && 'Upload an idcsId column. Each user will be suspended (active=false).'}
-        {mode === 'activate' && 'Upload an idcsId column. Each user will be activated (active=true).'}
-        {mode === 'reset-password' && 'Upload idcsId and newPassword columns — each user\u2019s password is set directly (no email). Optional column mustChangePassword (true/false) to force change on next login.'}
+        {mode === 'delete' && 'Upload an email column (or userName / idcsId). Each user will be permanently deleted from Oracle IDCS.'}
+        {mode === 'suspend' && 'Upload an email column (or userName / idcsId). Each user will be suspended (active=false).'}
+        {mode === 'activate' && 'Upload an email column (or userName / idcsId). Each user will be activated (active=true).'}
+        {mode === 'reset-password' && 'Upload email and newPassword columns — each user\u2019s password is set directly (no email). Optional mustChangePassword (true/false). userName / idcsId can be used in place of email.'}
       </div>
 
       {/* Drop zone */}
