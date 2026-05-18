@@ -7,15 +7,26 @@
  */
 
 import { useState, useRef } from 'react';
-import { bulkCreateUsers, bulkDeleteUsers } from '../../api/idcs';
+import { bulkCreateUsers, bulkDeleteUsers, bulkSetActive } from '../../api/idcs';
 import { idcsCx, idcsBtnPrimary, idcsBtnDanger } from './idcsTheme';
 
 const REQUIRED_FIELDS = ['firstName', 'lastName', 'email'];
 // `recoveryEmail` is optional; if present in the CSV/JSON it's forwarded to IDCS
 // and stored as a SCIM emails[type=recovery] entry on the user.
-const CSV_TEMPLATE = `firstName,lastName,email,recoveryEmail,mobileNumber,password
+const CREATE_CSV_TEMPLATE = `firstName,lastName,email,recoveryEmail,mobileNumber,password
 John,Doe,john.doe@example.com,john.personal@gmail.com,+911234567890,
 Jane,Smith,jane.smith@example.com,,,`;
+// Suspend / Activate / Delete — only IDCS user IDs are needed.
+const IDCS_ID_CSV_TEMPLATE = `idcsId
+ffffab6d220d414cad673a2d9fb995ab
+abcd1234ef567890abcd1234ef567890`;
+
+const MODES = [
+  { id: 'create',   label: 'Bulk Create',   needsIdcsId: false, danger: false },
+  { id: 'suspend',  label: 'Bulk Suspend',  needsIdcsId: true,  danger: false },
+  { id: 'activate', label: 'Bulk Activate', needsIdcsId: true,  danger: false },
+  { id: 'delete',   label: 'Bulk Delete',   needsIdcsId: true,  danger: true  },
+];
 
 function parseCSV(text) {
   const lines = text.trim().split('\n').filter(Boolean);
@@ -37,7 +48,7 @@ function parseJSON(text) {
 }
 
 export default function BulkUpload({ onComplete }) {
-  const [mode, setMode] = useState('create'); // 'create' | 'delete'
+  const [mode, setMode] = useState('create'); // 'create' | 'suspend' | 'activate' | 'delete'
   const [rows, setRows] = useState([]);
   const [parseError, setParseError] = useState('');
   const [fileName, setFileName] = useState('');
@@ -67,9 +78,11 @@ export default function BulkUpload({ onComplete }) {
             setParseError(`${missing.length} row(s) are missing required fields (firstName, lastName, email)`);
           }
         } else {
-          // For delete mode, expect email or idcsId column
-          const hasMeta = parsed.every((r) => r.email || r.idcsId || r.userName);
-          if (!hasMeta) setParseError('Each row must have at least email, idcsId, or userName');
+          // suspend/activate/delete: need idcsId for each row
+          const hasIdcsId = parsed.every((r) => r.idcsId);
+          if (!hasIdcsId) {
+            setParseError(`Each row must include an "idcsId" column for ${mode}. (Tip: download the template.)`);
+          }
         }
 
         setRows(parsed);
@@ -96,15 +109,17 @@ export default function BulkUpload({ onComplete }) {
       if (mode === 'create') {
         res = await bulkCreateUsers(rows);
       } else {
-        // For delete, collect IDs — user must have looked up IDs or provide emails
-        // This is a simplified version; in production, resolve emails → IDs first
         const userIds = rows.map((r) => r.idcsId).filter(Boolean);
         if (userIds.length === 0) {
-          setResult({ error: 'No idcsId column found. Please include the IDCS ID for each user to delete.' });
+          setResult({ error: 'No idcsId column found. Please include the IDCS ID for each user.' });
           setSubmitting(false);
           return;
         }
-        res = await bulkDeleteUsers(userIds);
+        if (mode === 'delete') {
+          res = await bulkDeleteUsers(userIds);
+        } else if (mode === 'suspend' || mode === 'activate') {
+          res = await bulkSetActive(userIds, mode === 'activate');
+        }
       }
       setResult(res);
       if (onComplete) onComplete();
@@ -116,31 +131,34 @@ export default function BulkUpload({ onComplete }) {
   };
 
   const downloadTemplate = () => {
-    const blob = new Blob([CSV_TEMPLATE], { type: 'text/csv' });
+    const isCreate = mode === 'create';
+    const blob = new Blob([isCreate ? CREATE_CSV_TEMPLATE : IDCS_ID_CSV_TEMPLATE], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'idcs_bulk_create_template.csv';
+    a.download = `idcs_bulk_${mode}_template.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
+  const currentMode = MODES.find((m) => m.id === mode) || MODES[0];
+
   return (
     <div className="space-y-5">
       {/* Mode toggle */}
-      <div className="flex gap-2 flex-wrap">
-        {['create', 'delete'].map((m) => (
+      <div className="flex gap-2 flex-wrap items-center">
+        {MODES.map((m) => (
           <button
             type="button"
-            key={m}
-            onClick={() => { setMode(m); setRows([]); setResult(null); setParseError(''); }}
+            key={m.id}
+            onClick={() => { setMode(m.id); setRows([]); setResult(null); setParseError(''); setFileName(''); }}
             className={
-              mode === m
-                ? `rounded-lg text-sm font-medium capitalize ${m === 'delete' ? idcsBtnDanger() : idcsBtnPrimary()}`
-                : `rounded-lg text-sm font-medium capitalize px-4 py-2 border ${idcsCx.border} ${idcsCx.bg3} ${idcsCx.text2} hover:opacity-90`
+              mode === m.id
+                ? `rounded-lg text-sm font-medium ${m.danger ? idcsBtnDanger() : idcsBtnPrimary()}`
+                : `rounded-lg text-sm font-medium px-4 py-2 border ${idcsCx.border} ${idcsCx.bg3} ${idcsCx.text2} hover:opacity-90`
             }
           >
-            Bulk {m}
+            {m.label}
           </button>
         ))}
         <button
@@ -151,6 +169,13 @@ export default function BulkUpload({ onComplete }) {
         >
           Download CSV template
         </button>
+      </div>
+
+      {/* Mode helper */}
+      <div className={`text-xs ${idcsCx.text3}`}>
+        {mode === 'create'
+          ? 'Upload users to create. Required: firstName, lastName, email. Optional: recoveryEmail, mobileNumber, password.'
+          : `Upload an idcsId column. ${mode === 'delete' ? 'Each user will be permanently deleted.' : `Each user will be ${mode === 'suspend' ? 'suspended (active=false)' : 'activated (active=true)'}.`}`}
       </div>
 
       {/* Drop zone */}
@@ -223,12 +248,12 @@ export default function BulkUpload({ onComplete }) {
             onClick={handleSubmit}
             disabled={submitting || !!parseError}
             className={`mt-4 rounded-lg text-sm font-medium disabled:opacity-50 ${
-              mode === 'delete' ? idcsBtnDanger() : idcsBtnPrimary()
+              currentMode.danger ? idcsBtnDanger() : idcsBtnPrimary()
             }`}
           >
             {submitting
               ? `Processing ${rows.length} users...`
-              : `${mode === 'delete' ? 'Delete' : 'Create'} ${rows.length} Users`}
+              : `${currentMode.label.replace('Bulk ', '')} ${rows.length} User${rows.length === 1 ? '' : 's'}`}
           </button>
         </div>
       )}

@@ -8,7 +8,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { listUsers, deleteUser, setPassword } from '../../api/idcs';
+import { listUsers, deleteUser, setPassword, suspendUser, activateUser, bulkSetActive } from '../../api/idcs';
 import { idcsCx, idcsInputClass, idcsBtnPrimary, idcsBtnGhost } from './idcsTheme';
 import UserDetailModal from './UserDetailModal';
 import { formatUserGroups } from './formatUserGroups';
@@ -428,6 +428,52 @@ export default function UserTable({ onAddToGroup, refreshTrigger }) {
     }
   };
 
+  const handleToggleActive = async (user) => {
+    const targetActive = !user.active;
+    const verb = targetActive ? 'Activate' : 'Suspend';
+    if (!window.confirm(`${verb} user ${user.userName || user.displayName}?`)) return;
+    setActionLoading((p) => ({ ...p, [user.id]: targetActive ? 'activating' : 'suspending' }));
+    try {
+      if (targetActive) await activateUser(user.id);
+      else await suspendUser(user.id);
+      fetchUsers();
+      setToast({
+        message: `${user.userName || 'User'} ${targetActive ? 'activated' : 'suspended'}`,
+        type: 'success',
+      });
+    } catch (e) {
+      setToast({
+        message: `${verb} failed: ${e.response?.data?.error || e.message}`,
+        type: 'error',
+      });
+    } finally {
+      setActionLoading((p) => ({ ...p, [user.id]: null }));
+    }
+  };
+
+  const handleBulkSetActive = async (active) => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    const verb = active ? 'Activate' : 'Suspend';
+    if (!window.confirm(`${verb} ${ids.length} selected user${ids.length === 1 ? '' : 's'}?`)) return;
+    try {
+      const res = await bulkSetActive(ids, active);
+      const okN = res?.succeeded?.length ?? 0;
+      const failN = res?.failed?.length ?? 0;
+      setToast({
+        message: `${verb}d ${okN} user${okN === 1 ? '' : 's'}${failN ? ` — ${failN} failed` : ''}`,
+        type: failN ? 'error' : 'success',
+      });
+      setSelected(new Set());
+      fetchUsers();
+    } catch (e) {
+      setToast({
+        message: `Bulk ${verb.toLowerCase()} failed: ${e.response?.data?.error || e.message}`,
+        type: 'error',
+      });
+    }
+  };
+
   const handlePasswordSuccess = (mustChange) => {
     setPwdModal(null);
     setToast({
@@ -485,14 +531,36 @@ export default function UserTable({ onAddToGroup, refreshTrigger }) {
         <span className={`text-sm ml-auto ${idcsCx.text2}`}>
           {total} user{total !== 1 ? 's' : ''} found
         </span>
-        {selected.size > 0 && onAddToGroup && (
-          <button
-            type="button"
-            onClick={() => onAddToGroup([...selected])}
-            className={`text-sm ${idcsBtnPrimary()}`}
-          >
-            Add {selected.size} to Group
-          </button>
+        {selected.size > 0 && (
+          <div className="flex flex-wrap gap-2 items-center">
+            {onAddToGroup && (
+              <button
+                type="button"
+                onClick={() => onAddToGroup([...selected])}
+                className={`text-sm ${idcsBtnPrimary()}`}
+              >
+                Add {selected.size} to Group
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => handleBulkSetActive(false)}
+              className={`text-sm px-4 py-2.5 rounded-lg font-medium border ${idcsCx.border} ${idcsCx.bg3} hover:opacity-90`}
+              style={{ color: 'var(--amber)' }}
+              title="Set active=false for the selected users"
+            >
+              Suspend {selected.size}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleBulkSetActive(true)}
+              className={`text-sm px-4 py-2.5 rounded-lg font-medium border ${idcsCx.border} ${idcsCx.bg3} hover:opacity-90`}
+              style={{ color: 'var(--green)' }}
+              title="Set active=true for the selected users"
+            >
+              Activate {selected.size}
+            </button>
+          </div>
         )}
       </div>
 
@@ -600,6 +668,18 @@ export default function UserTable({ onAddToGroup, refreshTrigger }) {
                             Group
                           </button>
                         )}
+                        <button
+                          type="button"
+                          onClick={() => handleToggleActive(u)}
+                          disabled={!!busy}
+                          className="text-xs font-medium hover:opacity-90 disabled:opacity-40"
+                          style={{ color: u.active ? 'var(--amber)' : 'var(--green)' }}
+                          title={u.active ? 'Suspend (set active=false)' : 'Activate (set active=true)'}
+                        >
+                          {busy === 'suspending' || busy === 'activating'
+                            ? '...'
+                            : u.active ? 'Suspend' : 'Activate'}
+                        </button>
                         <button
                           type="button"
                           onClick={() => handleDelete(u.id, u.userName)}

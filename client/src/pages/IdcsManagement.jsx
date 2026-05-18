@@ -325,14 +325,19 @@ function AuditLogTable() {
   }, [page, filter]);
 
   const ACTION_STYLE = {
-    CREATE_USER:       { mix: 'var(--green)', fg: 'var(--green)' },
-    DELETE_USER:       { mix: 'var(--red)', fg: 'var(--red)' },
-    BULK_CREATE_USERS: { mix: 'var(--accent)', fg: 'var(--accent)' },
-    BULK_DELETE_USERS: { mix: 'var(--amber)', fg: 'var(--amber)' },
-    PASSWORD_RESET:    { mix: 'var(--accent2)', fg: 'var(--accent2)' },
-    ADD_TO_GROUP:      { mix: 'var(--cyan)', fg: 'var(--cyan)' },
-    REMOVE_FROM_GROUP: { mix: 'var(--amber)', fg: 'var(--amber)' },
-    EXPORT_USERS:      { mix: 'var(--text2)', fg: 'var(--text)' },
+    CREATE_USER:         { mix: 'var(--green)', fg: 'var(--green)' },
+    UPDATE_USER:         { mix: 'var(--accent2)', fg: 'var(--accent2)' },
+    DELETE_USER:         { mix: 'var(--red)', fg: 'var(--red)' },
+    SUSPEND_USER:        { mix: 'var(--amber)', fg: 'var(--amber)' },
+    ACTIVATE_USER:       { mix: 'var(--green)', fg: 'var(--green)' },
+    BULK_CREATE_USERS:   { mix: 'var(--accent)', fg: 'var(--accent)' },
+    BULK_DELETE_USERS:   { mix: 'var(--red)', fg: 'var(--red)' },
+    BULK_SUSPEND_USERS:  { mix: 'var(--amber)', fg: 'var(--amber)' },
+    BULK_ACTIVATE_USERS: { mix: 'var(--green)', fg: 'var(--green)' },
+    PASSWORD_RESET:      { mix: 'var(--accent2)', fg: 'var(--accent2)' },
+    ADD_TO_GROUP:        { mix: 'var(--cyan)', fg: 'var(--cyan)' },
+    REMOVE_FROM_GROUP:   { mix: 'var(--amber)', fg: 'var(--amber)' },
+    EXPORT_USERS:        { mix: 'var(--text2)', fg: 'var(--text)' },
   };
 
   const totalPages = Math.ceil(total / LIMIT);

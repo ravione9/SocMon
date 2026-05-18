@@ -106,19 +106,58 @@ router.patch('/users/:id', async (req, res) => {
       if (Object.prototype.hasOwnProperty.call(req.body, k)) patch[k] = req.body[k]
     }
     if (!Object.keys(patch).length) return res.status(400).json({ error: 'No editable fields supplied' })
+
+    const fields = Object.keys(patch)
+    // Dedicated audit action when the only change is suspend/activate — easier to filter later.
+    const onlyActive = fields.length === 1 && fields[0] === 'active'
+    const action = onlyActive ? (patch.active ? 'ACTIVATE_USER' : 'SUSPEND_USER') : 'UPDATE_USER'
+
     const updated = await idcs.updateUser(req.params.id, patch)
     audit(
-      'UPDATE_USER',
+      action,
       req,
       { idcsId: updated.id, userName: updated.userName, email: updated.emails?.find((e) => e.primary)?.value, displayName: updated.displayName },
       null,
       'SUCCESS',
-      { fields: Object.keys(patch) },
+      { fields },
     )
     res.json(updated)
   } catch (e) {
     audit('UPDATE_USER', req, { idcsId: req.params.id }, null, 'FAILED', { error: e.message, fields: Object.keys(req.body || {}) })
     res.status(idcsStatus(e)).json({ error: e.message })
+  }
+})
+
+router.post('/users/bulk-set-active', async (req, res) => {
+  try {
+    const { userIds, active } = req.body
+    if (!Array.isArray(userIds) || !userIds.length) return res.status(400).json({ error: 'userIds[] required' })
+    if (typeof active !== 'boolean') return res.status(400).json({ error: 'active boolean required' })
+
+    const succeeded = []
+    const failed = []
+    const CHUNK = 10
+    for (let i = 0; i < userIds.length; i += CHUNK) {
+      const chunk = userIds.slice(i, i + CHUNK)
+      const results = await Promise.allSettled(chunk.map((id) => idcs.updateUser(id, { active })))
+      results.forEach((r, idx) => {
+        r.status === 'fulfilled'
+          ? succeeded.push(chunk[idx])
+          : failed.push({ id: chunk[idx], error: r.reason?.message })
+      })
+    }
+    const status = failed.length === 0 ? 'SUCCESS' : succeeded.length > 0 ? 'PARTIAL' : 'FAILED'
+    audit(
+      active ? 'BULK_ACTIVATE_USERS' : 'BULK_SUSPEND_USERS',
+      req,
+      null,
+      null,
+      status,
+      { total: userIds.length, succeeded: succeeded.length, failed: failed.length },
+    )
+    res.json({ succeeded, failed })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
   }
 })
 
