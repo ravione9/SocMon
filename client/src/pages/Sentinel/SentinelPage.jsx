@@ -1,5 +1,6 @@
 import RangePicker from '../../components/ui/RangePicker.jsx'
 import SentinelLogSearch from '../../components/sentinel/SentinelLogSearch.jsx'
+import SentinelQueryDataSearch from '../../components/sentinel/SentinelQueryDataSearch.jsx'
 import S1FixThreatsPanel from '../../components/sentinel/S1FixThreatsPanel.jsx'
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import { Line, Bar, Doughnut } from 'react-chartjs-2'
@@ -50,6 +51,7 @@ const TABS = [
   { id: 'bluetooth', label: 'Bluetooth device connection' },
   { id: 'feed', label: 'Event feed' },
   { id: 'custom', label: 'Custom log' },
+  { id: 'query', label: 'XDR query data search' },
 ]
 
 function buildChartOpts(tc) {
@@ -790,7 +792,7 @@ export default function SentinelPage() {
               ))}
             </select>
           </label>
-          {(showDashPanel || showFixThreatsPanel) && (
+          {(showDashPanel || showFixThreatsPanel) && tab !== 'query' && (
             <RangePicker range={range} onChange={setRange} accentColor={C.accent} />
           )}
         </div>
@@ -1987,6 +1989,14 @@ export default function SentinelPage() {
         <div style={{ fontSize: 10, color: C.text3, fontFamily: 'var(--mono)' }}>
           Tip: open <strong style={{ color: C.text2 }}>Custom log</strong> for the full analyze filter panel (scope, message, endpoint, user, USB or Bluetooth device, event kind).
         </div>
+      )}
+
+      {tab === 'query' && (
+        <SentinelQueryDataSearch
+          range={range}
+          onRangeChange={setRange}
+          hostGroupSync={hostGroupFilter.trim()}
+        />
       )}
     </div>
   )

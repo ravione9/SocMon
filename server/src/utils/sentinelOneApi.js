@@ -33,6 +33,61 @@ export function resolveSentinelOneConsoleBase() {
   return raw
 }
 
+/**
+ * Singularity Data Lake (XDR) base URL — separate hostname from the Management Console
+ * (e.g. console `apse1-2001.sentinelone.net` vs Data Lake `xdr.ap1.sentinelone.net`).
+ * Env override (preferred): SENTINEL_ONE_XDR_BASE_URL. Falls back to the same family using
+ * region inference, then to the Management Console URL itself (works on some tenants).
+ */
+export function resolveSentinelOneXdrBase() {
+  const explicit = String(
+    process.env.SENTINEL_ONE_XDR_BASE_URL ||
+      process.env.SENTINELONE_XDR_BASE_URL ||
+      process.env.SENTINEL_ONE_DATA_LAKE_URL ||
+      '',
+  )
+    .trim()
+    .replace(/\/+$/, '')
+  if (explicit) return explicit
+  const console = resolveSentinelOneConsoleBase()
+  if (!console) return ''
+  // Try a couple of well-known patterns so the feature works out-of-the-box when an admin
+  // forgets to set the new var (apse1-2001.sentinelone.net → xdr.ap1.sentinelone.net).
+  try {
+    const u = new URL(console)
+    const host = u.hostname.toLowerCase()
+    // apse1, apse2, … (Asia Pacific Southeast) → ap1, ap2
+    const apse = /^apse(\d+)(?:-\d+)?\./.exec(host)
+    if (apse) return `https://xdr.ap${apse[1]}.sentinelone.net`
+    // usea1 / use2 / use1 → us1 / us2
+    const use = /^use(?:a)?(\d+)(?:-\d+)?\./.exec(host)
+    if (use) return `https://xdr.us${use[1]}.sentinelone.net`
+    // euw1 / eu1 / euc1 / etc. — `eu1` already matches the xdr prefix
+    const eu = /^eu(?:w|c)?(\d+)(?:-\d+)?\./.exec(host)
+    if (eu) return `https://xdr.eu${eu[1]}.sentinelone.net`
+    // Fallback: bolt `xdr.` on the front of the management host.
+    return `${u.protocol}//xdr.${host}`
+  } catch {
+    return console
+  }
+}
+
+/** Optional separate API token for the XDR Data Lake (Log Read Access). Falls back to the management token. */
+export function resolveSentinelOneXdrToken() {
+  const direct = normalizeApiTokenString(
+    process.env.SENTINEL_ONE_XDR_API_TOKEN ||
+      process.env.SENTINELONE_XDR_API_TOKEN ||
+      process.env.SENTINEL_ONE_XDR_TOKEN ||
+      '',
+  )
+  if (direct) return direct
+  return resolveSentinelOneApiToken()
+}
+
+export function isSentinelOneXdrConfigured() {
+  return !!(resolveSentinelOneXdrBase() && resolveSentinelOneXdrToken())
+}
+
 function normalizeApiTokenString(raw) {
   let t = String(raw ?? '')
     .replace(/^\uFEFF/, '')
@@ -603,6 +658,271 @@ export async function markThreatsResolved(threatIds) {
   }
 
   throw lastErr || new Error('SentinelOne could not resolve threats')
+}
+
+/**
+ * Build the candidate (url, body) attempts for a PowerQuery. Tenants vary:
+ *   • Newer Data Lake:  POST <xdrBase>/api/powerQuery  body { query, startTime, endTime, limit }
+ *   • Some deployments: same path but ISO `start`/`end`
+ *   • Legacy on management:  POST <console>/web/api/v2.1/dv/events/pq
+ * We try them in order until one returns 2xx. Each attempt's URL/body/error is
+ * collected so the failure response can show the operator exactly what was tried.
+ */
+function powerQueryAttempts({ query, start, end, limit, priority }) {
+  const xdrBase = resolveSentinelOneXdrBase().replace(/\/+$/, '')
+  const consoleBase = resolveSentinelOneConsoleBase().replace(/\/+$/, '')
+
+  const epochMs = iso => {
+    if (!iso) return null
+    const n = Date.parse(iso)
+    return Number.isFinite(n) ? n : null
+  }
+  const startMs = epochMs(start)
+  const endMs = epochMs(end)
+
+  const bodyEpoch = { query }
+  if (startMs != null) bodyEpoch.startTime = startMs
+  if (endMs != null) bodyEpoch.endTime = endMs
+  if (limit != null) bodyEpoch.limit = limit
+  if (priority) bodyEpoch.priority = priority
+
+  const bodyIso = { query }
+  if (start) bodyIso.start = start
+  if (end) bodyIso.end = end
+  if (limit != null) bodyIso.limit = limit
+  if (priority) bodyIso.priority = priority
+
+  const out = []
+  if (xdrBase) {
+    out.push({ url: `${xdrBase}/api/powerQuery`, body: bodyEpoch, label: 'xdr /api/powerQuery (epoch ms)' })
+    out.push({ url: `${xdrBase}/api/powerQuery`, body: bodyIso, label: 'xdr /api/powerQuery (ISO time)' })
+    out.push({ url: `${xdrBase}/api/v1/events`, body: bodyEpoch, label: 'xdr /api/v1/events (epoch ms)' })
+    out.push({ url: `${xdrBase}/web/api/v2.1/dv/events/pq`, body: bodyIso, label: 'xdr legacy /dv/events/pq' })
+  }
+  if (consoleBase && consoleBase !== xdrBase) {
+    out.push({ url: `${consoleBase}/web/api/v2.1/dv/events/pq`, body: bodyIso, label: 'console /dv/events/pq' })
+  }
+  return out
+}
+
+/** Single raw call to the XDR API — used by both PowerQuery and the /xdr/raw passthrough. */
+export async function callSentinelOneXdr({ method = 'POST', url, body = null, authScheme = 'auto' } = {}) {
+  const token = resolveSentinelOneXdrToken()
+  if (!token) {
+    const e = new Error('SentinelOne XDR token is not configured (SENTINEL_ONE_XDR_API_TOKEN or fallback SENTINEL_ONE_API_TOKEN).')
+    e.code = 'S1_XDR_NOT_CONFIGURED'
+    throw e
+  }
+  const schemes =
+    authScheme === 'bearer'
+      ? [`Bearer ${token}`]
+      : authScheme === 'apitoken'
+        ? [`ApiToken ${token}`]
+        : authScheme === 'token'
+          ? [`Token ${token}`]
+          : [`Bearer ${token}`, `ApiToken ${token}`, `Token ${token}`]
+
+  let lastErr = null
+  for (let i = 0; i < schemes.length; i++) {
+    const authorization = schemes[i]
+    /** @type {RequestInit} */
+    const init = {
+      method,
+      headers: {
+        Authorization: authorization,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+    }
+    if (body !== null) init.body = typeof body === 'string' ? body : JSON.stringify(body)
+
+    let res
+    try {
+      res = await s1Fetch(url, init)
+    } catch (netErr) {
+      const wrapped = new Error(
+        netErr?.cause?.message || netErr?.message || 'Cannot reach SentinelOne XDR Data Lake (TLS/DNS/network).',
+      )
+      wrapped.code = 'S1_NETWORK_ERROR'
+      wrapped.cause = netErr
+      throw wrapped
+    }
+    const rawText = await res.text().catch(() => '')
+    let payload = null
+    try {
+      payload = rawText ? JSON.parse(rawText) : null
+    } catch {
+      payload = null
+    }
+    const result = {
+      status: res.status,
+      ok: res.ok,
+      authScheme: authorization.split(' ')[0],
+      url,
+      body: payload != null ? payload : rawText,
+      rawText,
+    }
+    if (res.ok) return result
+    // 401/403 → try the next auth scheme; other status codes are returned to the caller.
+    if ((res.status === 401 || res.status === 403) && i < schemes.length - 1) {
+      lastErr = result
+      continue
+    }
+    return result
+  }
+  return lastErr || { status: 0, ok: false, url, body: null, rawText: '' }
+}
+
+/**
+ * Run a PowerQuery against the SentinelOne Singularity Data Lake (XDR).
+ *
+ * @returns {Promise<{ status, matchingEvents, omittedEvents, columns, rows, raw, attempt: { url, label, body } }>}
+ */
+export async function runSentinelOnePowerQuery({ query, start = null, end = null, limit = null, priority = 'low' } = {}) {
+  const q = String(query || '').trim()
+  if (!q) {
+    const e = new Error('PowerQuery text required')
+    e.code = 'S1_VALIDATION'
+    throw e
+  }
+  const base = resolveSentinelOneXdrBase()
+  const token = resolveSentinelOneXdrToken()
+  if (!base || !token) {
+    const e = new Error(
+      'SentinelOne XDR Data Lake is not configured. Set SENTINEL_ONE_XDR_BASE_URL (e.g. https://xdr.ap1.sentinelone.net) and SENTINEL_ONE_XDR_API_TOKEN (Log Read Access).',
+    )
+    e.code = 'S1_XDR_NOT_CONFIGURED'
+    throw e
+  }
+
+  const attempts = powerQueryAttempts({ query: q, start, end, limit, priority })
+  const tried = []
+  for (const att of attempts) {
+    const r = await callSentinelOneXdr({ method: 'POST', url: att.url, body: att.body })
+    tried.push({ url: att.url, label: att.label, status: r.status, body: trimPreview(r.rawText, 600) })
+    if (r.ok) {
+      let final = r.body
+      // Some tenants reply with a queryId and require polling.
+      const queryId =
+        (final && typeof final === 'object' && (final.queryId || final.id || final.data?.queryId)) || null
+      if (queryId && shouldPoll(final)) {
+        try {
+          const polled = await pollPowerQueryUntilReady({ base, queryId })
+          if (polled) final = polled
+        } catch {
+          /* keep the initial response so the UI can still show partial info */
+        }
+      }
+      const normalized = normalizePowerQueryResponse(final)
+      normalized.attempt = { url: att.url, label: att.label }
+      normalized.attempts = tried
+      return normalized
+    }
+  }
+
+  const last = tried[tried.length - 1] || { status: 0, body: '' }
+  const err = new Error(
+    `SentinelOne PowerQuery did not accept the request (HTTP ${last.status}). Last response: ${trimPreview(String(last.body || ''), 280) || 'no body'}.`,
+  )
+  err.code = 'S1_HTTP_ERROR'
+  err.status = last.status || 502
+  err.body = { attempts: tried }
+  throw err
+}
+
+function shouldPoll(payload) {
+  const status = String(payload?.status || payload?.queryStatus || payload?.state || '').toUpperCase()
+  if (!status) return false
+  return status !== 'SUCCESS' && status !== 'FINISHED' && status !== 'OK'
+}
+
+async function pollPowerQueryUntilReady({ base, queryId, timeoutMs = 60_000 }) {
+  const xdrBase = base.replace(/\/+$/, '')
+  const pingCandidates = [
+    `${xdrBase}/api/powerQuery/ping/${encodeURIComponent(queryId)}`,
+    `${xdrBase}/api/powerQuery?queryId=${encodeURIComponent(queryId)}`,
+    `${xdrBase}/web/api/v2.1/dv/events/pq-ping?queryId=${encodeURIComponent(queryId)}`,
+  ]
+  const start = Date.now()
+  let lastPayload = null
+  while (Date.now() - start < timeoutMs) {
+    for (const url of pingCandidates) {
+      const r = await callSentinelOneXdr({ method: 'GET', url })
+      if (r.ok && r.body) {
+        lastPayload = r.body
+        const stillRunning = shouldPoll(r.body)
+        if (!stillRunning) return r.body
+      }
+    }
+    await new Promise(resolve => setTimeout(resolve, 1500))
+  }
+  return lastPayload
+}
+
+function trimPreview(s, n) {
+  const t = String(s || '')
+  if (t.length <= n) return t
+  return t.slice(0, n) + '…'
+}
+
+/**
+ * SentinelOne returns either {data:{…}} or a flat top-level object depending on tenant.
+ * We normalise to { status, matchingEvents, omittedEvents, columns[], rows[{…}], raw }.
+ */
+function normalizePowerQueryResponse(payload) {
+  const root = payload?.data && typeof payload.data === 'object' ? payload.data : payload || {}
+  const status =
+    root.status || root.queryStatus || root.state || (Array.isArray(root.results) ? 'SUCCESS' : 'UNKNOWN')
+
+  // Result rows can arrive as:
+  //   values:  [ [v1,v2,…], … ] with columns:[{name:'...'}] (current /api/powerQuery)
+  //   results: [ {col:val,…}, … ]                            (XSOAR-like shape)
+  //   results: [ [v1,v2,…], … ] with columns:[...]           (legacy /dv/events/pq)
+  //   data|rows|events: [ … ]                                (older variants)
+  const candidates = [root.values, root.results, root.data, root.rows, root.events].filter(Array.isArray)
+  let rows = []
+  let columns = []
+  if (candidates.length) {
+    const first = candidates[0]
+    if (first.length === 0) {
+      rows = []
+      columns = Array.isArray(root.columns) ? root.columns.map(stringifyColumn) : []
+    } else if (Array.isArray(first[0])) {
+      const cols = Array.isArray(root.columns) ? root.columns.map(stringifyColumn) : first[0].map((_, i) => `col_${i}`)
+      columns = cols
+      rows = first.map(arr => {
+        const o = {}
+        for (let i = 0; i < cols.length; i++) o[cols[i]] = arr[i]
+        return o
+      })
+    } else if (typeof first[0] === 'object' && first[0] !== null) {
+      rows = first
+      const set = new Set()
+      for (const r of rows) for (const k of Object.keys(r)) set.add(k)
+      columns = [...set]
+    }
+  }
+  return {
+    status,
+    matchingEvents: numOrNull(root.matchingEvents ?? root.matching_events),
+    omittedEvents: numOrNull(root.omittedEvents ?? root.omitted_events),
+    columns,
+    rows,
+    raw: payload,
+  }
+}
+
+function stringifyColumn(c) {
+  if (c == null) return ''
+  if (typeof c === 'string') return c
+  if (typeof c === 'object') return c.name || c.field || c.title || JSON.stringify(c)
+  return String(c)
+}
+
+function numOrNull(v) {
+  if (v == null) return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
 }
 
 /** @param {string} verdict API values: undefined | false_positive | suspicious | true_positive */
