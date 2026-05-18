@@ -18,6 +18,7 @@ const NetworkAccessPage = lazy(() => import('./pages/Network/NetworkAccessPage.j
 const NoAccessPage = lazy(() => import('./pages/NoAccess/NoAccessPage.jsx'))
 const IdcsPage     = lazy(() => import('./pages/IdcsManagement.jsx'))
 const ActiveDirectoryPage = lazy(() => import('./pages/ActiveDirectoryManagement.jsx'))
+const NexsUserManagementPage = lazy(() => import('./pages/Nexs/NexsUserManagementPage.jsx'))
 
 function PrivateRoute({ children }) {
   const token = useAuthStore(s => s.token)
@@ -54,6 +55,7 @@ export default function App() {
           <Route path="ai"       element={<PageRoute pageKey="ai"><AIPage /></PageRoute>} />
           <Route path="idcs"     element={<PageRoute pageKey="idcs"><IdcsPage /></PageRoute>} />
           <Route path="ad"       element={<PageRoute pageKey="ad"><ActiveDirectoryPage /></PageRoute>} />
+          <Route path="nexs"     element={<PageRoute pageKey="nexs"><NexsUserManagementPage /></PageRoute>} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

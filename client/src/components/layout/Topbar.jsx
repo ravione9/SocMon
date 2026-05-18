@@ -10,6 +10,7 @@ const titles = {
   '/network': 'Network Access',
   '/idcs': 'Oracle IDCS',
   '/ad': 'Active Directory',
+  '/nexs': 'Nexs User Management',
   '/tickets': 'Ticket Management',
   '/ai': 'AI Assistant',
   '/reports': 'Reports & Analytics',

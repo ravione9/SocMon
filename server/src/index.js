@@ -36,6 +36,7 @@ import webMgmtRoutes, { proxyWsUpgrade } from './routes/webMgmt.js'
 import rdpRoutes, { proxyRdpWsUpgrade } from './routes/rdp.js'
 import idcsRoutes from './routes/idcs.js'
 import adRoutes from './routes/ad.js'
+import nexsRoutes from './routes/nexs.js'
 import customRoleRoutes from './routes/customRoles.js'
 import { errorHandler } from './middleware/errorHandler.js'
 
@@ -126,6 +127,7 @@ app.use('/api/ssh-sessions', sshSessionRoutes)
 app.use('/api/rdp',  rdpRoutes)
 app.use('/api/idcs', idcsRoutes)
 app.use('/api/ad', adRoutes)
+app.use('/api/nexs', nexsRoutes)
 app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.0.0', ai: process.env.AI_PROVIDER || 'claude' }))
 
 app.use(errorHandler)

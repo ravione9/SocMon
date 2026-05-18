@@ -10,6 +10,7 @@ const nav = [
   { pageKey:'network',  to:'/network', label:'Net',    icon:'🔌' },
   { pageKey:'idcs',     to:'/idcs',    label:'IDCS',   icon:'🪪' },
   { pageKey:'ad',       to:'/ad',      label:'AD',     icon:'🏢' },
+  { pageKey:'nexs',     to:'/nexs',    label:'Nexs',   icon:'🔐' },
   { pageKey:'tickets',  to:'/tickets', label:'Tickets', icon:'🎫' },
   { pageKey:'ai',       to:'/ai',      label:'AI',      icon:'🤖' },
   { pageKey:'reports',  to:'/reports', label:'Reports', icon:'📊' },
