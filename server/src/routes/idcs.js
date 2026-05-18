@@ -74,7 +74,10 @@ router.get('/users', async (req, res) => {
     if (status === 'active')   filters.push('active eq true')
     if (status === 'inactive') filters.push('active eq false')
     if (search) filters.push(`(userName co "${search}" or displayName co "${search}")`)
-    const result = await idcs.listUsers({ filter: filters.join(' and '), startIndex, count })
+    // Explicitly request `groups` so the UI can show membership in the list view; many IDCS
+    // tenants exclude `groups` from the default user payload to save bandwidth.
+    const attributes = 'id,userName,displayName,name,emails,phoneNumbers,active,groups'
+    const result = await idcs.listUsers({ filter: filters.join(' and '), startIndex, count, attributes })
     res.json({ users: result.Resources || [], total: result.totalResults || 0, page: +page, limit: count })
   } catch (e) { res.status(idcsStatus(e)).json({ error: e.message }) }
 })

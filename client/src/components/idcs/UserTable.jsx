@@ -13,6 +13,21 @@ import { idcsCx, idcsInputClass, idcsBtnPrimary, idcsBtnGhost } from './idcsThem
 import UserDetailModal from './UserDetailModal';
 import { formatUserGroups } from './formatUserGroups';
 import { computePasswordStrength, generateRandomPassword } from '../../utils/idcsStylePassword.js';
+import { useResizableColumns, ResizableColGroup, ResizableTh } from '../ui/ResizableTable.jsx';
+
+const USER_COLS = [44, 220, 240, 130, 200, 96, 260];
+const USER_TH_STYLE = {
+  textAlign: 'left',
+  padding: '12px 16px',
+  fontSize: 11,
+  fontWeight: 600,
+  textTransform: 'uppercase',
+  letterSpacing: 0.6,
+  color: 'var(--text3)',
+  borderBottom: '1px solid var(--border)',
+  background: 'var(--bg3)',
+  whiteSpace: 'nowrap',
+};
 
 function StatusBadge({ active }) {
   const mix = active ? 'var(--green)' : 'var(--amber)';
@@ -486,6 +501,8 @@ export default function UserTable({ onAddToGroup, refreshTrigger }) {
 
   const totalPages = Math.ceil(total / LIMIT);
 
+  const userResize = useResizableColumns('idcs-users', USER_COLS);
+
   return (
     <div className="space-y-4">
       {/* Modals & toasts */}
@@ -576,23 +593,42 @@ export default function UserTable({ onAddToGroup, refreshTrigger }) {
 
       {/* Table */}
       <div className={`overflow-x-auto rounded-xl border ${idcsCx.border}`}>
-        <table className="min-w-full text-sm">
-          <thead className={`${idcsCx.bg3} text-xs uppercase tracking-wide ${idcsCx.text3}`}>
+        <table
+          className="text-sm"
+          style={{
+            width: '100%',
+            tableLayout: 'fixed',
+            minWidth: userResize.sumWidth,
+            borderCollapse: 'collapse',
+          }}
+        >
+          <ResizableColGroup widths={userResize.widths} />
+          <thead>
             <tr>
-              <th className="px-4 py-3 text-left">
+              <ResizableTh
+                columnIndex={0}
+                columnCount={USER_COLS.length}
+                startResize={userResize.startResize}
+                style={USER_TH_STYLE}
+              >
                 <input
                   type="checkbox"
                   checked={selected.size === users.length && users.length > 0}
                   onChange={toggleAll}
                   className="rounded"
                 />
-              </th>
-              <th className="px-4 py-3 text-left">User</th>
-              <th className="px-4 py-3 text-left">Email</th>
-              <th className="px-4 py-3 text-left">Mobile</th>
-              <th className="px-4 py-3 text-left">Groups</th>
-              <th className="px-4 py-3 text-left">Status</th>
-              <th className="px-4 py-3 text-left">Actions</th>
+              </ResizableTh>
+              {['User', 'Email', 'Mobile', 'Groups', 'Status', 'Actions'].map((label, i) => (
+                <ResizableTh
+                  key={label}
+                  columnIndex={i + 1}
+                  columnCount={USER_COLS.length}
+                  startResize={userResize.startResize}
+                  style={USER_TH_STYLE}
+                >
+                  {label}
+                </ResizableTh>
+              ))}
             </tr>
           </thead>
           <tbody className={`divide-y ${idcsCx.divide}`}>
@@ -627,7 +663,7 @@ export default function UserTable({ onAddToGroup, refreshTrigger }) {
                       selected.has(u.id) ? 'bg-[color-mix(in_srgb,var(--accent)_10%,var(--bg3))]' : ''
                     }`}
                   >
-                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                    <td className="px-4 py-3 overflow-hidden" onClick={(e) => e.stopPropagation()}>
                       <input
                         type="checkbox"
                         checked={selected.has(u.id)}
@@ -635,17 +671,17 @@ export default function UserTable({ onAddToGroup, refreshTrigger }) {
                         className="rounded"
                       />
                     </td>
-                    <td className="px-4 py-3">
-                      <div className={`font-medium ${idcsCx.text}`}>{u.displayName || u.userName}</div>
-                      <div className={`text-xs ${idcsCx.text3}`}>{u.userName}</div>
+                    <td className="px-4 py-3 overflow-hidden">
+                      <div className={`font-medium truncate ${idcsCx.text}`} title={u.displayName || u.userName}>{u.displayName || u.userName}</div>
+                      <div className={`text-xs truncate ${idcsCx.text3}`} title={u.userName}>{u.userName}</div>
                     </td>
-                    <td className={`px-4 py-3 ${idcsCx.text2}`}>{email}</td>
-                    <td className={`px-4 py-3 ${idcsCx.text2}`}>{mobile}</td>
-                    <td className={`px-4 py-3 max-w-xs truncate ${idcsCx.text2}`} title={groups}>{groups}</td>
-                    <td className="px-4 py-3">
+                    <td className={`px-4 py-3 overflow-hidden truncate ${idcsCx.text2}`} title={email}>{email}</td>
+                    <td className={`px-4 py-3 overflow-hidden truncate ${idcsCx.text2}`} title={mobile}>{mobile}</td>
+                    <td className={`px-4 py-3 overflow-hidden truncate ${idcsCx.text2}`} title={groups}>{groups}</td>
+                    <td className="px-4 py-3 overflow-hidden">
                       <StatusBadge active={u.active} />
                     </td>
-                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                    <td className="px-4 py-3 overflow-hidden" onClick={(e) => e.stopPropagation()}>
                       <div className="flex gap-3 items-center">
                         <button
                           type="button"
