@@ -7,7 +7,7 @@
  */
 
 import { useState, useRef } from 'react';
-import { bulkCreateUsers, bulkDeleteUsers, bulkSetActive } from '../../api/idcs';
+import { bulkCreateUsers, bulkDeleteUsers, bulkSetActive, bulkResetPassword } from '../../api/idcs';
 import { idcsCx, idcsBtnPrimary, idcsBtnDanger } from './idcsTheme';
 
 const REQUIRED_FIELDS = ['firstName', 'lastName', 'email'];
@@ -22,10 +22,11 @@ ffffab6d220d414cad673a2d9fb995ab
 abcd1234ef567890abcd1234ef567890`;
 
 const MODES = [
-  { id: 'create',   label: 'Bulk Create',   needsIdcsId: false, danger: false },
-  { id: 'suspend',  label: 'Bulk Suspend',  needsIdcsId: true,  danger: false },
-  { id: 'activate', label: 'Bulk Activate', needsIdcsId: true,  danger: false },
-  { id: 'delete',   label: 'Bulk Delete',   needsIdcsId: true,  danger: true  },
+  { id: 'create',        label: 'Bulk Create',         needsIdcsId: false, danger: false },
+  { id: 'reset-password',label: 'Bulk Reset Password', needsIdcsId: true,  danger: false },
+  { id: 'suspend',       label: 'Bulk Suspend',        needsIdcsId: true,  danger: false },
+  { id: 'activate',      label: 'Bulk Activate',       needsIdcsId: true,  danger: false },
+  { id: 'delete',        label: 'Bulk Delete',         needsIdcsId: true,  danger: true  },
 ];
 
 function parseCSV(text) {
@@ -119,6 +120,8 @@ export default function BulkUpload({ onComplete }) {
           res = await bulkDeleteUsers(userIds);
         } else if (mode === 'suspend' || mode === 'activate') {
           res = await bulkSetActive(userIds, mode === 'activate');
+        } else if (mode === 'reset-password') {
+          res = await bulkResetPassword(userIds);
         }
       }
       setResult(res);
@@ -173,9 +176,11 @@ export default function BulkUpload({ onComplete }) {
 
       {/* Mode helper */}
       <div className={`text-xs ${idcsCx.text3}`}>
-        {mode === 'create'
-          ? 'Upload users to create. Required: firstName, lastName, email. Optional: recoveryEmail, mobileNumber, password.'
-          : `Upload an idcsId column. ${mode === 'delete' ? 'Each user will be permanently deleted.' : `Each user will be ${mode === 'suspend' ? 'suspended (active=false)' : 'activated (active=true)'}.`}`}
+        {mode === 'create' && 'Upload users to create. Required: firstName, lastName, email. Optional: recoveryEmail, mobileNumber, password.'}
+        {mode === 'delete' && 'Upload an idcsId column. Each user will be permanently deleted from Oracle IDCS.'}
+        {mode === 'suspend' && 'Upload an idcsId column. Each user will be suspended (active=false).'}
+        {mode === 'activate' && 'Upload an idcsId column. Each user will be activated (active=true).'}
+        {mode === 'reset-password' && 'Upload an idcsId column. Oracle IDCS will email a password-reset link to each user.'}
       </div>
 
       {/* Drop zone */}

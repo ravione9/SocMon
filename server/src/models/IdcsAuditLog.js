@@ -10,8 +10,8 @@ const idcsAuditLogSchema = new mongoose.Schema(
         'SUSPEND_USER', 'ACTIVATE_USER',
         'BULK_CREATE_USERS', 'BULK_DELETE_USERS',
         'BULK_SUSPEND_USERS', 'BULK_ACTIVATE_USERS',
-        'PASSWORD_RESET', 'ADD_TO_GROUP',
-        'REMOVE_FROM_GROUP', 'EXPORT_USERS',
+        'PASSWORD_RESET', 'BULK_PASSWORD_RESET',
+        'ADD_TO_GROUP', 'REMOVE_FROM_GROUP', 'EXPORT_USERS',
       ],
     },
     performedBy: {

@@ -8,7 +8,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { listUsers, deleteUser, setPassword, suspendUser, activateUser, bulkSetActive } from '../../api/idcs';
+import { listUsers, deleteUser, setPassword, suspendUser, activateUser, bulkSetActive, bulkResetPassword } from '../../api/idcs';
 import { idcsCx, idcsInputClass, idcsBtnPrimary, idcsBtnGhost } from './idcsTheme';
 import UserDetailModal from './UserDetailModal';
 import { formatUserGroups } from './formatUserGroups';
@@ -489,6 +489,30 @@ export default function UserTable({ onAddToGroup, refreshTrigger }) {
     }
   };
 
+  const handleBulkResetPassword = async () => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    if (!window.confirm(
+      `Send a password-reset email to ${ids.length} selected user${ids.length === 1 ? '' : 's'}?\n\n` +
+      'Oracle IDCS will email each user a reset link to their registered (or recovery) email.',
+    )) return;
+    try {
+      const res = await bulkResetPassword(ids);
+      const okN = res?.succeeded?.length ?? 0;
+      const failN = res?.failed?.length ?? 0;
+      setToast({
+        message: `Reset emails sent for ${okN} user${okN === 1 ? '' : 's'}${failN ? ` — ${failN} failed` : ''}`,
+        type: failN ? 'error' : 'success',
+      });
+      setSelected(new Set());
+    } catch (e) {
+      setToast({
+        message: `Bulk password reset failed: ${e.response?.data?.error || e.message}`,
+        type: 'error',
+      });
+    }
+  };
+
   const handlePasswordSuccess = (mustChange) => {
     setPwdModal(null);
     setToast({
@@ -576,6 +600,15 @@ export default function UserTable({ onAddToGroup, refreshTrigger }) {
               title="Set active=true for the selected users"
             >
               Activate {selected.size}
+            </button>
+            <button
+              type="button"
+              onClick={handleBulkResetPassword}
+              className={`text-sm px-4 py-2.5 rounded-lg font-medium border ${idcsCx.border} ${idcsCx.bg3} hover:opacity-90`}
+              style={{ color: 'var(--accent2)' }}
+              title="Send a password-reset email to each selected user via Oracle IDCS"
+            >
+              Reset {selected.size} Pwd
             </button>
           </div>
         )}

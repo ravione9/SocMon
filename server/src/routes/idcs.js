@@ -131,6 +131,35 @@ router.patch('/users/:id', async (req, res) => {
   }
 })
 
+router.post('/users/bulk-password-reset', async (req, res) => {
+  try {
+    const { userIds } = req.body
+    if (!Array.isArray(userIds) || !userIds.length) return res.status(400).json({ error: 'userIds[] required' })
+
+    const succeeded = []
+    const failed = []
+    const CHUNK = 10
+    for (let i = 0; i < userIds.length; i += CHUNK) {
+      const chunk = userIds.slice(i, i + CHUNK)
+      const results = await Promise.allSettled(chunk.map((id) => idcs.resetPassword(id)))
+      results.forEach((r, idx) => {
+        r.status === 'fulfilled'
+          ? succeeded.push(chunk[idx])
+          : failed.push({ id: chunk[idx], error: r.reason?.message })
+      })
+    }
+    const status = failed.length === 0 ? 'SUCCESS' : succeeded.length > 0 ? 'PARTIAL' : 'FAILED'
+    audit('BULK_PASSWORD_RESET', req, null, null, status, {
+      total: userIds.length,
+      succeeded: succeeded.length,
+      failed: failed.length,
+    })
+    res.json({ succeeded, failed })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 router.post('/users/bulk-set-active', async (req, res) => {
   try {
     const { userIds, active } = req.body

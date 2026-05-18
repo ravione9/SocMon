@@ -335,6 +335,7 @@ function AuditLogTable() {
     BULK_SUSPEND_USERS:  { mix: 'var(--amber)', fg: 'var(--amber)' },
     BULK_ACTIVATE_USERS: { mix: 'var(--green)', fg: 'var(--green)' },
     PASSWORD_RESET:      { mix: 'var(--accent2)', fg: 'var(--accent2)' },
+    BULK_PASSWORD_RESET: { mix: 'var(--accent2)', fg: 'var(--accent2)' },
     ADD_TO_GROUP:        { mix: 'var(--cyan)', fg: 'var(--cyan)' },
     REMOVE_FROM_GROUP:   { mix: 'var(--amber)', fg: 'var(--amber)' },
     EXPORT_USERS:        { mix: 'var(--text2)', fg: 'var(--text)' },
