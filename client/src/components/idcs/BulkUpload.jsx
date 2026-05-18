@@ -7,7 +7,7 @@
  */
 
 import { useState, useRef } from 'react';
-import { bulkCreateUsers, bulkDeleteUsers, bulkSetActive, bulkResetPassword } from '../../api/idcs';
+import { bulkCreateUsers, bulkDeleteUsers, bulkSetActive, bulkSetPassword } from '../../api/idcs';
 import { idcsCx, idcsBtnPrimary, idcsBtnDanger } from './idcsTheme';
 
 const REQUIRED_FIELDS = ['firstName', 'lastName', 'email'];
@@ -20,6 +20,11 @@ Jane,Smith,jane.smith@example.com,,,`;
 const IDCS_ID_CSV_TEMPLATE = `idcsId
 ffffab6d220d414cad673a2d9fb995ab
 abcd1234ef567890abcd1234ef567890`;
+// Reset Password — admin sets the actual password per row; no email sent.
+// mustChangePassword is optional (true/false/1/0/yes/no). Defaults to false.
+const RESET_PWD_CSV_TEMPLATE = `idcsId,newPassword,mustChangePassword
+ffffab6d220d414cad673a2d9fb995ab,SecurePass!12,true
+abcd1234ef567890abcd1234ef567890,AnotherP@ss34,false`;
 
 const MODES = [
   { id: 'create',        label: 'Bulk Create',         needsIdcsId: false, danger: false },
@@ -28,6 +33,11 @@ const MODES = [
   { id: 'activate',      label: 'Bulk Activate',       needsIdcsId: true,  danger: false },
   { id: 'delete',        label: 'Bulk Delete',         needsIdcsId: true,  danger: true  },
 ];
+
+const TRUTHY_RAW = new Set(['1', 'true', 'yes', 'y']);
+function parseTruthy(v) {
+  return TRUTHY_RAW.has(String(v ?? '').trim().toLowerCase());
+}
 
 function parseCSV(text) {
   const lines = text.trim().split('\n').filter(Boolean);
@@ -71,15 +81,19 @@ export default function BulkUpload({ onComplete }) {
         const parsed = file.name.endsWith('.json') ? parseJSON(text) : parseCSV(text);
 
         if (mode === 'create') {
-          // Validate required fields
           const missing = parsed.filter((r) =>
             REQUIRED_FIELDS.some((f) => !r[f])
           );
           if (missing.length > 0) {
             setParseError(`${missing.length} row(s) are missing required fields (firstName, lastName, email)`);
           }
+        } else if (mode === 'reset-password') {
+          const bad = parsed.filter((r) => !r.idcsId || !r.newPassword);
+          if (bad.length > 0) {
+            setParseError(`${bad.length} row(s) are missing required fields (idcsId, newPassword)`);
+          }
         } else {
-          // suspend/activate/delete: need idcsId for each row
+          // suspend / activate / delete: idcsId per row
           const hasIdcsId = parsed.every((r) => r.idcsId);
           if (!hasIdcsId) {
             setParseError(`Each row must include an "idcsId" column for ${mode}. (Tip: download the template.)`);
@@ -109,6 +123,20 @@ export default function BulkUpload({ onComplete }) {
       let res;
       if (mode === 'create') {
         res = await bulkCreateUsers(rows);
+      } else if (mode === 'reset-password') {
+        const users = rows
+          .filter((r) => r.idcsId && r.newPassword)
+          .map((r) => ({
+            idcsId: r.idcsId,
+            newPassword: r.newPassword,
+            mustChangePassword: parseTruthy(r.mustChangePassword),
+          }));
+        if (users.length === 0) {
+          setResult({ error: 'No usable rows. Each row needs idcsId and newPassword.' });
+          setSubmitting(false);
+          return;
+        }
+        res = await bulkSetPassword({ users });
       } else {
         const userIds = rows.map((r) => r.idcsId).filter(Boolean);
         if (userIds.length === 0) {
@@ -120,8 +148,6 @@ export default function BulkUpload({ onComplete }) {
           res = await bulkDeleteUsers(userIds);
         } else if (mode === 'suspend' || mode === 'activate') {
           res = await bulkSetActive(userIds, mode === 'activate');
-        } else if (mode === 'reset-password') {
-          res = await bulkResetPassword(userIds);
         }
       }
       setResult(res);
@@ -134,8 +160,10 @@ export default function BulkUpload({ onComplete }) {
   };
 
   const downloadTemplate = () => {
-    const isCreate = mode === 'create';
-    const blob = new Blob([isCreate ? CREATE_CSV_TEMPLATE : IDCS_ID_CSV_TEMPLATE], { type: 'text/csv' });
+    let template = IDCS_ID_CSV_TEMPLATE;
+    if (mode === 'create') template = CREATE_CSV_TEMPLATE;
+    else if (mode === 'reset-password') template = RESET_PWD_CSV_TEMPLATE;
+    const blob = new Blob([template], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -180,7 +208,7 @@ export default function BulkUpload({ onComplete }) {
         {mode === 'delete' && 'Upload an idcsId column. Each user will be permanently deleted from Oracle IDCS.'}
         {mode === 'suspend' && 'Upload an idcsId column. Each user will be suspended (active=false).'}
         {mode === 'activate' && 'Upload an idcsId column. Each user will be activated (active=true).'}
-        {mode === 'reset-password' && 'Upload an idcsId column. Oracle IDCS will email a password-reset link to each user.'}
+        {mode === 'reset-password' && 'Upload idcsId and newPassword columns — each user\u2019s password is set directly (no email). Optional column mustChangePassword (true/false) to force change on next login.'}
       </div>
 
       {/* Drop zone */}
@@ -239,9 +267,15 @@ export default function BulkUpload({ onComplete }) {
               <tbody className={`divide-y ${idcsCx.divide}`}>
                 {rows.slice(0, 5).map((row, i) => (
                   <tr key={i}>
-                    {Object.values(row).map((v, j) => (
-                      <td key={j} className={`px-3 py-2 ${idcsCx.text}`}>{v || '—'}</td>
-                    ))}
+                    {Object.keys(rows[0]).map((k) => {
+                      const v = row[k];
+                      const isSecret = /password/i.test(k) && !/must/i.test(k);
+                      return (
+                        <td key={k} className={`px-3 py-2 ${idcsCx.text}`}>
+                          {isSecret && v ? '••••••••' : (v || '—')}
+                        </td>
+                      );
+                    })}
                   </tr>
                 ))}
               </tbody>

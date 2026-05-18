@@ -33,8 +33,13 @@ export const bulkDeleteUsers = (userIds) =>
   api.post(`${BASE}/users/bulk-delete`, { userIds }).then((r) => r.data)
 export const bulkSetActive = (userIds, active) =>
   api.post(`${BASE}/users/bulk-set-active`, { userIds, active }).then((r) => r.data)
-export const bulkResetPassword = (userIds) =>
-  api.post(`${BASE}/users/bulk-password-reset`, { userIds }).then((r) => r.data)
+/**
+ * Direct admin password set, in bulk (no email link).
+ *  - Per-user:  bulkSetPassword({ users: [{ idcsId, newPassword, mustChangePassword? }] })
+ *  - Shared:    bulkSetPassword({ userIds: [...], newPassword, mustChangePassword? })
+ */
+export const bulkSetPassword = (body) =>
+  api.post(`${BASE}/users/bulk-set-password`, body).then((r) => r.data)
 /** Convenience: suspend = active:false, activate = active:true (single user). */
 export const suspendUser = (id) => updateUser(id, { active: false })
 export const activateUser = (id) => updateUser(id, { active: true })

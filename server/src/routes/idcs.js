@@ -131,26 +131,58 @@ router.patch('/users/:id', async (req, res) => {
   }
 })
 
-router.post('/users/bulk-password-reset', async (req, res) => {
+/**
+ * Direct admin password set, in bulk. No password-reset emails are sent.
+ *
+ * Two input shapes are accepted so the same endpoint serves both UI paths:
+ *  - Per-user passwords (CSV upload):  { users: [{ idcsId, newPassword, mustChangePassword? }, ...] }
+ *  - Shared password (toolbar modal):  { userIds: [...], newPassword, mustChangePassword? }
+ */
+router.post('/users/bulk-set-password', async (req, res) => {
   try {
-    const { userIds } = req.body
-    if (!Array.isArray(userIds) || !userIds.length) return res.status(400).json({ error: 'userIds[] required' })
+    const body = req.body || {}
+    let entries = []
+
+    if (Array.isArray(body.users) && body.users.length) {
+      entries = body.users.map((u) => ({
+        id: u.idcsId || u.id,
+        newPassword: u.newPassword,
+        mustChangePassword: !!u.mustChangePassword,
+      }))
+    } else if (Array.isArray(body.userIds) && body.userIds.length && body.newPassword) {
+      const shared = String(body.newPassword)
+      const must = !!body.mustChangePassword
+      entries = body.userIds.map((id) => ({ id, newPassword: shared, mustChangePassword: must }))
+    } else {
+      return res.status(400).json({
+        error: 'Provide either users[{idcsId,newPassword,mustChangePassword?}] or userIds[]+newPassword+mustChangePassword?',
+      })
+    }
+
+    if (entries.length > 500) return res.status(400).json({ error: 'Max 500 per request' })
 
     const succeeded = []
     const failed = []
     const CHUNK = 10
-    for (let i = 0; i < userIds.length; i += CHUNK) {
-      const chunk = userIds.slice(i, i + CHUNK)
-      const results = await Promise.allSettled(chunk.map((id) => idcs.resetPassword(id)))
+    for (let i = 0; i < entries.length; i += CHUNK) {
+      const chunk = entries.slice(i, i + CHUNK)
+      const results = await Promise.allSettled(
+        chunk.map(async (e) => {
+          if (!e.id) throw new Error('idcsId required')
+          if (!e.newPassword) throw new Error('newPassword required')
+          return idcs.setPassword(e.id, e.newPassword, !!e.mustChangePassword)
+        }),
+      )
       results.forEach((r, idx) => {
         r.status === 'fulfilled'
-          ? succeeded.push(chunk[idx])
-          : failed.push({ id: chunk[idx], error: r.reason?.message })
+          ? succeeded.push(chunk[idx].id)
+          : failed.push({ id: chunk[idx].id, error: r.reason?.message })
       })
     }
     const status = failed.length === 0 ? 'SUCCESS' : succeeded.length > 0 ? 'PARTIAL' : 'FAILED'
     audit('BULK_PASSWORD_RESET', req, null, null, status, {
-      total: userIds.length,
+      type: 'admin_set',
+      total: entries.length,
       succeeded: succeeded.length,
       failed: failed.length,
     })

@@ -8,7 +8,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { listUsers, deleteUser, setPassword, suspendUser, activateUser, bulkSetActive, bulkResetPassword } from '../../api/idcs';
+import { listUsers, deleteUser, setPassword, suspendUser, activateUser, bulkSetActive, bulkSetPassword } from '../../api/idcs';
 import { idcsCx, idcsInputClass, idcsBtnPrimary, idcsBtnGhost } from './idcsTheme';
 import UserDetailModal from './UserDetailModal';
 import { formatUserGroups } from './formatUserGroups';
@@ -125,6 +125,179 @@ function PasswordSavedPanel({ password, mustChange, user, email, groupStr, onDon
         </button>
       </div>
     </>
+  );
+}
+
+// ─── Bulk Set Password Modal ──────────────────────────────────────────────────
+// One shared password applied directly to every selected user. No emails are sent.
+function BulkSetPasswordModal({ userIds, onClose, onSuccess }) {
+  const [newPassword, setNewPassword]     = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [mustChange, setMustChange]       = useState(false);
+  const [showPwd, setShowPwd]             = useState(true);
+  const [loading, setLoading]             = useState(false);
+  const [error, setError]                 = useState('');
+  const [result, setResult]               = useState(null);
+
+  const applyEasyPassword = useCallback(() => {
+    const pw = generateRandomPassword();
+    setNewPassword(pw);
+    setConfirmPassword(pw);
+    setShowPwd(true);
+    setError('');
+  }, []);
+
+  useEffect(() => { applyEasyPassword(); }, [applyEasyPassword]);
+
+  const strength = computePasswordStrength(newPassword);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!newPassword) { setError('Password is required'); return; }
+    if (newPassword.length < 8) { setError('Password must be at least 8 characters'); return; }
+    if (newPassword !== confirmPassword) { setError('Passwords do not match'); return; }
+    setLoading(true);
+    setError('');
+    try {
+      const res = await bulkSetPassword({
+        userIds,
+        newPassword,
+        mustChangePassword: mustChange,
+      });
+      const okN = res?.succeeded?.length ?? 0;
+      const failN = res?.failed?.length ?? 0;
+      setResult({ okN, failN, failed: res?.failed || [] });
+      if (failN === 0) onSuccess(okN, mustChange);
+    } catch (ex) {
+      setError(ex.response?.data?.error || ex.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <div className={`rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden border ${idcsCx.border} ${idcsCx.bg2}`}>
+        <div className="px-6 py-4 flex items-center justify-between" style={{ background: 'linear-gradient(135deg, var(--accent), var(--accent2))' }}>
+          <div className="min-w-0 pr-2">
+            <h2 className="font-semibold text-base text-[var(--on-accent)]">Bulk Set Password</h2>
+            <p className="text-xs mt-0.5 opacity-90 text-[var(--on-accent)]">
+              {userIds.length} selected user{userIds.length === 1 ? '' : 's'} — same password applied to all
+            </p>
+            <p className="text-[11px] mt-1 opacity-85 text-[var(--on-accent)]">No emails sent. IDCS password is set directly.</p>
+          </div>
+          <button type="button" onClick={onClose} className="text-[var(--on-accent)] opacity-80 hover:opacity-100 text-xl leading-none">✕</button>
+        </div>
+
+        {result ? (
+          <div className="p-6 space-y-4">
+            <div
+              className={`text-sm rounded-lg px-3 py-2 border ${idcsCx.border}`}
+              style={{
+                background: result.failN ? 'color-mix(in srgb, var(--amber) 14%, var(--bg3))' : 'color-mix(in srgb, var(--green) 14%, var(--bg3))',
+                color: result.failN ? 'var(--amber)' : 'var(--green)',
+              }}
+            >
+              {result.okN} succeeded{result.failN ? ` — ${result.failN} failed` : ''}
+            </div>
+            {result.failN > 0 && (
+              <div className={`text-xs ${idcsCx.text3} max-h-40 overflow-y-auto font-mono`}>
+                {result.failed.slice(0, 25).map((f, i) => (
+                  <div key={i}>{f.id}: {f.error}</div>
+                ))}
+                {result.failed.length > 25 && <div>… and {result.failed.length - 25} more</div>}
+              </div>
+            )}
+            <button type="button" onClick={onClose} className={`w-full text-sm ${idcsBtnPrimary()}`}>Done</button>
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} className="p-6 space-y-5">
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <label className={`block text-sm font-medium ${idcsCx.text}`}>
+                  New Password <span className="text-[var(--red)]">*</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={applyEasyPassword}
+                  className={`text-xs font-semibold shrink-0 px-2 py-1 rounded-md border ${idcsCx.border} ${idcsCx.bg3} hover:opacity-90`}
+                  style={{ color: 'var(--accent)' }}
+                >
+                  Generate Password
+                </button>
+              </div>
+              <div className="relative">
+                <input
+                  type={showPwd ? 'text' : 'password'}
+                  value={newPassword}
+                  onChange={(e) => { setNewPassword(e.target.value); setError(''); }}
+                  placeholder="Enter new password"
+                  className={idcsInputClass('pr-10')}
+                />
+                <button type="button" onClick={() => setShowPwd((v) => !v)} className={`absolute right-3 top-1/2 -translate-y-1/2 text-sm ${idcsCx.text3}`} tabIndex={-1}>
+                  {showPwd ? '🙈' : '👁'}
+                </button>
+              </div>
+              {strength && (
+                <div className="mt-1.5">
+                  <div className={`h-1.5 rounded-full overflow-hidden ${idcsCx.bg3}`}>
+                    <div className="h-full rounded-full transition-all" style={{ background: strength.bar, width: strength.pct }} />
+                  </div>
+                  <p className="text-xs mt-0.5 font-medium" style={{
+                    color: strength.label === 'Weak' ? 'var(--red)' : strength.label === 'Fair' ? 'var(--amber)' : strength.label === 'Good' ? 'var(--accent)' : 'var(--green)',
+                  }}>
+                    {strength.label}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label className={`block text-sm font-medium mb-1 ${idcsCx.text}`}>Confirm Password <span className="text-[var(--red)]">*</span></label>
+              <input
+                type={showPwd ? 'text' : 'password'}
+                value={confirmPassword}
+                onChange={(e) => { setConfirmPassword(e.target.value); setError(''); }}
+                placeholder="Re-enter new password"
+                className={idcsInputClass()}
+                style={confirmPassword && confirmPassword !== newPassword
+                  ? { borderColor: 'var(--red)', background: 'color-mix(in srgb, var(--red) 10%, var(--bg3))' }
+                  : undefined}
+              />
+              {confirmPassword && confirmPassword !== newPassword && (
+                <p className="text-xs mt-1 text-[var(--red)]">Passwords do not match</p>
+              )}
+            </div>
+
+            <label className="flex items-start gap-3 cursor-pointer group">
+              <div className="relative mt-0.5">
+                <input type="checkbox" checked={mustChange} onChange={(e) => setMustChange(e.target.checked)} className="sr-only" />
+                <div
+                  className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-colors border-[var(--border)] ${idcsCx.bg3}`}
+                  style={mustChange ? { background: 'var(--accent)', borderColor: 'var(--accent)' } : undefined}
+                >
+                  {mustChange && <span className="text-[var(--on-accent)] text-xs font-bold">✓</span>}
+                </div>
+              </div>
+              <p className={`text-sm font-medium ${idcsCx.text}`}>Require password change on next login</p>
+            </label>
+
+            {error && (
+              <div className={`text-sm rounded-lg px-3 py-2 border ${idcsCx.border}`} style={{ background: 'color-mix(in srgb, var(--red) 12%, var(--bg3))', color: 'var(--red)' }}>
+                {error}
+              </div>
+            )}
+
+            <div className="flex gap-3 pt-1">
+              <button type="submit" disabled={loading} className={`flex-1 text-sm ${idcsBtnPrimary()}`}>
+                {loading ? `Setting (${userIds.length})…` : `Set Password for ${userIds.length} user${userIds.length === 1 ? '' : 's'}`}
+              </button>
+              <button type="button" onClick={onClose} className={`flex-1 text-sm ${idcsBtnGhost()}`}>Cancel</button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -489,28 +662,22 @@ export default function UserTable({ onAddToGroup, refreshTrigger }) {
     }
   };
 
-  const handleBulkResetPassword = async () => {
-    const ids = [...selected];
-    if (!ids.length) return;
-    if (!window.confirm(
-      `Send a password-reset email to ${ids.length} selected user${ids.length === 1 ? '' : 's'}?\n\n` +
-      'Oracle IDCS will email each user a reset link to their registered (or recovery) email.',
-    )) return;
-    try {
-      const res = await bulkResetPassword(ids);
-      const okN = res?.succeeded?.length ?? 0;
-      const failN = res?.failed?.length ?? 0;
-      setToast({
-        message: `Reset emails sent for ${okN} user${okN === 1 ? '' : 's'}${failN ? ` — ${failN} failed` : ''}`,
-        type: failN ? 'error' : 'success',
-      });
-      setSelected(new Set());
-    } catch (e) {
-      setToast({
-        message: `Bulk password reset failed: ${e.response?.data?.error || e.message}`,
-        type: 'error',
-      });
-    }
+  const [bulkPwdModal, setBulkPwdModal] = useState(null); // { userIds: [...] } | null
+
+  const handleOpenBulkPwd = () => {
+    if (!selected.size) return;
+    setBulkPwdModal({ userIds: [...selected] });
+  };
+
+  const handleBulkPwdSuccess = (count, mustChange) => {
+    setBulkPwdModal(null);
+    setSelected(new Set());
+    setToast({
+      message: mustChange
+        ? `Password set for ${count} user${count === 1 ? '' : 's'} — they must change it on next login`
+        : `Password set for ${count} user${count === 1 ? '' : 's'}`,
+      type: 'success',
+    });
   };
 
   const handlePasswordSuccess = (mustChange) => {
@@ -535,6 +702,13 @@ export default function UserTable({ onAddToGroup, refreshTrigger }) {
           user={pwdModal}
           onClose={() => setPwdModal(null)}
           onSuccess={handlePasswordSuccess}
+        />
+      )}
+      {bulkPwdModal && (
+        <BulkSetPasswordModal
+          userIds={bulkPwdModal.userIds}
+          onClose={() => setBulkPwdModal(null)}
+          onSuccess={handleBulkPwdSuccess}
         />
       )}
       {toast && (
@@ -603,10 +777,10 @@ export default function UserTable({ onAddToGroup, refreshTrigger }) {
             </button>
             <button
               type="button"
-              onClick={handleBulkResetPassword}
+              onClick={handleOpenBulkPwd}
               className={`text-sm px-4 py-2.5 rounded-lg font-medium border ${idcsCx.border} ${idcsCx.bg3} hover:opacity-90`}
               style={{ color: 'var(--accent2)' }}
-              title="Send a password-reset email to each selected user via Oracle IDCS"
+              title="Directly set a password for the selected users (no email)"
             >
               Reset {selected.size} Pwd
             </button>
