@@ -3,9 +3,25 @@
  */
 
 import { useState, useEffect, useMemo } from 'react';
-import { getUser, deleteUser, updateUser } from '../../api/idcs';
+import { getUser, deleteUser, updateUser, removeUsersFromGroup } from '../../api/idcs';
 import { idcsCx, idcsBtnPrimary, idcsBtnGhost, idcsInputClass } from './idcsTheme';
 import { formatUserGroups } from './formatUserGroups';
+
+/** Normalise SCIM/IDCS group entries into a stable shape for the UI. */
+function readableGroups(user) {
+  const list = user?.groups;
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((g, i) => {
+      if (!g || typeof g === 'string') {
+        return { id: typeof g === 'string' ? g : `g-${i}`, name: typeof g === 'string' ? g : '' };
+      }
+      const id = g.value || g.id || g.groupId || '';
+      const name = g.display || g.displayName || g.label || g.name || g.value || '(unnamed group)';
+      return { id, name };
+    })
+    .filter((g) => g.id);
+}
 
 function findEmail(user, predicate) {
   return (user?.emails || []).find(predicate)?.value || '';
@@ -61,6 +77,7 @@ export default function UserDetailModal({
   const [editMode, setEditMode] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({});
+  const [removingGroupId, setRemovingGroupId] = useState(null);
 
   const fetchUser = (signal) => {
     setLoading(true);
@@ -153,6 +170,29 @@ export default function UserDetailModal({
     }
   };
 
+  const handleRemoveFromGroup = async (group) => {
+    if (!group?.id) return;
+    if (
+      !window.confirm(
+        `Remove ${user?.displayName || user?.userName || 'this user'} from group "${group.name}"?`,
+      )
+    ) {
+      return;
+    }
+    setRemovingGroupId(group.id);
+    setError('');
+    try {
+      await removeUsersFromGroup(group.id, [userId]);
+      onUserChanged?.();
+      const signal = { cancelled: false };
+      await fetchUser(signal);
+    } catch (e) {
+      setError(e.response?.data?.error || e.message);
+    } finally {
+      setRemovingGroupId(null);
+    }
+  };
+
   const handleDelete = async () => {
     const un = user?.userName || previewUser?.userName || userId;
     if (!window.confirm(`Delete user ${un}? This cannot be undone.`)) return;
@@ -173,7 +213,7 @@ export default function UserDetailModal({
   const headerEmail =
     displayPeek?.emails?.find((e) => e.primary)?.value || displayPeek?.emails?.[0]?.value || '—';
   const headerGroups = formatUserGroups(displayPeek);
-  const groupsFormatted = formatUserGroups(user);
+  const groupList = useMemo(() => readableGroups(user), [user]);
   const title = user?.displayName || user?.userName || previewUser?.displayName || 'User';
 
   return (
@@ -272,7 +312,46 @@ export default function UserDetailModal({
                   {user.active ? 'Active' : 'Inactive'}
                 </span>
               </Field>
-              <Field label="Groups">{groupsFormatted || '—'}</Field>
+              <Field label="Groups">
+                {groupList.length === 0 ? (
+                  '—'
+                ) : (
+                  <div className="flex flex-wrap gap-1.5">
+                    {groupList.map((g) => {
+                      const removing = removingGroupId === g.id;
+                      return (
+                        <span
+                          key={g.id}
+                          className={`inline-flex items-center gap-1.5 rounded-full text-xs font-medium border ${idcsCx.border}`}
+                          style={{
+                            padding: '2px 4px 2px 10px',
+                            background: 'color-mix(in srgb, var(--accent2) 14%, var(--bg3))',
+                            color: 'var(--accent2)',
+                          }}
+                          title={g.id}
+                        >
+                          <span className="truncate max-w-[220px]">{g.name || g.id}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveFromGroup(g)}
+                            disabled={removing}
+                            aria-label={`Remove ${user?.userName || 'user'} from group ${g.name || g.id}`}
+                            title="Remove user from this group"
+                            className="rounded-full h-5 w-5 flex items-center justify-center text-[11px] disabled:opacity-40"
+                            style={{
+                              background: 'color-mix(in srgb, var(--red) 18%, var(--bg2))',
+                              color: 'var(--red)',
+                              border: '1px solid var(--border)',
+                            }}
+                          >
+                            {removing ? '…' : '×'}
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+              </Field>
               {user.meta?.created && (
                 <Field label="Created"><span className={idcsCx.text2}>{String(user.meta.created)}</span></Field>
               )}
