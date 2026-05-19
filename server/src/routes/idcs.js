@@ -25,6 +25,27 @@ function audit(action, req, targetUser, targetGroup, status, details) {
   }).catch((e) => console.error('[idcs audit]', e.message))
 }
 
+/** Build a targetUser audit payload from an IDCS user object. */
+function targetUserFrom(u) {
+  if (!u) return null
+  return {
+    idcsId: u.id,
+    userName: u.userName,
+    email: u.emails?.find((e) => e.primary)?.value || u.emails?.[0]?.value,
+    displayName: u.displayName,
+  }
+}
+
+/** Best-effort: fetch a user by id and shape it for audit. Never throws. */
+async function targetUserById(id) {
+  try {
+    const u = await idcs.getUserById(id)
+    return targetUserFrom(u)
+  } catch (_) {
+    return { idcsId: id }
+  }
+}
+
 /**
  * Resolve one identifier (idcsId | email | userName) → IDCS user id.
  * Caches lookups within this request so a repeated email is only queried once.
@@ -204,7 +225,8 @@ router.post('/users/bulk-set-password', async (req, res) => {
       })
     }
     const status = failed.length === 0 ? 'SUCCESS' : succeeded.length > 0 ? 'PARTIAL' : 'FAILED'
-    audit('BULK_PASSWORD_RESET', req, null, null, status, {
+    const target = entries.length === 1 && succeeded[0] ? await targetUserById(succeeded[0]) : null
+    audit('BULK_PASSWORD_RESET', req, target, null, status, {
       type: 'admin_set',
       total: entries.length,
       succeeded: succeeded.length,
@@ -253,10 +275,11 @@ router.post('/users/bulk-set-active', async (req, res) => {
       })
     }
     const status = failed.length === 0 ? 'SUCCESS' : succeeded.length > 0 ? 'PARTIAL' : 'FAILED'
+    const target = refs.length === 1 && succeeded[0] ? await targetUserById(succeeded[0]) : null
     audit(
       body.active ? 'BULK_ACTIVATE_USERS' : 'BULK_SUSPEND_USERS',
       req,
-      null,
+      target,
       null,
       status,
       { total: refs.length, succeeded: succeeded.length, failed: failed.length },
@@ -283,7 +306,8 @@ router.delete('/users/:id', async (req, res) => {
 router.post('/users/:id/password-reset', async (req, res) => {
   try {
     await idcs.resetPassword(req.params.id)
-    audit('PASSWORD_RESET', req, { idcsId: req.params.id }, null, 'SUCCESS', { type: 'email' })
+    const target = await targetUserById(req.params.id)
+    audit('PASSWORD_RESET', req, target, null, 'SUCCESS', { type: 'email' })
     res.json({ message: 'Password reset email sent' })
   } catch (e) {
     audit('PASSWORD_RESET', req, { idcsId: req.params.id }, null, 'FAILED', { error: e.message })
@@ -296,7 +320,8 @@ router.post('/users/:id/set-password', async (req, res) => {
     const { newPassword, mustChangePassword = false } = req.body
     if (!newPassword) return res.status(400).json({ error: 'newPassword required' })
     await idcs.setPassword(req.params.id, newPassword, mustChangePassword)
-    audit('PASSWORD_RESET', req, { idcsId: req.params.id }, null, 'SUCCESS', { type: 'admin_set', mustChangePassword: !!mustChangePassword })
+    const target = await targetUserById(req.params.id)
+    audit('PASSWORD_RESET', req, target, null, 'SUCCESS', { type: 'admin_set', mustChangePassword: !!mustChangePassword })
     res.json({ message: 'Password updated', mustChangePassword: !!mustChangePassword })
   } catch (e) {
     audit('PASSWORD_RESET', req, { idcsId: req.params.id }, null, 'FAILED', { error: e.message })
@@ -356,6 +381,7 @@ router.post('/users/bulk-delete', async (req, res) => {
     }))
     const status = failed.length === 0 ? 'SUCCESS' : succeeded.length > 0 ? 'PARTIAL' : 'FAILED'
     audit('BULK_DELETE_USERS', req, null, null, status, { total: refs.length, succeeded: succeeded.length, failed: failed.length })
+    // BULK_DELETE intentionally leaves targetUser null — the user no longer exists to look up.
     res.json({ succeeded, failed })
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
@@ -412,7 +438,8 @@ router.post('/groups/:id/members', async (req, res) => {
     const { userIds } = req.body
     if (!Array.isArray(userIds) || !userIds.length) return res.status(400).json({ error: 'userIds[] required' })
     const result = await idcs.addUsersToGroup(req.params.id, userIds)
-    audit('ADD_TO_GROUP', req, null, { idcsId: req.params.id }, 'SUCCESS', { userIds })
+    const target = userIds.length === 1 ? await targetUserById(userIds[0]) : null
+    audit('ADD_TO_GROUP', req, target, { idcsId: req.params.id }, 'SUCCESS', { userIds })
     res.json(result)
   } catch (e) {
     audit('ADD_TO_GROUP', req, null, { idcsId: req.params.id }, 'FAILED', { error: e.message })
@@ -425,7 +452,8 @@ router.delete('/groups/:id/members', async (req, res) => {
     const { userIds } = req.body
     if (!Array.isArray(userIds) || !userIds.length) return res.status(400).json({ error: 'userIds[] required' })
     const result = await idcs.removeUsersFromGroup(req.params.id, userIds)
-    audit('REMOVE_FROM_GROUP', req, null, { idcsId: req.params.id }, 'SUCCESS', { userIds })
+    const target = userIds.length === 1 ? await targetUserById(userIds[0]) : null
+    audit('REMOVE_FROM_GROUP', req, target, { idcsId: req.params.id }, 'SUCCESS', { userIds })
     res.json(result)
   } catch (e) {
     audit('REMOVE_FROM_GROUP', req, null, { idcsId: req.params.id }, 'FAILED', { error: e.message })

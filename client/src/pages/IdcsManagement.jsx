@@ -406,7 +406,11 @@ function AuditLogTable() {
                 </td>
                 <td className={`px-4 py-2 text-xs ${idcsCx.text2}`}>{log.performedBy?.email || '—'}</td>
                 <td className={`px-4 py-2 text-xs ${idcsCx.text2}`}>
-                  {log.targetUser?.userName || log.targetUser?.email || '—'}
+                  {log.targetUser?.userName || log.targetUser?.email || log.targetUser?.displayName || (
+                    log.details?.total > 0
+                      ? <span className={idcsCx.text3}>{`${log.details.total} user${log.details.total === 1 ? '' : 's'}`}</span>
+                      : '—'
+                  )}
                 </td>
                 <td className="px-4 py-2">
                   <span className={`text-xs font-medium ${
