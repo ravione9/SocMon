@@ -1757,9 +1757,11 @@ export default function EmailSimulationPage() {
                       onClick={async () => {
                         const out = await seedIndustryTemplates()
                         toast.success(
-                          out.inserted
-                            ? `Imported ${out.inserted} default templates${out.skipped ? ` · skipped ${out.skipped} existing` : ''}`
-                            : 'Default templates already imported',
+                          out.inserted || out.updated || out.removedDuplicates
+                            ? `Default pack synced: ${out.inserted || 0} new, ${out.updated || 0} updated${
+                                out.removedDuplicates ? `, ${out.removedDuplicates} duplicates removed` : ''
+                              }`
+                            : 'Default templates already up to date',
                         )
                         refreshAll()
                       }}
@@ -1771,9 +1773,11 @@ export default function EmailSimulationPage() {
                       onClick={async () => {
                         const out = await seedWorkplaceTemplates()
                         toast.success(
-                          out.inserted
-                            ? `Imported ${out.inserted} portal templates${out.skipped ? ` · skipped ${out.skipped} existing` : ''}`
-                            : 'Portal templates already imported',
+                          out.inserted || out.updated || out.removedDuplicates
+                            ? `Portal pack synced: ${out.inserted || 0} new, ${out.updated || 0} updated${
+                                out.removedDuplicates ? `, ${out.removedDuplicates} duplicates removed` : ''
+                              }`
+                            : 'Portal templates already up to date',
                         )
                         refreshAll()
                       }}

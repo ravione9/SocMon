@@ -71,6 +71,20 @@ function newTrackingToken() {
   return crypto.randomBytes(24).toString('hex')
 }
 
+function defaultMergeVars(email, trackingToken) {
+  const local = String(email || '').split('@')[0] || ''
+  const firstName = local
+    .split(/[._-]/)
+    .filter(Boolean)[0]
+    ?.replace(/^\w/, (c) => c.toUpperCase())
+  return {
+    firstName: firstName || 'there',
+    lastName: '',
+    employeeCode: '',
+    reference: String(trackingToken || '').slice(0, 8).toUpperCase(),
+  }
+}
+
 export async function assertCampaignOwned(userId, campaignId) {
   const c = await EmailSimCampaign.findOne({ _id: campaignId, createdBy: userId })
   if (!c) {
@@ -156,6 +170,7 @@ export async function launchCampaign(req, userId, campaignId) {
     const trackingUrlCamp = String(campaign.trackingUrl || '').trim()
     const otherUrlCamp = String(campaign.otherUrl || '').trim()
     const vars = {
+      ...defaultMergeVars(rec.email, rec.trackingToken),
       ...(campaign.mergeDefaults && typeof campaign.mergeDefaults === 'object' ? campaign.mergeDefaults : {}),
       ...(trackingUrlCamp ? { trackingUrl: trackingUrlCamp } : {}),
       ...(otherUrlCamp ? { otherUrl: otherUrlCamp } : {}),
@@ -241,6 +256,7 @@ export async function sendSingleSimulation(req, userId, payload) {
   }
   const token = newTrackingToken()
   const vars = {
+    ...defaultMergeVars(to, token),
     ...(payload.mergeVars && typeof payload.mergeVars === 'object' ? payload.mergeVars : {}),
     email: to,
     landingUrl: `${origin}${LANDING_PATH}/${token}`,

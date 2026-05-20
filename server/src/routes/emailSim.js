@@ -47,19 +47,49 @@ function escapeRegex(s) {
 }
 
 async function seedTemplatesForUser(userId, rows) {
-  const names = rows.map((row) => String(row.name || '').trim()).filter(Boolean)
-  const existing = await EmailSimTemplate.find({ createdBy: userId, name: { $in: names } }).select('name').lean()
-  const existingNames = new Set(existing.map((row) => String(row.name || '').trim().toLowerCase()))
-  const docs = rows
-    .filter((row) => !existingNames.has(String(row.name || '').trim().toLowerCase()))
+  const normalizedRows = rows
     .map((row) => ({
-      ...row,
       name: String(row.name || '').trim(),
-      createdBy: userId,
+      subject: String(row.subject || '').trim(),
+      htmlBody: String(row.htmlBody || ''),
+      category: row.category != null ? String(row.category).trim() : 'custom',
     }))
-  if (!docs.length) return { inserted: 0, skipped: rows.length }
-  const inserted = await EmailSimTemplate.insertMany(docs, { ordered: false })
-  return { inserted: inserted.length, skipped: rows.length - inserted.length }
+    .filter((row) => row.name && row.subject && row.htmlBody)
+  if (!normalizedRows.length) return { inserted: 0, updated: 0, removedDuplicates: 0 }
+
+  const result = await EmailSimTemplate.bulkWrite(
+    normalizedRows.map((row) => ({
+      updateOne: {
+        filter: { createdBy: userId, name: row.name },
+        update: { $set: row, $setOnInsert: { createdBy: userId } },
+        upsert: true,
+      },
+    })),
+    { ordered: false },
+  )
+
+  // If older imports created duplicates, keep the newest document per template name.
+  const names = normalizedRows.map((row) => row.name)
+  const existing = await EmailSimTemplate.find({ createdBy: userId, name: { $in: names } })
+    .select('_id name updatedAt')
+    .sort({ name: 1, updatedAt: -1 })
+    .lean()
+  const seen = new Set()
+  const duplicateIds = []
+  for (const row of existing) {
+    const key = String(row.name || '').trim().toLowerCase()
+    if (seen.has(key)) duplicateIds.push(row._id)
+    else seen.add(key)
+  }
+  if (duplicateIds.length) {
+    await EmailSimTemplate.deleteMany({ _id: { $in: duplicateIds }, createdBy: userId })
+  }
+
+  return {
+    inserted: result.upsertedCount || 0,
+    updated: result.modifiedCount || 0,
+    removedDuplicates: duplicateIds.length,
+  }
 }
 
 router.get('/meta', (req, res) => {

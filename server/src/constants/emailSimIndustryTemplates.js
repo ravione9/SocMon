@@ -8,7 +8,7 @@ export const EMAIL_SIM_INDUSTRY_TEMPLATES = [
     htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
 <p>Hello {{firstName}},</p>
 <p>Our security team published an update to the <strong>acceptable use policy</strong>. Please review and acknowledge within <strong>48 hours</strong> to avoid restricted access.</p>
-<p><a href="https://example.com/policy">Open policy summary</a></p>
+<p><a href="{{landingUrl}}">Open policy summary</a></p>
 <p style="font-size:12px;color:#666;">Sent by LensPulse awareness programme · Ref {{reference}}</p>
 </div>`,
   },
@@ -19,7 +19,7 @@ export const EMAIL_SIM_INDUSTRY_TEMPLATES = [
     htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
 <p>Hi {{firstName}},</p>
 <p>Multi-factor authentication is now required for your role. Complete enrollment using the link below from a trusted device.</p>
-<p><a href="https://example.com/mfa-enroll">Complete MFA enrollment</a></p>
+<p><a href="{{landingUrl}}">Complete MFA enrollment</a></p>
 <p>If you did not expect this message, contact the IT service desk with reference <strong>{{reference}}</strong>.</p>
 </div>`,
   },
@@ -30,7 +30,7 @@ export const EMAIL_SIM_INDUSTRY_TEMPLATES = [
     htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
 <p>Hello {{firstName}},</p>
 <p>Your corporate password is scheduled to expire soon. Review the account security checklist to avoid interruption to business applications.</p>
-<p><a href="https://example.com/password-check">Review account security</a></p>
+<p><a href="{{landingUrl}}">Review account security</a></p>
 <p style="font-size:12px;color:#666;">Security Operations · Ticket {{reference}}</p>
 </div>`,
   },
@@ -41,7 +41,7 @@ export const EMAIL_SIM_INDUSTRY_TEMPLATES = [
     htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
 <p>Hi {{firstName}},</p>
 <p>We are validating VPN access for employees with remote connectivity. Confirm whether your assigned access is still required.</p>
-<p><a href="https://example.com/vpn-review">Confirm VPN access</a></p>
+<p><a href="{{landingUrl}}">Confirm VPN access</a></p>
 <p style="font-size:12px;color:#666;">This awareness template should be used only for approved simulations.</p>
 </div>`,
   },
@@ -52,7 +52,7 @@ export const EMAIL_SIM_INDUSTRY_TEMPLATES = [
     htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
 <p>Hello {{firstName}},</p>
 <p>A revised workplace document has been assigned to your employee profile. Please acknowledge receipt before the close of business.</p>
-<p><a href="https://example.com/hr-docs">Open assigned document</a></p>
+<p><a href="{{landingUrl}}">Open assigned document</a></p>
 <p style="font-size:12px;color:#666;">Employee code: {{employeeCode}}</p>
 </div>`,
   },
@@ -63,7 +63,7 @@ export const EMAIL_SIM_INDUSTRY_TEMPLATES = [
     htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
 <p>{{firstName}},</p>
 <p>Payroll records for your profile were updated recently. Confirm the request if this change was expected.</p>
-<p><a href="https://example.com/payroll-confirm">Confirm payroll request</a></p>
+<p><a href="{{landingUrl}}">Confirm payroll request</a></p>
 <p>If you did not request a change, report this message to the service desk.</p>
 </div>`,
   },
@@ -74,7 +74,7 @@ export const EMAIL_SIM_INDUSTRY_TEMPLATES = [
     htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
 <p>Hello {{firstName}},</p>
 <p>A vendor invoice has been routed to your department queue for review. Please validate whether it should be approved or rejected.</p>
-<p><a href="https://example.com/invoice-review">Review invoice</a></p>
+<p><a href="{{landingUrl}}">Review invoice</a></p>
 <p style="font-size:12px;color:#666;">Finance workflow reference {{reference}}</p>
 </div>`,
   },
@@ -85,7 +85,7 @@ export const EMAIL_SIM_INDUSTRY_TEMPLATES = [
     htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
 <p>Hi {{firstName}},</p>
 <p>Your assigned device has not completed its latest compliance check. Connect to the portal to review the status and remediation steps.</p>
-<p><a href="https://example.com/device-compliance">Open device status</a></p>
+<p><a href="{{landingUrl}}">Open device status</a></p>
 <p style="font-size:12px;color:#666;">Endpoint compliance · {{reference}}</p>
 </div>`,
   },
@@ -96,7 +96,7 @@ export const EMAIL_SIM_INDUSTRY_TEMPLATES = [
     htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
 <p>Hello {{firstName}},</p>
 <p>A permission request for a shared drive folder is waiting for your response. Review the request before access is granted.</p>
-<p><a href="https://example.com/drive-access">Review access request</a></p>
+<p><a href="{{landingUrl}}">Review access request</a></p>
 <p style="font-size:12px;color:#666;">Access governance simulation · {{reference}}</p>
 </div>`,
   },
@@ -107,7 +107,7 @@ export const EMAIL_SIM_INDUSTRY_TEMPLATES = [
     htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
 <p>Hi {{firstName}},</p>
 <p>The travel desk has generated an itinerary for your profile. Please confirm or reject the schedule from the travel portal.</p>
-<p><a href="https://example.com/travel-itinerary">View itinerary</a></p>
+<p><a href="{{landingUrl}}">View itinerary</a></p>
 <p style="font-size:12px;color:#666;">Travel desk · Employee {{employeeCode}}</p>
 </div>`,
   },
@@ -118,7 +118,7 @@ export const EMAIL_SIM_INDUSTRY_TEMPLATES = [
     htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
 <p>Hello {{firstName}},</p>
 <p>The benefits enrollment window is closing soon. Review your selections to ensure your profile is up to date.</p>
-<p><a href="https://example.com/benefits">Review benefit selections</a></p>
+<p><a href="{{landingUrl}}">Review benefit selections</a></p>
 <p style="font-size:12px;color:#666;">Human Resources · {{reference}}</p>
 </div>`,
   },
@@ -129,7 +129,7 @@ export const EMAIL_SIM_INDUSTRY_TEMPLATES = [
     htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
 <p>Hi {{firstName}},</p>
 <p>Your security awareness assessment is pending. Complete the short assessment to keep your training record current.</p>
-<p><a href="https://example.com/security-assessment">Start assessment</a></p>
+<p><a href="{{landingUrl}}">Start assessment</a></p>
 <p style="font-size:12px;color:#666;">Awareness program · {{reference}}</p>
 </div>`,
   },
