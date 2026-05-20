@@ -36,12 +36,21 @@ router.get('/ping', (_req, res) => {
 })
 
 router.get('/open/:token', async (req, res) => {
+  const token = req.params.token
+  const variant = String(req.query.p || '').slice(0, 16)
+  const ua = req.headers['user-agent'] || ''
+  const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim()
+  // Always log — operators need to see open hits in container logs to debug
+  // "why is my open rate stuck at 0?" without grepping the DB.
+  console.log(`[email-sim] open hit token=${token.slice(0, 8)}… variant=${variant || '-'} ip=${ip} ua="${String(ua).slice(0, 120)}"`)
   try {
     await EmailSimRecipient.updateOne(
-      { trackingToken: req.params.token, 'events.type': { $ne: 'opened' } },
-      { $push: { events: { type: 'opened', at: new Date(), meta: { source: 'pixel', ua: req.headers['user-agent'] || '' } } } },
+      { trackingToken: token, 'events.type': { $ne: 'opened' } },
+      { $push: { events: { type: 'opened', at: new Date(), meta: { source: `pixel:${variant || 'default'}`, ua, ip } } } },
     )
-  } catch (_) {}
+  } catch (e) {
+    console.warn('[email-sim] open update failed:', e?.message || e)
+  }
   res.setHeader('Content-Type', 'image/gif')
   res.setHeader('Content-Length', String(PIXEL_GIF.length))
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private')

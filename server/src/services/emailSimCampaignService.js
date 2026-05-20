@@ -49,18 +49,32 @@ export function buildTrackedHtml(html, trackingToken, origin) {
     root(el).attr('href', `${clickBase}?u=${u}`)
   })
 
-  // Two pixels — top of body and bottom — give us the best chance of an open
-  // event regardless of which images the recipient's client decides to fetch.
-  // Cache-busting query params make corporate proxies (Gmail image proxy,
-  // delivery.lenskart.in, Mimecast) treat each as distinct and re-fetch.
-  const pixelTop = `<img src="${openUrl}?p=top" alt="" width="1" height="1" border="0" style="display:block !important;height:1px;width:1px;border:0;line-height:1px;" />`
-  const pixelBot = `<img src="${openUrl}?p=bot" alt="" width="1" height="1" border="0" style="display:block !important;height:1px;width:1px;border:0;line-height:1px;" />`
+  // Multi-vector open tracking. Real-world mail clients block remote content
+  // aggressively, so we drop several different shapes — every additional one
+  // costs us nothing and meaningfully raises the chance one of them fetches.
+  //
+  //   1) <img> at the very top of <body>           — read on render
+  //   2) <img> at the very end of <body>           — read after layout
+  //   3) <img> wrapped in MSO-conditional comment  — Outlook desktop / Word renderer
+  //   4) CSS background-image on a 1px <div>       — Gmail web sometimes fetches these
+  //   5) Tracked anchor on the header logo span    — counts as a click→open if pressed
+  //
+  // Each src has a unique `?p=` so corporate proxies (Gmail Image Proxy,
+  // delivery.lenskart.in, Mimecast) don't collapse them into a single cached hit.
+  const pixelTop  = `<img src="${openUrl}?p=top" alt="" width="1" height="1" border="0" style="display:block !important;height:1px;width:1px;border:0;line-height:1px;outline:none;" />`
+  const pixelBot  = `<img src="${openUrl}?p=bot" alt="" width="1" height="1" border="0" style="display:block !important;height:1px;width:1px;border:0;line-height:1px;outline:none;" />`
+  const pixelMso  = `<!--[if mso]><img src="${openUrl}?p=mso" alt="" width="1" height="1" border="0" /><![endif]-->`
+  const pixelCss  = `<div style="background-image:url('${openUrl}?p=css');background-repeat:no-repeat;background-position:0 0;height:1px;width:1px;font-size:0;line-height:0;mso-hide:all;" aria-hidden="true">&nbsp;</div>`
   const body = root('body')
   if (body.length) {
     body.prepend(pixelTop)
+    body.append(pixelCss)
+    body.append(pixelMso)
     body.append(pixelBot)
   } else {
     root.root().prepend(pixelTop)
+    root.root().append(pixelCss)
+    root.root().append(pixelMso)
     root.root().append(pixelBot)
   }
   return root.html()
