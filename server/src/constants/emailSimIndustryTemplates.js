@@ -1,136 +1,243 @@
 /** Starter templates — LensPulse branded; neutral wording for awareness simulations. */
 
+import { buildEmail } from './emailSimTemplateBuilder.js'
+
 export const EMAIL_SIM_INDUSTRY_TEMPLATES = [
   {
     name: 'LensPulse — Policy reminder',
     category: 'industry',
     subject: 'Action requested: acknowledge updated acceptable use guidelines',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hello {{firstName}},</p>
-<p>Our security team published an update to the <strong>acceptable use policy</strong>. Please review and acknowledge within <strong>48 hours</strong> to avoid restricted access.</p>
-<p><a href="{{landingUrl}}">Open policy summary</a></p>
-<p style="font-size:12px;color:#666;">Sent by LensPulse awareness programme · Ref {{reference}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      icon: '📜',
+      accentColor: '#dc2626',
+      accentDark: '#991b1b',
+      urgencyText: '⚠ Action required within 48 hours',
+      urgencyColor: '#dc2626',
+      title: 'Acceptable Use Policy — acknowledgement required',
+      paragraphs: [
+        'Our security team published an updated <strong>Acceptable Use Policy</strong>. Please review and acknowledge within <strong>48 hours</strong> to avoid restricted access to corporate applications.',
+        'Acknowledging confirms you understand the new rules on device hygiene, password practices, and acceptable network use.',
+      ],
+      ctaLabel: 'Acknowledge policy',
+      noteLine: 'This is a one-click action. Acknowledgement is recorded against your employee profile.',
+      footerLine: 'Sent by LensPulse awareness programme · Reference <strong>{{reference}}</strong>',
+    }),
   },
   {
     name: 'LensPulse — MFA enrollment',
     category: 'industry',
     subject: 'Finish securing your account — MFA enrollment',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hi {{firstName}},</p>
-<p>Multi-factor authentication is now required for your role. Complete enrollment using the link below from a trusted device.</p>
-<p><a href="{{landingUrl}}">Complete MFA enrollment</a></p>
-<p>If you did not expect this message, contact the IT service desk with reference <strong>{{reference}}</strong>.</p>
-</div>`,
+    htmlBody: buildEmail({
+      icon: '🔐',
+      accentColor: '#2563eb',
+      accentDark: '#1d4ed8',
+      urgencyText: '🔒 Multi-factor authentication is now required for your role',
+      urgencyColor: '#2563eb',
+      title: 'Complete your MFA enrollment',
+      paragraphs: [
+        'Hi {{firstName}},',
+        'Multi-factor authentication is now required for your role. Complete the short enrollment from a trusted device to keep access to email, VPN, and internal portals.',
+        'Enrollment takes less than two minutes and supports the corporate Authenticator app.',
+      ],
+      greeting: '',
+      ctaLabel: 'Enroll MFA now',
+      noteLine: 'If you did not expect this message, contact the IT service desk with reference <strong>{{reference}}</strong>.',
+      footerLine: 'Identity & Access Management · Reference <strong>{{reference}}</strong>',
+    }),
   },
   {
     name: 'LensPulse — Password expiry notice',
     category: 'industry',
     subject: 'Password expiry reminder for {{firstName}}',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hello {{firstName}},</p>
-<p>Your corporate password is scheduled to expire soon. Review the account security checklist to avoid interruption to business applications.</p>
-<p><a href="{{landingUrl}}">Review account security</a></p>
-<p style="font-size:12px;color:#666;">Security Operations · Ticket {{reference}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      icon: '🔑',
+      accentColor: '#ea580c',
+      accentDark: '#c2410c',
+      urgencyText: '⏰ Your password expires soon',
+      urgencyColor: '#ea580c',
+      title: 'Password expiry reminder',
+      paragraphs: [
+        'Your corporate password is scheduled to expire shortly. Review the account security checklist to avoid interruption to business applications such as email, VPN, and internal portals.',
+        'Updating now takes under a minute and avoids being locked out.',
+      ],
+      ctaLabel: 'Review account security',
+      footerLine: 'Security Operations · Ticket <strong>{{reference}}</strong>',
+    }),
   },
   {
     name: 'LensPulse — VPN access review',
     category: 'industry',
     subject: 'VPN access review required',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hi {{firstName}},</p>
-<p>We are validating VPN access for employees with remote connectivity. Confirm whether your assigned access is still required.</p>
-<p><a href="{{landingUrl}}">Confirm VPN access</a></p>
-<p style="font-size:12px;color:#666;">This awareness template should be used only for approved simulations.</p>
-</div>`,
+    htmlBody: buildEmail({
+      icon: '🌐',
+      accentColor: '#0d9488',
+      accentDark: '#0f766e',
+      urgencyText: '🔍 Quarterly access review',
+      urgencyColor: '#0d9488',
+      title: 'Confirm your VPN access is still needed',
+      paragraphs: [
+        'Hi {{firstName}},',
+        'We are validating VPN access for employees with remote connectivity. Confirm whether your assigned access is still required as part of this quarterly review.',
+        'Failing to confirm may result in access being removed at the end of the cycle.',
+      ],
+      greeting: '',
+      ctaLabel: 'Confirm VPN access',
+      footerLine: 'Network access review · Reference <strong>{{reference}}</strong>',
+    }),
   },
   {
     name: 'LensPulse — HR document acknowledgement',
     category: 'industry',
     subject: 'HR document acknowledgement pending',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hello {{firstName}},</p>
-<p>A revised workplace document has been assigned to your employee profile. Please acknowledge receipt before the close of business.</p>
-<p><a href="{{landingUrl}}">Open assigned document</a></p>
-<p style="font-size:12px;color:#666;">Employee code: {{employeeCode}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      icon: '📑',
+      accentColor: '#7c3aed',
+      accentDark: '#6d28d9',
+      brandTagline: 'People Operations',
+      title: 'A revised HR document needs your acknowledgement',
+      paragraphs: [
+        'A revised workplace document has been assigned to your employee profile. Please acknowledge receipt before the close of business.',
+        'The document covers updated working practices and is required reading for active employees.',
+      ],
+      ctaLabel: 'Open assigned document',
+      footerLine: 'People Operations · Employee <strong>{{employeeCode}}</strong>',
+    }),
   },
   {
     name: 'LensPulse — Payroll update confirmation',
     category: 'industry',
     subject: 'Confirm payroll information update',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>{{firstName}},</p>
-<p>Payroll records for your profile were updated recently. Confirm the request if this change was expected.</p>
-<p><a href="{{landingUrl}}">Confirm payroll request</a></p>
-<p>If you did not request a change, report this message to the service desk.</p>
-</div>`,
+    htmlBody: buildEmail({
+      icon: '💳',
+      accentColor: '#16a34a',
+      accentDark: '#15803d',
+      urgencyText: '💰 Payroll record was updated',
+      urgencyColor: '#16a34a',
+      title: 'Confirm your payroll update',
+      paragraphs: [
+        '{{firstName}}, payroll records for your profile were updated recently. Confirm the request if this change was expected.',
+        'If you did <strong>not</strong> request a change, report this message to the IT service desk immediately.',
+      ],
+      greeting: '',
+      ctaLabel: 'Confirm payroll request',
+      footerLine: 'Finance & Payroll · Reference <strong>{{reference}}</strong>',
+    }),
   },
   {
     name: 'LensPulse — Vendor invoice review',
     category: 'industry',
     subject: 'Invoice awaiting department review',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hello {{firstName}},</p>
-<p>A vendor invoice has been routed to your department queue for review. Please validate whether it should be approved or rejected.</p>
-<p><a href="{{landingUrl}}">Review invoice</a></p>
-<p style="font-size:12px;color:#666;">Finance workflow reference {{reference}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      icon: '🧾',
+      accentColor: '#0891b2',
+      accentDark: '#0e7490',
+      brandTagline: 'Finance Workflow',
+      title: 'Vendor invoice awaiting your review',
+      paragraphs: [
+        'A vendor invoice has been routed to your department queue for review. Please validate whether it should be approved or rejected.',
+        'Invoices remaining in the queue beyond seven days are escalated automatically.',
+      ],
+      ctaLabel: 'Review invoice',
+      footerLine: 'Finance workflow · Reference <strong>{{reference}}</strong>',
+    }),
   },
   {
     name: 'LensPulse — Device compliance alert',
     category: 'industry',
     subject: 'Device compliance check required',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hi {{firstName}},</p>
-<p>Your assigned device has not completed its latest compliance check. Connect to the portal to review the status and remediation steps.</p>
-<p><a href="{{landingUrl}}">Open device status</a></p>
-<p style="font-size:12px;color:#666;">Endpoint compliance · {{reference}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      icon: '💻',
+      accentColor: '#ea580c',
+      accentDark: '#c2410c',
+      urgencyText: '⚠ Your device failed its latest compliance check',
+      urgencyColor: '#ea580c',
+      title: 'Device compliance status needs your attention',
+      paragraphs: [
+        'Hi {{firstName}},',
+        'Your assigned device has not completed its latest compliance check. Connect to the portal to review the status and remediation steps.',
+        'Devices that remain out of compliance for 48 hours may lose access to corporate resources.',
+      ],
+      greeting: '',
+      ctaLabel: 'Open device status',
+      footerLine: 'Endpoint compliance · Reference <strong>{{reference}}</strong>',
+    }),
   },
   {
     name: 'LensPulse — Shared drive permission',
     category: 'industry',
     subject: 'Shared drive permission request',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hello {{firstName}},</p>
-<p>A permission request for a shared drive folder is waiting for your response. Review the request before access is granted.</p>
-<p><a href="{{landingUrl}}">Review access request</a></p>
-<p style="font-size:12px;color:#666;">Access governance simulation · {{reference}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      icon: '📂',
+      accentColor: '#2563eb',
+      accentDark: '#1d4ed8',
+      brandTagline: 'Access Governance',
+      title: 'Permission request awaiting your response',
+      paragraphs: [
+        'A permission request for a shared drive folder is waiting for your response. Review the request before access is granted.',
+        'Approving access without review can lead to data exposure — please verify the requester and folder before approving.',
+      ],
+      ctaLabel: 'Review access request',
+      footerLine: 'Access governance · Reference <strong>{{reference}}</strong>',
+    }),
   },
   {
     name: 'LensPulse — Travel desk itinerary',
     category: 'industry',
     subject: 'Travel itinerary confirmation needed',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hi {{firstName}},</p>
-<p>The travel desk has generated an itinerary for your profile. Please confirm or reject the schedule from the travel portal.</p>
-<p><a href="{{landingUrl}}">View itinerary</a></p>
-<p style="font-size:12px;color:#666;">Travel desk · Employee {{employeeCode}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      icon: '✈️',
+      accentColor: '#0891b2',
+      accentDark: '#0e7490',
+      brandTagline: 'Travel Desk',
+      title: 'Confirm your generated itinerary',
+      paragraphs: [
+        'Hi {{firstName}},',
+        'The travel desk has generated an itinerary for your profile. Please confirm or reject the schedule from the travel portal.',
+        'Unconfirmed itineraries are cancelled automatically 24 hours before departure.',
+      ],
+      greeting: '',
+      ctaLabel: 'View itinerary',
+      footerLine: 'Travel desk · Employee <strong>{{employeeCode}}</strong>',
+    }),
   },
   {
     name: 'LensPulse — Benefits enrollment',
     category: 'industry',
     subject: 'Benefits enrollment window closing',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hello {{firstName}},</p>
-<p>The benefits enrollment window is closing soon. Review your selections to ensure your profile is up to date.</p>
-<p><a href="{{landingUrl}}">Review benefit selections</a></p>
-<p style="font-size:12px;color:#666;">Human Resources · {{reference}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      icon: '🎁',
+      accentColor: '#db2777',
+      accentDark: '#be185d',
+      urgencyText: '🎯 Enrollment window closes soon',
+      urgencyColor: '#db2777',
+      title: 'Review your benefits selections',
+      paragraphs: [
+        'The benefits enrollment window is closing soon. Review your selections to make sure your profile reflects the coverage you want for the next cycle.',
+        'Selections cannot be edited after the window closes.',
+      ],
+      ctaLabel: 'Review benefit selections',
+      footerLine: 'Human Resources · Reference <strong>{{reference}}</strong>',
+    }),
   },
   {
     name: 'LensPulse — Security awareness assessment',
     category: 'industry',
     subject: 'Complete your security awareness assessment',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hi {{firstName}},</p>
-<p>Your security awareness assessment is pending. Complete the short assessment to keep your training record current.</p>
-<p><a href="{{landingUrl}}">Start assessment</a></p>
-<p style="font-size:12px;color:#666;">Awareness program · {{reference}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      icon: '🛡',
+      accentColor: '#2563eb',
+      accentDark: '#1e40af',
+      urgencyText: '📚 Mandatory training assignment',
+      urgencyColor: '#2563eb',
+      title: 'Your security awareness assessment is pending',
+      paragraphs: [
+        'Hi {{firstName}},',
+        'Your security awareness assessment is pending. Complete the short assessment to keep your training record current.',
+        'Most employees finish in under 10 minutes.',
+      ],
+      greeting: '',
+      ctaLabel: 'Start assessment',
+      footerLine: 'Awareness programme · Reference <strong>{{reference}}</strong>',
+    }),
   },
 ]

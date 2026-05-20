@@ -1,136 +1,266 @@
 /** Workplace verification-style starters — use only in sanctioned simulations. */
 
+import { buildEmail } from './emailSimTemplateBuilder.js'
+
 export const EMAIL_SIM_WORKPLACE_TEMPLATES = [
   {
     name: 'Portal — Sign-in verification',
     category: 'workplace',
     subject: 'Verify your recent portal sign-in',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hello,</p>
-<p>We detected a sign-in to the workplace portal from an unrecognized browser. Confirm this was you.</p>
-<p><a href="{{landingUrl}}">Verify activity</a> · Or review your active sessions from the security dashboard.</p>
-<p style="font-size:12px;color:#666;">Workspace · Employee {{employeeCode}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      brand: 'Workspace',
+      brandTagline: 'Account Security',
+      icon: '🔒',
+      accentColor: '#2563eb',
+      accentDark: '#1d4ed8',
+      urgencyText: '🚨 New sign-in from an unrecognized browser',
+      urgencyColor: '#dc2626',
+      title: 'Was this you?',
+      paragraphs: [
+        'We detected a sign-in to your workplace portal from a browser we have not seen before.',
+        'If this was you, no further action is required. Otherwise, verify activity now so we can secure the account.',
+      ],
+      ctaLabel: 'Verify activity',
+      noteLine: 'Or review active sessions from the security dashboard.',
+      footerLine: 'Workspace Account Security · Employee <strong>{{employeeCode}}</strong>',
+      footerOrg: '© Workspace · Account Security',
+    }),
   },
   {
     name: 'Portal — Mailbox quota',
     category: 'workplace',
     subject: 'Mailbox approaching quota — optional cleanup',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>{{firstName}},</p>
-<p>Your mailbox is above <strong>90%</strong> of its quota. Large attachments may bounce until space is freed.</p>
-<p><a href="{{landingUrl}}">Review storage</a></p>
-<p>This is an informational simulation template — replace links before use.</p>
-</div>`,
+    htmlBody: buildEmail({
+      brand: 'Workspace',
+      brandTagline: 'Mailbox',
+      icon: '📬',
+      accentColor: '#f59e0b',
+      accentDark: '#d97706',
+      urgencyText: '📊 Mailbox is at 92% of its allocated quota',
+      urgencyColor: '#f59e0b',
+      title: 'Optional cleanup before new mail bounces',
+      paragraphs: [
+        '{{firstName}}, your mailbox is above <strong>90%</strong> of its quota. Large attachments may bounce until space is freed.',
+        'Take a moment to remove large attachments or archive older folders.',
+      ],
+      greeting: '',
+      ctaLabel: 'Review storage',
+      footerLine: 'Workspace Mailbox Service · Reference <strong>{{reference}}</strong>',
+      footerOrg: '© Workspace · Mail Service',
+    }),
   },
   {
     name: 'Portal — Teams file share',
     category: 'workplace',
     subject: '{{firstName}}, a file was shared with you',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hello {{firstName}},</p>
-<p>A workplace file has been shared with you for review. Open the secure workspace link to view the document details.</p>
-<p><a href="{{landingUrl}}">Open shared file</a></p>
-<p style="font-size:12px;color:#666;">Workspace notifications · Ref {{reference}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      brand: 'Workspace',
+      brandTagline: 'File Sharing',
+      icon: '📎',
+      accentColor: '#2563eb',
+      accentDark: '#1d4ed8',
+      title: 'A workplace file has been shared with you',
+      paragraphs: [
+        'Hello {{firstName}}, a workplace file has been shared with you for review.',
+        'Open the secure workspace link to view the document details and any access expiry.',
+      ],
+      greeting: '',
+      ctaLabel: 'Open shared file',
+      footerLine: 'Workspace notifications · Reference <strong>{{reference}}</strong>',
+      footerOrg: '© Workspace · File Sharing',
+    }),
   },
   {
     name: 'Portal — Meeting recording',
     category: 'workplace',
     subject: 'Meeting recording available',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hi {{firstName}},</p>
-<p>A meeting recording has been processed and is available for your review.</p>
-<p><a href="{{landingUrl}}">View recording</a></p>
-<p style="font-size:12px;color:#666;">Workspace media · {{reference}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      brand: 'Workspace',
+      brandTagline: 'Meeting Media',
+      icon: '🎥',
+      accentColor: '#7c3aed',
+      accentDark: '#6d28d9',
+      title: 'A meeting recording is ready for review',
+      paragraphs: [
+        'Hi {{firstName}}, a meeting recording has been processed and is available for your review.',
+        'Recordings are available for 30 days from the date of the meeting.',
+      ],
+      greeting: '',
+      ctaLabel: 'View recording',
+      footerLine: 'Workspace media · Reference <strong>{{reference}}</strong>',
+      footerOrg: '© Workspace · Meeting Media',
+    }),
   },
   {
     name: 'Portal — DLP hold notification',
     category: 'workplace',
     subject: 'Message held for data protection review',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hello,</p>
-<p>A message associated with your mailbox was held for data protection review. Confirm if this was a business-approved transmission.</p>
-<p><a href="{{landingUrl}}">Review held message</a></p>
-<p style="font-size:12px;color:#666;">Data protection · Employee {{employeeCode}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      brand: 'Workspace',
+      brandTagline: 'Data Protection',
+      icon: '🛑',
+      accentColor: '#dc2626',
+      accentDark: '#991b1b',
+      urgencyText: '⚠ Message paused by data loss prevention',
+      urgencyColor: '#dc2626',
+      title: 'A message was held for data protection review',
+      paragraphs: [
+        'A message associated with your mailbox was held for data protection review. Confirm if this was a business-approved transmission.',
+        'Held messages older than 7 days are deleted automatically.',
+      ],
+      ctaLabel: 'Review held message',
+      footerLine: 'Data Protection · Employee <strong>{{employeeCode}}</strong>',
+      footerOrg: '© Workspace · Data Protection',
+    }),
   },
   {
     name: 'Portal — Document signature',
     category: 'workplace',
     subject: 'Document signature requested',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>{{firstName}},</p>
-<p>A document is waiting for your electronic signature in the workplace portal.</p>
-<p><a href="{{landingUrl}}">Review and sign</a></p>
-<p style="font-size:12px;color:#666;">Document workflow · {{reference}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      brand: 'Workspace',
+      brandTagline: 'Document Workflow',
+      icon: '✍',
+      accentColor: '#0891b2',
+      accentDark: '#0e7490',
+      title: 'A document is waiting for your signature',
+      paragraphs: [
+        '{{firstName}}, a document is waiting for your electronic signature in the workplace portal.',
+        'The workflow cannot continue until you sign or decline.',
+      ],
+      greeting: '',
+      ctaLabel: 'Review and sign',
+      footerLine: 'Document workflow · Reference <strong>{{reference}}</strong>',
+      footerOrg: '© Workspace · Document Workflow',
+    }),
   },
   {
     name: 'Portal — Calendar invite update',
     category: 'workplace',
     subject: 'Updated calendar invite requires response',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hello {{firstName}},</p>
-<p>A calendar invite was updated and requires your response before the organizer can finalize attendance.</p>
-<p><a href="{{landingUrl}}">Respond to invite</a></p>
-<p style="font-size:12px;color:#666;">Calendar service · {{reference}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      brand: 'Workspace',
+      brandTagline: 'Calendar',
+      icon: '📅',
+      accentColor: '#4f46e5',
+      accentDark: '#4338ca',
+      title: 'Calendar invite was updated',
+      paragraphs: [
+        'Hello {{firstName}}, a calendar invite was updated and requires your response before the organizer can finalize attendance.',
+        'Without a response, the slot stays tentative on your calendar.',
+      ],
+      greeting: '',
+      ctaLabel: 'Respond to invite',
+      footerLine: 'Calendar service · Reference <strong>{{reference}}</strong>',
+      footerOrg: '© Workspace · Calendar',
+    }),
   },
   {
     name: 'Portal — Expense report returned',
     category: 'workplace',
     subject: 'Expense report returned for correction',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hi {{firstName}},</p>
-<p>Your expense report was returned for a quick correction. Review the comments before resubmitting.</p>
-<p><a href="{{landingUrl}}">Open expense report</a></p>
-<p style="font-size:12px;color:#666;">Expense portal · {{reference}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      brand: 'Workspace',
+      brandTagline: 'Expense Portal',
+      icon: '💸',
+      accentColor: '#f59e0b',
+      accentDark: '#d97706',
+      urgencyText: '↩ Action needed before resubmission',
+      urgencyColor: '#f59e0b',
+      title: 'Expense report returned for a quick correction',
+      paragraphs: [
+        'Hi {{firstName}}, your expense report was returned for a small correction.',
+        'Review the reviewer comments and resubmit. Reports older than 30 days cannot be re-opened.',
+      ],
+      greeting: '',
+      ctaLabel: 'Open expense report',
+      footerLine: 'Expense portal · Reference <strong>{{reference}}</strong>',
+      footerOrg: '© Workspace · Expense Portal',
+    }),
   },
   {
     name: 'Portal — Secure message',
     category: 'workplace',
     subject: 'You received a secure message',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hello,</p>
-<p>A secure message is waiting in the workplace portal. Sign in to view the message and any attached files.</p>
-<p><a href="{{landingUrl}}">Open secure message</a></p>
-<p style="font-size:12px;color:#666;">Secure messaging · Employee {{employeeCode}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      brand: 'Workspace',
+      brandTagline: 'Secure Messaging',
+      icon: '✉',
+      accentColor: '#0f766e',
+      accentDark: '#115e59',
+      title: 'You have a new secure message',
+      paragraphs: [
+        'A secure message is waiting in the workplace portal. Sign in to view the message and any attached files.',
+        'Secure messages expire 14 days after delivery and cannot be re-issued.',
+      ],
+      ctaLabel: 'Open secure message',
+      footerLine: 'Secure messaging · Employee <strong>{{employeeCode}}</strong>',
+      footerOrg: '© Workspace · Secure Messaging',
+    }),
   },
   {
     name: 'Portal — Helpdesk ticket update',
     category: 'workplace',
     subject: 'Helpdesk ticket requires your input',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hi {{firstName}},</p>
-<p>The helpdesk team needs additional input on your ticket before it can be resolved.</p>
-<p><a href="{{landingUrl}}">Open ticket</a></p>
-<p style="font-size:12px;color:#666;">Ticket reference {{reference}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      brand: 'Workspace',
+      brandTagline: 'IT Helpdesk',
+      icon: '🛠',
+      accentColor: '#2563eb',
+      accentDark: '#1d4ed8',
+      title: 'Helpdesk needs additional input',
+      paragraphs: [
+        'Hi {{firstName}}, the helpdesk team needs additional input on your ticket before it can be resolved.',
+        'Tickets without a response for 5 business days are closed automatically.',
+      ],
+      greeting: '',
+      ctaLabel: 'Open ticket',
+      footerLine: 'Ticket reference <strong>{{reference}}</strong>',
+      footerOrg: '© Workspace · IT Helpdesk',
+    }),
   },
   {
     name: 'Portal — Cloud app authorization',
     category: 'workplace',
     subject: 'New cloud app authorization request',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>Hello {{firstName}},</p>
-<p>A cloud application has requested access to your workplace account. Review the authorization request before granting access.</p>
-<p><a href="{{landingUrl}}">Review app request</a></p>
-<p style="font-size:12px;color:#666;">Identity portal · {{reference}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      brand: 'Workspace',
+      brandTagline: 'Identity Portal',
+      icon: '🔓',
+      accentColor: '#7c3aed',
+      accentDark: '#6d28d9',
+      urgencyText: '👤 A new application is requesting access to your account',
+      urgencyColor: '#7c3aed',
+      title: 'Review a cloud app authorization request',
+      paragraphs: [
+        'Hello {{firstName}}, a cloud application has requested access to your workplace account.',
+        'Authorize only applications you recognize. Granting access shares profile data and may allow the app to act on your behalf.',
+      ],
+      greeting: '',
+      ctaLabel: 'Review app request',
+      footerLine: 'Identity portal · Reference <strong>{{reference}}</strong>',
+      footerOrg: '© Workspace · Identity Portal',
+    }),
   },
   {
     name: 'Portal — Storage cleanup',
     category: 'workplace',
     subject: 'Cloud storage cleanup recommended',
-    htmlBody: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;color:#111;line-height:1.5;">
-<p>{{firstName}},</p>
-<p>Your cloud storage contains files that may be archived. Review the cleanup list before automatic retention rules apply.</p>
-<p><a href="{{landingUrl}}">Review cleanup list</a></p>
-<p style="font-size:12px;color:#666;">Storage service · {{reference}}</p>
-</div>`,
+    htmlBody: buildEmail({
+      brand: 'Workspace',
+      brandTagline: 'Cloud Storage',
+      icon: '☁',
+      accentColor: '#0891b2',
+      accentDark: '#0e7490',
+      title: 'Cloud storage cleanup recommended',
+      paragraphs: [
+        '{{firstName}}, your cloud storage contains files that may be archived. Review the cleanup list before automatic retention rules apply.',
+        'Files older than the cleanup window are archived to cold storage and may take up to 24 hours to restore.',
+      ],
+      greeting: '',
+      ctaLabel: 'Review cleanup list',
+      footerLine: 'Storage service · Reference <strong>{{reference}}</strong>',
+      footerOrg: '© Workspace · Cloud Storage',
+    }),
   },
 ]
