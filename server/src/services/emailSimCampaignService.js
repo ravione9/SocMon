@@ -32,12 +32,20 @@ export function buildTrackedHtml(html, trackingToken, origin) {
   const base = String(origin || '').replace(/\/+$/, '')
   const openUrl = `${base}${PIXEL_PATH}/${trackingToken}`
   const clickBase = `${base}${CLICK_PATH}/${trackingToken}`
+  const landingUrl = `${base}${LANDING_PATH}/${trackingToken}`
   const root = cheerio.load(html, { decodeEntities: false })
   root('a[href]').each((_, el) => {
     const href = root(el).attr('href')
     if (!href || href.startsWith('#') || href.startsWith('mailto:')) return
     if (!/^https?:\/\//i.test(href)) return
-    const u = encodeURIComponent(href)
+    let target = href
+    try {
+      const parsed = new URL(href)
+      if (parsed.hostname === 'example.com') target = landingUrl
+    } catch {
+      target = href
+    }
+    const u = encodeURIComponent(target)
     root(el).attr('href', `${clickBase}?u=${u}`)
   })
   const pixel = `<img src="${openUrl}" alt="" width="1" height="1" border="0" style="height:1px;width:1px;border:0;" />`
