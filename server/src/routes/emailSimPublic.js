@@ -12,6 +12,25 @@ const router = Router()
 
 const PIXEL_GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')
 
+/**
+ * Real-world phishing-sim quirk: many corporate gateways (Gmail Workspace with
+ * "Restrict external images", Lenskart's delivery.lenskart.in wrapper, Outlook
+ * with image blocking) strip remote images. Recipients still click links from
+ * preview panes, so we see clicked/landing/submitted but Opens stays at 0%.
+ *
+ * A click physically implies the message was opened. Push an "opened" event the
+ * first time we see any downstream activity, so stats reflect real engagement
+ * instead of just "did this client auto-fetch images".
+ */
+async function ensureOpenedEvent(trackingToken, source) {
+  try {
+    await EmailSimRecipient.updateOne(
+      { trackingToken, 'events.type': { $ne: 'opened' } },
+      { $push: { events: { type: 'opened', at: new Date(), meta: { source } } } },
+    )
+  } catch (_) {}
+}
+
 router.get('/ping', (_req, res) => {
   res.json({ ok: true })
 })
@@ -19,13 +38,16 @@ router.get('/ping', (_req, res) => {
 router.get('/open/:token', async (req, res) => {
   try {
     await EmailSimRecipient.updateOne(
-      { trackingToken: req.params.token },
-      { $push: { events: { type: 'opened', at: new Date(), meta: { ua: req.headers['user-agent'] || '' } } } },
+      { trackingToken: req.params.token, 'events.type': { $ne: 'opened' } },
+      { $push: { events: { type: 'opened', at: new Date(), meta: { source: 'pixel', ua: req.headers['user-agent'] || '' } } } },
     )
   } catch (_) {}
   res.setHeader('Content-Type', 'image/gif')
-  res.setHeader('Cache-Control', 'no-store')
-  res.send(PIXEL_GIF)
+  res.setHeader('Content-Length', String(PIXEL_GIF.length))
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  res.setHeader('Pragma', 'no-cache')
+  res.setHeader('Expires', '0')
+  res.status(200).end(PIXEL_GIF)
 })
 
 router.get('/click/:token', async (req, res) => {
@@ -35,6 +57,7 @@ router.get('/click/:token', async (req, res) => {
   } catch (_) {
     target = ''
   }
+  await ensureOpenedEvent(req.params.token, 'click')
   try {
     await EmailSimRecipient.updateOne(
       { trackingToken: req.params.token },
@@ -50,6 +73,7 @@ router.get('/click/:token', async (req, res) => {
 router.get('/landing/:token', async (req, res) => {
   const origin =
     resolveTrackingOriginFromEnv() || resolveOriginFromRequest(req) || `${req.protocol}://${req.get('host')}`
+  await ensureOpenedEvent(req.params.token, 'landing')
   try {
     const rec = await EmailSimRecipient.findOne({ trackingToken: req.params.token }).populate('campaignId').lean()
     if (rec) {
@@ -77,6 +101,7 @@ router.get('/landing/:token', async (req, res) => {
 })
 
 router.post('/capture/:token', async (req, res) => {
+  await ensureOpenedEvent(req.params.token, 'capture')
   try {
     const payload =
       typeof req.body === 'object' && req.body !== null && Object.keys(req.body).length ? req.body : { raw: '' }

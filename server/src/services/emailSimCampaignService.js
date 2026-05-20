@@ -48,9 +48,21 @@ export function buildTrackedHtml(html, trackingToken, origin) {
     const u = encodeURIComponent(target)
     root(el).attr('href', `${clickBase}?u=${u}`)
   })
-  const pixel = `<img src="${openUrl}" alt="" width="1" height="1" border="0" style="height:1px;width:1px;border:0;" />`
-  if (root('body').length) root('body').append(pixel)
-  else root.root().append(pixel)
+
+  // Two pixels — top of body and bottom — give us the best chance of an open
+  // event regardless of which images the recipient's client decides to fetch.
+  // Cache-busting query params make corporate proxies (Gmail image proxy,
+  // delivery.lenskart.in, Mimecast) treat each as distinct and re-fetch.
+  const pixelTop = `<img src="${openUrl}?p=top" alt="" width="1" height="1" border="0" style="display:block !important;height:1px;width:1px;border:0;line-height:1px;" />`
+  const pixelBot = `<img src="${openUrl}?p=bot" alt="" width="1" height="1" border="0" style="display:block !important;height:1px;width:1px;border:0;line-height:1px;" />`
+  const body = root('body')
+  if (body.length) {
+    body.prepend(pixelTop)
+    body.append(pixelBot)
+  } else {
+    root.root().prepend(pixelTop)
+    root.root().append(pixelBot)
+  }
   return root.html()
 }
 
