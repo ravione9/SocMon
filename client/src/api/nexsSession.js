@@ -26,6 +26,15 @@ export function setNexsSession(session) {
   sessionStorage.setItem(STORAGE_KEY, JSON.stringify(session))
 }
 
+/** Merge new fields into the existing session (used to backfill empCode after login). */
+export function updateNexsSession(patch) {
+  const current = getNexsSession()
+  if (!current) return null
+  const next = { ...current, ...patch }
+  sessionStorage.setItem(STORAGE_KEY, JSON.stringify(next))
+  return next
+}
+
 export function clearNexsSession() {
   sessionStorage.removeItem(STORAGE_KEY)
 }

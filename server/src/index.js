@@ -37,6 +37,8 @@ import rdpRoutes, { proxyRdpWsUpgrade } from './routes/rdp.js'
 import idcsRoutes from './routes/idcs.js'
 import adRoutes from './routes/ad.js'
 import nexsRoutes from './routes/nexs.js'
+import emailSimRoutes from './routes/emailSim.js'
+import emailSimPublicRoutes from './routes/emailSimPublic.js'
 import customRoleRoutes from './routes/customRoles.js'
 import { errorHandler } from './middleware/errorHandler.js'
 
@@ -99,14 +101,18 @@ app.use(
 )
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true, limit: '10mb' }))
+/** Tracking pixels/clicks — avoid JWT and keep modest throughput separate from bulk API limits. */
+app.use('/api/email-sim/pub', emailSimPublicRoutes)
 app.use(
   '/api/',
   rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 500,
+    validate: { xForwardedForHeader: false },
     skip: (req) =>
       req.path.startsWith('/web-mgmt/p/') ||
-      (req.originalUrl || req.url || '').includes('idcs/export'),
+      (req.originalUrl || req.url || '').includes('idcs/export') ||
+      (req.originalUrl || req.url || '').includes('/email-sim/pub'),
   }),
 )
 
@@ -128,6 +134,7 @@ app.use('/api/rdp',  rdpRoutes)
 app.use('/api/idcs', idcsRoutes)
 app.use('/api/ad', adRoutes)
 app.use('/api/nexs', nexsRoutes)
+app.use('/api/email-sim', emailSimRoutes)
 app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.0.0', ai: process.env.AI_PROVIDER || 'claude' }))
 
 app.use(errorHandler)

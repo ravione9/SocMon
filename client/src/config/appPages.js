@@ -1,5 +1,5 @@
 /** Keep in sync with server/src/constants/appPages.js */
-export const APP_PAGE_KEYS = ['soc', 'noc', 'sentinel', 'infra', 'network', 'idcs', 'ad', 'nexs', 'tickets', 'reports', 'ai', 'admin']
+export const APP_PAGE_KEYS = ['soc', 'noc', 'sentinel', 'infra', 'network', 'idcs', 'ad', 'nexs', 'tickets', 'reports', 'emailSim', 'ai', 'admin']
 
 export const APP_PAGES = [
   { key: 'soc',      label: 'SOC',            path: '/soc' },
@@ -12,6 +12,7 @@ export const APP_PAGES = [
   { key: 'nexs',     label: 'Nexs Users',      path: '/nexs' },
   { key: 'tickets',  label: 'Tickets',         path: '/tickets' },
   { key: 'reports',  label: 'Reports',         path: '/reports' },
+  { key: 'emailSim', label: 'Email simulation', path: '/email-sim' },
   { key: 'ai',       label: 'AI assistant',    path: '/ai' },
   { key: 'admin',    label: 'Admin',           path: '/admin' },
 ]

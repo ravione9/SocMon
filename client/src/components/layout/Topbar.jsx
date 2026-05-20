@@ -11,6 +11,7 @@ const titles = {
   '/idcs': 'Oracle IDCS',
   '/ad': 'Active Directory',
   '/nexs': 'Nexs User Management',
+  '/email-sim': 'Email simulation',
   '/tickets': 'Ticket Management',
   '/ai': 'AI Assistant',
   '/reports': 'Reports & Analytics',

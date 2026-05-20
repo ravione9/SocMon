@@ -17,7 +17,13 @@ const APP_NAME = (process.env.NEXS_APP_NAME || DEFAULT_APP_ID || 'nexs_search').
 const ROLES_APP = (process.env.NEXS_ROLES_APP_NAME || process.env.NEXS_APP_NAME || DEFAULT_APP_ID || 'nexs_search').trim()
 const PORTAL_URL = (process.env.NEXS_PORTAL_URL || 'https://app.nexs.lenskart.com/usermanagement/roles').trim()
 const PORTAL_ORIGIN = (process.env.NEXS_PORTAL_ORIGIN || 'https://app.nexs.lenskart.com').trim().replace(/\/+$/, '')
+/** Portal app's own REST host (used for /facilities and other portal-side endpoints; mirrors the SPA's XHRs). */
+const PORTAL_API_BASE_URL = (process.env.NEXS_PORTAL_API_BASE_URL || PORTAL_ORIGIN || 'https://app.nexs.lenskart.com')
+  .trim()
+  .replace(/\/+$/, '')
 const SOURCE_DOMAIN = (process.env.NEXS_SOURCE_DOMAIN || PORTAL_ORIGIN).trim()
+/** Facility code the portal sends on its auth-service calls (defaults to NXS1, the Nexs admin facility). */
+const FACILITY_CODE = (process.env.NEXS_FACILITY_CODE || 'NXS1').trim()
 
 export function isNexsBaseConfigured() {
   return Boolean(BASE_URL)
@@ -78,6 +84,47 @@ export function looksLikeJwt(value) {
   return parts.length === 3 && parts.every((p) => p.length > 0)
 }
 
+/** Decode a JWT payload (base64url JSON) without verifying the signature. Safe for our own JWT. */
+export function decodeJwtPayload(token) {
+  try {
+    const parts = String(token || '').split('.')
+    if (parts.length < 2) return null
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const pad = b64.length % 4 ? '='.repeat(4 - (b64.length % 4)) : ''
+    const json = Buffer.from(b64 + pad, 'base64').toString('utf8')
+    return JSON.parse(json)
+  } catch {
+    return null
+  }
+}
+
+/** Pull the most useful identity fields from a Nexs JWT payload. */
+export function identityFromJwt(token) {
+  const claims = decodeJwtPayload(token) || {}
+  const empCodeRaw =
+    claims.empCode ||
+    claims.employeeCode ||
+    claims.employee_code ||
+    claims.empcode ||
+    claims.user?.empCode ||
+    claims.user?.employeeCode ||
+    null
+  const email =
+    claims.email ||
+    claims.emailId ||
+    claims.user?.email ||
+    claims.user?.emailId ||
+    (typeof claims.sub === 'string' && claims.sub.includes('@') ? claims.sub : null) ||
+    null
+  const userName = claims.userName || claims.user?.userName || claims.sub || email || null
+  return {
+    empCode: empCodeRaw ? String(empCodeRaw).trim() : null,
+    email: email ? String(email).trim() : null,
+    userName: userName ? String(userName).trim() : null,
+    claims,
+  }
+}
+
 function findJwtDeep(value, depth = 0) {
   if (depth > 6 || value == null) return null
   if (typeof value === 'string' && looksLikeJwt(value)) return value.trim()
@@ -107,6 +154,9 @@ function credHeaders(credentials, extra = {}) {
   }
   if (credentials.appId) {
     headers['X-Lenskart-App-Id'] = credentials.appId
+  }
+  if (FACILITY_CODE && !headers['facility-code']) {
+    headers['facility-code'] = FACILITY_CODE
   }
   return headers
 }
@@ -250,16 +300,58 @@ export async function login({ userName, password, appId }) {
     )
   }
 
+  const identity = identityFromJwt(token)
+  let empCode = identity.empCode
+  const email = identity.email || (user.includes('@') ? user : null)
+
+  // Fallback: JWT often omits empCode for portal users — look it up by email/userName via the search endpoint.
+  if (!empCode) {
+    empCode = await lookupEmpCodeByIdentity({ token, appId: aid }, { email, userName: user })
+  }
+
   return {
     token,
     appId: aid,
-    userName: user,
+    userName: identity.userName || user,
+    email: email || null,
+    empCode: empCode || null,
     raw: process.env.NEXS_DEBUG_RESPONSE === '1' ? data : undefined,
   }
 }
 
-export async function nexsFetch(credentials, path, { method = 'GET', query, body, headers } = {}) {
-  const url = new URL(`${BASE_URL}${path.startsWith('/') ? path : `/${path}`}`)
+/** Public alias around lookupEmpCodeByIdentity for routes that need to resolve a parent user's code. */
+export function resolveEmpCode(credentials, { email, userName } = {}) {
+  return lookupEmpCodeByIdentity(credentials, { email, userName })
+}
+
+/** Best-effort: resolve a user's empCode using their email/userName via /v1/get/users. */
+async function lookupEmpCodeByIdentity(credentials, { email, userName }) {
+  const tries = []
+  if (email) tries.push({ emailIds: email })
+  if (userName && userName !== email) tries.push({ empCodes: userName })
+
+  for (const params of tries) {
+    try {
+      const raw = await getUsersByParams(credentials, params)
+      const users = normalizeUserList(raw)
+      for (const u of users) {
+        const code =
+          u?.employeeCode ||
+          u?.empCode ||
+          u?.employee_code ||
+          u?.empcode ||
+          (typeof u?.userId === 'string' && /^\d+$/.test(u.userId) ? u.userId : null)
+        if (code) return String(code).trim()
+      }
+    } catch {
+      // ignore — fallback is best-effort
+    }
+  }
+  return null
+}
+
+async function nexsHttp(baseUrl, credentials, path, { method = 'GET', query, body, headers } = {}) {
+  const url = new URL(`${baseUrl}${path.startsWith('/') ? path : `/${path}`}`)
   if (query) {
     Object.entries(query).forEach(([k, v]) => {
       if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v))
@@ -285,6 +377,15 @@ export async function nexsFetch(credentials, path, { method = 'GET', query, body
   return data
 }
 
+export function nexsFetch(credentials, path, options) {
+  return nexsHttp(BASE_URL, credentials, path, options)
+}
+
+/** Call the Nexs portal's own REST host (app.nexs.lenskart.com). Used for endpoints the SPA itself owns. */
+export function nexsPortalFetch(credentials, path, options) {
+  return nexsHttp(PORTAL_API_BASE_URL, credentials, path, options)
+}
+
 export async function listApplicationUsers(credentials, appName = APP_NAME) {
   const candidates = []
   const pushCandidate = (value) => {
@@ -307,7 +408,9 @@ export async function listApplicationUsers(credentials, appName = APP_NAME) {
       lastData = data
       if (normalizeUserList(data).length > 0) return data
     } catch (e) {
-      if (e?.code === 'NEXS_TOKEN_INVALID' || e?.code === 'NEXS_AUTH_REQUIRED' || e?.status === 401) {
+      // Only a genuine token error invalidates the session. Other 401s (e.g. "no access to this app")
+      // are app-name-specific — keep retrying other candidates.
+      if (e?.code === 'NEXS_TOKEN_INVALID' || e?.code === 'NEXS_AUTH_REQUIRED') {
         throw e
       }
       lastError = e
@@ -373,6 +476,61 @@ export async function getActiveRoleGroups(credentials, empCode) {
   return nexsFetch(credentials, `/v1/userManagement/user/${encodeURIComponent(code)}/activeRoleGroups`)
 }
 
+/** GET /v1/userManagement/user/{empCode}/getAllChildRoles/ — assignable role groups for a manager (portal flow). */
+export async function getAssignableRoles(credentials, empCode) {
+  const code = String(empCode || '').trim()
+  if (!code) throw Object.assign(new Error('Employee code is required'), { status: 400 })
+  return nexsFetch(credentials, `/v1/userManagement/user/${encodeURIComponent(code)}/getAllChildRoles/`)
+}
+
+/** GET /v1/userManagement/user/{empCode}/approverRoleGroups — fallback when getAllChildRoles isn't available. */
+export async function getApproverRoleGroups(credentials, empCode) {
+  const code = String(empCode || '').trim()
+  if (!code) throw Object.assign(new Error('Employee code is required'), { status: 400 })
+  return nexsFetch(credentials, `/v1/userManagement/user/${encodeURIComponent(code)}/approverRoleGroups`)
+}
+
+/**
+ * GET /v1/userManagement/get/employeeData/{empCode} — resolve an employee from HR master data
+ * (works whether or not the employee is already a Nexs user). Mirrors the portal's add-user picker.
+ * Tries the auth service first (our JWT works there); falls back to the portal host (matches the SPA call).
+ */
+export async function lookupEmployee(credentials, empCode) {
+  const code = String(empCode || '').trim()
+  if (!code) throw Object.assign(new Error('Employee code is required'), { status: 400 })
+
+  const path = `/v1/userManagement/get/employeeData/${encodeURIComponent(code)}`
+  try {
+    return await nexsFetch(credentials, path)
+  } catch (e) {
+    if (e?.code === 'NEXS_TOKEN_INVALID' || e?.code === 'NEXS_AUTH_REQUIRED') throw e
+    // Best-effort fallback — same endpoint on the portal app's host (the SPA hits this).
+    return nexsPortalFetch(credentials, path)
+  }
+}
+
+/** Pick the most useful "employee" object out of the HR endpoint's response. */
+export function normalizeEmployeeRecord(raw) {
+  if (!raw) return null
+  const list = Array.isArray(raw) ? raw : Array.isArray(raw.data) ? raw.data : Array.isArray(raw.content) ? raw.content : null
+  const row = list && list.length ? list[0] : (raw && typeof raw === 'object' && raw.employeeCode ? raw : null)
+  if (!row || typeof row !== 'object') return null
+  return {
+    empCode: row.employeeCode || row.empCode || row.employee_code || null,
+    name: row.employeeName || row.name || row.fullName || null,
+    status: row.employeeStatus || row.status || null,
+    designation: row.designation || row.title || null,
+    department: row.department || row.dept || null,
+    location: row.location || row.facility || null,
+    managerEmpCode: row.managerEmployeeCode || row.managerEmpCode || null,
+    managerName: row.managerEmployeeName || row.managerName || null,
+    mobile: row.mobileNumber || row.phone || row.phoneNumber || null,
+    email: row.email || row.emailId || null,
+    dateOfJoining: row.dateOfJoining || row.doj || null,
+    raw: row,
+  }
+}
+
 export async function bulkCreateUsersFromCsv(credentials, buffer, filename = 'users.csv') {
   const form = new FormData()
   form.append('csvFile', new Blob([buffer]), filename)
@@ -393,6 +551,75 @@ export async function bulkUpdateUserRolesFromCsv(credentials, buffer, filename =
 
 export async function validateEmail(credentials, email) {
   return nexsFetch(credentials, '/v1/validate/email', { query: { email: String(email || '').trim() } })
+}
+
+/**
+ * Dedupe a flat list of user rows by empCode (falling back to email or userId).
+ * The upstream often returns one row per user/role-group binding, which makes the same
+ * user appear many times. Here we collapse those rows into one and union the role/facility lists.
+ */
+export function dedupeUserList(users) {
+  if (!Array.isArray(users) || users.length < 2) return Array.isArray(users) ? users : []
+
+  const keyOf = (u) => {
+    if (!u || typeof u !== 'object') return null
+    const code = u.employeeCode || u.empCode || u.employee_code || u.empcode
+    if (code) return `emp:${String(code).trim().toLowerCase()}`
+    const email = u.email || u.emailId || u.mail
+    if (email) return `email:${String(email).trim().toLowerCase()}`
+    const userId = u.userId || u.id
+    if (userId) return `uid:${String(userId).trim().toLowerCase()}`
+    return null
+  }
+
+  const LIST_KEYS = ['roleGroups', 'roles', 'roleNames', 'activeRoleGroups', 'facilities', 'facilityList', 'accesses']
+
+  const mergeListField = (existing, incoming) => {
+    if (!incoming) return existing
+    const seen = new Map()
+    const add = (item) => {
+      if (item == null) return
+      const key =
+        typeof item === 'string'
+          ? item.trim().toLowerCase()
+          : typeof item === 'object'
+            ? String(item.name || item.roleGroupName || item.id || JSON.stringify(item)).trim().toLowerCase()
+            : String(item).toLowerCase()
+      if (!key || seen.has(key)) return
+      seen.set(key, item)
+    }
+    if (Array.isArray(existing)) existing.forEach(add)
+    if (Array.isArray(incoming)) incoming.forEach(add)
+    else add(incoming)
+    return [...seen.values()]
+  }
+
+  const merged = new Map()
+  const fallbackRows = []
+
+  for (const row of users) {
+    const key = keyOf(row)
+    if (!key) {
+      fallbackRows.push(row)
+      continue
+    }
+    const prev = merged.get(key)
+    if (!prev) {
+      merged.set(key, { ...row })
+      continue
+    }
+
+    // Merge: keep first non-empty scalar for each field, union list-shaped fields.
+    for (const [field, value] of Object.entries(row)) {
+      if (LIST_KEYS.includes(field) || Array.isArray(value)) {
+        prev[field] = mergeListField(prev[field], value)
+      } else if (prev[field] === undefined || prev[field] === null || prev[field] === '') {
+        prev[field] = value
+      }
+    }
+  }
+
+  return [...merged.values(), ...fallbackRows]
 }
 
 export function normalizeUserList(data) {
@@ -457,9 +684,170 @@ export function normalizeUserList(data) {
 
 export function normalizeRoleList(data) {
   if (!data) return []
-  if (Array.isArray(data)) return data
-  if (Array.isArray(data.data)) return data.data
-  if (Array.isArray(data.roles)) return data.roles
-  if (data.data && Array.isArray(data.data.roles)) return data.data.roles
-  return []
+  if (Array.isArray(data)) return data.filter((r) => r !== null && r !== undefined)
+
+  const arrays = []
+  const seen = new Set()
+  const priorityKeys = [
+    'roleGroups',
+    'roles',
+    'childRoles',
+    'activeRoleGroups',
+    'data',
+    'content',
+    'result',
+    'results',
+    'payload',
+    'items',
+    'records',
+  ]
+
+  const pushArray = (arr) => {
+    if (!Array.isArray(arr) || !arr.length) return
+    const key = `${arr.length}:${typeof arr[0]}`
+    if (seen.has(key)) return
+    seen.add(key)
+    arrays.push(arr)
+  }
+
+  const visit = (node, depth = 0) => {
+    if (!node || depth > 6) return
+    if (Array.isArray(node)) {
+      pushArray(node)
+      return
+    }
+    if (typeof node !== 'object') return
+
+    for (const k of priorityKeys) {
+      if (node[k] !== undefined) visit(node[k], depth + 1)
+    }
+    for (const v of Object.values(node)) {
+      if (v && typeof v === 'object') visit(v, depth + 1)
+    }
+  }
+
+  visit(data)
+  if (!arrays.length) return []
+
+  const scoreRoleArray = (arr) =>
+    arr.reduce((score, r) => {
+      if (typeof r === 'string' && r.trim()) return score + 1
+      if (r && typeof r === 'object' && (r.name || r.roleGroupName || r.roleName || r.id || r.code)) {
+        return score + 1
+      }
+      return score
+    }, 0)
+
+  arrays.sort((a, b) => scoreRoleArray(b) - scoreRoleArray(a) || b.length - a.length)
+  return arrays[0] || []
+}
+
+function facilityName(value) {
+  if (value == null) return ''
+  if (typeof value === 'string') return value.trim()
+  if (typeof value === 'number') return String(value)
+  if (typeof value !== 'object') return ''
+  return String(
+    value.name ||
+      value.facilityName ||
+      value.facility ||
+      value.franchiseName ||
+      value.storeName ||
+      value.siteName ||
+      value.location ||
+      value.code ||
+      value.id ||
+      '',
+  ).trim()
+}
+
+/**
+ * POST {portal-host}/facilities — exact call the Nexs SPA makes when populating the role-assign modal.
+ * Body matches the portal HAR ({type, pageRequest, facility_status}); response carries facility rows under data.results.
+ */
+export async function getFacilities(
+  credentials,
+  { facilityType, facilityStatus = 'ACTIVE', pageSize = 6000, pageNumber = 0, sortKey = 'updated_at', sortOrder = 'DESC' } = {},
+) {
+  const body = {
+    type: facilityType || 'facilities',
+    pageRequest: { pageNumber, pageSize, sortKey, sortOrder },
+    facility_status: facilityStatus,
+  }
+  return nexsPortalFetch(credentials, '/facilities', { method: 'POST', body })
+}
+
+const FACILITY_OBJECT_HINT_KEYS = new Set([
+  'facilityName',
+  'facility',
+  'facilityCode',
+  'franchiseName',
+  'storeName',
+  'siteName',
+  'storeCode',
+  'siteCode',
+  'code',
+  'name',
+])
+
+function looksLikeFacilityObject(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false
+  for (const k of Object.keys(obj)) {
+    if (FACILITY_OBJECT_HINT_KEYS.has(k)) return true
+  }
+  return false
+}
+
+export function normalizeFacilityList(data) {
+  const found = new Set()
+  const add = (value) => {
+    const name = facilityName(value)
+    if (name) found.add(name)
+  }
+
+  const visit = (node, depth = 0) => {
+    if (node == null || depth > 8) return
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item, depth + 1)
+      return
+    }
+    if (typeof node === 'string' || typeof node === 'number') {
+      add(node)
+      return
+    }
+    if (typeof node !== 'object') return
+
+    // Pull a name from this object if it shaped like a facility row.
+    if (looksLikeFacilityObject(node)) add(node)
+
+    const arrayKeys = [
+      'content',
+      'data',
+      'result',
+      'results',
+      'payload',
+      'items',
+      'records',
+      'rows',
+      'facilities',
+      'facility',
+      'facilityNames',
+      'franchises',
+      'sites',
+      'stores',
+      'locations',
+    ]
+    for (const key of arrayKeys) {
+      if (node[key] !== undefined) visit(node[key], depth + 1)
+    }
+
+    for (const [key, value] of Object.entries(node)) {
+      if (/facilit|franchise|store|site|location/i.test(key) && (Array.isArray(value) || typeof value === 'object')) {
+        visit(value, depth + 1)
+      }
+    }
+  }
+
+  visit(data)
+  return [...found].sort((a, b) => a.localeCompare(b))
 }

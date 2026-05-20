@@ -10,12 +10,17 @@ import NexsBulkUpload from '../../components/nexs/NexsBulkUpload'
 import NexsLoginPanel from '../../components/nexs/NexsLoginPanel'
 import {
   createUser,
+  getAssignableRoles,
+  getNexsMe,
   getNexsMeta,
   getNexsSession,
   getUserRoles,
+  listFacilities,
   listRoles,
   listUsers,
+  lookupEmployee,
   signOutNexs,
+  updateNexsSession,
 } from '../../api/nexs'
 import NexsPortalButton from '../../components/nexs/NexsPortalButton'
 import { nexsBtnGhost, nexsBtnPrimary, nexsCx, nexsInputClass } from '../../components/nexs/nexsTheme'
@@ -48,6 +53,8 @@ function parseRoleGroups(data) {
   const candidates = [
     data?.roleGroups,
     data?.roles,
+    data?.roleNames,
+    data?.roleGroup,
     data?.activeRoleGroups,
     data?.data,
     data?.content,
@@ -63,6 +70,12 @@ function parseRoleGroups(data) {
     if (!candidate) continue
     if (Array.isArray(candidate)) {
       return candidate.map(roleName).filter(Boolean)
+    }
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean)
     }
   }
 
@@ -204,9 +217,12 @@ export default function NexsUserManagementPage() {
   const [session, setSession] = useState(() => getNexsSession())
   const [users, setUsers] = useState([])
   const [roles, setRoles] = useState([])
+  const [grantableRoles, setGrantableRoles] = useState([])
+  const [facilities, setFacilities] = useState([])
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
   const [roleModal, setRoleModal] = useState(null)
+  const parentEmpCode = session?.empCode || null
 
   const loadMeta = useCallback(async () => {
     try {
@@ -236,46 +252,114 @@ export default function NexsUserManagementPage() {
     }
   }, [])
 
+  const loadFacilities = useCallback(async (appName) => {
+    // Facilities are an enhancement — failures (including 401) must not sign the user out.
+    // Search/roles calls will surface a genuine session expiry.
+    try {
+      const d = await listFacilities(appName)
+      setFacilities(Array.isArray(d.facilities) ? d.facilities : [])
+    } catch {
+      setFacilities([])
+    }
+  }, [])
+
+  const loadGrantableRoles = useCallback(async (empCode) => {
+    if (!empCode) {
+      setGrantableRoles([])
+      return
+    }
+    try {
+      const d = await getAssignableRoles(empCode)
+      setGrantableRoles(Array.isArray(d?.roles) ? d.roles : [])
+    } catch {
+      setGrantableRoles([])
+    }
+  }, [])
+
   const loadUsers = useCallback(async (q = '') => {
     setLoading(true)
     try {
-      const params = q.trim() ? { search: q, mode: 'search' } : {}
+      const params = q.trim()
+        ? { search: q, mode: 'search' }
+        : { ...(parentEmpCode ? { parentEmpCode } : {}) }
       const d = await listUsers(params)
       let nextUsers = Array.isArray(d.users) ? d.users : []
-
       const query = String(q || '').trim()
-      if (query) {
-        const empCodes = [...new Set(nextUsers.map((u) => pickEmpCode(u)).filter(Boolean))].slice(0, 10)
-        if (empCodes.length) {
-          const lookups = await Promise.allSettled(
-            empCodes.map(async (empCode) => {
-              const data = await getUserRoles(empCode)
-              return { empCode, roles: parseRoleGroups(data) }
-            }),
-          )
 
-          const rolesByEmp = new Map()
-          for (const result of lookups) {
-            if (result.status !== 'fulfilled') continue
-            const { empCode, roles: assignedRoles } = result.value
-            if (empCode && Array.isArray(assignedRoles) && assignedRoles.length) {
-              rolesByEmp.set(empCode, assignedRoles)
+      // If the query looks like an employee code but Nexs has nothing, surface an HR-only row
+      // so the user can still see the person and assign roles (creating the Nexs user on save).
+      if (query && nextUsers.length === 0 && /^[A-Za-z0-9_-]{3,}$/.test(query)) {
+        try {
+          const lookup = await lookupEmployee(query)
+          const emp = lookup?.employee
+          if (emp?.empCode) {
+            nextUsers = [{
+              employeeCode: emp.empCode,
+              name: emp.name || '',
+              email: emp.email || '',
+              phoneNumber: emp.mobile || '',
+              department: emp.department || '',
+              designation: emp.designation || '',
+              location: emp.location || '',
+              managerEmployeeCode: emp.managerEmpCode || '',
+              roleGroups: [],
+              _hrOnly: true,
+            }]
+          }
+        } catch {
+          // ignore - search just returns empty.
+        }
+      }
+
+      // Enrich every visible user with HR master data (name, dept, designation, location)
+      // in parallel. Capped to keep this responsive on larger result sets.
+      const empCodes = [...new Set(nextUsers.map((u) => pickEmpCode(u)).filter(Boolean))].slice(0, 30)
+      if (empCodes.length) {
+        const lookups = await Promise.allSettled(
+          empCodes.map(async (empCode) => {
+            const [hr, roles] = await Promise.allSettled([
+              lookupEmployee(empCode),
+              getUserRoles(empCode),
+            ])
+            return {
+              empCode,
+              employee: hr.status === 'fulfilled' ? hr.value?.employee || null : null,
+              roles: roles.status === 'fulfilled' ? parseRoleGroups(roles.value) : null,
             }
-          }
+          }),
+        )
 
-          if (rolesByEmp.size) {
-            nextUsers = nextUsers.map((user) => {
-              const empCode = pickEmpCode(user)
-              const assignedRoles = rolesByEmp.get(empCode)
-              if (!assignedRoles?.length) return user
+        const enrichByEmp = new Map()
+        for (const result of lookups) {
+          if (result.status !== 'fulfilled') continue
+          const { empCode, employee, roles: assignedRoles } = result.value
+          enrichByEmp.set(empCode, { employee, roles: assignedRoles })
+        }
 
+        if (enrichByEmp.size) {
+          nextUsers = nextUsers.map((user) => {
+            const empCode = pickEmpCode(user)
+            const enrich = enrichByEmp.get(empCode)
+            if (!enrich) return user
+            const out = { ...user }
+            if (enrich.employee) {
+              const emp = enrich.employee
+              out.name = out.name || emp.name || ''
+              out.email = out.email || emp.email || ''
+              out.phoneNumber = out.phoneNumber || emp.mobile || ''
+              out.department = out.department || emp.department || ''
+              out.designation = out.designation || emp.designation || ''
+              out.location = out.location || emp.location || ''
+              out.managerEmployeeCode = out.managerEmployeeCode || emp.managerEmpCode || ''
+            }
+            if (Array.isArray(enrich.roles) && enrich.roles.length) {
               const existing = []
-              if (Array.isArray(user?.roleGroups)) existing.push(...user.roleGroups.map(roleName).filter(Boolean))
-              if (Array.isArray(user?.roles)) existing.push(...user.roles.map(roleName).filter(Boolean))
-              const merged = [...new Set([...existing, ...assignedRoles])]
-              return { ...user, roleGroups: merged }
-            })
-          }
+              if (Array.isArray(out.roleGroups)) existing.push(...out.roleGroups.map(roleName).filter(Boolean))
+              if (Array.isArray(out.roles)) existing.push(...out.roles.map(roleName).filter(Boolean))
+              out.roleGroups = [...new Set([...existing, ...enrich.roles])]
+            }
+            return out
+          })
         }
       }
 
@@ -292,16 +376,37 @@ export default function NexsUserManagementPage() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [parentEmpCode])
 
   const refreshData = useCallback(() => {
     loadRoles(meta?.rolesAppName)
+    loadFacilities(meta?.appName)
+    loadGrantableRoles(parentEmpCode)
     loadUsers(search)
-  }, [loadRoles, loadUsers, search, meta?.rolesAppName])
+  }, [loadRoles, loadFacilities, loadGrantableRoles, loadUsers, search, meta?.rolesAppName, meta?.appName, parentEmpCode])
 
   useEffect(() => {
     loadMeta()
   }, [loadMeta])
+
+  // Backfill empCode for sessions that pre-date the login change.
+  // Once we have it, immediately trigger a grantable-role fetch so the page header
+  // and the role modal don't show "JWT active" with an empty pool.
+  useEffect(() => {
+    let cancelled = false
+    if (!session?.token || session?.empCode) return undefined
+    getNexsMe()
+      .then((me) => {
+        if (cancelled || !me?.empCode) return
+        const next = updateNexsSession({ empCode: me.empCode, email: me.email || session.email })
+        if (next) {
+          setSession(next)
+          loadGrantableRoles(me.empCode)
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [session?.token, session?.empCode, session?.email, loadGrantableRoles])
 
   useEffect(() => {
     if (session?.token && meta?.configured) {
@@ -318,6 +423,8 @@ export default function NexsUserManagementPage() {
     setSession(null)
     setUsers([])
     setRoles([])
+    setGrantableRoles([])
+    setFacilities([])
     toast.success('Signed out of Nexs')
   }
 
@@ -353,6 +460,12 @@ export default function NexsUserManagementPage() {
           <h1 className={`text-xl font-bold ${nexsCx.text}`}>Nexs user management</h1>
           <p className={`text-sm ${nexsCx.text3}`}>
             Signed in as <strong className={nexsCx.text2}>{session.userName}</strong>
+            {parentEmpCode ? (
+              <>
+                {' · '}
+                Emp <span className="font-mono">{parentEmpCode}</span>
+              </>
+            ) : null}
             {session.appId ? (
               <>
                 {' · '}
@@ -360,7 +473,13 @@ export default function NexsUserManagementPage() {
               </>
             ) : null}
             {' · '}
-            <span className="font-mono text-xs">JWT active (this tab)</span>
+            <span className="font-mono text-xs">
+              {grantableRoles.length
+                ? `${grantableRoles.length} grantable roles`
+                : roles.length
+                  ? `admin scope (${roles.length} roles)`
+                  : 'JWT active'}
+            </span>
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -389,24 +508,35 @@ export default function NexsUserManagementPage() {
 
       {tab === 'users' && (
         <div className="space-y-4">
-          <form onSubmit={handleSearch} className="flex gap-2 max-w-md">
-            <input
-              className={nexsInputClass('flex-1')}
-              placeholder="Search email or employee code"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-            <button type="submit" className={nexsBtnPrimary()}>Search</button>
-            <button type="button" className="text-sm px-3" style={{ color: 'var(--text3)' }} onClick={() => { setSearch(''); loadUsers('') }}>
-              Clear
+          <div className="flex flex-wrap items-center gap-3">
+            <form onSubmit={handleSearch} className="flex gap-2 max-w-md flex-1">
+              <input
+                className={nexsInputClass('flex-1')}
+                placeholder="Search email or employee code"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+              <button type="submit" className={nexsBtnPrimary()}>Search</button>
+              <button type="button" className="text-sm px-3" style={{ color: 'var(--text3)' }} onClick={() => { setSearch(''); loadUsers('') }}>
+                Clear
+              </button>
+            </form>
+            <button
+              type="button"
+              className={nexsBtnGhost()}
+              onClick={() => setRoleModal({ empCode: '', label: 'New employee', initialRoles: [] })}
+              title="Assign roles to one or more employees (existing or new — auto-resolved from HR data)"
+            >
+              + Add / assign roles
             </button>
-          </form>
+          </div>
           <NexsUserTable
             users={users}
             loading={loading}
             onAssignRoles={(raw, empCode) => setRoleModal({
               empCode,
               label: raw?.name || raw?.email || empCode,
+              initialRoles: parseRoleGroups(raw),
             })}
           />
         </div>
@@ -420,6 +550,11 @@ export default function NexsUserManagementPage() {
           empCode={roleModal.empCode}
           userLabel={roleModal.label}
           allRoles={roles}
+          grantableRoles={grantableRoles}
+          parentEmpCode={parentEmpCode}
+          parentLabel={session?.userName || session?.email}
+          allFacilities={facilities}
+          initialRoles={roleModal.initialRoles}
           onClose={() => setRoleModal(null)}
           onSaved={() => { toast.success('Roles updated'); loadUsers(search) }}
         />

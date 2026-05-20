@@ -7,10 +7,15 @@ import { useAuthStore } from '../../store/authStore'
 import { useThemeStore } from '../../store/themeStore'
 import { getPageAccessLevel } from '../../utils/pageAccess'
 
+/** Path segments that differ from APP_PAGE_KEYS (e.g. kebab-case routes). */
+const PATH_SEGMENT_TO_PAGE_KEY = {
+  'email-sim': 'emailSim',
+}
+
 function pathToPageKey(pathname) {
   const seg = pathname.replace(/^\//, '').split('/')[0]
   if (!seg || seg === 'no-access') return null
-  return seg
+  return PATH_SEGMENT_TO_PAGE_KEY[seg] || seg
 }
 
 export default function Layout() {
