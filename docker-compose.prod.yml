@@ -14,8 +14,11 @@
 #      docker compose -f docker-compose.prod.yml up -d --build --force-recreate --no-deps server nginx
 #
 # Public: nginx on port 80 only (UI + /api + /socket.io).
-# API: internal Docker port 5010 — NOT mapped to the host (no 0.0.0.0:5000).
-# Use http://YOUR_HOST/ in the browser and for EMAIL_SIM_PUBLIC_ORIGIN (no :5000 / :5010).
+# Two internal Node containers — neither is mapped to the host:
+#   server      -> port 7325 — admin API (auth, devices, AD, IDCS, Email Sim admin, RDP, websockets)
+#   server-pub  -> port 7326 — public Email Sim tracking only (open pixel, click, landing, capture)
+# Same image, same Mongo/Redis. nginx routes public paths to server-pub and everything else to server.
+# Use http://YOUR_HOST/ in the browser and for EMAIL_SIM_PUBLIC_ORIGIN (no :7325 / :7326).
 #
 # Optional — bake the UI into an image instead of ./client/dist:
 #   docker build -f docker/nginx/Dockerfile -t netpulse-nginx .
@@ -36,6 +39,8 @@ services:
     depends_on:
       server:
         condition: service_healthy
+      server-pub:
+        condition: service_healthy
     networks:
       - netpulse
     restart: unless-stopped
@@ -45,14 +50,14 @@ services:
       context: ./server
       dockerfile: Dockerfile.prod
     container_name: netpulse-prod-server
-    # Internal only — nginx reaches server:5010 on the compose network. No "ports:" here.
+    # Internal only — nginx reaches server:7325 on the compose network. No "ports:" here.
     expose:
-      - "5010"
+      - "7325"
     env_file:
       - .env
     environment:
       NODE_ENV: production
-      PORT: "5010"
+      PORT: "7325"
       # guacd runs as a sibling container on the internal Docker network.
       # The server talks to it via the service name, not localhost.
       GUACD_HOST: guacd
@@ -75,7 +80,48 @@ services:
           'CMD',
           'node',
           '-e',
-          "fetch('http://127.0.0.1:5010/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+          "fetch('http://127.0.0.1:7325/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 75s
+
+  # Public-only Node: same image as `server`, but nginx only forwards
+  # /api/email-sim/pub/* to it. Lets you restart/scale the public surface
+  # without touching the admin API, and keeps a single container's blast
+  # radius limited to phishing-sim tracking endpoints.
+  server-pub:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.prod
+    container_name: netpulse-prod-server-pub
+    expose:
+      - "7326"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: "7326"
+      # No guacd/RDP usage from this container — point at a stub so the
+      # container doesn't try to dial a sibling on startup.
+      GUACD_HOST: guacd
+      GUACD_PORT: "4822"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - netpulse
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:7326/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
         ]
       interval: 10s
       timeout: 5s
