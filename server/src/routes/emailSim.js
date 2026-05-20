@@ -46,6 +46,22 @@ function escapeRegex(s) {
   return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+async function seedTemplatesForUser(userId, rows) {
+  const names = rows.map((row) => String(row.name || '').trim()).filter(Boolean)
+  const existing = await EmailSimTemplate.find({ createdBy: userId, name: { $in: names } }).select('name').lean()
+  const existingNames = new Set(existing.map((row) => String(row.name || '').trim().toLowerCase()))
+  const docs = rows
+    .filter((row) => !existingNames.has(String(row.name || '').trim().toLowerCase()))
+    .map((row) => ({
+      ...row,
+      name: String(row.name || '').trim(),
+      createdBy: userId,
+    }))
+  if (!docs.length) return { inserted: 0, skipped: rows.length }
+  const inserted = await EmailSimTemplate.insertMany(docs, { ordered: false })
+  return { inserted: inserted.length, skipped: rows.length - inserted.length }
+}
+
 router.get('/meta', (req, res) => {
   const origin = resolveTrackingOrigin(req) || null
   const warning = describeTrackingOriginIssue(origin)
@@ -191,12 +207,8 @@ router.delete('/templates/:id', write, async (req, res, next) => {
 
 router.post('/templates/seed/industry', write, async (req, res, next) => {
   try {
-    const docs = EMAIL_SIM_INDUSTRY_TEMPLATES.map((row) => ({
-      ...row,
-      createdBy: req.user._id,
-    }))
-    const inserted = await EmailSimTemplate.insertMany(docs)
-    res.status(201).json({ inserted: inserted.length })
+    const out = await seedTemplatesForUser(req.user._id, EMAIL_SIM_INDUSTRY_TEMPLATES)
+    res.status(out.inserted ? 201 : 200).json(out)
   } catch (e) {
     next(e)
   }
@@ -204,12 +216,8 @@ router.post('/templates/seed/industry', write, async (req, res, next) => {
 
 router.post('/templates/seed/workplace', write, async (req, res, next) => {
   try {
-    const docs = EMAIL_SIM_WORKPLACE_TEMPLATES.map((row) => ({
-      ...row,
-      createdBy: req.user._id,
-    }))
-    const inserted = await EmailSimTemplate.insertMany(docs)
-    res.status(201).json({ inserted: inserted.length })
+    const out = await seedTemplatesForUser(req.user._id, EMAIL_SIM_WORKPLACE_TEMPLATES)
+    res.status(out.inserted ? 201 : 200).json(out)
   } catch (e) {
     next(e)
   }

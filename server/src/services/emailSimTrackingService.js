@@ -76,8 +76,5 @@ export function describeTrackingOriginIssue(origin) {
   if (host.endsWith('.local')) {
     return `Tracking origin "${u.host}" uses a .local hostname. External mailboxes cannot resolve it.`
   }
-  if (u.protocol !== 'https:') {
-    return `Tracking origin is HTTP. Gmail proxies images aggressively and may block insecure trackers — prefer HTTPS for reliable open tracking.`
-  }
   return null
 }

@@ -1755,8 +1755,12 @@ export default function EmailSimulationPage() {
                     <GpSecondaryButton
                       disabled={!write}
                       onClick={async () => {
-                        await seedIndustryTemplates()
-                        toast.success('Default templates imported')
+                        const out = await seedIndustryTemplates()
+                        toast.success(
+                          out.inserted
+                            ? `Imported ${out.inserted} default templates${out.skipped ? ` · skipped ${out.skipped} existing` : ''}`
+                            : 'Default templates already imported',
+                        )
                         refreshAll()
                       }}
                     >
@@ -1765,8 +1769,12 @@ export default function EmailSimulationPage() {
                     <GpSecondaryButton
                       disabled={!write}
                       onClick={async () => {
-                        await seedWorkplaceTemplates()
-                        toast.success('Portal templates imported')
+                        const out = await seedWorkplaceTemplates()
+                        toast.success(
+                          out.inserted
+                            ? `Imported ${out.inserted} portal templates${out.skipped ? ` · skipped ${out.skipped} existing` : ''}`
+                            : 'Portal templates already imported',
+                        )
                         refreshAll()
                       }}
                     >
