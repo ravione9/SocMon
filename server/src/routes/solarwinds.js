@@ -436,6 +436,11 @@ router.get('/custom-properties/nodes', async (req, res) => {
         to: req.query.to,
         excludeFrom: req.query.excludeFrom,
         excludeTo: req.query.excludeTo,
+        bhEnabled: req.query.bhEnabled,
+        bhStart: req.query.bhStart,
+        bhEnd: req.query.bhEnd,
+        bhDays: req.query.bhDays,
+        bhTzOffsetMin: req.query.bhTzOffsetMin,
       }),
       'custom-properties query',
     )
@@ -449,6 +454,8 @@ router.get('/custom-properties/nodes', async (req, res) => {
       configured: true,
       nodeFields: result.nodeFields,
       ifaceFields: result.ifaceFields,
+      timeWindow: result.timeWindow,
+      businessHours: result.businessHours,
       nodes,
       total: nodes.length,
     })

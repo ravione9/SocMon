@@ -95,16 +95,87 @@ function toOrionDT(iso) {
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}T${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}.0000000`
 }
 
-async function nodeIdsInEventWindow(fromIso, toIso) {
+/** Parse "HH:MM" → minutes from midnight. */
+function parseHm(str) {
+  const m = String(str || '').match(/^(\d{1,2}):(\d{2})$/)
+  if (!m) return null
+  const h = Number(m[1])
+  const mm = Number(m[2])
+  if (h < 0 || h > 23 || mm < 0 || mm > 59) return null
+  return h * 60 + mm
+}
+
+function inBusinessHours(date, bh) {
+  if (!bh?.enabled) return true
+  const tzOffsetMin = Number.isFinite(Number(bh.tzOffsetMin)) ? Number(bh.tzOffsetMin) : 0
+  const local = new Date(date.getTime() + tzOffsetMin * 60_000)
+  const day = local.getUTCDay()
+  if (!bh.days.has(day)) return false
+  const mins = local.getUTCHours() * 60 + local.getUTCMinutes()
+  if (bh.startMin <= bh.endMin) return mins >= bh.startMin && mins < bh.endMin
+  return mins >= bh.startMin || mins < bh.endMin
+}
+
+function parseBusinessHours(opts) {
+  if (!opts?.bhEnabled || String(opts.bhEnabled) === 'false' || String(opts.bhEnabled) === '0') return null
+  const startMin = parseHm(opts.bhStart) ?? 9 * 60
+  const endMin = parseHm(opts.bhEnd) ?? 18 * 60
+  const daysRaw = String(opts.bhDays || '1,2,3,4,5').split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n >= 0 && n <= 6)
+  return {
+    enabled: true,
+    startMin,
+    endMin,
+    days: new Set(daysRaw.length ? daysRaw : [1, 2, 3, 4, 5]),
+    tzOffsetMin: Number(opts.bhTzOffsetMin) || 0,
+  }
+}
+
+async function nodeIdsInEventWindow(fromIso, toIso, bh = null) {
   const from = toOrionDT(fromIso)
   const to = toOrionDT(toIso)
   if (!from || !to) return null
   const data = await orionSwisQuery(
-    `SELECT DISTINCT e.NetworkNode AS NodeID FROM Orion.Events e
+    `SELECT DISTINCT e.NetworkNode AS NodeID, e.EventTime FROM Orion.Events e
      INNER JOIN Orion.Nodes n ON e.NetworkNode = n.NodeID
      WHERE e.EventTime >= '${from}' AND e.EventTime <= '${to}'`,
   )
-  return new Set((data?.results || []).map((r) => Number(r.NodeID)).filter(Number.isFinite))
+  const rows = data?.results || []
+  if (!bh?.enabled) {
+    return new Set(rows.map((r) => Number(r.NodeID)).filter(Number.isFinite))
+  }
+  const set = new Set()
+  for (const r of rows) {
+    const t = new Date(r.EventTime)
+    if (Number.isNaN(t.getTime())) continue
+    if (inBusinessHours(t, bh)) set.add(Number(r.NodeID))
+  }
+  return set
+}
+
+/** Average node availability (%) from Orion.ResponseTime over the window. */
+async function nodeAvailabilityMap(nodeIds, fromIso, toIso) {
+  const map = new Map()
+  if (!nodeIds?.length || !fromIso || !toIso) return map
+  const from = toOrionDT(fromIso)
+  const to = toOrionDT(toIso)
+  if (!from || !to) return map
+  const CHUNK = 100
+  for (let i = 0; i < nodeIds.length; i += CHUNK) {
+    const ids = nodeIds.slice(i, i + CHUNK).join(',')
+    try {
+      const data = await orionSwisQuery(
+        `SELECT NodeID, AVG(Availability) AS Avail
+         FROM Orion.ResponseTime
+         WHERE NodeID IN (${ids}) AND DateTime >= '${from}' AND DateTime <= '${to}'
+         GROUP BY NodeID`,
+      )
+      for (const r of data?.results || []) {
+        const v = Number(r.Avail)
+        if (Number.isFinite(v)) map.set(Number(r.NodeID), Math.max(0, Math.min(100, v)))
+      }
+    } catch { /* table absent on some Orion installs */ }
+  }
+  return map
 }
 
 /**
@@ -154,6 +225,7 @@ const STATUS_CODE = { up: 1, down: 2, warning: 3 }
 export async function queryByCustomProperties(opts = {}) {
   const nodeFields = await discoverNodeCPFields()
   const ifaceFields = await discoverIfaceCPFields()
+  const bh = parseBusinessHours(opts)
 
   const nodeCpCols = nodeFields.length
     ? nodeFields.map((f) => `ncp.${f}`).join(', ')
@@ -207,8 +279,8 @@ export async function queryByCustomProperties(opts = {}) {
   // Apply time window filtering in JS (event joins are too slow in SWQL)
   if ((opts.from && opts.to) || (opts.excludeFrom && opts.excludeTo)) {
     const [includeSet, excludeSet] = await Promise.all([
-      opts.from && opts.to ? nodeIdsInEventWindow(opts.from, opts.to) : Promise.resolve(null),
-      opts.excludeFrom && opts.excludeTo ? nodeIdsInEventWindow(opts.excludeFrom, opts.excludeTo) : Promise.resolve(null),
+      opts.from && opts.to ? nodeIdsInEventWindow(opts.from, opts.to, bh) : Promise.resolve(null),
+      opts.excludeFrom && opts.excludeTo ? nodeIdsInEventWindow(opts.excludeFrom, opts.excludeTo, bh) : Promise.resolve(null),
     ])
     rows = rows.filter((r) => {
       const id = Number(r.NodeID)
@@ -220,20 +292,37 @@ export async function queryByCustomProperties(opts = {}) {
 
   // Fetch top-2 interfaces (with CPs) for all returned nodes in bulk
   const nodeIds = rows.map((r) => Number(r.NodeID))
-  const ifaceMap = await fetchInterfacesBulk(nodeIds, ifaceFields)
+  const [ifaceMap, ifaceStats, availMap] = await Promise.all([
+    fetchInterfacesBulk(nodeIds, ifaceFields),
+    fetchInterfaceStats(nodeIds),
+    opts.from && opts.to ? nodeAvailabilityMap(nodeIds, opts.from, opts.to) : Promise.resolve(new Map()),
+  ])
 
   return {
     nodeFields,
     ifaceFields,
+    timeWindow: opts.from && opts.to ? { from: opts.from, to: opts.to } : null,
+    businessHours: bh ? { enabled: true, startMin: bh.startMin, endMin: bh.endMin, days: [...bh.days].sort() } : null,
     nodes: rows.map((r) => {
       const nodeCp = {}
       for (const f of nodeFields) nodeCp[f] = r[f] ?? null
       const ifaces = ifaceMap.get(Number(r.NodeID)) || []
+      const stats = ifaceStats.get(Number(r.NodeID)) || null
+      const statusCode = Number(r.Status)
+      const sampledAvail = availMap.get(Number(r.NodeID))
+      // Fallback when no time window or ResponseTime table not available:
+      //   1 (Up) → 100, 3 (Warning) → 50, 2 (Down) → 0, else null
+      const fallbackUptime =
+        statusCode === 1 ? 100 :
+        statusCode === 2 ? 0 :
+        statusCode === 3 ? 50 :
+        null
+      const uptimePct = sampledAvail != null ? sampledAvail : fallbackUptime
       return {
         id: r.NodeID,
         name: r.Caption,
         ip: r.IPAddress,
-        statusCode: Number(r.Status),
+        statusCode,
         statusDescription: r.StatusDescription || null,
         responseTime: r.ResponseTime != null ? Number(r.ResponseTime) : null,
         packetLoss: r.PercentLoss != null ? Number(r.PercentLoss) : null,
@@ -241,12 +330,43 @@ export async function queryByCustomProperties(opts = {}) {
         memory: r.PercentMemoryUsed != null ? Number(r.PercentMemoryUsed) : null,
         vendor: r.Vendor || null,
         machineType: r.MachineType || null,
+        uptimePct,
+        uptimeSampled: sampledAvail != null,
+        bandwidthPct: stats?.avgUtil ?? null,
+        bandwidthPeakPct: stats?.peakUtil ?? null,
         nodeCp,
         interface1: ifaces[0] || null,
         interface2: ifaces[1] || null,
       }
     }),
   }
+}
+
+/** Average + peak PercentUtil per node across all its interfaces. */
+async function fetchInterfaceStats(nodeIds) {
+  const map = new Map()
+  if (!nodeIds?.length) return map
+  const CHUNK = 100
+  for (let i = 0; i < nodeIds.length; i += CHUNK) {
+    const ids = nodeIds.slice(i, i + CHUNK).join(',')
+    try {
+      const d = await orionSwisQuery(
+        `SELECT NodeID, AVG(PercentUtil) AS AvgUtil, MAX(PercentUtil) AS PeakUtil
+         FROM Orion.NPM.Interfaces
+         WHERE NodeID IN (${ids}) AND PercentUtil >= 0
+         GROUP BY NodeID`,
+      )
+      for (const r of d?.results || []) {
+        const avg = Number(r.AvgUtil)
+        const peak = Number(r.PeakUtil)
+        map.set(Number(r.NodeID), {
+          avgUtil: Number.isFinite(avg) ? avg : null,
+          peakUtil: Number.isFinite(peak) ? peak : null,
+        })
+      }
+    } catch { /* keep going */ }
+  }
+  return map
 }
 
 async function fetchInterfacesBulk(nodeIds, ifaceFields) {

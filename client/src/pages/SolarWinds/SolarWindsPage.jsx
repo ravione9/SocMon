@@ -244,6 +244,21 @@ button.sw-kpi { width:100%; text-align:left; font-family:inherit; color:inherit;
 .sw-bh-day { padding:4px 8px; border-radius:6px; font-size:10px; font-family:var(--mono); font-weight:600;
   border:1px solid var(--border); background:transparent; color:var(--text3); cursor:pointer; }
 .sw-bh-day.on { border-color:var(--accent); background:rgba(79,126,245,.15); color:var(--accent); }
+
+/* Print / Export PDF: hide chrome, render report cleanly when window.print() is invoked
+   from the Custom Properties tab. body.sw-cp-printing scopes the rules to that flow. */
+@media print {
+  body.sw-cp-printing .sw-no-print,
+  body.sw-cp-printing aside,
+  body.sw-cp-printing nav,
+  body.sw-cp-printing header,
+  body.sw-cp-printing .sw-tabs,
+  body.sw-cp-printing .sw-toolbar { display:none !important; }
+  body.sw-cp-printing .sw-cp-print-header { display:block !important; margin-bottom:14px; }
+  body.sw-cp-printing { background:#fff !important; color:#111 !important; }
+  body.sw-cp-printing .sw-table { font-size:11px; }
+  body.sw-cp-printing .sw-table th, body.sw-cp-printing .sw-table td { color:#111 !important; border-color:#ccc !important; }
+}
 .sw-device-list { flex:0 0 250px; max-height:620px; overflow-y:auto; border:1px solid var(--border);
   border-radius:10px; background:var(--bg2); }
 .sw-device-list-hd { padding:9px 14px; border-bottom:1px solid var(--border); background:var(--bg3);
@@ -1052,6 +1067,111 @@ function CustomPropertiesTab({
   const set = (key, val) => onFiltersChange?.({ ...f, [key]: val })
   const p = presets || {}
 
+  const toggleBhDay = (day) => {
+    const current = Array.isArray(f.bhDays) ? f.bhDays : []
+    const next = current.includes(day) ? current.filter((d) => d !== day) : [...current, day].sort()
+    set('bhDays', next)
+  }
+
+  // Summary stats for the result set (drives the chart row + KPIs)
+  const summary = useMemo(() => {
+    const rows = Array.isArray(results) ? results : []
+    const status = { up: 0, warning: 0, down: 0, other: 0 }
+    let uptimeSum = 0, uptimeCount = 0, uptimeSampled = false
+    let bwSum = 0, bwCount = 0
+    const bwBins = { low: 0, medium: 0, high: 0, none: 0 }
+    for (const n of rows) {
+      const c = Number(n.statusCode)
+      if (c === 1) status.up++
+      else if (c === 3) status.warning++
+      else if (c === 2) status.down++
+      else status.other++
+
+      if (Number.isFinite(n.uptimePct)) { uptimeSum += n.uptimePct; uptimeCount++; if (n.uptimeSampled) uptimeSampled = true }
+
+      const bw = Number(n.bandwidthPct)
+      if (Number.isFinite(bw)) {
+        bwSum += bw; bwCount++
+        if (bw > 50) bwBins.high++
+        else if (bw >= 10) bwBins.medium++
+        else bwBins.low++
+      } else {
+        bwBins.none++
+      }
+    }
+    return {
+      total: rows.length,
+      status,
+      avgUptime: uptimeCount ? uptimeSum / uptimeCount : null,
+      uptimeSampled,
+      avgBandwidth: bwCount ? bwSum / bwCount : null,
+      bwBins,
+    }
+  }, [results])
+
+  const statusDoughnut = useMemo(() => ({
+    labels: ['Up', 'Warning', 'Down', 'Other'],
+    datasets: [{
+      data: [summary.status.up, summary.status.warning, summary.status.down, summary.status.other],
+      backgroundColor: [STATUS_COLOR.up, STATUS_COLOR.warning, STATUS_COLOR.down, STATUS_COLOR.unknown],
+      borderWidth: 0,
+    }],
+  }), [summary])
+
+  const bandwidthDoughnut = useMemo(() => ({
+    labels: ['Low (<10%)', 'Medium (10–50%)', 'High (>50%)', 'No data'],
+    datasets: [{
+      data: [summary.bwBins.low, summary.bwBins.medium, summary.bwBins.high, summary.bwBins.none],
+      backgroundColor: [STATUS_COLOR.up, STATUS_COLOR.warning, STATUS_COLOR.down, STATUS_COLOR.unknown],
+      borderWidth: 0,
+    }],
+  }), [summary])
+
+  const doughnutOpts = useMemo(() => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 } } },
+    },
+    cutout: '60%',
+  }), [])
+
+  const exportPdf = () => {
+    const root = document.querySelector('.sw-cp-print-root')
+    if (!root) { window.print(); return }
+    document.body.classList.add('sw-cp-printing')
+    setTimeout(() => {
+      window.print()
+      document.body.classList.remove('sw-cp-printing')
+    }, 50)
+  }
+
+  const exportCsv = () => {
+    const rows = Array.isArray(results) ? results : []
+    if (!rows.length) return
+    const header = ['Name', 'IP', 'Status', 'Uptime %', 'Bandwidth %', 'Link', 'Org', 'Dept', 'If1', 'Carrier', 'If2']
+    const cell = (v) => {
+      if (v == null) return ''
+      const s = String(v).replace(/"/g, '""')
+      return /[",\n]/.test(s) ? `"${s}"` : s
+    }
+    const body = rows.map((n) => [
+      n.name, n.ip || '', n.status || '',
+      Number.isFinite(n.uptimePct) ? n.uptimePct.toFixed(1) : '',
+      Number.isFinite(n.bandwidthPct) ? n.bandwidthPct.toFixed(1) : '',
+      n.nodeCp?.DUAL_LINKS || '', n.nodeCp?.ORGANIZATION || '', n.nodeCp?.Department || '',
+      n.interface1?.name || '', n.interface1?.cp?.CarrierName || '', n.interface2?.name || '',
+    ].map(cell).join(','))
+    const csv = [header.join(','), ...body].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `solarwinds-nodes-${new Date().toISOString().slice(0, 10)}.csv`
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
   const applyRange = (kind, rangeKey) => {
     const sec = CP_RANGE_SEC[rangeKey]
     if (!sec) return
@@ -1139,6 +1259,37 @@ function CustomPropertiesTab({
             </div>
           </>
         )}
+
+        <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px dashed var(--border)' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 8 }}>
+            <input type="checkbox" checked={Boolean(f.bhEnabled)} onChange={(e) => set('bhEnabled', e.target.checked)} />
+            <span style={{ fontSize: 11, color: 'var(--text2)', fontWeight: 600 }}>Business hours only</span>
+            <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>(applies to include & exclude windows)</span>
+          </label>
+          {f.bhEnabled && (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                <input type="time" className="sw-search" style={{ maxWidth: 110, fontSize: 11 }} value={f.bhStart || '09:00'} onChange={(e) => set('bhStart', e.target.value)} />
+                <span style={{ fontSize: 11, color: 'var(--text3)' }}>to</span>
+                <input type="time" className="sw-search" style={{ maxWidth: 110, fontSize: 11 }} value={f.bhEnd || '18:00'} onChange={(e) => set('bhEnd', e.target.value)} />
+                <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>(local)</span>
+              </div>
+              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                {BH_DAY_LABELS.map((label, day) => {
+                  const active = Array.isArray(f.bhDays) ? f.bhDays.includes(day) : false
+                  return (
+                    <button
+                      key={label}
+                      type="button"
+                      className={`sw-bh-day${active ? ' on' : ''}`}
+                      onClick={() => toggleBhDay(day)}
+                    >{label}</button>
+                  )
+                })}
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -1153,38 +1304,91 @@ function CustomPropertiesTab({
       </div>
 
       {results != null && (
-        <Widget title={`Results (${results.length})`}>
-          <div className="sw-table-wrap">
-            {results.length === 0 ? (
-              <div className="sw-empty">No nodes matched. Try &quot;All&quot; on one dimension or clear time filters.</div>
-            ) : (
-              <table className="sw-table">
-                <thead><tr>
-                  <th>Status</th><th>Name</th><th>IP</th>
-                  <th>Link</th><th>Org</th><th>Dept</th>
-                  <th>If1</th><th>Carrier</th><th>If2</th>
-                </tr></thead>
-                <tbody>
-                  {results.map((n) => (
-                    <tr key={n.id} className={onNodeClick ? 'sw-row-click' : undefined}
-                      onClick={onNodeClick ? () => onNodeClick(n) : undefined}
-                      title={onNodeClick ? 'Open device snapshot' : undefined}>
-                      <td><Pill label={n.status} /></td>
-                      <td style={{ fontWeight: 600, color: 'var(--accent)' }}>{n.name}</td>
-                      <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{n.ip || '—'}</td>
-                      <td style={{ fontSize: 11 }}>{n.nodeCp?.DUAL_LINKS ?? '—'}</td>
-                      <td style={{ fontSize: 11 }}>{n.nodeCp?.ORGANIZATION ?? '—'}</td>
-                      <td style={{ fontSize: 11 }}>{n.nodeCp?.Department ?? '—'}</td>
-                      <td style={{ fontSize: 11 }}>{n.interface1?.name || '—'}</td>
-                      <td style={{ fontSize: 11, color: 'var(--text3)' }}>{n.interface1?.cp?.CarrierName ?? '—'}</td>
-                      <td style={{ fontSize: 11 }}>{n.interface2?.name || '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+        <div className="sw-cp-print-root" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div className="sw-cp-print-header" style={{ display: 'none' }}>
+            <h2 style={{ margin: 0, fontSize: 18 }}>SolarWinds — Custom property report</h2>
+            <div style={{ fontSize: 11, color: '#555' }}>
+              Generated {new Date().toLocaleString()} · {results.length} node{results.length !== 1 ? 's' : ''}
+              {f.bhEnabled ? ` · Business hours ${f.bhStart || '09:00'}–${f.bhEnd || '18:00'}` : ''}
+            </div>
           </div>
-        </Widget>
+
+          {results.length > 0 && (
+            <Widget title="Summary">
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, alignItems: 'stretch' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                  <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 6 }}>STATUS DISTRIBUTION</div>
+                  <div style={{ width: '100%', height: 180 }}>
+                    <Doughnut data={statusDoughnut} options={doughnutOpts} />
+                  </div>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                  <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 6 }}>BANDWIDTH BUCKETS</div>
+                  <div style={{ width: '100%', height: 180 }}>
+                    <Doughnut data={bandwidthDoughnut} options={doughnutOpts} />
+                  </div>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 10 }}>
+                  <KpiCard
+                    label="Avg uptime"
+                    value={summary.avgUptime != null ? fmtPct(summary.avgUptime) : '—'}
+                    sub={summary.uptimeSampled ? 'sampled from Orion.ResponseTime' : 'derived from current status'}
+                  />
+                  <KpiCard
+                    label="Avg bandwidth"
+                    value={summary.avgBandwidth != null ? fmtPct(summary.avgBandwidth) : '—'}
+                    sub="mean PercentUtil across interfaces"
+                  />
+                </div>
+              </div>
+            </Widget>
+          )}
+
+          <Widget title={`Results (${results.length})`}>
+            <div className="sw-cp-actions sw-no-print" style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+              <button type="button" className="sw-btn" onClick={exportPdf} disabled={!results.length}>Export PDF</button>
+              <button type="button" className="sw-btn" onClick={exportCsv} disabled={!results.length}>Export CSV</button>
+            </div>
+            <div className="sw-table-wrap">
+              {results.length === 0 ? (
+                <div className="sw-empty">No nodes matched. Try &quot;All&quot; on one dimension or clear time filters.</div>
+              ) : (
+                <table className="sw-table">
+                  <thead><tr>
+                    <th>Status</th><th>Name</th><th>IP</th>
+                    <th>Uptime</th><th>Bandwidth</th>
+                    <th>Link</th><th>Org</th><th>Dept</th>
+                    <th>If1</th><th>Carrier</th><th>If2</th>
+                  </tr></thead>
+                  <tbody>
+                    {results.map((n) => (
+                      <tr key={n.id} className={onNodeClick ? 'sw-row-click' : undefined}
+                        onClick={onNodeClick ? () => onNodeClick(n) : undefined}
+                        title={onNodeClick ? 'Open device snapshot' : undefined}>
+                        <td><Pill label={n.status} /></td>
+                        <td style={{ fontWeight: 600, color: 'var(--accent)' }}>{n.name}</td>
+                        <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{n.ip || '—'}</td>
+                        <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: Number.isFinite(n.uptimePct) && n.uptimePct < 95 ? 'var(--amber)' : undefined }} title={n.uptimeSampled ? 'Average availability over selected window' : 'Derived from current node status (no time window)'}>
+                          {fmtPct(n.uptimePct)}
+                          {n.uptimeSampled && <span style={{ fontSize: 9, marginLeft: 4, color: 'var(--text3)' }}>•</span>}
+                        </td>
+                        <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: Number.isFinite(n.bandwidthPct) && n.bandwidthPct > 50 ? 'var(--amber)' : undefined }} title={Number.isFinite(n.bandwidthPeakPct) ? `Peak ${n.bandwidthPeakPct.toFixed(1)}%` : undefined}>
+                          {fmtPct(n.bandwidthPct)}
+                        </td>
+                        <td style={{ fontSize: 11 }}>{n.nodeCp?.DUAL_LINKS ?? '—'}</td>
+                        <td style={{ fontSize: 11 }}>{n.nodeCp?.ORGANIZATION ?? '—'}</td>
+                        <td style={{ fontSize: 11 }}>{n.nodeCp?.Department ?? '—'}</td>
+                        <td style={{ fontSize: 11 }}>{n.interface1?.name || '—'}</td>
+                        <td style={{ fontSize: 11, color: 'var(--text3)' }}>{n.interface1?.cp?.CarrierName ?? '—'}</td>
+                        <td style={{ fontSize: 11 }}>{n.interface2?.name || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </Widget>
+        </div>
       )}
     </div>
   )
@@ -1341,6 +1545,7 @@ export default function SolarWindsPage() {
     uptime: 'all', bandwidth: 'all',
     fromLocal: '', toLocal: '', excludeEnabled: false,
     excludeFromLocal: '', excludeToLocal: '',
+    bhEnabled: false, bhStart: '09:00', bhEnd: '18:00', bhDays: [1, 2, 3, 4, 5],
   })
   const [loading, setLoading]   = useState(false)
   const [tabBusy, setTabBusy]   = useState(false)
@@ -1415,6 +1620,13 @@ export default function SolarWindsPage() {
     if (f.excludeEnabled && f.excludeFromLocal && f.excludeToLocal) {
       params.excludeFrom = new Date(f.excludeFromLocal).toISOString()
       params.excludeTo = new Date(f.excludeToLocal).toISOString()
+    }
+    if (f.bhEnabled) {
+      params.bhEnabled = '1'
+      if (f.bhStart) params.bhStart = f.bhStart
+      if (f.bhEnd) params.bhEnd = f.bhEnd
+      if (Array.isArray(f.bhDays) && f.bhDays.length) params.bhDays = f.bhDays.join(',')
+      params.bhTzOffsetMin = -new Date().getTimezoneOffset()
     }
     return params
   }, [cpPresets])
