@@ -109,6 +109,34 @@ function buildCondition(prefix, field, value, mode) {
   return `${prefix}.${field} = '${v}'`
 }
 
+/** Carrier preset filters apply to the primary WAN (lowest InterfaceID on the node). */
+function buildPrimaryIfaceCarrierCondition(field, value, mode = 'equals') {
+  if (field !== 'CarrierName' || !isValidCol(field) || value == null || String(value).trim() === '') return null
+  if (mode === 'contains') return null
+  const v = String(value).trim().replace(/'/g, "''")
+  return `n.NodeID IN (
+    SELECT i.NodeID FROM Orion.NPM.Interfaces i
+    INNER JOIN Orion.NPM.InterfacesCustomProperties icp ON i.InterfaceID = icp.InterfaceID
+    WHERE i.InterfaceID = (
+      SELECT TOP 1 i2.InterfaceID FROM Orion.NPM.Interfaces i2
+      WHERE i2.NodeID = i.NodeID ORDER BY i2.InterfaceID
+    )
+    AND icp.${field} = '${v}'
+  )`
+}
+
+function ifaceCarrierValue(iface) {
+  return String(iface?.cp?.CarrierName ?? '').trim()
+}
+
+function primaryIfaceMatchesCarrier(ifaces, value, mode = 'equals') {
+  if (!value || !ifaces?.length) return !value
+  const carrier = ifaceCarrierValue(ifaces[0])
+  const v = String(value).trim()
+  if (mode === 'contains') return carrier.toLowerCase().includes(v.toLowerCase())
+  return carrier === v
+}
+
 function toOrionDT(iso) {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return null
@@ -258,10 +286,12 @@ export async function queryByCustomProperties(opts = {}) {
     buildCondition('ncp', opts.nodeProp3, opts.nodeVal3, opts.match),
   ].filter(Boolean)
 
-  const ifaceConds = [
-    buildCondition('icp', opts.ifaceProp1, opts.ifaceVal1, opts.match),
-    buildCondition('icp', opts.ifaceProp2, opts.ifaceVal2, opts.match),
-  ].filter(Boolean)
+  const matchMode = opts.match === 'contains' ? 'contains' : 'equals'
+  const primaryCarrierCond = opts.ifaceProp1 === 'CarrierName' && opts.ifaceVal1
+    ? buildPrimaryIfaceCarrierCondition('CarrierName', opts.ifaceVal1, matchMode)
+    : null
+  const genericIfaceProp1 = primaryCarrierCond ? null : opts.ifaceProp1
+  const genericIfaceVal1 = primaryCarrierCond ? null : opts.ifaceVal1
 
   const allConds = [...nodeConds]
 
@@ -269,8 +299,17 @@ export async function queryByCustomProperties(opts = {}) {
     allConds.push(`n.Status = ${STATUS_CODE[opts.status]}`)
   }
 
-  if (ifaceConds.length) {
-    const ifaceWhere = ifaceConds.join(' AND ')
+  if (primaryCarrierCond) {
+    allConds.push(primaryCarrierCond)
+  }
+
+  const genericIfaceConds = [
+    buildCondition('icp', genericIfaceProp1, genericIfaceVal1, opts.match),
+    buildCondition('icp', opts.ifaceProp2, opts.ifaceVal2, opts.match),
+  ].filter(Boolean)
+
+  if (genericIfaceConds.length) {
+    const ifaceWhere = genericIfaceConds.join(' AND ')
     allConds.push(`n.NodeID IN (SELECT DISTINCT i.NodeID FROM Orion.NPM.Interfaces i
       INNER JOIN Orion.NPM.InterfacesCustomProperties icp ON i.InterfaceID = icp.InterfaceID
       WHERE ${ifaceWhere})`)
@@ -318,48 +357,54 @@ export async function queryByCustomProperties(opts = {}) {
     opts.from && opts.to ? nodeAvailabilityMap(nodeIds, opts.from, opts.to) : Promise.resolve(new Map()),
   ])
   const ifaceStats = statsMap
+  const carrierFilterVal = opts.ifaceProp1 === 'CarrierName' && opts.ifaceVal1
+    ? String(opts.ifaceVal1).trim()
+    : null
+
+  const nodes = rows.map((r) => {
+    const nodeCp = {}
+    for (const f of nodeFields) nodeCp[f] = r[f] ?? null
+    const ifaces = ifaceMap.get(Number(r.NodeID)) || []
+    if (carrierFilterVal && !primaryIfaceMatchesCarrier(ifaces, carrierFilterVal, matchMode)) {
+      return null
+    }
+    const stats = ifaceStats.get(Number(r.NodeID)) || null
+    const statusCode = Number(r.Status)
+    const sampledAvail = availMap.get(Number(r.NodeID))
+    const fallbackUptime =
+      statusCode === 1 ? 100 :
+      statusCode === 2 ? 0 :
+      statusCode === 3 ? 50 :
+      null
+    const uptimePct = sampledAvail != null ? sampledAvail : fallbackUptime
+    return {
+      id: r.NodeID,
+      name: r.Caption,
+      ip: r.IPAddress,
+      statusCode,
+      statusDescription: r.StatusDescription || null,
+      responseTime: r.ResponseTime != null ? Number(r.ResponseTime) : null,
+      packetLoss: r.PercentLoss != null ? Number(r.PercentLoss) : null,
+      cpu: r.CPULoad != null ? Number(r.CPULoad) : null,
+      memory: r.PercentMemoryUsed != null ? Number(r.PercentMemoryUsed) : null,
+      vendor: r.Vendor || null,
+      machineType: r.MachineType || null,
+      uptimePct,
+      uptimeSampled: sampledAvail != null,
+      bandwidthPct: stats?.avgUtil ?? null,
+      bandwidthPeakPct: stats?.peakUtil ?? null,
+      nodeCp,
+      interface1: ifaces[0] || null,
+      interface2: ifaces[1] || null,
+    }
+  }).filter(Boolean)
 
   return {
     nodeFields,
     ifaceFields,
     timeWindow: opts.from && opts.to ? { from: opts.from, to: opts.to } : null,
     businessHours: bh ? { enabled: true, startMin: bh.startMin, endMin: bh.endMin, days: [...bh.days].sort() } : null,
-    nodes: rows.map((r) => {
-      const nodeCp = {}
-      for (const f of nodeFields) nodeCp[f] = r[f] ?? null
-      const ifaces = ifaceMap.get(Number(r.NodeID)) || []
-      const stats = ifaceStats.get(Number(r.NodeID)) || null
-      const statusCode = Number(r.Status)
-      const sampledAvail = availMap.get(Number(r.NodeID))
-      // Fallback when no time window or ResponseTime table not available:
-      //   1 (Up) → 100, 3 (Warning) → 50, 2 (Down) → 0, else null
-      const fallbackUptime =
-        statusCode === 1 ? 100 :
-        statusCode === 2 ? 0 :
-        statusCode === 3 ? 50 :
-        null
-      const uptimePct = sampledAvail != null ? sampledAvail : fallbackUptime
-      return {
-        id: r.NodeID,
-        name: r.Caption,
-        ip: r.IPAddress,
-        statusCode,
-        statusDescription: r.StatusDescription || null,
-        responseTime: r.ResponseTime != null ? Number(r.ResponseTime) : null,
-        packetLoss: r.PercentLoss != null ? Number(r.PercentLoss) : null,
-        cpu: r.CPULoad != null ? Number(r.CPULoad) : null,
-        memory: r.PercentMemoryUsed != null ? Number(r.PercentMemoryUsed) : null,
-        vendor: r.Vendor || null,
-        machineType: r.MachineType || null,
-        uptimePct,
-        uptimeSampled: sampledAvail != null,
-        bandwidthPct: stats?.avgUtil ?? null,
-        bandwidthPeakPct: stats?.peakUtil ?? null,
-        nodeCp,
-        interface1: ifaces[0] || null,
-        interface2: ifaces[1] || null,
-      }
-    }),
+    nodes,
   }
 }
 
@@ -383,19 +428,17 @@ async function fetchInterfacesBulk(nodeIds, ifaceFields) {
   const accumulate = (nid, row) => {
     if (!ifaceMap.has(nid)) ifaceMap.set(nid, [])
     const list = ifaceMap.get(nid)
-    if (list.length < 2) {
-      const ifaceCp = {}
-      for (const f of ifaceFields) ifaceCp[f] = row[f] ?? null
-      list.push({
-        id: row.InterfaceID,
-        name: row.Caption,
-        statusCode: Number(row.Status),
-        inBps: row.InBps != null ? Number(row.InBps) : null,
-        outBps: row.OutBps != null ? Number(row.OutBps) : null,
-        utilization: row.PercentUtil != null ? Number(row.PercentUtil) : null,
-        cp: ifaceCp,
-      })
-    }
+    const ifaceCp = {}
+    for (const f of ifaceFields) ifaceCp[f] = row[f] ?? null
+    list.push({
+      id: row.InterfaceID,
+      name: row.Caption,
+      statusCode: Number(row.Status),
+      inBps: row.InBps != null ? Number(row.InBps) : null,
+      outBps: row.OutBps != null ? Number(row.OutBps) : null,
+      utilization: row.PercentUtil != null ? Number(row.PercentUtil) : null,
+      cp: ifaceCp,
+    })
     const util = row.PercentUtil != null ? Number(row.PercentUtil) : null
     if (Number.isFinite(util) && util >= 0) {
       if (!acc.has(nid)) acc.set(nid, { sum: 0, n: 0, peak: 0 })
@@ -444,4 +487,4 @@ async function fetchInterfacesBulk(nodeIds, ifaceFields) {
   return { ifaceMap, statsMap }
 }
 
-export { toOrionDT, parseBusinessHours, inBusinessHours }
+export { toOrionDT, parseBusinessHours, inBusinessHours, fetchInterfacesBulk }

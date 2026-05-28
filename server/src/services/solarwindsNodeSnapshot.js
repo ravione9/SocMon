@@ -3,6 +3,7 @@
  */
 
 import { orionSwisQuery, withOrionTimeout } from './solarwinds.js'
+import { discoverIfaceCPFields, fetchInterfacesBulk, toOrionDT } from './solarwindsCustomProps.js'
 
 const NODE_STATUS = {
   0: 'Unknown', 1: 'Up', 2: 'Down', 3: 'Warning',
@@ -182,13 +183,13 @@ export async function fetchNodeSnapshot(nodeId) {
     utilization: i.PercentUtil != null ? Number(i.PercentUtil) : null,
   }))
 
-  const events = (eventsData?.results || []).map((e) => ({
-    id: e.EventID,
-    time: e.EventTime,
-    type: e.EventType || null,
-    message: e.Message || '',
-    acknowledged: Boolean(e.Acknowledged),
-  }))
+  const events = await enrichEventsWithCarriers(
+    (eventsData?.results || []).map((e) => mapEventRow({
+      ...e,
+      NetworkNode: nodeId,
+      NodeCaption: node.name,
+    })),
+  )
 
   const alerts = (alertsData?.results || []).map((a, idx) => mapAlertRow(a, idx))
 
@@ -243,25 +244,61 @@ export async function fetchActiveAlerts(limit = 200) {
 const EVENT_QUERY_VARIANTS = [
   {
     cols: `e.EventID, e.EventTime, e.NetworkNode, n.Caption AS NodeCaption,
+      e.EventType, et.Name AS EventTypeName, e.Message, e.Acknowledged,
+      e.NetObjectType, e.NetObjectID,
+      i.Caption AS InterfaceName,
+      icp.CarrierName, icp.Comments AS CarrierDescription`,
+    from: `FROM Orion.Events e
+      LEFT JOIN Orion.Nodes n ON e.NetworkNode = n.NodeID
+      LEFT JOIN Orion.EventTypes et ON e.EventType = et.EventType
+      LEFT JOIN Orion.NPM.Interfaces i ON e.NetObjectType = 'I' AND e.NetObjectID = i.InterfaceID
+      LEFT JOIN Orion.NPM.InterfacesCustomProperties icp ON i.InterfaceID = icp.InterfaceID`,
+    alias: true,
+  },
+  {
+    cols: `e.EventID, e.EventTime, e.NetworkNode, n.Caption AS NodeCaption,
       e.EventType, et.Name AS EventTypeName, e.Message, e.Acknowledged`,
     from: `FROM Orion.Events e
       LEFT JOIN Orion.Nodes n ON e.NetworkNode = n.NodeID
       LEFT JOIN Orion.EventTypes et ON e.EventType = et.EventType`,
+    alias: true,
   },
   {
     cols: `e.EventID, e.EventTime, e.NetworkNode, n.Caption AS NodeCaption,
       e.EventType, e.Message, e.Acknowledged`,
     from: `FROM Orion.Events e
       LEFT JOIN Orion.Nodes n ON e.NetworkNode = n.NodeID`,
+    alias: true,
   },
   {
     cols: `EventID, EventTime, NetworkNode, EventType, Message, Acknowledged`,
     from: `FROM Orion.Events`,
+    alias: false,
   },
 ]
 
+function wanLinkIndex(message) {
+  const m = String(message || '').match(/\bWAN\s*(\d+)\b/i)
+  return m ? Number(m[1]) : null
+}
+
+function pickIfaceForEvent(ifaces, message, interfaceName) {
+  if (!ifaces?.length) return null
+  if (interfaceName) {
+    const byName = ifaces.find((i) => i.name && String(i.name).toLowerCase() === String(interfaceName).toLowerCase())
+    if (byName) return byName
+  }
+  const wan = wanLinkIndex(message)
+  if (wan != null && wan >= 1 && wan <= ifaces.length) return ifaces[wan - 1]
+  if (wan === 1) return ifaces[0] || null
+  if (wan === 2) return ifaces[1] || null
+  return null
+}
+
 function mapEventRow(e) {
   const nodeId = e.NetworkNode != null ? Number(e.NetworkNode) : null
+  const carrier = e.CarrierName != null ? String(e.CarrierName).trim() : ''
+  const carrierDescription = e.CarrierDescription != null ? String(e.CarrierDescription).trim() : ''
   return {
     id: e.EventID,
     time: e.EventTime,
@@ -271,15 +308,63 @@ function mapEventRow(e) {
     typeLabel: e.EventTypeName || (e.EventType != null ? `Type ${e.EventType}` : null),
     message: e.Message || '',
     acknowledged: Boolean(e.Acknowledged),
+    netObjectType: e.NetObjectType || null,
+    interfaceName: e.InterfaceName || null,
+    carrier: carrier || null,
+    carrierDescription: carrierDescription || null,
   }
 }
 
-async function queryEvents(limit = 200) {
+async function enrichEventsWithCarriers(events) {
+  const needNodes = new Set()
+  for (const e of events) {
+    if ((!e.carrier && !e.carrierDescription) && e.nodeId != null) {
+      needNodes.add(e.nodeId)
+    }
+  }
+  if (!needNodes.size) return events
+
+  const ifaceFields = await discoverIfaceCPFields()
+  const { ifaceMap } = await fetchInterfacesBulk([...needNodes], ifaceFields)
+
+  return events.map((e) => {
+    if (e.carrier || e.carrierDescription) return e
+    const ifaces = ifaceMap.get(e.nodeId) || []
+    const iface = pickIfaceForEvent(ifaces, e.message, e.interfaceName)
+    if (!iface) return e
+    const cpCarrier = iface.cp?.CarrierName != null ? String(iface.cp.CarrierName).trim() : ''
+    const cpDesc = iface.cp?.Comments != null ? String(iface.cp.Comments).trim() : ''
+    return {
+      ...e,
+      interfaceName: e.interfaceName || iface.name || null,
+      carrier: cpCarrier || null,
+      carrierDescription: cpDesc || null,
+    }
+  })
+}
+
+function buildEventWhere(opts = {}, useAlias = true) {
+  const parts = []
+  const p = useAlias ? 'e.' : ''
+  if (opts.from && opts.to) {
+    const from = toOrionDT(opts.from)
+    const to = toOrionDT(opts.to)
+    if (from && to) {
+      parts.push(`${p}EventTime >= '${from}' AND ${p}EventTime <= '${to}'`)
+    }
+  }
+  if (opts.unackedOnly) parts.push(`${p}Acknowledged = false`)
+  return parts.length ? `WHERE ${parts.join(' AND ')}` : ''
+}
+
+async function queryEvents(limit = 200, opts = {}) {
   let lastErr = null
-  for (const { cols, from } of EVENT_QUERY_VARIANTS) {
+  for (const { cols, from, alias } of EVENT_QUERY_VARIANTS) {
+    const where = buildEventWhere(opts, alias)
     const swql = `SELECT TOP ${limit} ${cols}
       ${from}
-      ORDER BY EventTime DESC`
+      ${where}
+      ORDER BY ${alias ? 'e.EventTime' : 'EventTime'} DESC`
     try {
       return await orionSwisQuery(swql)
     } catch (e) {
@@ -289,9 +374,10 @@ async function queryEvents(limit = 200) {
   throw lastErr || new Error('Unable to query Orion.Events')
 }
 
-/** Recent events for /api/solarwinds/events */
-export async function fetchEvents(limit = 200) {
+/** Recent events for /api/solarwinds/events and reports */
+export async function fetchEvents(limit = 200, opts = {}) {
   const top = Math.min(Math.max(Number(limit) || 100, 10), 500)
-  const data = await queryEvents(top)
-  return (data?.results || []).map(mapEventRow)
+  const data = await queryEvents(top, opts)
+  const rows = (data?.results || []).map(mapEventRow)
+  return enrichEventsWithCarriers(rows)
 }

@@ -171,11 +171,13 @@ export const CUSTOM_REPORT_SOURCES = {
     columns: [
       { key: 'time', label: 'Time' },
       { key: 'node', label: 'Node' },
+      { key: 'carrier', label: 'Carrier' },
+      { key: 'carrierDescription', label: 'Link description' },
       { key: 'typeLabel', label: 'Event type' },
       { key: 'message', label: 'Message' },
       { key: 'acknowledged', label: 'Acknowledged' },
     ],
-    defaultColumns: ['time', 'node', 'typeLabel', 'message', 'acknowledged'],
+    defaultColumns: ['time', 'node', 'carrier', 'carrierDescription', 'typeLabel', 'message', 'acknowledged'],
   },
 }
 
@@ -410,49 +412,9 @@ async function alertCountsInWindow(fromIso, toIso, bh) {
 async function fetchEventsForReport({ limit = 200, hours = 24, unackedOnly = false } = {}) {
   const top = clampInt(limit, 10, 500, 200)
   const hrs = clampInt(hours, 1, 168, 24)
-  const from = toOrionDT(new Date(Date.now() - hrs * 3600 * 1000).toISOString())
-  const to = toOrionDT(new Date().toISOString())
-  if (!from || !to) return fetchEvents(top)
-
-  const ackClause = unackedOnly ? ' AND Acknowledged = false' : ''
-  const variants = [
-    `SELECT TOP ${top} e.EventID, e.EventTime, e.NetworkNode, n.Caption AS NodeCaption,
-      e.EventType, et.Name AS EventTypeName, e.Message, e.Acknowledged
-      FROM Orion.Events e
-      LEFT JOIN Orion.Nodes n ON e.NetworkNode = n.NodeID
-      LEFT JOIN Orion.EventTypes et ON e.EventType = et.EventType
-      WHERE e.EventTime >= '${from}' AND e.EventTime <= '${to}'${ackClause}
-      ORDER BY e.EventTime DESC`,
-    `SELECT TOP ${top} e.EventID, e.EventTime, e.NetworkNode, n.Caption AS NodeCaption,
-      e.EventType, e.Message, e.Acknowledged
-      FROM Orion.Events e
-      LEFT JOIN Orion.Nodes n ON e.NetworkNode = n.NodeID
-      WHERE e.EventTime >= '${from}' AND e.EventTime <= '${to}'${ackClause}
-      ORDER BY e.EventTime DESC`,
-    `SELECT TOP ${top} EventID, EventTime, NetworkNode, EventType, Message, Acknowledged
-      FROM Orion.Events
-      WHERE EventTime >= '${from}' AND EventTime <= '${to}'${ackClause}
-      ORDER BY EventTime DESC`,
-  ]
-
-  for (const swql of variants) {
-    try {
-      const data = await orionSwisQuery(swql)
-      return (data?.results || []).map((e) => ({
-        id: e.EventID,
-        time: e.EventTime,
-        nodeId: e.NetworkNode != null ? Number(e.NetworkNode) : null,
-        node: e.NodeCaption || (e.NetworkNode != null ? `Node ${e.NetworkNode}` : null),
-        type: e.EventType != null ? Number(e.EventType) : null,
-        typeLabel: e.EventTypeName || (e.EventType != null ? `Type ${e.EventType}` : null),
-        message: e.Message || '',
-        acknowledged: Boolean(e.Acknowledged),
-      }))
-    } catch {
-      /* try next variant */
-    }
-  }
-  return fetchEvents(top)
+  const from = new Date(Date.now() - hrs * 3600 * 1000).toISOString()
+  const to = new Date().toISOString()
+  return fetchEvents(top, { from, to, unackedOnly })
 }
 
 function alertsTriggeredInWindow(alerts, fromIso, toIso, bh) {
@@ -850,12 +812,14 @@ export async function runSolarWindsReport(reportId, params = {}) {
       return reportPayload(def, {
         summary: { eventCount: rows.length, hours },
         columns: col(
-          ['time', 'node', 'typeLabel', 'message', 'acknowledged'],
-          ['Time', 'Node', 'Type', 'Message', 'Acknowledged'],
+          ['time', 'node', 'carrier', 'carrierDescription', 'typeLabel', 'message', 'acknowledged'],
+          ['Time', 'Node', 'Carrier', 'Link description', 'Type', 'Message', 'Acknowledged'],
         ),
         rows: rows.map((r) => ({
           time: r.time ? new Date(r.time).toISOString() : '',
           node: r.node || '',
+          carrier: r.carrier || '',
+          carrierDescription: r.carrierDescription || '',
           typeLabel: r.typeLabel || '',
           message: r.message || '',
           acknowledged: r.acknowledged ? 'Yes' : 'No',
@@ -868,12 +832,14 @@ export async function runSolarWindsReport(reportId, params = {}) {
       return reportPayload(def, {
         summary: { eventCount: rows.length, hours },
         columns: col(
-          ['time', 'node', 'typeLabel', 'message'],
-          ['Time', 'Node', 'Type', 'Message'],
+          ['time', 'node', 'carrier', 'carrierDescription', 'typeLabel', 'message'],
+          ['Time', 'Node', 'Carrier', 'Link description', 'Type', 'Message'],
         ),
         rows: rows.map((r) => ({
           time: r.time ? new Date(r.time).toISOString() : '',
           node: r.node || '',
+          carrier: r.carrier || '',
+          carrierDescription: r.carrierDescription || '',
           typeLabel: r.typeLabel || '',
           message: r.message || '',
         })),

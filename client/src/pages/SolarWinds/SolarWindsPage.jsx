@@ -195,6 +195,35 @@ button.sw-kpi { width:100%; text-align:left; font-family:inherit; color:inherit;
 .sw-kpi-clickable:hover { border-color:var(--border2); background:var(--bg3); }
 .sw-kpi-clickable:active { transform:scale(.99); }
 .sw-kpi-clickable.active { border-color:var(--accent); background:rgba(79,126,245,.08); }
+.sw-report-summary { display:flex; flex-direction:column; gap:10px; margin-bottom:14px; }
+.sw-report-stat-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(104px,1fr)); gap:8px; }
+.sw-report-stat-grid .sw-kpi { min-width:0; }
+.sw-report-stat-grid .sw-kpi-label { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.sw-report-stat-grid .sw-kpi-value { font-size:20px; line-height:1.1; }
+.sw-report-meta-bar { display:flex; flex-wrap:wrap; gap:8px; padding:10px 12px; background:var(--bg2);
+  border:1px solid var(--border); border-radius:10px; }
+.sw-report-meta-chip { display:flex; flex-direction:column; gap:3px; padding:7px 11px; border-radius:8px;
+  background:var(--bg3); border:1px solid var(--border); min-width:0; flex:0 1 auto; max-width:100%; }
+.sw-report-meta-chip-label { font-size:9px; font-family:var(--mono); color:var(--text3); text-transform:uppercase;
+  letter-spacing:.06em; white-space:nowrap; }
+.sw-report-meta-chip-value { font-size:11px; color:var(--text2); line-height:1.4; word-break:break-word; }
+.sw-report-hero-row { display:flex; flex-wrap:wrap; gap:14px; align-items:stretch; padding:14px 16px;
+  background:var(--bg2); border:1px solid var(--border); border-radius:10px; }
+.sw-report-hero-stats { display:flex; flex-wrap:wrap; gap:20px; flex:0 0 auto; padding-right:16px;
+  border-right:1px solid var(--border); }
+.sw-report-hero-stat { display:flex; flex-direction:column; justify-content:center; min-width:88px; }
+.sw-report-hero-value { font-size:34px; font-weight:700; line-height:1; color:var(--text); }
+.sw-report-hero-label { font-size:10px; font-family:var(--mono); color:var(--text3); text-transform:uppercase;
+  letter-spacing:.06em; margin-top:8px; max-width:120px; line-height:1.35; }
+.sw-report-meta-bar--inline { flex:1 1 220px; border:none; background:transparent; padding:0; margin:0;
+  align-items:flex-start; align-content:center; min-height:100%; }
+.sw-report-charts { margin-bottom:14px; }
+.sw-report-charts-grid { display:flex; flex-wrap:wrap; justify-content:center; gap:14px; }
+.sw-report-chart-cell { flex:1 1 280px; max-width:100%; display:flex; flex-direction:column; align-items:center;
+  padding:12px 14px 10px; background:var(--bg3); border:1px solid var(--border); border-radius:10px; }
+.sw-report-chart-title { font-size:10px; color:var(--text3); font-family:var(--mono); margin-bottom:10px;
+  text-align:center; letter-spacing:.05em; text-transform:uppercase; width:100%; }
+.sw-report-chart-canvas { width:100%; height:200px; position:relative; margin:0 auto; }
 .sw-legend-row-click { cursor:pointer; border-radius:6px; padding:4px 6px; margin:0 -6px; transition:background .12s; }
 .sw-legend-row-click:hover { background:var(--bg3); }
 .sw-table-wrap { overflow-x:auto; }
@@ -357,13 +386,42 @@ button.sw-kpi { width:100%; text-align:left; font-family:inherit; color:inherit;
   }
 
   body.sw-cp-printing .sw-kpi-grid,
-  body.sw-report-printing .sw-kpi-grid {
+  body.sw-report-printing .sw-kpi-grid,
+  body.sw-report-printing .sw-report-stat-grid {
     display: grid !important;
     grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
     gap: 6px !important;
     break-inside: avoid;
     page-break-inside: avoid;
     margin-bottom: 10px !important;
+  }
+
+  body.sw-report-printing .sw-report-meta-bar {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+    padding: 8px !important;
+    margin-bottom: 10px !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+    background: #fff !important;
+    border: 1px solid #ccc !important;
+  }
+
+  body.sw-report-printing .sw-report-meta-chip {
+    background: #f5f5f5 !important;
+    border: 1px solid #ddd !important;
+    padding: 4px 8px !important;
+  }
+
+  body.sw-report-printing .sw-report-meta-chip-label {
+    font-size: 7px !important;
+    color: #555 !important;
+  }
+
+  body.sw-report-printing .sw-report-meta-chip-value {
+    font-size: 9px !important;
+    color: #111 !important;
   }
 
   body.sw-cp-printing .sw-kpi,
@@ -410,22 +468,52 @@ button.sw-kpi { width:100%; text-align:left; font-family:inherit; color:inherit;
     page-break-inside: avoid;
   }
 
+  body.sw-report-printing .sw-report-hero-row {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+    padding: 8px !important;
+    margin-bottom: 10px !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+    background: #fff !important;
+    border: 1px solid #ccc !important;
+  }
+
+  body.sw-report-printing .sw-report-hero-value {
+    font-size: 22px !important;
+    color: #111 !important;
+  }
+
+  body.sw-report-printing .sw-report-hero-label {
+    font-size: 8px !important;
+    color: #555 !important;
+  }
+
   body.sw-report-printing .sw-report-charts-grid {
-    display: grid !important;
-    grid-template-columns: 1fr 1fr !important;
+    display: flex !important;
+    flex-wrap: wrap !important;
+    justify-content: center !important;
     gap: 8px !important;
   }
 
   body.sw-report-printing .sw-report-chart-cell {
+    flex: 1 1 45% !important;
     min-height: 0 !important;
-    height: 130px !important;
-    max-width: 100% !important;
+    height: auto !important;
+    max-width: 48% !important;
     overflow: hidden !important;
+    padding: 6px !important;
+  }
+
+  body.sw-report-printing .sw-report-chart-canvas {
+    height: 120px !important;
+    max-width: 100% !important;
   }
 
   body.sw-report-printing .sw-report-chart-cell canvas {
     max-width: 100% !important;
-    max-height: 120px !important;
+    max-height: 115px !important;
   }
 
   body.sw-cp-printing .sw-table-wrap,
@@ -1297,13 +1385,15 @@ function DeviceSnapshotTab({
                 ) : (
                   <div className="sw-table-wrap">
                     <table className="sw-table">
-                      <thead><tr><th>Time</th><th>Age</th><th>Type</th><th>Message</th></tr></thead>
+                      <thead><tr><th>Time</th><th>Age</th><th>Carrier</th><th>Link description</th><th>Type</th><th>Message</th></tr></thead>
                       <tbody>
                         {snapshot.events.map((e) => (
                           <tr key={e.id}>
                             <td style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)', whiteSpace: 'nowrap' }}>{fmtDate(e.time)}</td>
                             <td style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)' }}>{relAge(e.time)}</td>
-                            <td style={{ fontSize: 11, color: 'var(--text3)' }}>{e.type || '—'}</td>
+                            <td style={{ fontSize: 11, color: 'var(--text2)' }}>{e.carrier || '—'}</td>
+                            <td style={{ fontSize: 11, color: 'var(--text3)', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.carrierDescription}>{e.carrierDescription || '—'}</td>
+                            <td style={{ fontSize: 11, color: 'var(--text3)' }}>{e.typeLabel || e.type || '—'}</td>
                             <td style={{ color: 'var(--text2)', maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.message}>{e.message}</td>
                           </tr>
                         ))}
@@ -1750,7 +1840,7 @@ function AlertsTab({ alerts, loading, onRefresh, severityFilter, onSeverityFilte
 
 function eventMatchesSearch(e, ql) {
   if (!ql) return true
-  const hay = [e.message, e.node, e.typeLabel, e.type, e.nodeId]
+  const hay = [e.message, e.node, e.typeLabel, e.type, e.nodeId, e.carrier, e.carrierDescription, e.interfaceName]
     .map((v) => String(v ?? '').toLowerCase())
     .join(' ')
   return hay.includes(ql)
@@ -1760,12 +1850,22 @@ function EventsTab({ events, loading, onRefresh }) {
   const [q, setQ] = useState('')
   const [typeF, setTypeF] = useState('all')
   const [ackF, setAckF] = useState('all')
+  const [carrierF, setCarrierF] = useState('all')
 
   const typeOptions = useMemo(() => {
     const labels = new Set()
     for (const e of events || []) {
       const label = e.typeLabel || (e.type != null ? String(e.type) : null)
       if (label) labels.add(label)
+    }
+    return [...labels].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+  }, [events])
+
+  const carrierOptions = useMemo(() => {
+    const labels = new Set()
+    for (const e of events || []) {
+      const c = String(e.carrier || '').trim()
+      if (c) labels.add(c)
     }
     return [...labels].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
   }, [events])
@@ -1777,14 +1877,15 @@ function EventsTab({ events, loading, onRefresh }) {
         const label = e.typeLabel || (e.type != null ? String(e.type) : '')
         if (label !== typeF) return false
       }
+      if (carrierF !== 'all' && String(e.carrier || '') !== carrierF) return false
       if (ackF === 'acked' && !e.acknowledged) return false
       if (ackF === 'unacked' && e.acknowledged) return false
       return eventMatchesSearch(e, ql)
     })
-  }, [events, q, typeF, ackF])
+  }, [events, q, typeF, ackF, carrierF])
 
   const { sorted, sortKey, sortDir, toggleSort } = useSort(filtered, 'time', 'desc')
-  const hasFilters = Boolean(q.trim()) || typeF !== 'all' || ackF !== 'all'
+  const hasFilters = Boolean(q.trim()) || typeF !== 'all' || ackF !== 'all' || carrierF !== 'all'
 
   const th = (key, label) => (
     <th onClick={() => toggleSort(key)} style={{ cursor: 'pointer', userSelect: 'none' }}>
@@ -1798,10 +1899,16 @@ function EventsTab({ events, loading, onRefresh }) {
         <input
           className="sw-search"
           type="search"
-          placeholder="Search node, message, or type…"
+          placeholder="Search node, carrier, link, message…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
+        <select className="sw-select" value={carrierF} onChange={(e) => setCarrierF(e.target.value)}>
+          <option value="all">All carriers</option>
+          {carrierOptions.map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
+        </select>
         <select className="sw-select" value={typeF} onChange={(e) => setTypeF(e.target.value)}>
           <option value="all">All event types</option>
           {typeOptions.map((t) => (
@@ -1834,6 +1941,8 @@ function EventsTab({ events, loading, onRefresh }) {
                 {th('time', 'Time')}
                 <th>Age</th>
                 {th('node', 'Node')}
+                {th('carrier', 'Carrier')}
+                {th('carrierDescription', 'Link description')}
                 {th('typeLabel', 'Type')}
                 {th('message', 'Message')}
                 <th>Ack</th>
@@ -1844,8 +1953,10 @@ function EventsTab({ events, loading, onRefresh }) {
                     <td style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)', whiteSpace: 'nowrap' }}>{fmtDate(e.time)}</td>
                     <td style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)' }}>{relAge(e.time)}</td>
                     <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--accent)' }} title={e.nodeId != null ? `Node ID ${e.nodeId}` : undefined}>{e.node || '—'}</td>
+                    <td style={{ fontSize: 11, color: 'var(--text2)', whiteSpace: 'nowrap' }} title={e.carrier || undefined}>{e.carrier || '—'}</td>
+                    <td style={{ fontSize: 11, color: 'var(--text3)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.carrierDescription || undefined}>{e.carrierDescription || '—'}</td>
                     <td style={{ color: 'var(--text3)', fontSize: 11 }} title={e.type != null ? `Event type ${e.type}` : undefined}>{e.typeLabel || '—'}</td>
-                    <td style={{ color: 'var(--text2)', maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.message}>{e.message}</td>
+                    <td style={{ color: 'var(--text2)', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.message}>{e.message}</td>
                     <td style={{ textAlign: 'center' }}>
                       {e.acknowledged
                         ? <span style={{ color: '#22d3a0', fontSize: 12 }} title="Acknowledged">✓</span>

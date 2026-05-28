@@ -61,9 +61,23 @@ function barFromTop(map, n = 8) {
       data: entries.map(([, v]) => v),
       backgroundColor: entries.map((_, i) => PALETTE[i % PALETTE.length]),
       borderWidth: 0,
-      borderRadius: 4,
+      borderRadius: 6,
+      maxBarThickness: 44,
+      categoryPercentage: 0.55,
+      barPercentage: 0.82,
     }],
   }
+}
+
+function chartCanvasMaxWidth(chartType, labelCount = 1) {
+  const n = Math.max(1, labelCount)
+  if (chartType === 'doughnut') return Math.min(260, 120 + n * 22)
+  return Math.min(420, Math.max(160, n * 68 + 48))
+}
+
+function trimChartLabel(label, max = 14) {
+  const s = String(label ?? '')
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s
 }
 
 function buildReportCharts(payload) {
@@ -96,8 +110,11 @@ function buildReportCharts(payload) {
   }
 
   if (reportId === 'down_interfaces') {
-    const carrierData = barFromTop(countByField(rows, 'carrier', 'No carrier'))
-    if (carrierData) charts.push({ type: 'bar', title: 'Down interfaces by carrier', data: carrierData })
+    const carrierMap = countByField(rows, 'carrier', 'No carrier')
+    if (carrierMap.size > 1) {
+      const carrierData = barFromTop(carrierMap)
+      if (carrierData) charts.push({ type: 'bar', title: 'Down interfaces by carrier', data: carrierData })
+    }
     const ifaceData = barFromTop(countByField(rows, 'interface'))
     if (ifaceData) charts.push({ type: 'bar', title: 'Down interfaces by name', data: ifaceData })
   }
@@ -167,8 +184,8 @@ function ReportCharts({ payload }) {
     responsive: true,
     maintainAspectRatio: false,
     animation: false,
-    plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 } } } },
-    cutout: '60%',
+    plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, padding: 8, font: { size: 10 } } } },
+    cutout: '62%',
   }), [])
   const barOpts = useMemo(() => ({
     responsive: true,
@@ -176,32 +193,51 @@ function ReportCharts({ payload }) {
     animation: false,
     plugins: { legend: { display: false } },
     scales: {
-      x: { ticks: { font: { size: 10 }, maxRotation: 45, minRotation: 0 } },
-      y: { beginAtZero: true, ticks: { precision: 0, font: { size: 10 } } },
+      x: {
+        grid: { display: false },
+        ticks: {
+          font: { size: 11 },
+          maxRotation: 0,
+          minRotation: 0,
+          autoSkip: false,
+          callback(value) {
+            const label = this.getLabelForValue(value)
+            return trimChartLabel(label, 12)
+          },
+        },
+      },
+      y: {
+        beginAtZero: true,
+        grace: '5%',
+        ticks: { precision: 0, font: { size: 10 } },
+        grid: { color: 'rgba(128,128,128,.12)' },
+      },
     },
   }), [])
 
   if (!charts.length) return null
 
   return (
-    <div className="sw-widget sw-report-charts" style={{ marginBottom: 14 }}>
+    <div className="sw-widget sw-report-charts">
       <div className="sw-widget-hd">
         <span className="sw-widget-title">Visual summary</span>
       </div>
       <div className="sw-widget-body">
-        <div className="sw-report-charts-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 16 }}>
-          {charts.map((c) => (
-            <div key={c.title} className="sw-report-chart-cell" style={{ minHeight: 200 }}>
-              <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 8, textAlign: 'center', letterSpacing: '.05em' }}>
-                {c.title.toUpperCase()}
+        <div className="sw-report-charts-grid">
+          {charts.map((c) => {
+            const labelCount = c.data?.labels?.length || 1
+            const maxW = chartCanvasMaxWidth(c.type, labelCount)
+            return (
+              <div key={c.title} className="sw-report-chart-cell">
+                <div className="sw-report-chart-title">{c.title}</div>
+                <div className="sw-report-chart-canvas" style={{ maxWidth: maxW }}>
+                  {c.type === 'doughnut'
+                    ? <Doughnut data={c.data} options={doughnutOpts} />
+                    : <Bar data={c.data} options={barOpts} />}
+                </div>
               </div>
-              <div style={{ height: 180 }}>
-                {c.type === 'doughnut'
-                  ? <Doughnut data={c.data} options={doughnutOpts} />
-                  : <Bar data={c.data} options={barOpts} />}
-              </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       </div>
     </div>
@@ -218,6 +254,22 @@ function toLocalInput(ts) {
 function fmtDate(ts) {
   if (!ts) return '—'
   try { return new Date(ts).toLocaleString() } catch { return ts }
+}
+
+function fmtBhDays(days) {
+  const sorted = [...(days || [])].map(Number).filter((d) => d >= 0 && d <= 6).sort((a, b) => a - b)
+  if (!sorted.length) return ''
+  if (sorted.length === 7) return 'Every day'
+  if (sorted.length === 5 && sorted.join(',') === '1,2,3,4,5') return 'Mon–Fri'
+  if (sorted.length === 2 && sorted.join(',') === '0,6') return 'Sat–Sun'
+  return sorted.map((d) => BH_DAY_LABELS[d] || d).join(', ')
+}
+
+function fmtBhRange(bh) {
+  if (!bh?.enabled) return null
+  const days = fmtBhDays(bh.days)
+  const range = `${bh.start || '—'}–${bh.end || '—'}`
+  return days ? `${range} · ${days}` : range
 }
 
 function csvCell(v) {
@@ -254,77 +306,102 @@ function exportPdf() {
 
 function SummaryKpis({ summary }) {
   if (!summary) return null
-  const items = []
+  const stats = []
+  const meta = []
+
   if (summary.nodes) {
-    items.push(
-      { label: 'Total nodes', value: summary.nodes.total },
+    stats.push(
+      { label: 'Total', value: summary.nodes.total },
       { label: 'Up', value: summary.nodes.up, color: '#22d3a0' },
       { label: 'Down', value: summary.nodes.down, color: '#f5534f' },
       { label: 'Warning', value: summary.nodes.warning, color: '#f5a623' },
     )
     if (summary.availabilityPct != null) {
-      items.push({ label: 'Availability', value: `${summary.availabilityPct}%` })
+      stats.push({ label: 'Avail %', value: `${summary.availabilityPct}%` })
     }
   }
   if (summary.alerts) {
-    items.push(
-      { label: 'Active alerts', value: summary.alerts.total },
+    stats.push(
+      { label: 'Alerts', value: summary.alerts.total },
       { label: 'Critical', value: summary.alerts.Critical, color: '#f5534f' },
       { label: 'High', value: summary.alerts.High, color: '#f97316' },
     )
   }
-  if (summary.impairedCount != null) items.push({ label: 'Impaired nodes', value: summary.impairedCount })
-  if (summary.downInterfaceCount != null) items.push({ label: 'Down interfaces', value: summary.downInterfaceCount })
-  if (summary.alertCount != null) items.push({ label: 'Alerts in report', value: summary.alertCount })
-  if (summary.eventCount != null) items.push({ label: 'Events in report', value: summary.eventCount })
-  if (summary.stressedNodeCount != null) {
-    items.push({ label: 'Stressed nodes', value: summary.stressedNodeCount })
-    if (summary.thresholdPct != null) items.push({ label: 'Threshold', value: `${summary.thresholdPct}%` })
-  }
-  if (summary.timeRange?.from && summary.timeRange?.to) {
-    items.push({ label: 'From', value: fmtDate(summary.timeRange.from) })
-    items.push({ label: 'To', value: fmtDate(summary.timeRange.to) })
-  }
-  if (summary.businessHours?.enabled) {
-    const days = (summary.businessHours.days || []).map((d) => BH_DAY_LABELS[d] || d).join(', ')
-    items.push({
-      label: 'Business hours',
-      value: `${summary.businessHours.start}–${summary.businessHours.end}${days ? ` (${days})` : ''}`,
-    })
-  }
+  if (summary.impairedCount != null) stats.push({ label: 'Impaired nodes', value: summary.impairedCount })
+  if (summary.downInterfaceCount != null) stats.push({ label: 'Down interfaces', value: summary.downInterfaceCount })
+  if (summary.alertCount != null) stats.push({ label: 'Alerts in report', value: summary.alertCount })
+  if (summary.eventCount != null) stats.push({ label: 'Events in report', value: summary.eventCount })
+  if (summary.stressedNodeCount != null) stats.push({ label: 'Stressed nodes', value: summary.stressedNodeCount })
   if (summary.period?.avgAvailabilityPct != null) {
-    items.push({ label: 'Period availability', value: `${summary.period.avgAvailabilityPct}%` })
+    stats.push({ label: 'Period avail', value: `${summary.period.avgAvailabilityPct}%` })
   }
   if (summary.period?.downEventCount != null) {
-    items.push({ label: 'Down events (period)', value: summary.period.downEventCount })
+    stats.push({ label: 'Down events', value: summary.period.downEventCount })
   }
   if (summary.period?.alerts?.total != null) {
-    items.push({ label: 'Alerts triggered (period)', value: summary.period.alerts.total })
+    stats.push({ label: 'Alerts (period)', value: summary.period.alerts.total })
   }
-  if (summary.hasPeriod) {
-    items.push({ label: 'Report mode', value: 'Current + period metrics' })
-  }
-  if (summary.filters?.carrier) {
-    items.push({ label: 'Carrier filter', value: summary.filters.carrier })
-  }
-  if (summary.filters?.carrierDescription) {
-    items.push({ label: 'Description filter', value: summary.filters.carrierDescription })
-  }
-  if (summary.mode === 'down_events_in_window') {
-    items.push({ label: 'Scope', value: 'Down events in window' })
-  } else if (summary.mode === 'currently_down') {
-    items.push({ label: 'Scope', value: 'Currently down' })
-  }
-  if (!items.length) return null
 
-  return (
-    <div className="sw-kpi-grid" style={{ marginBottom: 14 }}>
-      {items.map((k) => (
-        <div key={k.label} className="sw-kpi">
-          <div className="sw-kpi-label">{k.label}</div>
-          <div className="sw-kpi-value" style={k.color ? { color: k.color } : undefined}>{k.value ?? '—'}</div>
+  if (summary.timeRange?.from && summary.timeRange?.to) {
+    meta.push({
+      label: 'Time range',
+      value: `${fmtDate(summary.timeRange.from)} → ${fmtDate(summary.timeRange.to)}`,
+    })
+  }
+  const bhText = fmtBhRange(summary.businessHours)
+  if (bhText) meta.push({ label: 'Business hours', value: bhText })
+  if (summary.thresholdPct != null) meta.push({ label: 'Threshold', value: `${summary.thresholdPct}%` })
+  if (summary.hasPeriod) meta.push({ label: 'Report mode', value: 'Current snapshot + period metrics' })
+  if (summary.filters?.carrier) meta.push({ label: 'Carrier', value: summary.filters.carrier })
+  if (summary.filters?.carrierDescription) meta.push({ label: 'Description', value: summary.filters.carrierDescription })
+  if (summary.mode === 'down_events_in_window') meta.push({ label: 'Scope', value: 'Down events in window' })
+  else if (summary.mode === 'currently_down') meta.push({ label: 'Scope', value: 'Currently down' })
+
+  if (!stats.length && !meta.length) return null
+
+  const isDashboardSummary = Boolean(summary.nodes || summary.alerts)
+  const useHeroLayout = !isDashboardSummary && stats.length > 0 && stats.length <= 2
+
+  const metaChips = meta.length > 0 && (
+    <div className={`sw-report-meta-bar${useHeroLayout ? ' sw-report-meta-bar--inline' : ''}`}>
+      {meta.map((m) => (
+        <div key={m.label} className="sw-report-meta-chip">
+          <div className="sw-report-meta-chip-label">{m.label}</div>
+          <div className="sw-report-meta-chip-value">{m.value ?? '—'}</div>
         </div>
       ))}
+    </div>
+  )
+
+  return (
+    <div className="sw-report-summary">
+      {useHeroLayout ? (
+        <div className="sw-report-hero-row">
+          <div className="sw-report-hero-stats">
+            {stats.map((k) => (
+              <div key={k.label} className="sw-report-hero-stat">
+                <div className="sw-report-hero-value" style={k.color ? { color: k.color } : undefined}>{k.value ?? '—'}</div>
+                <div className="sw-report-hero-label">{k.label}</div>
+              </div>
+            ))}
+          </div>
+          {metaChips}
+        </div>
+      ) : (
+        <>
+          {stats.length > 0 && (
+            <div className="sw-report-stat-grid">
+              {stats.map((k) => (
+                <div key={k.label} className="sw-kpi">
+                  <div className="sw-kpi-label">{k.label}</div>
+                  <div className="sw-kpi-value" style={k.color ? { color: k.color } : undefined}>{k.value ?? '—'}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {metaChips}
+        </>
+      )}
     </div>
   )
 }
@@ -638,6 +715,11 @@ export default function SolarWindsReportsTab({ loading: parentBusy, onReachabili
     setBhDays((prev) => (prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day].sort()))
   }, [])
 
+  useEffect(() => {
+    if (!catalog?.length || !selectedDef || selectedDef.custom) return
+    runReport(selectedId)
+  }, [selectedId, catalog]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const grouped = useMemo(() => {
     const map = new Map()
     for (const r of catalog || []) {
@@ -783,12 +865,6 @@ export default function SolarWindsReportsTab({ loading: parentBusy, onReachabili
 
       {error && !busy && (
         <div className="sw-empty sw-no-print" style={{ color: 'var(--red)', marginBottom: 14 }}>{error}</div>
-      )}
-
-      {!payload && !busy && !error && selectedDef && !selectedDef.custom && (
-        <div className="sw-empty sw-no-print" style={{ marginBottom: 14 }}>
-          Choose filters if needed, then click Generate to load this report from Orion.
-        </div>
       )}
 
       {busy && !payload && (
