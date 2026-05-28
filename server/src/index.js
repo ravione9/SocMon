@@ -95,11 +95,20 @@ app.use(cors({ origin: corsOrigins }))
 // Web-mgmt proxy is mounted BEFORE compression / json so streamed device responses pass through untouched.
 app.use('/api/web-mgmt', webMgmtRoutes)
 app.use('/api/solarwinds', solarwindsRoutes)
-/** IDCS/XLSX export streams ZIP to the client — skip gzip (can corrupt binary). */
+/** Streaming exports (CSV/ZIP) — skip gzip so rows flush to the client and nginx can pass them through. */
+function isStreamingExportUrl(url) {
+  const u = String(url || '')
+  return (
+    u.includes('/api/idcs/export') ||
+    u.includes('/api/sentinel/events/export') ||
+    u.includes('/api/logs/export') ||
+    u.includes('/api/sentinel-one/xdr/powerQuery/export')
+  )
+}
 app.use(
   compression({
     filter: (req, res) => {
-      if ((req.originalUrl || req.url || '').includes('/api/idcs/export')) return false
+      if (isStreamingExportUrl(req.originalUrl || req.url)) return false
       return compression.filter(req, res)
     },
   }),

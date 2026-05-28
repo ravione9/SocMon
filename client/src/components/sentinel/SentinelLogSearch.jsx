@@ -269,7 +269,7 @@ export default function SentinelLogSearch({
     setExporting(true)
     const tid = toast.loading('Exporting…')
     try {
-      const cap = 100000
+      const cap = 200000
       const capped = total > cap
       const maxRows = String(capped ? cap : Math.max(total, 1))
       const qs = buildSentinelListQueryString([['maxRows', maxRows]])
