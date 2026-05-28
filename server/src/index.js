@@ -17,6 +17,7 @@ import morgan from 'morgan'
 import rateLimit from 'express-rate-limit'
 import { connectMongo } from './config/mongo.js'
 import { connectRedis } from './config/redis.js'
+import { migrateLegacyPageKeys } from './utils/migrateLegacyPageKeys.js'
 import { initWebSocket } from './services/websocket.js'
 import { startAlertEngine } from './services/alertEngine.js'
 import authRoutes from './routes/auth.js'
@@ -158,6 +159,7 @@ process.on('uncaughtException', (err) => {
 
 async function start() {
   await connectMongo()
+  await migrateLegacyPageKeys()
   await connectRedis()
   initWebSocket(io)
   startAlertEngine(io)

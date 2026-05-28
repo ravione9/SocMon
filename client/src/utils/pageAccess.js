@@ -2,6 +2,29 @@ import { APP_PAGE_KEYS } from '../config/appPages.js'
 
 const ALL = [...APP_PAGE_KEYS]
 
+/** Retired client-side alias until persisted sessions refresh from /api/auth/me. */
+function normalizePageKey(key) {
+  if (typeof key !== 'string') return null
+  const k = key.trim()
+  if (!k) return null
+  const mapped = k === 'network' ? 'solarwinds' : k
+  return ALL.includes(mapped) ? mapped : null
+}
+
+function normalizeAllowedPages(pages) {
+  if (!Array.isArray(pages)) return pages
+  const next = []
+  const seen = new Set()
+  for (const raw of pages) {
+    const k = normalizePageKey(raw)
+    if (k && !seen.has(k)) {
+      seen.add(k)
+      next.push(k)
+    }
+  }
+  return next
+}
+
 /**
  * Route keys shipped after granular page ACL landed. Users edited before that may
  * have an explicit Mongo `allowedPages` array that omitted these — they would never
@@ -40,7 +63,7 @@ export function getEffectiveAllowedPages(user) {
     return user.allowedPages.filter((k) => ALL.includes(k))
   }
   if (!Array.isArray(user.allowedPages)) return ALL
-  const filtered = user.allowedPages.filter((k) => ALL.includes(k))
+  const filtered = normalizeAllowedPages(user.allowedPages)
   return mergeLegacyImplicitGrant(user.role, filtered)
 }
 

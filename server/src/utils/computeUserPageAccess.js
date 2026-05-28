@@ -1,4 +1,4 @@
-import { APP_PAGE_KEYS, APP_PAGE_KEY_SET } from '../constants/appPages.js'
+import { APP_PAGE_KEYS, APP_PAGE_KEY_SET, normalizeAllowedPages } from '../constants/appPages.js'
 import CustomRole from '../models/CustomRole.js'
 
 const ALL = [...APP_PAGE_KEYS]
@@ -51,7 +51,7 @@ export async function computeUserPageAccess(userDoc) {
 
   if (role === 'custom_admin') {
     const allowed = Array.isArray(userDoc.allowedPages)
-      ? [...new Set(userDoc.allowedPages.filter((k) => APP_PAGE_KEY_SET.has(k)))]
+      ? normalizeAllowedPages(userDoc.allowedPages)
       : []
     const pageAccess = Object.fromEntries(allowed.map((k) => [k, 'full']))
     return { allowedPages: allowed, pageAccess, customRoleName: null }
@@ -59,7 +59,7 @@ export async function computeUserPageAccess(userDoc) {
 
   let allowed = ALL
   if (Array.isArray(userDoc.allowedPages)) {
-    allowed = [...new Set(userDoc.allowedPages.filter((k) => APP_PAGE_KEY_SET.has(k)))]
+    allowed = normalizeAllowedPages(userDoc.allowedPages)
   }
   allowed = mergeLegacyImplicitGrant(role, allowed)
   const level = role === 'viewer' ? 'read' : 'full'

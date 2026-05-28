@@ -2,7 +2,8 @@
   "private": true,
   "scripts": {
     "build": "npm ci --prefix client && npm run build --prefix client",
-    "build:client": "npm run build --prefix client"
+    "build:client": "npm run build --prefix client",
+    "deploy:prod": "bash scripts/deploy-prod.sh"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

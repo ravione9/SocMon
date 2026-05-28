@@ -1,7 +1,9 @@
 # Production stack: nginx (static UI + /api + /socket.io) → Node API → Mongo + Redis.
 #
-# 1) Build the SPA (from repo root) — required; an empty client/dist often shows as HTTP 403 from nginx:
-#      cd client && npm ci && npm run build
+# 1) Build the SPA (from repo root) — required; an empty or stale client/dist shows old nav/pages:
+#      npm run build
+#    Or use the helper script (pull + build + recreate containers):
+#      npm run deploy:prod
 # 2) Set CORS_ORIGIN in ../.env to the URL users open in the browser (scheme + host + port), e.g. http://YOUR_SERVER
 # 3) If you still get 403 after building: host paths must be readable/traversable by the container (nginx user ~101).
 #      chmod -R a+rX client/dist && chmod a+x . client client/dist
