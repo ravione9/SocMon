@@ -22,6 +22,11 @@ import {
   getInterfaceTrafficHistory,
   TRAFFIC_RANGE_SEC,
 } from '../services/solarwindsInterfaceTraffic.js'
+import {
+  fetchAlertDetail,
+  fetchActiveAlerts,
+  fetchNodeSnapshot,
+} from '../services/solarwindsNodeSnapshot.js'
 
 const router = Router()
 
@@ -223,72 +228,15 @@ router.get('/nodes/:nodeId/snapshot', async (req, res) => {
   }
 
   try {
-    const nodeSwql = `SELECT NodeID, Caption, IPAddress, Status, StatusDescription,
-      ResponseTime, PercentLoss, CPULoad, PercentMemoryUsed,
-      Vendor, MachineType, DNS, Location, Contact, Description
-      FROM Orion.Nodes WHERE NodeID=${nodeId}`
-
-    const nodeData = await withOrionTimeout(orionSwisQuery(nodeSwql), 'node')
-    const raw = nodeData?.results?.[0]
-    if (!raw) {
-      return res.json({ reachable: true, configured: true, found: false, node: null, interfaces: [], alerts: [], events: [] })
-    }
-
-    const node = mapNodeRow(raw)
-    const cap = swqlEscape(node.name)
-
-    const ifSwql = `SELECT TOP 100 InterfaceID, Caption, Status, InBps, OutBps, PercentUtil
-      FROM Orion.NPM.Interfaces WHERE NodeID=${nodeId} ORDER BY Caption`
-    const eventsSwql = `SELECT TOP 50 e.EventID, e.EventTime, e.EventType, e.Message, e.Acknowledged
-      FROM Orion.Events e INNER JOIN Orion.Nodes n ON e.NetworkNode = n.NodeID
-      WHERE n.NodeID=${nodeId} ORDER BY e.EventTime DESC`
-    const alertsSwql = `SELECT TOP 50 ao.AlertID, ao.EntityCaption, ao.TriggeredCount, ac.Name, ac.Severity
-      FROM Orion.AlertObjects ao INNER JOIN Orion.AlertConfigurations ac ON ao.AlertID = ac.AlertID
-      WHERE ao.RelatedNodeCaption='${cap}' OR ao.EntityCaption='${cap}'
-      ORDER BY ac.Severity DESC`
-
-    const [ifData, eventsData, alertsData] = await Promise.all([
-      withOrionTimeout(orionSwisQuery(ifSwql), 'interfaces').catch(() => ({ results: [] })),
-      withOrionTimeout(orionSwisQuery(eventsSwql), 'events'),
-      withOrionTimeout(orionSwisQuery(alertsSwql), 'alerts').catch(() => ({ results: [] })),
-    ])
-
-    const interfaces = (ifData?.results || []).map((i) => ({
-      id: i.InterfaceID,
-      name: i.Caption,
-      status: nodeStatusLabel(i.Status),
-      statusColor: nodeStatusColor(i.Status),
-      inBps: i.InBps != null ? Number(i.InBps) : null,
-      outBps: i.OutBps != null ? Number(i.OutBps) : null,
-      utilization: i.PercentUtil != null ? Number(i.PercentUtil) : null,
-    }))
-
-    const events = (eventsData?.results || []).map((e) => ({
-      id: e.EventID,
-      time: e.EventTime,
-      type: e.EventType || null,
-      message: e.Message || '',
-      acknowledged: Boolean(e.Acknowledged),
-    }))
-
-    const alerts = (alertsData?.results || []).map((a, idx) => ({
-      id: `${a.AlertID}-${idx}`,
-      alertId: a.AlertID,
-      name: a.Name,
-      severity: alertSeverityLabel(a.Severity),
-      severityCode: Number(a.Severity),
-      message: a.EntityCaption || null,
-      count: a.TriggeredCount != null ? Number(a.TriggeredCount) : 1,
-    }))
-
+    const snap = await fetchNodeSnapshot(nodeId)
     res.json({
       reachable: true,
       configured: true,
-      found: true,
-      node,
-      interfaces,
-      alerts,
-      events,
+      found: snap.found,
+      node: snap.node,
+      interfaces: snap.interfaces,
+      alerts: snap.alerts,
+      events: snap.events,
     })
   } catch (e) {
     swisErr(res, e, { found: false, node: null, interfaces: [], alerts: [], events: [] })
@@ -346,27 +294,37 @@ router.get('/nodes/:nodeId/interfaces/:interfaceId/traffic', async (req, res) =>
 router.get('/alerts', async (req, res) => {
   if (!isOrionConfigured()) return res.status(503).json({ error: 'Set ORION_USERNAME and ORION_PASSWORD in server .env', configured: false })
   try {
-    const swql = `SELECT TOP 200 ao.AlertID, ao.EntityCaption, ao.RelatedNodeCaption,
-      ao.EntityUri, ao.TriggeredCount, ac.Name, ac.Severity
-      FROM Orion.AlertObjects ao
-      INNER JOIN Orion.AlertConfigurations ac ON ao.AlertID = ac.AlertID
-      ORDER BY ac.Severity DESC`
-
-    const data = await withOrionTimeout(orionSwisQuery(swql), 'alerts')
-    const rows = (data?.results || []).map((a, i) => ({
-      id: `${a.AlertID}-${i}`,
-      alertId: a.AlertID,
-      name: a.Name,
-      severity: alertSeverityLabel(a.Severity),
-      severityCode: Number(a.Severity),
-      message: a.EntityCaption || null,
-      objectName: a.RelatedNodeCaption || a.EntityCaption || null,
-      entityUri: a.EntityUri || null,
-      count: a.TriggeredCount != null ? Number(a.TriggeredCount) : 1,
-    }))
+    const rows = await withOrionTimeout(fetchActiveAlerts(200), 'alerts')
     res.json({ reachable: true, configured: true, alerts: rows, total: rows.length })
   } catch (e) {
     swisErr(res, e, { alerts: [], total: 0 })
+  }
+})
+
+/** Alert drill-down — full alert fields + node snapshot when the object is a node. */
+router.get('/alerts/detail', async (req, res) => {
+  if (!isOrionConfigured()) return res.status(503).json({ error: 'Set ORION_USERNAME and ORION_PASSWORD in server .env', configured: false })
+  const alertId = req.query.alertId
+  const object = req.query.object || req.query.entityCaption || req.query.objectName || ''
+  if (!alertId) return res.status(400).json({ error: 'alertId query parameter required', configured: true })
+  try {
+    const detail = await withOrionTimeout(fetchAlertDetail(alertId, object), 'alert detail')
+    if (!detail.found) {
+      return res.json({ reachable: true, configured: true, found: false, alert: null, node: null, interfaces: [], alerts: [], events: [] })
+    }
+    res.json({
+      reachable: true,
+      configured: true,
+      found: true,
+      alert: detail.alert,
+      node: detail.node,
+      interfaces: detail.interfaces,
+      alerts: detail.alerts,
+      events: detail.events,
+    })
+  } catch (e) {
+    const status = e.status && e.status >= 400 && e.status < 600 ? e.status : 502
+    res.status(status).json({ error: e.message || 'Failed to load alert detail', configured: true })
   }
 })
 
