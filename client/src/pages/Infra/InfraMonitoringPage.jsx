@@ -18,6 +18,9 @@ import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../compo
 import { useThemeStore } from '../../store/themeStore.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
 import { useSmartPolling } from '../../hooks/useSmartPolling.js'
+import { useUrlTab } from '../../hooks/useUrlTab.js'
+
+const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events']
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, BarController, ArcElement, Tooltip, Legend, Filler)
 
@@ -890,7 +893,7 @@ function GraphPanel({ graph, series, chartData, chartOpts, busy, graphDataMode }
    MAIN COMPONENT
    ═══════════════════════════════════════════════════════════════ */
 export default function InfraMonitoringPage() {
-  const [tab, setTab] = useState('overview')
+  const [tab, setTab] = useUrlTab('overview', INFRA_TAB_IDS)
   const [config, setConfig] = useState(null)
   const [overview, setOverview] = useState(null)
   const [hosts, setHosts] = useState(null)

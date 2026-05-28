@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useUrlTab } from '../../hooks/useUrlTab.js'
 import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../components/ui/ResizableTable.jsx'
 import api from '../../api/client'
 import toast from 'react-hot-toast'
@@ -141,7 +142,7 @@ export default function AdminPage() {
   const sessionUser = useAuthStore((s) => s.user)
   const adminEditable = canWritePage(sessionUser, 'admin')
 
-  const [tab, setTab]         = useState('devices')
+  const [tab, setTab]         = useUrlTab('devices', TABS)
   const [devices, setDevices] = useState([])
   const [sites, setSites]     = useState([])
   const [users, setUsers]     = useState([])

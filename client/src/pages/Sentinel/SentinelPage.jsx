@@ -23,6 +23,7 @@ import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../compo
 import { useThemeStore } from '../../store/themeStore.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
 import { useSmartPolling, pollIntervalForRange } from '../../hooks/useSmartPolling.js'
+import { useUrlTab } from '../../hooks/useUrlTab.js'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, ArcElement, Tooltip, Legend, Filler)
 
@@ -234,7 +235,7 @@ function HBarChart({ rows, color, onBarClick, tc }) {
 }
 
 export default function SentinelPage() {
-  const [tab, setTab] = useState('overview')
+  const [tab, setTab] = useUrlTab('overview', TABS)
   const [range, setRange] = useState(() => ({ ...DEFAULT_RANGE_PRESET }))
   const [hostGroupFilter, setHostGroupFilter] = useState('')
   const [dash, setDash] = useState(null)

@@ -3,7 +3,7 @@ import mongoose from 'mongoose'
 import bcrypt from 'bcryptjs'
 import User from '../models/User.js'
 import CustomRole from '../models/CustomRole.js'
-import { sanitizeAllowedPages, APP_PAGE_KEY_SET, APP_PAGE_KEYS } from '../constants/appPages.js'
+import { sanitizeAllowedPages, normalizeAllowedPages, APP_PAGE_KEY_SET, APP_PAGE_KEYS } from '../constants/appPages.js'
 import { toClientUserPayload } from '../utils/computeUserPageAccess.js'
 
 const router = Router()
@@ -129,7 +129,7 @@ router.get('/', async (_req, res) => {
       }
       if (u.role === 'custom_admin') {
         const allowed = Array.isArray(u.allowedPages)
-          ? [...new Set(u.allowedPages.filter((k) => APP_PAGE_KEY_SET.has(k)))]
+          ? normalizeAllowedPages(u.allowedPages)
           : []
         out.allowedPages = allowed
         out.pageAccess = Object.fromEntries(allowed.map((k) => [k, 'full']))
@@ -139,7 +139,7 @@ router.get('/', async (_req, res) => {
       // for the list view we return the stored allowedPages — admin UI never needs the implicit grant
       // behaviour and bulk-list perf matters more here).
       const allowed = Array.isArray(u.allowedPages)
-        ? [...new Set(u.allowedPages.filter((k) => APP_PAGE_KEY_SET.has(k)))]
+        ? normalizeAllowedPages(u.allowedPages)
         : [...ALL]
       const level = u.role === 'viewer' ? 'read' : 'full'
       out.allowedPages = allowed

@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import api from '../../api/client'
 import toast from 'react-hot-toast'
+import { useUrlTab } from '../../hooks/useUrlTab.js'
 
 const WebSshModal  = lazy(() => import('../../components/network/WebSshModal.jsx'))
 const WebUiFrame   = lazy(() => import('../../components/network/WebUiFrame.jsx'))
@@ -220,7 +221,7 @@ export default function NetworkAccessPage() {
   const [rdpDevice, setRdpDevice] = useState(null)
   const [sshSessions, setSshSessions] = useState([])
   const [sshLogSession, setSshLogSession] = useState(null)
-  const [pageTab, setPageTab] = useState('devices')
+  const [pageTab, setPageTab] = useUrlTab('devices', MAIN_TABS)
   const [expandedSiteIds, setExpandedSiteIds] = useState(() => new Set())
   const f = (key) => (val) => setForm((p) => ({ ...p, [key]: val }))
 

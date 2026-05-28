@@ -4,6 +4,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { useUrlTab } from '../hooks/useUrlTab.js';
 import UserTable from '../components/idcs/UserTable';
 import BulkUpload from '../components/idcs/BulkUpload';
 import ExportPanel from '../components/idcs/ExportPanel';
@@ -447,7 +448,7 @@ function AuditLogTable() {
 
 // ─── Main page ───────────────────────────────────────────────────────────────
 export default function IdcsManagement() {
-  const [activeTab, setActiveTab] = useState('users');
+  const [activeTab, setActiveTab] = useUrlTab('users', TABS);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [groupUserIds, setGroupUserIds] = useState([]);
 

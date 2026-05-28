@@ -29,6 +29,7 @@ import AdOuCreateModal from '../components/ad/AdOuCreateModal.jsx'
 import AdBulkPanel from '../components/ad/AdBulkPanel.jsx'
 import AdReportsPanel from '../components/ad/AdReportsPanel.jsx'
 import AdAuditPanel from '../components/ad/AdAuditPanel.jsx'
+import { useUrlTab } from '../hooks/useUrlTab.js'
 
 const NAV_GROUPS = [
   {
@@ -1516,7 +1517,7 @@ function OverviewPanel({
 }
 
 export default function ActiveDirectoryManagement() {
-  const [section, setSection] = useState('overview')
+  const [section, setSection] = useUrlTab('overview', NAV_GROUPS.flatMap((g) => g.items.map((i) => i.id)))
   const [reportsPresetId, setReportsPresetId] = useState(null)
   const [usersFilterDefault, setUsersFilterDefault] = useState('all')
   const [status, setStatus] = useState(null)

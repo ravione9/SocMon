@@ -11,6 +11,7 @@ import { useThemeStore } from '../../store/themeStore.js'
 import { DEFAULT_RANGE_PRESET, DEFAULT_RANGE_VALUE } from '../../constants/timeRange.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
 import { useSmartPolling, pollIntervalForRange } from '../../hooks/useSmartPolling.js'
+import { useUrlTab } from '../../hooks/useUrlTab.js'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, ArcElement, Tooltip, Legend, Filler)
 
@@ -136,7 +137,7 @@ function BarRows({ items, colorFn, onRowClick }) {
 }
 
 export default function NOCPage() {
-  const [tab, setTab]         = useState('overview')
+  const [tab, setTab]         = useUrlTab('overview', TABS)
   const [range, setRange] = useState(() => ({ ...DEFAULT_RANGE_PRESET }))
   const [stats, setStats]     = useState(null)
   const [events, setEvents]   = useState([])

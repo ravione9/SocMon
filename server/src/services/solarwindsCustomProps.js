@@ -443,3 +443,5 @@ async function fetchInterfacesBulk(nodeIds, ifaceFields) {
   }
   return { ifaceMap, statsMap }
 }
+
+export { toOrionDT, parseBusinessHours, inBusinessHours }

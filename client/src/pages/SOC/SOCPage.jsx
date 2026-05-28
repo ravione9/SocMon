@@ -13,6 +13,7 @@ import { SOC_DEFAULT_RANGE_PRESET, SOC_DEFAULT_RANGE_VALUE } from '../../constan
 import { getSevCategory } from '../../utils/logSeverity.js'
 import { firewallIdentityFromEvent, fortigateVpnUserLabel, logSearchDeviceLabel } from '../../utils/firewallIdentity.js'
 import { useSmartPolling, pollIntervalForRange } from '../../hooks/useSmartPolling.js'
+import { useUrlTab } from '../../hooks/useUrlTab.js'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, ArcElement, Tooltip, Legend, Filler)
 
@@ -308,7 +309,7 @@ function socRangeMeta(range) {
 }
 
 export default function SOCPage() {
-  const [tab, setTab]           = useState('overview')
+  const [tab, setTab]           = useUrlTab('overview', TABS)
   const [range, setRange] = useState(() => ({ ...SOC_DEFAULT_RANGE_PRESET }))
   const [stats, setStats]       = useState(null)
   const [timeline, setTimeline] = useState([])

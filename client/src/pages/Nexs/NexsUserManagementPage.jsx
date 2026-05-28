@@ -3,6 +3,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
+import { useUrlTab } from '../../hooks/useUrlTab.js'
 import toast from 'react-hot-toast'
 import NexsUserTable from '../../components/nexs/NexsUserTable'
 import NexsRoleAssignModal from '../../components/nexs/NexsRoleAssignModal'
@@ -212,7 +213,7 @@ function CreateUserForm({ roles, onCreated }) {
 }
 
 export default function NexsUserManagementPage() {
-  const [tab, setTab] = useState('users')
+  const [tab, setTab] = useUrlTab('users', TABS)
   const [meta, setMeta] = useState(null)
   const [session, setSession] = useState(() => getNexsSession())
   const [users, setUsers] = useState([])

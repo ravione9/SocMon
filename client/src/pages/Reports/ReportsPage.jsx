@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useUrlTab } from '../../hooks/useUrlTab.js'
 import api from '../../api/client'
 import { ResizableColsTable } from '../../components/ui/ResizableTable.jsx'
 
@@ -141,7 +142,7 @@ export default function ReportsPage() {
   const [error, setError] = useState(null)
   const [deviceFilter, setDeviceFilter] = useState('')
   const [eventTypeFilter, setEventTypeFilter] = useState('all')
-  const [reportTab, setReportTab] = useState('overall')
+  const [reportTab, setReportTab] = useUrlTab('overall', REPORT_TABS)
   const [xdrStats, setXdrStats] = useState(null)
   const [xdrLoading, setXdrLoading] = useState(false)
   const [xdrError, setXdrError] = useState(null)

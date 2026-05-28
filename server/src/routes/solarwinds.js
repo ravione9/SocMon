@@ -25,8 +25,14 @@ import {
 import {
   fetchAlertDetail,
   fetchActiveAlerts,
+  fetchEvents,
   fetchNodeSnapshot,
 } from '../services/solarwindsNodeSnapshot.js'
+import {
+  CUSTOM_REPORT_SOURCES,
+  getReportCatalog,
+  runSolarWindsReportSafe,
+} from '../services/solarwindsReports.js'
 
 const router = Router()
 
@@ -93,11 +99,13 @@ function swisErr(res, e, emptyPayload = {}) {
   if (e.code === 'ORION_NOT_CONFIGURED') {
     return res.status(503).json({ error: e.message, configured: false })
   }
-  const isTimeout = e.code === 'ORION_TIMEOUT' || /timeout/i.test(e.message)
+  const isTimeout = e.code === 'ORION_TIMEOUT' || e.code === 'ORION_REPORT_TIMEOUT' || /timeout/i.test(e.message)
   const is405 = e.status === 405 || /405/.test(e.message)
   let tip = null
   if (isTimeout) {
-    tip = 'Orion did not respond in time. Check firewall and that the Netpulse server can reach port 17774.'
+    tip = e.code === 'ORION_REPORT_TIMEOUT'
+      ? 'Report took too long — try a shorter time range, lower row limit, or set ORION_REPORT_TIMEOUT_MS on the server.'
+      : 'Orion did not respond in time. Check firewall and that the Netpulse server can reach port 17774.'
   } else if (is405) {
     tip = 'SWIS rejected the HTTP method. Set ORION_SWIS_URL=https://HOST:17774/SolarWinds/InformationService/v3/Json and ORION_TLS_INSECURE=true, then GET /api/solarwinds/diagnostic.'
   } else if (e.status === 302 || /redirect/i.test(e.message)) {
@@ -426,22 +434,53 @@ router.get('/events', async (req, res) => {
   if (!isOrionConfigured()) return res.status(503).json({ error: 'Set ORION_USERNAME and ORION_PASSWORD in server .env', configured: false })
   try {
     const limit = Math.min(Math.max(Number(req.query.limit) || 100, 10), 500)
-    const swql = `SELECT TOP ${limit} EventID, EventTime, NetworkNode, EventType, Message, Acknowledged
-      FROM Orion.Events
-      ORDER BY EventTime DESC`
-
-    const data = await withOrionTimeout(orionSwisQuery(swql), 'events')
-    const rows = (data?.results || []).map((e) => ({
-      id: e.EventID,
-      time: e.EventTime,
-      node: e.NetworkNode || null,
-      type: e.EventType || null,
-      message: e.Message || '',
-      acknowledged: Boolean(e.Acknowledged),
-    }))
+    const rows = await withOrionTimeout(fetchEvents(limit), 'events')
     res.json({ reachable: true, configured: true, events: rows, total: rows.length })
   } catch (e) {
     swisErr(res, e, { events: [], total: 0 })
+  }
+})
+
+/** Prebuilt report catalog for Reports tab. */
+router.get('/reports/catalog', async (req, res) => {
+  const payload = {
+    configured: isOrionConfigured(),
+    reports: getReportCatalog(),
+    customSources: CUSTOM_REPORT_SOURCES,
+    carrierFilters: { carriers: [], descriptions: [] },
+  }
+  if (!isOrionConfigured()) return res.json(payload)
+  try {
+    const [carriers, descriptions] = await withOrionTimeout(
+      Promise.all([
+        getIfaceCPValues('CarrierName'),
+        getIfaceCPValues('Comments'),
+      ]),
+      'report catalog filters',
+    )
+    payload.carrierFilters = {
+      carriers: Array.isArray(carriers) ? carriers : [],
+      descriptions: Array.isArray(descriptions) ? descriptions : [],
+    }
+  } catch {
+    /* carrier dropdowns stay empty */
+  }
+  res.json(payload)
+})
+
+/** Run a prebuilt or custom Orion report. */
+router.get('/reports/:reportId', async (req, res) => {
+  if (!isOrionConfigured()) return res.status(503).json({ error: 'Set ORION_USERNAME and ORION_PASSWORD in server .env', configured: false })
+  const { reportId } = req.params
+  try {
+    const report = await runSolarWindsReportSafe(reportId, req.query)
+    res.json({ reachable: true, configured: true, ...report })
+  } catch (e) {
+    const status = e.status && e.status >= 400 && e.status < 600 ? e.status : 502
+    if (status === 404 || status === 400) {
+      return res.status(status).json({ error: e.message, configured: true })
+    }
+    swisErr(res, e, { reportId, columns: [], rows: [], rowCount: 0 })
   }
 })
 

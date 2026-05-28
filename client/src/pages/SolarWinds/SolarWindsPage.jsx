@@ -16,6 +16,7 @@ import { useSmartPolling } from '../../hooks/useSmartPolling.js'
 import { useUrlTab } from '../../hooks/useUrlTab.js'
 import { useThemeStore } from '../../store/themeStore.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
+import SolarWindsReportsTab from './SolarWindsReportsTab.jsx'
 
 ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, PointElement, LineElement, Filler)
 
@@ -144,6 +145,7 @@ const TABS = [
   { id: 'nodes',    label: 'Nodes',     icon: '▦' },
   { id: 'snapshot', label: 'Device Snapshot', icon: '▣' },
   { id: 'custom',   label: 'Custom Properties', icon: '◇' },
+  { id: 'reports',  label: 'Reports',   icon: '▧' },
   { id: 'alerts',   label: 'Alerts',    icon: '⚠' },
   { id: 'events',   label: 'Events',    icon: '◉' },
 ]
@@ -217,6 +219,8 @@ button.sw-kpi { width:100%; text-align:left; font-family:inherit; color:inherit;
   color:var(--text); font-size:12px; font-family:var(--sans); outline:none; min-width:180px; flex:1; max-width:280px; }
 .sw-select { padding:6px 10px; border-radius:8px; border:1px solid var(--border); background:var(--bg3);
   color:var(--text); font-size:11px; font-family:var(--sans); outline:none; cursor:pointer; }
+.sw-input { padding:6px 10px; border-radius:8px; border:1px solid var(--border); background:var(--bg3);
+  color:var(--text); font-size:12px; font-family:var(--sans); outline:none; }
 .sw-btn { padding:6px 12px; border-radius:8px; border:1px solid var(--border); background:var(--bg4);
   color:var(--text2); font-size:11px; font-weight:600; cursor:pointer; font-family:var(--sans); }
 .sw-btn:hover { background:var(--bg3); color:var(--text); }
@@ -257,19 +261,210 @@ button.sw-kpi { width:100%; text-align:left; font-family:inherit; color:inherit;
   color:var(--text3); font-family:var(--mono); margin-bottom:10px; }
 
 /* Print / Export PDF: hide chrome, render report cleanly when window.print() is invoked
-   from the Custom Properties tab. body.sw-cp-printing scopes the rules to that flow. */
+   from the Custom Properties tab or Reports tab. */
 @media print {
-  body.sw-cp-printing .sw-no-print,
+  @page { size: A4 portrait; margin: 10mm 12mm; }
+
+  body.sw-cp-printing,
+  body.sw-report-printing {
+    background: #fff !important;
+    color: #111 !important;
+    height: auto !important;
+    overflow: visible !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  html:has(body.sw-cp-printing),
+  html:has(body.sw-report-printing) {
+    height: auto !important;
+    overflow: visible !important;
+  }
+
+  body.sw-cp-printing > div,
+  body.sw-report-printing > div,
+  body.sw-cp-printing > div > div,
+  body.sw-report-printing > div > div {
+    height: auto !important;
+    overflow: visible !important;
+  }
+
+  body.sw-cp-printing main > div[role="status"],
+  body.sw-report-printing main > div[role="status"] {
+    display: none !important;
+  }
+
   body.sw-cp-printing aside,
   body.sw-cp-printing nav,
   body.sw-cp-printing header,
+  body.sw-cp-printing .sw-header,
   body.sw-cp-printing .sw-tabs,
-  body.sw-cp-printing .sw-toolbar { display:none !important; }
-  body.sw-cp-printing .sw-cp-print-header { display:block !important; margin-bottom:14px; }
-  body.sw-cp-printing { background:#fff !important; color:#111 !important; }
-  body.sw-cp-printing .sw-table { font-size:11px; }
-  body.sw-cp-printing .sw-table th, body.sw-cp-printing .sw-table td { color:#111 !important; border-color:#ccc !important; }
+  body.sw-cp-printing .sw-toolbar,
+  body.sw-cp-printing .sw-no-print,
+  body.sw-cp-printing .sw-err,
+  body.sw-report-printing aside,
+  body.sw-report-printing nav,
+  body.sw-report-printing header,
+  body.sw-report-printing .sw-header,
+  body.sw-report-printing .sw-tabs,
+  body.sw-report-printing .sw-toolbar,
+  body.sw-report-printing .sw-no-print,
+  body.sw-report-printing .sw-err {
+    display: none !important;
+  }
+
+  body.sw-cp-printing main,
+  body.sw-report-printing main,
+  body.sw-cp-printing .sw-page,
+  body.sw-report-printing .sw-page {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    overflow: visible !important;
+    height: auto !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  body.sw-cp-printing > div,
+  body.sw-report-printing > div {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+
+  body.sw-cp-printing .sw-cp-print-header,
+  body.sw-report-printing .sw-cp-print-header {
+    display: block !important;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #ccc;
+  }
+
+  body.sw-cp-printing .sw-cp-print-header h2,
+  body.sw-report-printing .sw-cp-print-header h2 {
+    color: #111 !important;
+    font-size: 16px !important;
+  }
+
+  body.sw-cp-printing .sw-report-print-root,
+  body.sw-report-printing .sw-report-print-root,
+  body.sw-cp-printing .sw-cp-print-root,
+  body.sw-report-printing .sw-cp-print-root {
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow: visible !important;
+  }
+
+  body.sw-cp-printing .sw-kpi-grid,
+  body.sw-report-printing .sw-kpi-grid {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+    margin-bottom: 10px !important;
+  }
+
+  body.sw-cp-printing .sw-kpi,
+  body.sw-report-printing .sw-kpi {
+    padding: 6px 8px !important;
+    border: 1px solid #ccc !important;
+    background: #fff !important;
+  }
+
+  body.sw-cp-printing .sw-kpi-label,
+  body.sw-report-printing .sw-kpi-label {
+    font-size: 8px !important;
+    color: #555 !important;
+  }
+
+  body.sw-cp-printing .sw-kpi-value,
+  body.sw-report-printing .sw-kpi-value {
+    font-size: 15px !important;
+    color: #111 !important;
+  }
+
+  body.sw-cp-printing .sw-widget,
+  body.sw-report-printing .sw-widget {
+    break-inside: auto;
+    border: 1px solid #ccc !important;
+    background: #fff !important;
+    margin-bottom: 10px !important;
+    overflow: visible !important;
+  }
+
+  body.sw-cp-printing .sw-widget-hd,
+  body.sw-report-printing .sw-widget-hd {
+    background: #f5f5f5 !important;
+    border-color: #ccc !important;
+  }
+
+  body.sw-cp-printing .sw-widget-title,
+  body.sw-report-printing .sw-widget-title {
+    color: #333 !important;
+  }
+
+  body.sw-report-printing .sw-report-charts {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  body.sw-report-printing .sw-report-charts-grid {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr !important;
+    gap: 8px !important;
+  }
+
+  body.sw-report-printing .sw-report-chart-cell {
+    min-height: 0 !important;
+    height: 130px !important;
+    max-width: 100% !important;
+    overflow: hidden !important;
+  }
+
+  body.sw-report-printing .sw-report-chart-cell canvas {
+    max-width: 100% !important;
+    max-height: 120px !important;
+  }
+
+  body.sw-cp-printing .sw-table-wrap,
+  body.sw-report-printing .sw-table-wrap {
+    overflow: visible !important;
+  }
+
+  body.sw-cp-printing .sw-table,
+  body.sw-report-printing .sw-table {
+    width: 100% !important;
+    font-size: 9px !important;
+    table-layout: auto !important;
+  }
+
+  body.sw-cp-printing .sw-table th,
+  body.sw-cp-printing .sw-table td,
+  body.sw-report-printing .sw-table th,
+  body.sw-report-printing .sw-table td {
+    color: #111 !important;
+    border-color: #ccc !important;
+    white-space: normal !important;
+    word-break: break-word !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    max-width: none !important;
+    padding: 3px 5px !important;
+  }
+
+  body.sw-cp-printing .sw-table thead,
+  body.sw-report-printing .sw-table thead {
+    display: table-header-group;
+  }
+
+  body.sw-report-printing .sw-table tbody tr {
+    break-inside: auto;
+    page-break-inside: auto;
+  }
 }
+.sw-report-td { max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .sw-device-list { flex:0 0 250px; max-height:620px; overflow-y:auto; border:1px solid var(--border);
   border-radius:10px; background:var(--bg2); }
 .sw-device-list-hd { padding:9px 14px; border-bottom:1px solid var(--border); background:var(--bg3);
@@ -1228,7 +1423,7 @@ function CustomPropertiesTab({
     setTimeout(() => {
       window.print()
       document.body.classList.remove('sw-cp-printing')
-    }, 50)
+    }, 350)
   }
 
   const exportCsv = () => {
@@ -1553,23 +1748,74 @@ function AlertsTab({ alerts, loading, onRefresh, severityFilter, onSeverityFilte
   )
 }
 
+function eventMatchesSearch(e, ql) {
+  if (!ql) return true
+  const hay = [e.message, e.node, e.typeLabel, e.type, e.nodeId]
+    .map((v) => String(v ?? '').toLowerCase())
+    .join(' ')
+  return hay.includes(ql)
+}
+
 function EventsTab({ events, loading, onRefresh }) {
   const [q, setQ] = useState('')
+  const [typeF, setTypeF] = useState('all')
+  const [ackF, setAckF] = useState('all')
+
+  const typeOptions = useMemo(() => {
+    const labels = new Set()
+    for (const e of events || []) {
+      const label = e.typeLabel || (e.type != null ? String(e.type) : null)
+      if (label) labels.add(label)
+    }
+    return [...labels].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+  }, [events])
+
   const filtered = useMemo(() => {
-    if (!q) return events || []
-    const ql = q.toLowerCase()
-    return (events || []).filter((e) =>
-      e.message?.toLowerCase().includes(ql) || e.node?.toLowerCase().includes(ql)
-    )
-  }, [events, q])
+    const ql = q.trim().toLowerCase()
+    return (events || []).filter((e) => {
+      if (typeF !== 'all') {
+        const label = e.typeLabel || (e.type != null ? String(e.type) : '')
+        if (label !== typeF) return false
+      }
+      if (ackF === 'acked' && !e.acknowledged) return false
+      if (ackF === 'unacked' && e.acknowledged) return false
+      return eventMatchesSearch(e, ql)
+    })
+  }, [events, q, typeF, ackF])
+
+  const { sorted, sortKey, sortDir, toggleSort } = useSort(filtered, 'time', 'desc')
+  const hasFilters = Boolean(q.trim()) || typeF !== 'all' || ackF !== 'all'
+
+  const th = (key, label) => (
+    <th onClick={() => toggleSort(key)} style={{ cursor: 'pointer', userSelect: 'none' }}>
+      {label} <SortIcon col={key} sortKey={sortKey} sortDir={sortDir} />
+    </th>
+  )
 
   return (
     <div className="sw-fade">
-      <div className="sw-toolbar">
-        <input className="sw-search" type="search" placeholder="Filter by node or message…"
-          value={q} onChange={(e) => setQ(e.target.value)} />
-        <span style={{ fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text3)', marginLeft: 4 }}>
-          {filtered.length} event{filtered.length !== 1 ? 's' : ''}
+      <div className="sw-toolbar" style={{ flexWrap: 'wrap', gap: 8 }}>
+        <input
+          className="sw-search"
+          type="search"
+          placeholder="Search node, message, or type…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+        <select className="sw-select" value={typeF} onChange={(e) => setTypeF(e.target.value)}>
+          <option value="all">All event types</option>
+          {typeOptions.map((t) => (
+            <option key={t} value={t}>{t}</option>
+          ))}
+        </select>
+        <select className="sw-select" value={ackF} onChange={(e) => setAckF(e.target.value)}>
+          <option value="all">All ack states</option>
+          <option value="unacked">Unacknowledged</option>
+          <option value="acked">Acknowledged</option>
+        </select>
+        <span style={{ fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>
+          {sorted.length} event{sorted.length !== 1 ? 's' : ''}
+          {hasFilters && events?.length != null ? ` · ${events.length} loaded` : ''}
         </span>
         <button type="button" className="sw-btn" onClick={onRefresh} disabled={loading}>
           {loading ? <span className="sw-spinner" /> : '↻'} Refresh
@@ -1578,30 +1824,32 @@ function EventsTab({ events, loading, onRefresh }) {
 
       <div className="sw-widget">
         <div className="sw-table-wrap">
-          {filtered.length === 0 ? (
-            <div className="sw-empty">{loading ? 'Loading…' : 'No events'}</div>
+          {sorted.length === 0 ? (
+            <div className="sw-empty">
+              {loading ? 'Loading…' : hasFilters ? 'No events match your filters' : 'No events'}
+            </div>
           ) : (
             <table className="sw-table">
               <thead><tr>
-                <th>Time</th>
+                {th('time', 'Time')}
                 <th>Age</th>
-                <th>Node</th>
-                <th>Type</th>
-                <th>Message</th>
+                {th('node', 'Node')}
+                {th('typeLabel', 'Type')}
+                {th('message', 'Message')}
                 <th>Ack</th>
               </tr></thead>
               <tbody>
-                {filtered.map((e, i) => (
+                {sorted.map((e, i) => (
                   <tr key={e.id ?? i}>
                     <td style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)', whiteSpace: 'nowrap' }}>{fmtDate(e.time)}</td>
                     <td style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)' }}>{relAge(e.time)}</td>
-                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--accent)' }}>{e.node || '—'}</td>
-                    <td style={{ color: 'var(--text3)', fontSize: 11 }}>{e.type || '—'}</td>
+                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--accent)' }} title={e.nodeId != null ? `Node ID ${e.nodeId}` : undefined}>{e.node || '—'}</td>
+                    <td style={{ color: 'var(--text3)', fontSize: 11 }} title={e.type != null ? `Event type ${e.type}` : undefined}>{e.typeLabel || '—'}</td>
                     <td style={{ color: 'var(--text2)', maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.message}>{e.message}</td>
                     <td style={{ textAlign: 'center' }}>
                       {e.acknowledged
-                        ? <span style={{ color: '#22d3a0', fontSize: 12 }}>✓</span>
-                        : <span style={{ color: 'var(--border2)', fontSize: 12 }}>—</span>}
+                        ? <span style={{ color: '#22d3a0', fontSize: 12 }} title="Acknowledged">✓</span>
+                        : <span style={{ color: 'var(--border2)', fontSize: 12 }} title="Not acknowledged">—</span>}
                     </td>
                   </tr>
                 ))}
@@ -2093,6 +2341,9 @@ export default function SolarWindsPage() {
           )}
           {tab === 'events' && (
             <EventsTab events={events} loading={tabBusy} onRefresh={() => runTab('events')} />
+          )}
+          {tab === 'reports' && (
+            <SolarWindsReportsTab loading={tabBusy} onReachability={applyReachability} />
           )}
         </>
       )}

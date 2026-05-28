@@ -68,22 +68,42 @@ export function parseObjectTypeFromEntityUri(uri) {
   return null
 }
 
-/** SWQL column sets — try richest first; fall back when Orion rejects unknown properties. */
-const ALERT_SELECT_VARIANTS = [
-  `ao.AlertObjectID, ao.AlertID, ao.EntityCaption, ao.RelatedNodeCaption,
-    ao.EntityUri, ao.TriggeredCount, ao.LastTriggeredDateTime, ao.FirstTriggeredDateTime,
-    ac.Name, ac.Severity, ac.Description`,
-  `ao.AlertID, ao.EntityCaption, ao.RelatedNodeCaption,
-    ao.EntityUri, ao.TriggeredCount, ac.Name, ac.Severity`,
+/**
+ * SWQL query variants — richest first; fall back when Orion rejects unknown properties.
+ * Note: Orion.AlertObjects has LastTriggeredDateTime but not FirstTriggeredDateTime;
+ * join AlertActive for the current active instance TriggeredDateTime.
+ */
+const ALERT_QUERY_VARIANTS = [
+  {
+    cols: `ao.AlertObjectID, ao.AlertID, ao.EntityCaption, ao.RelatedNodeCaption,
+      ao.EntityUri, ao.TriggeredCount, ao.LastTriggeredDateTime,
+      aa.TriggeredDateTime,
+      ac.Name, ac.Severity, ac.Description`,
+    from: `FROM Orion.AlertObjects ao
+      INNER JOIN Orion.AlertConfigurations ac ON ao.AlertID = ac.AlertID
+      LEFT JOIN Orion.AlertActive aa ON aa.AlertObjectID = ao.AlertObjectID`,
+  },
+  {
+    cols: `ao.AlertObjectID, ao.AlertID, ao.EntityCaption, ao.RelatedNodeCaption,
+      ao.EntityUri, ao.TriggeredCount, ao.LastTriggeredDateTime,
+      ac.Name, ac.Severity, ac.Description`,
+    from: `FROM Orion.AlertObjects ao
+      INNER JOIN Orion.AlertConfigurations ac ON ao.AlertID = ac.AlertID`,
+  },
+  {
+    cols: `ao.AlertID, ao.EntityCaption, ao.RelatedNodeCaption,
+      ao.EntityUri, ao.TriggeredCount, ac.Name, ac.Severity`,
+    from: `FROM Orion.AlertObjects ao
+      INNER JOIN Orion.AlertConfigurations ac ON ao.AlertID = ac.AlertID`,
+  },
 ]
 
-async function queryAlertObjects({ top = 200, where = '', orderBy = 'ac.Severity DESC' } = {}) {
+async function queryAlertObjects({ top = 200, where = '', orderBy = 'ao.LastTriggeredDateTime DESC' } = {}) {
   const whereClause = where ? ` WHERE ${where}` : ''
   let lastErr = null
-  for (const cols of ALERT_SELECT_VARIANTS) {
+  for (const { cols, from } of ALERT_QUERY_VARIANTS) {
     const swql = `SELECT TOP ${top} ${cols}
-      FROM Orion.AlertObjects ao
-      INNER JOIN Orion.AlertConfigurations ac ON ao.AlertID = ac.AlertID${whereClause}
+      ${from}${whereClause}
       ORDER BY ${orderBy}`
     try {
       return await orionSwisQuery(swql)
@@ -97,7 +117,7 @@ async function queryAlertObjects({ top = 200, where = '', orderBy = 'ac.Severity
 async function queryAlertDetailRow(alertId, objectHint = '') {
   const id = Number(alertId)
   const object = swqlEscape(String(objectHint || '').trim())
-  const orderVariants = ['ao.LastTriggeredDateTime DESC', 'ac.Severity DESC']
+  const orderVariants = ['aa.TriggeredDateTime DESC', 'ao.LastTriggeredDateTime DESC', 'ac.Severity DESC']
   const whereVariants = object
     ? [`ao.AlertID = ${id} AND (ao.EntityCaption='${object}' OR ao.RelatedNodeCaption='${object}')`, `ao.AlertID = ${id}`]
     : [`ao.AlertID = ${id}`]
@@ -189,8 +209,8 @@ function mapAlertRow(a, idx = 0) {
     entityUri: a.EntityUri || null,
     objectType: parseObjectTypeFromEntityUri(a.EntityUri),
     count: a.TriggeredCount != null ? Number(a.TriggeredCount) : 1,
-    lastTriggered: a.LastTriggeredDateTime || null,
-    firstTriggered: a.FirstTriggeredDateTime || null,
+    lastTriggered: a.TriggeredDateTime || a.LastTriggeredDateTime || null,
+    firstTriggered: a.TriggeredDateTime || a.LastTriggeredDateTime || null,
   }
 }
 
@@ -218,4 +238,60 @@ export async function fetchAlertDetail(alertId, objectHint = '') {
 export async function fetchActiveAlerts(limit = 200) {
   const data = await queryAlertObjects({ top: limit })
   return (data?.results || []).map((a, i) => mapAlertRow(a, i))
+}
+
+const EVENT_QUERY_VARIANTS = [
+  {
+    cols: `e.EventID, e.EventTime, e.NetworkNode, n.Caption AS NodeCaption,
+      e.EventType, et.Name AS EventTypeName, e.Message, e.Acknowledged`,
+    from: `FROM Orion.Events e
+      LEFT JOIN Orion.Nodes n ON e.NetworkNode = n.NodeID
+      LEFT JOIN Orion.EventTypes et ON e.EventType = et.EventType`,
+  },
+  {
+    cols: `e.EventID, e.EventTime, e.NetworkNode, n.Caption AS NodeCaption,
+      e.EventType, e.Message, e.Acknowledged`,
+    from: `FROM Orion.Events e
+      LEFT JOIN Orion.Nodes n ON e.NetworkNode = n.NodeID`,
+  },
+  {
+    cols: `EventID, EventTime, NetworkNode, EventType, Message, Acknowledged`,
+    from: `FROM Orion.Events`,
+  },
+]
+
+function mapEventRow(e) {
+  const nodeId = e.NetworkNode != null ? Number(e.NetworkNode) : null
+  return {
+    id: e.EventID,
+    time: e.EventTime,
+    nodeId,
+    node: e.NodeCaption || (nodeId != null ? `Node ${nodeId}` : null),
+    type: e.EventType != null ? Number(e.EventType) : null,
+    typeLabel: e.EventTypeName || (e.EventType != null ? `Type ${e.EventType}` : null),
+    message: e.Message || '',
+    acknowledged: Boolean(e.Acknowledged),
+  }
+}
+
+async function queryEvents(limit = 200) {
+  let lastErr = null
+  for (const { cols, from } of EVENT_QUERY_VARIANTS) {
+    const swql = `SELECT TOP ${limit} ${cols}
+      ${from}
+      ORDER BY EventTime DESC`
+    try {
+      return await orionSwisQuery(swql)
+    } catch (e) {
+      lastErr = e
+    }
+  }
+  throw lastErr || new Error('Unable to query Orion.Events')
+}
+
+/** Recent events for /api/solarwinds/events */
+export async function fetchEvents(limit = 200) {
+  const top = Math.min(Math.max(Number(limit) || 100, 10), 500)
+  const data = await queryEvents(top)
+  return (data?.results || []).map(mapEventRow)
 }

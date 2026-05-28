@@ -292,12 +292,26 @@ export async function orionWebPreAuth() {
 /** Cap slow Orion probes so API handlers return before the client axios timeout. */
 export function withOrionTimeout(promise, label = 'Orion') {
   const ms = requestTimeoutMs() + 5_000   // a bit more than the per-request socket timeout
+  return promiseTimeout(promise, ms, label, 'ORION_TIMEOUT')
+}
+
+function reportTimeoutMs() {
+  const n = Number(process.env.ORION_REPORT_TIMEOUT_MS)
+  return Number.isFinite(n) && n > 0 ? n : 90_000
+}
+
+/** Reports may run several SWQL queries — allow a longer budget than single probes. */
+export function withOrionReportTimeout(promise, label = 'Orion report') {
+  return promiseTimeout(promise, reportTimeoutMs(), label, 'ORION_REPORT_TIMEOUT')
+}
+
+function promiseTimeout(promise, ms, label, code) {
   return Promise.race([
     promise,
     new Promise((_, reject) => {
       setTimeout(() => {
-        const e = new Error(`${label} probe timed out after ${ms}ms — check ORION_WEB_URL and that port 17774 is open`)
-        e.code = 'ORION_TIMEOUT'
+        const e = new Error(`${label} timed out after ${ms}ms — try a shorter time range or lower row limit`)
+        e.code = code
         reject(e)
       }, ms)
     }),

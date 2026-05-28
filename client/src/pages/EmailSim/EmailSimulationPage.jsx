@@ -19,6 +19,7 @@ import { canWritePage } from '../../utils/pageAccess'
 import { buildFunnelDonutDataset, getFunnelStageColors, getThemeCssColors } from '../../utils/themeCssColors.js'
 import { useThemeStore } from '../../store/themeStore.js'
 import CampWorkspacePanel from './CampWorkspacePanel.jsx'
+import { useUrlTab } from '../../hooks/useUrlTab.js'
 import { ES_ACCENT, ES_RADIUS, ES_RADIUS_SM, ES_SHADOW } from './emailSimTheme.js'
 import './emailSimTheme.css'
 import {
@@ -378,7 +379,7 @@ export default function EmailSimulationPage() {
   const user = useAuthStore((s) => s.user)
   const write = canWritePage(user, 'emailSim')
 
-  const [tab, setTab] = useState('dash')
+  const [tab, setTab] = useUrlTab('dash', NAV)
   const [audienceView, setAudienceView] = useState('groups')
   const [meta, setMeta] = useState(null)
   const [stats, setStats] = useState(null)
