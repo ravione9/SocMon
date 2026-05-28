@@ -211,19 +211,7 @@ export async function fetchAlertDetail(alertId, objectHint = '') {
   }
 
   const alert = mapAlertRow(raw, 0)
-
-  let nodeId = parseNodeIdFromEntityUri(raw.EntityUri)
-  const nodeCaption = raw.RelatedNodeCaption || (parseObjectTypeFromEntityUri(raw.EntityUri) === 'Node' ? raw.EntityCaption : null)
-  if (!nodeId && nodeCaption) {
-    nodeId = await findNodeIdByCaption(nodeCaption)
-  }
-
-  if (!nodeId) {
-    return { found: true, alert, node: null, interfaces: [], alerts: [], events: [] }
-  }
-
-  const snap = await fetchNodeSnapshot(nodeId)
-  return { found: true, alert, ...snap }
+  return { found: true, alert, node: null, interfaces: [], alerts: [], events: [] }
 }
 
 /** Active alerts list for /api/solarwinds/alerts */

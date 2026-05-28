@@ -13,6 +13,7 @@ import {
 } from 'chart.js'
 import api from '../../api/client'
 import { useSmartPolling } from '../../hooks/useSmartPolling.js'
+import { useUrlTab } from '../../hooks/useUrlTab.js'
 import { useThemeStore } from '../../store/themeStore.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
 
@@ -248,6 +249,7 @@ button.sw-kpi { width:100%; text-align:left; font-family:inherit; color:inherit;
   display:flex; align-items:center; justify-content:center; padding:16px; }
 .sw-modal { width:min(920px,100%); max-height:min(90vh,900px); display:flex; flex-direction:column;
   background:var(--bg2); border:1px solid var(--border); border-radius:14px; box-shadow:0 24px 80px rgba(0,0,0,.45); }
+.sw-modal.sw-modal-sm { width:min(560px,100%); max-height:min(80vh,640px); }
 .sw-modal-hd { display:flex; align-items:flex-start; gap:12px; padding:16px 18px; border-bottom:1px solid var(--border); }
 .sw-modal-body { flex:1; overflow-y:auto; padding:16px 18px 20px; }
 .sw-modal-section { margin-bottom:18px; }
@@ -564,14 +566,13 @@ function NodesTab({ nodes, loading, onRefresh, onNodeClick, statusFilter, onStat
   )
 }
 
-function AlertDetailModal({ detail, onClose, onOpenSnapshot }) {
+function AlertDetailModal({ detail, onClose }) {
   if (!detail) return null
-  const { loading, error, alert, node, interfaces, alerts, events } = detail
-  const dotColor = node ? (STATUS_COLOR[node.statusColor] || STATUS_COLOR.unknown) : null
+  const { loading, error, alert } = detail
 
   return (
     <div className="sw-modal-backdrop" onClick={onClose} role="presentation">
-      <div className="sw-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="sw-alert-modal-title">
+      <div className="sw-modal sw-modal-sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="sw-alert-modal-title">
         <div className="sw-modal-hd">
           <div style={{ flex: 1, minWidth: 0 }}>
             <div id="sw-alert-modal-title" style={{ fontSize: 16, fontWeight: 800, color: 'var(--text)', fontFamily: 'var(--sans)' }}>
@@ -580,8 +581,10 @@ function AlertDetailModal({ detail, onClose, onOpenSnapshot }) {
             {alert && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
                 <Pill label={alert.severity} />
-                {alert.objectName && (
-                  <span style={{ fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--accent)' }}>{alert.objectName}</span>
+                {(alert.objectName || alert.message) && (
+                  <span style={{ fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--accent)' }}>
+                    {alert.objectName || alert.message}
+                  </span>
                 )}
               </div>
             )}
@@ -591,7 +594,7 @@ function AlertDetailModal({ detail, onClose, onOpenSnapshot }) {
 
         <div className="sw-modal-body">
           {loading && (
-            <div className="sw-empty" style={{ padding: 40 }}>
+            <div className="sw-empty" style={{ padding: 32 }}>
               <span className="sw-spinner" /> Loading from Orion…
             </div>
           )}
@@ -599,131 +602,31 @@ function AlertDetailModal({ detail, onClose, onOpenSnapshot }) {
             <div className="sw-empty" style={{ color: 'var(--red)' }}>{error}</div>
           )}
           {!loading && !error && alert && (
-            <>
-              <div className="sw-modal-section">
-                <div className="sw-modal-section-title">Alert</div>
-                <div className="sw-info-grid">
-                  {[
-                    { label: 'Severity', value: alert.severity },
-                    { label: 'Alert name', value: alert.name },
-                    { label: 'Object', value: alert.objectName || alert.message || '—' },
-                    { label: 'Type', value: alert.objectType || '—' },
-                    { label: 'Trigger count', value: alert.count ?? '—' },
-                    { label: 'Last triggered', value: fmtDate(alert.lastTriggered) },
-                    { label: 'First triggered', value: fmtDate(alert.firstTriggered) },
-                    { label: 'Description', value: alert.description || '—' },
-                  ].map((f) => (
-                    <div key={f.label} className="sw-info-field">
-                      <div className="sw-info-label">{f.label}</div>
-                      <div className="sw-info-value">{f.value}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {node && (
-                <>
-                  <div className="sw-modal-section">
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
-                      <div className="sw-modal-section-title" style={{ margin: 0 }}>Node — {node.name}</div>
-                      {onOpenSnapshot && (
-                        <button type="button" className="sw-btn sw-btn-primary" style={{ fontSize: 11 }} onClick={() => onOpenSnapshot(node)}>
-                          Open snapshot
-                        </button>
-                      )}
-                    </div>
-                    <div className="sw-info-grid">
-                      {[
-                        { label: 'Status', value: node.status, color: dotColor },
-                        { label: 'IP', value: node.ip || '—' },
-                        { label: 'Response', value: fmtMs(node.responseTime) },
-                        { label: 'Packet loss', value: fmtPct(node.packetLoss) },
-                        { label: 'CPU', value: node.cpu != null && node.cpu >= 0 ? fmtPct(node.cpu) : '—' },
-                        { label: 'Memory', value: node.memory != null && node.memory >= 0 ? fmtPct(node.memory) : '—' },
-                        { label: 'Vendor', value: node.vendor || '—' },
-                        { label: 'Type', value: node.machineType || '—' },
-                        { label: 'Location', value: node.location || '—' },
-                        { label: 'DNS', value: node.dns || '—' },
-                      ].map((f) => (
-                        <div key={f.label} className="sw-info-field">
-                          <div className="sw-info-label">{f.label}</div>
-                          <div className="sw-info-value" style={f.color ? { color: f.color } : undefined}>{f.value}</div>
-                        </div>
-                      ))}
-                    </div>
+            <div className="sw-info-grid">
+              {[
+                { label: 'Severity', value: alert.severity },
+                { label: 'Alert name', value: alert.name },
+                { label: 'Object', value: alert.objectName || '—' },
+                { label: 'Entity caption', value: alert.message || '—' },
+                { label: 'Type', value: alert.objectType || '—' },
+                { label: 'Trigger count', value: alert.count ?? '—' },
+                { label: 'Last triggered', value: fmtDate(alert.lastTriggered) },
+                { label: 'First triggered', value: fmtDate(alert.firstTriggered) },
+                { label: 'Alert ID', value: alert.alertId ?? '—' },
+                { label: 'Description', value: alert.description || '—', wide: true },
+                { label: 'Entity URI', value: alert.entityUri || '—', wide: true, mono: true },
+              ].map((f) => (
+                <div key={f.label} className="sw-info-field" style={f.wide ? { minWidth: '100%' } : undefined}>
+                  <div className="sw-info-label">{f.label}</div>
+                  <div
+                    className="sw-info-value"
+                    style={f.mono ? { fontFamily: 'var(--mono)', fontSize: 11, wordBreak: 'break-all' } : undefined}
+                  >
+                    {f.value}
                   </div>
-
-                  {(interfaces || []).length > 0 && (
-                    <div className="sw-modal-section">
-                      <div className="sw-modal-section-title">Interfaces ({interfaces.length})</div>
-                      <div className="sw-table-wrap">
-                        <table className="sw-table">
-                          <thead><tr><th>Status</th><th>Name</th><th>In</th><th>Out</th><th>Util</th></tr></thead>
-                          <tbody>
-                            {interfaces.map((i) => (
-                              <tr key={i.id}>
-                                <td><Pill label={i.status} /></td>
-                                <td style={{ fontWeight: 600 }}>{i.name}</td>
-                                <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{fmtBps(i.inBps)}</td>
-                                <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{fmtBps(i.outBps)}</td>
-                                <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{fmtPct(i.utilization)}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  )}
-
-                  {(alerts || []).length > 0 && (
-                    <div className="sw-modal-section">
-                      <div className="sw-modal-section-title">All active alerts on node ({alerts.length})</div>
-                      <div className="sw-table-wrap">
-                        <table className="sw-table">
-                          <thead><tr><th>Severity</th><th>Alert</th><th>Object</th><th>Count</th></tr></thead>
-                          <tbody>
-                            {alerts.map((a) => (
-                              <tr key={a.id}>
-                                <td><Pill label={a.severity} /></td>
-                                <td style={{ fontWeight: 600 }}>{a.name}</td>
-                                <td style={{ fontSize: 11, color: 'var(--text2)' }}>{a.message || a.objectName || '—'}</td>
-                                <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{a.count}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  )}
-
-                  {(events || []).length > 0 && (
-                    <div className="sw-modal-section">
-                      <div className="sw-modal-section-title">Recent events ({events.length})</div>
-                      <div className="sw-table-wrap">
-                        <table className="sw-table">
-                          <thead><tr><th>Time</th><th>Age</th><th>Message</th></tr></thead>
-                          <tbody>
-                            {events.slice(0, 15).map((e) => (
-                              <tr key={e.id}>
-                                <td style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)', whiteSpace: 'nowrap' }}>{fmtDate(e.time)}</td>
-                                <td style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)' }}>{relAge(e.time)}</td>
-                                <td style={{ fontSize: 11, color: 'var(--text2)' }} title={e.message}>{e.message}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-
-              {!node && (
-                <div className="sw-empty" style={{ marginTop: 8 }}>
-                  No Orion node matched this alert object. It may be an interface, IP range, or other entity type.
                 </div>
-              )}
-            </>
+              ))}
+            </div>
           )}
         </div>
       </div>
@@ -1178,7 +1081,7 @@ function DeviceSnapshotTab({
                           <tr
                             key={a.id}
                             className="sw-row-click"
-                            onClick={() => onAlertClick?.(a, { node: snapshot.node, interfaces: snapshot.interfaces, alerts: snapshot.alerts, events: snapshot.events })}
+                            onClick={() => onAlertClick?.(a)}
                             title="View alert details"
                           >
                             <td><Pill label={a.severity} /></td>
@@ -1713,7 +1616,7 @@ function EventsTab({ events, loading, onRefresh }) {
 
 /* ─── main page ────────────────────────────────────────────────────────────── */
 export default function SolarWindsPage() {
-  const [tab, setTab]           = useState('overview')
+  const [tab, setTab]           = useUrlTab('overview', TABS)
   const [config, setConfig]     = useState(null)
   const [overview, setOverview] = useState(null)
   const [nodes, setNodes]       = useState(null)
@@ -1848,16 +1751,8 @@ export default function SolarWindsPage() {
     if (data.node) setSelectedNode(data.node)
   }, [])
 
-  const openAlertDetail = useCallback(async (alert, inlineSnapshot = null) => {
-    setAlertDetail({
-      loading: true,
-      error: null,
-      alert,
-      node: inlineSnapshot?.node ?? null,
-      interfaces: inlineSnapshot?.interfaces ?? [],
-      alerts: inlineSnapshot?.alerts ?? [],
-      events: inlineSnapshot?.events ?? [],
-    })
+  const openAlertDetail = useCallback(async (alert) => {
+    setAlertDetail({ loading: true, error: null, alert })
     try {
       const { data } = await api.get('/api/solarwinds/alerts/detail', {
         params: {
@@ -1869,41 +1764,17 @@ export default function SolarWindsPage() {
         loading: false,
         error: data.found === false ? 'Alert not found in Orion' : null,
         alert: data.alert || alert,
-        node: data.node ?? inlineSnapshot?.node ?? null,
-        interfaces: data.interfaces?.length ? data.interfaces : (inlineSnapshot?.interfaces ?? []),
-        alerts: data.alerts?.length ? data.alerts : (inlineSnapshot?.alerts ?? []),
-        events: data.events?.length ? data.events : (inlineSnapshot?.events ?? []),
       })
     } catch (e) {
-      if (inlineSnapshot?.node) {
-        setAlertDetail({
-          loading: false,
-          error: null,
-          alert,
-          node: inlineSnapshot.node,
-          interfaces: inlineSnapshot.interfaces ?? [],
-          alerts: inlineSnapshot.alerts ?? [],
-          events: inlineSnapshot.events ?? [],
-        })
-      } else {
-        setAlertDetail((prev) => ({
-          ...prev,
-          loading: false,
-          error: e.response?.data?.error || e.message || 'Failed to load alert detail',
-        }))
-      }
+      setAlertDetail({
+        loading: false,
+        error: e.response?.data?.error || e.message || 'Failed to load alert detail',
+        alert,
+      })
     }
   }, [])
 
   const closeAlertDetail = useCallback(() => setAlertDetail(null), [])
-
-  const openSnapshotFromAlert = useCallback((node) => {
-    if (!node?.id) return
-    closeAlertDetail()
-    setTab('snapshot')
-    setSelectedNode(node)
-    loadSnapshot(node.id)
-  }, [closeAlertDetail, loadSnapshot])
 
   const runTab = useCallback(async (t) => {
     setTabBusy(true)
@@ -2229,7 +2100,6 @@ export default function SolarWindsPage() {
       <AlertDetailModal
         detail={alertDetail}
         onClose={closeAlertDetail}
-        onOpenSnapshot={openSnapshotFromAlert}
       />
     </div>
   )
