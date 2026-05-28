@@ -35,16 +35,37 @@ function candidateList(envKey, defaults) {
   return env.length ? env : defaults
 }
 
+/**
+ * Discover which CP columns exist on this Orion.
+ * Tries SWIS metadata first (single round-trip). Falls back to parallel column probes when
+ * metadata isn't accessible — much faster than the old sequential per-column SELECT loop
+ * which would take ~30+ round trips on first load.
+ */
 async function probeFields(entity, candidates) {
-  const found = []
-  for (const col of candidates) {
-    if (!isValidCol(col)) continue
-    try {
-      await orionSwisQuery(`SELECT TOP 1 ${entity === 'Nodes' ? 'NodeID' : 'InterfaceID'}, ${col} FROM Orion.${entity === 'Nodes' ? 'NodesCustomProperties' : 'NPM.InterfacesCustomProperties'}`)
-      found.push(col)
-    } catch { /* column not present */ }
-  }
-  return found
+  const tableName = entity === 'Nodes'
+    ? 'Orion.NodesCustomProperties'
+    : 'Orion.NPM.InterfacesCustomProperties'
+
+  try {
+    const data = await orionSwisQuery(
+      `SELECT Name FROM Metadata.Property WHERE EntityName = '${tableName}'`,
+    )
+    const known = new Set((data?.results || []).map((r) => String(r.Name || '')))
+    if (known.size) {
+      const validCandidates = candidates.filter(isValidCol)
+      const fromMeta = validCandidates.filter((c) => known.has(c))
+      if (fromMeta.length) return fromMeta
+    }
+  } catch { /* metadata table not exposed — fall through to probing */ }
+
+  const idCol = entity === 'Nodes' ? 'NodeID' : 'InterfaceID'
+  const valid = candidates.filter(isValidCol)
+  const settled = await Promise.allSettled(
+    valid.map((col) =>
+      orionSwisQuery(`SELECT TOP 1 ${idCol}, ${col} FROM ${tableName}`).then(() => col),
+    ),
+  )
+  return settled.filter((r) => r.status === 'fulfilled').map((r) => r.value)
 }
 
 export async function discoverNodeCPFields(force = false) {
@@ -290,13 +311,13 @@ export async function queryByCustomProperties(opts = {}) {
     })
   }
 
-  // Fetch top-2 interfaces (with CPs) for all returned nodes in bulk
+  // Fetch top-2 interfaces (with CPs) + aggregate stats in a single bulk pass.
   const nodeIds = rows.map((r) => Number(r.NodeID))
-  const [ifaceMap, ifaceStats, availMap] = await Promise.all([
+  const [{ ifaceMap, statsMap }, availMap] = await Promise.all([
     fetchInterfacesBulk(nodeIds, ifaceFields),
-    fetchInterfaceStats(nodeIds),
     opts.from && opts.to ? nodeAvailabilityMap(nodeIds, opts.from, opts.to) : Promise.resolve(new Map()),
   ])
+  const ifaceStats = statsMap
 
   return {
     nodeFields,
@@ -342,41 +363,48 @@ export async function queryByCustomProperties(opts = {}) {
   }
 }
 
-/** Average + peak PercentUtil per node across all its interfaces. */
-async function fetchInterfaceStats(nodeIds) {
-  const map = new Map()
-  if (!nodeIds?.length) return map
-  const CHUNK = 100
-  for (let i = 0; i < nodeIds.length; i += CHUNK) {
-    const ids = nodeIds.slice(i, i + CHUNK).join(',')
-    try {
-      const d = await orionSwisQuery(
-        `SELECT NodeID, AVG(PercentUtil) AS AvgUtil, MAX(PercentUtil) AS PeakUtil
-         FROM Orion.NPM.Interfaces
-         WHERE NodeID IN (${ids}) AND PercentUtil >= 0
-         GROUP BY NodeID`,
-      )
-      for (const r of d?.results || []) {
-        const avg = Number(r.AvgUtil)
-        const peak = Number(r.PeakUtil)
-        map.set(Number(r.NodeID), {
-          avgUtil: Number.isFinite(avg) ? avg : null,
-          peakUtil: Number.isFinite(peak) ? peak : null,
-        })
-      }
-    } catch { /* keep going */ }
-  }
-  return map
-}
-
+/**
+ * Walks all interfaces for the supplied node IDs once and produces:
+ *   - ifaceMap: NodeID → up to 2 interface objects (with CPs) for the table
+ *   - statsMap: NodeID → { avgUtil, peakUtil } across every interface
+ *
+ * Returning both from a single pass avoids a separate aggregation round-trip.
+ */
 async function fetchInterfacesBulk(nodeIds, ifaceFields) {
-  const map = new Map()
-  if (!nodeIds.length) return map
+  const ifaceMap = new Map()
+  const acc = new Map()
+  if (!nodeIds.length) return { ifaceMap, statsMap: new Map() }
 
   const CHUNK = 100
   const ifaceCpCols = ifaceFields.length
     ? ifaceFields.map((f) => `icp.${f}`).join(', ')
     : 'icp.InterfaceID'
+
+  const accumulate = (nid, row) => {
+    if (!ifaceMap.has(nid)) ifaceMap.set(nid, [])
+    const list = ifaceMap.get(nid)
+    if (list.length < 2) {
+      const ifaceCp = {}
+      for (const f of ifaceFields) ifaceCp[f] = row[f] ?? null
+      list.push({
+        id: row.InterfaceID,
+        name: row.Caption,
+        statusCode: Number(row.Status),
+        inBps: row.InBps != null ? Number(row.InBps) : null,
+        outBps: row.OutBps != null ? Number(row.OutBps) : null,
+        utilization: row.PercentUtil != null ? Number(row.PercentUtil) : null,
+        cp: ifaceCp,
+      })
+    }
+    const util = row.PercentUtil != null ? Number(row.PercentUtil) : null
+    if (Number.isFinite(util) && util >= 0) {
+      if (!acc.has(nid)) acc.set(nid, { sum: 0, n: 0, peak: 0 })
+      const a = acc.get(nid)
+      a.sum += util
+      a.n++
+      if (util > a.peak) a.peak = util
+    }
+  }
 
   for (let i = 0; i < nodeIds.length; i += CHUNK) {
     const ids = nodeIds.slice(i, i + CHUNK).join(',')
@@ -387,29 +415,12 @@ async function fetchInterfacesBulk(nodeIds, ifaceFields) {
         INNER JOIN Orion.NPM.InterfacesCustomProperties icp ON i.InterfaceID = icp.InterfaceID
         WHERE i.NodeID IN (${ids}) ORDER BY i.NodeID, i.InterfaceID`
       const d = await orionSwisQuery(q)
-      for (const row of d?.results || []) {
-        const nid = Number(row.NodeID)
-        if (!map.has(nid)) map.set(nid, [])
-        const list = map.get(nid)
-        if (list.length < 2) {
-          const ifaceCp = {}
-          for (const f of ifaceFields) ifaceCp[f] = row[f] ?? null
-          list.push({
-            id: row.InterfaceID,
-            name: row.Caption,
-            statusCode: Number(row.Status),
-            inBps: row.InBps != null ? Number(row.InBps) : null,
-            outBps: row.OutBps != null ? Number(row.OutBps) : null,
-            utilization: row.PercentUtil != null ? Number(row.PercentUtil) : null,
-            cp: ifaceCp,
-          })
-        }
-      }
-    } catch { /* if iface CP join fails, continue without */ }
+      for (const row of d?.results || []) accumulate(Number(row.NodeID), row)
+    } catch { /* iface CP join unavailable — fallback below */ }
   }
 
-  // Fallback: if iface CP join produced nothing, try without CP join
-  const missing = nodeIds.filter((id) => !map.has(id))
+  // Fallback for nodes that produced no rows (e.g. no CP join present)
+  const missing = nodeIds.filter((id) => !ifaceMap.has(id))
   if (missing.length) {
     const CHUNK2 = 150
     for (let i = 0; i < missing.length; i += CHUNK2) {
@@ -418,25 +429,17 @@ async function fetchInterfacesBulk(nodeIds, ifaceFields) {
         const q = `SELECT TOP 500 InterfaceID, NodeID, Caption, Status, InBps, OutBps, PercentUtil
           FROM Orion.NPM.Interfaces WHERE NodeID IN (${ids}) ORDER BY NodeID, InterfaceID`
         const d = await orionSwisQuery(q)
-        for (const row of d?.results || []) {
-          const nid = Number(row.NodeID)
-          if (!map.has(nid)) map.set(nid, [])
-          const list = map.get(nid)
-          if (list.length < 2) {
-            list.push({
-              id: row.InterfaceID,
-              name: row.Caption,
-              statusCode: Number(row.Status),
-              inBps: row.InBps != null ? Number(row.InBps) : null,
-              outBps: row.OutBps != null ? Number(row.OutBps) : null,
-              utilization: row.PercentUtil != null ? Number(row.PercentUtil) : null,
-              cp: {},
-            })
-          }
-        }
+        for (const row of d?.results || []) accumulate(Number(row.NodeID), row)
       } catch { /* ignore */ }
     }
   }
 
-  return map
+  const statsMap = new Map()
+  for (const [nid, a] of acc) {
+    statsMap.set(nid, {
+      avgUtil: a.n ? a.sum / a.n : null,
+      peakUtil: a.n ? a.peak : null,
+    })
+  }
+  return { ifaceMap, statsMap }
 }
