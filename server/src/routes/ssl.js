@@ -8,25 +8,26 @@ import { exec } from 'child_process'
 import { promisify } from 'util'
 import { authenticate, authorize } from '../middleware/auth.js'
 
-// Minimal HTTP-only nginx config written when switching to HTTP mode.
-// The server execs into the nginx container and writes this to its conf.d dir.
-const HTTP_ONLY_NGINX_CONF = `
-server {
-    listen 80;
-    server_name _;
+// Keep in sync with docker/nginx/default.conf — Admin SSL mode writes these into prod nginx.
+const NGINX_STATIC_PREFIX = `
     root /usr/share/nginx/html;
     index index.html;
 
     gzip on;
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
+`.trim()
 
+const NGINX_APP_LOCATIONS = `
     location = /api/rdp/ws {
         proxy_pass http://server:5000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
         proxy_buffering off;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
@@ -37,10 +38,36 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+    location /api/solarwinds/ {
+        proxy_pass http://server:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_buffering off;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
+    }
+    location /api/idcs/export {
+        proxy_pass http://server:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 600s;
+        proxy_read_timeout 600s;
+        proxy_buffering off;
     }
     location /api/ {
         proxy_pass http://server:5000;
@@ -53,17 +80,35 @@ server {
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
     }
-    location /health { proxy_pass http://server:5000; }
+    location /health {
+        proxy_pass http://server:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+    }
     location /socket.io/ {
         proxy_pass http://server:5000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
     }
-    location / { try_files $uri /index.html; }
+    location / {
+        try_files $uri /index.html;
+    }
+`.trim()
+
+const HTTP_ONLY_NGINX_CONF = `
+server {
+    listen 80;
+    server_name _;
+${NGINX_STATIC_PREFIX}
+${NGINX_APP_LOCATIONS}
 }
 `.trim()
 
@@ -80,48 +125,8 @@ server {
     ssl_certificate_key ${keyPath};
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers HIGH:!aNULL:!MD5;
-
-    location = /api/rdp/ws {
-        proxy_pass http://server:5000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_buffering off;
-        proxy_read_timeout 86400s;
-        proxy_send_timeout 86400s;
-    }
-    location /api/web-mgmt/ {
-        proxy_pass http://server:5000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_buffering off;
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-    }
-    location /api/ {
-        proxy_pass http://server:5000;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-    location /health { proxy_pass http://server:5000; }
-    location /socket.io/ {
-        proxy_pass http://server:5000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_read_timeout 86400s;
-        proxy_send_timeout 86400s;
-    }
-    location / { try_files $uri /index.html; }
+${NGINX_STATIC_PREFIX}
+${NGINX_APP_LOCATIONS}
 }
 `.trim()
 
