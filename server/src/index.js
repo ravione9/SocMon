@@ -18,6 +18,7 @@ import rateLimit from 'express-rate-limit'
 import { connectMongo } from './config/mongo.js'
 import { connectRedis } from './config/redis.js'
 import { migrateLegacyPageKeys } from './utils/migrateLegacyPageKeys.js'
+import { applyCurrentSslNginx } from './routes/ssl.js'
 import { initWebSocket } from './services/websocket.js'
 import { startAlertEngine } from './services/alertEngine.js'
 import authRoutes from './routes/auth.js'
@@ -160,6 +161,17 @@ process.on('uncaughtException', (err) => {
 async function start() {
   await connectMongo()
   await migrateLegacyPageKeys()
+  try {
+    const ssl = await applyCurrentSslNginx()
+    if (ssl?.written?.length) {
+      console.log(`[ssl] nginx config written on startup (${ssl.written.length} file(s))`)
+    }
+    if (ssl && !ssl.ok && !ssl.skipped) {
+      console.warn('[ssl] nginx reload failed on startup:', ssl.error || ssl.manual)
+    }
+  } catch (e) {
+    console.warn('[ssl] could not apply saved nginx mode:', e?.message || e)
+  }
   await connectRedis()
   initWebSocket(io)
   startAlertEngine(io)

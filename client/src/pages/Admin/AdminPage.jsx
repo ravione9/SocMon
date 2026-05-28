@@ -1054,8 +1054,9 @@ export default function AdminPage() {
                         try {
                           const { data } = await api.post('/api/ssl/mode', { mode: next })
                           setSsl(prev => ({ ...prev, mode: data.mode }))
-                          toast.success(data.message || `Switched to ${next.toUpperCase()}`)
-                          if (!data.ok && data.manual) toast.error(`Nginx reload failed. Run: ${data.manual}`)
+                          if (data.ok) toast.success(data.message || `Switched to ${next.toUpperCase()}`)
+                          else toast.error(data.message || 'Mode saved but nginx reload failed')
+                          if (!data.ok && data.manual) toast.error(`Run: ${data.manual}`)
                         } catch (err) {
                           toast.error(err.response?.data?.error || 'Mode switch failed')
                         } finally { setSslModeLoading(false) }
@@ -1112,7 +1113,13 @@ export default function AdminPage() {
                         setSslLoading(true)
                         try {
                           const { data } = await api.post('/api/ssl/reload')
-                          toast.success(data.message || 'Nginx reloaded')
+                          if (data.ok) {
+                            toast.success(data.message || 'HTTPS nginx config applied')
+                            loadSslStatus()
+                          } else {
+                            toast.error(data.message || data.error || 'Nginx reload failed')
+                            if (data.manual) toast.error(`Run manually: ${data.manual}`)
+                          }
                         } catch (err) {
                           const d = err.response?.data
                           if (d?.manual) {
@@ -1257,7 +1264,7 @@ export default function AdminPage() {
                 </div>
 
                 <div style={{ marginTop:14, padding:'10px 14px', background:'var(--bg3)', borderRadius:10, border:'1px solid var(--border)', fontSize:11, color:'var(--text3)', fontFamily:'var(--mono)', lineHeight:1.6 }}>
-                  Paste or browse PEM files. After upload, click <strong style={{ color:'var(--text)' }}>Apply &amp; reload nginx</strong> — nginx reloads gracefully with zero downtime, no container restart.
+                  Paste or browse PEM files. Use the full certificate chain in the cert box if browsers show untrusted errors. After upload, enable the HTTPS toggle or click <strong style={{ color:'var(--text)' }}>Apply &amp; reload nginx</strong>.
                 </div>
               </div>
             </div>

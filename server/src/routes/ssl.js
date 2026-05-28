@@ -140,6 +140,10 @@ const KEY_FILE   = process.env.SSL_KEY_FILE  || 'netpulse.key'
 const CERT_PATH  = resolve(CERTS_DIR, CERT_FILE)
 const KEY_PATH   = resolve(CERTS_DIR, KEY_FILE)
 const NGINX_CTR  = process.env.NGINX_CONTAINER || 'netpulse-nginx'
+/** Shared host file also mounted into the nginx container (prod docker-compose). */
+const NGINX_CONF_PATH = process.env.NGINX_CONF_PATH
+  ? resolve(process.env.NGINX_CONF_PATH)
+  : null
 
 /** Ensure the certs directory exists (creates it if the volume is fresh). */
 function ensureCertsDir() {
@@ -179,26 +183,70 @@ function writeMode(mode) {
   writeFileSync(MODE_FILE, mode, { mode: 0o644 })
 }
 
-async function reloadNginxWith(confContent) {
-  // Write config to a temp location on the shared certs volume then exec copy+reload
-  const tmpConf = resolve(CERTS_DIR, 'nginx-netpulse.conf')
-  writeFileSync(tmpConf, confContent + '\n', { mode: 0o644 })
+function nginxCertPathsInsideContainer() {
+  return {
+    cert: `/etc/nginx/certs/${CERT_FILE}`,
+    key: `/etc/nginx/certs/${KEY_FILE}`,
+  }
+}
 
-  const nginxConfPath = '/etc/nginx/conf.d/default.conf'
-  const cmd =
-    `docker exec ${NGINX_CTR} sh -c "cp /etc/nginx/certs/nginx-netpulse.conf ${nginxConfPath} && nginx -t && nginx -s reload"`
+function buildNginxConfForMode(mode) {
+  if (mode === 'https') {
+    const { cert, key } = nginxCertPathsInsideContainer()
+    return HTTPS_NGINX_CONF(cert, key)
+  }
+  return HTTP_ONLY_NGINX_CONF
+}
+
+function writeNginxConfFiles(confContent) {
+  ensureCertsDir()
+  const written = []
+  const payload = `${confContent.trim()}\n`
+  const backup = resolve(CERTS_DIR, 'nginx-netpulse.conf')
+  writeFileSync(backup, payload, { mode: 0o644 })
+  written.push(backup)
+  if (NGINX_CONF_PATH) {
+    writeFileSync(NGINX_CONF_PATH, payload, { mode: 0o644 })
+    written.push(NGINX_CONF_PATH)
+  }
+  return written
+}
+
+async function reloadNginxContainer() {
+  const cmd = `docker exec ${NGINX_CTR} nginx -t && docker exec ${NGINX_CTR} nginx -s reload`
   try {
     const { stdout, stderr } = await execAsync(cmd, { timeout: 15_000 })
     return { ok: true, stdout: stdout.trim(), stderr: stderr.trim() }
   } catch (dockerErr) {
-    // fallback: host nginx
     try {
-      await execAsync('nginx -s reload', { timeout: 10_000 })
+      await execAsync('nginx -t && nginx -s reload', { timeout: 10_000 })
       return { ok: true, stdout: 'host nginx reloaded' }
     } catch {
-      return { ok: false, error: dockerErr.message, manual: `docker exec ${NGINX_CTR} nginx -s reload` }
+      return {
+        ok: false,
+        error: dockerErr.message,
+        manual: `docker exec ${NGINX_CTR} nginx -t && docker exec ${NGINX_CTR} nginx -s reload`,
+      }
     }
   }
+}
+
+async function reloadNginxWith(confContent) {
+  const written = writeNginxConfFiles(confContent)
+  const reload = await reloadNginxContainer()
+  return { ...reload, written }
+}
+
+/** Apply persisted HTTP/HTTPS mode to nginx config (used on reload + server startup). */
+export async function applyCurrentSslNginx() {
+  const mode = readMode()
+  if (mode === 'https') {
+    if (!existsSync(CERT_PATH) || !existsSync(KEY_PATH)) {
+      return { ok: false, skipped: true, error: 'HTTPS mode saved but certificate files are missing' }
+    }
+    return reloadNginxWith(buildNginxConfForMode('https'))
+  }
+  return reloadNginxWith(buildNginxConfForMode('http'))
 }
 
 // ── GET /api/ssl/status ─────────────────────────────────────────────────────
@@ -226,17 +274,29 @@ router.post('/mode', authenticate, authorize('admin'), async (req, res) => {
     if (!existsSync(CERT_PATH) || !existsSync(KEY_PATH)) {
       return res.status(400).json({ error: 'Upload a certificate and key before enabling HTTPS.' })
     }
-    const nginxCertPath = '/etc/nginx/certs/' + CERT_FILE
-    const nginxKeyPath  = '/etc/nginx/certs/' + KEY_FILE
     writeMode('https')
-    const result = await reloadNginxWith(HTTPS_NGINX_CONF(nginxCertPath, nginxKeyPath))
-    return res.json({ ok: result.ok, mode: 'https', message: result.ok ? 'HTTPS enabled — nginx reloaded' : 'HTTPS mode saved but nginx reload failed', ...result })
+    const result = await reloadNginxWith(buildNginxConfForMode('https'))
+    return res.json({
+      ok: result.ok,
+      mode: 'https',
+      message: result.ok
+        ? 'HTTPS enabled — nginx config written and reloaded'
+        : 'HTTPS config written but nginx reload failed — restart the nginx container or run the manual command',
+      ...result,
+    })
   }
 
   // HTTP mode
   writeMode('http')
-  const result = await reloadNginxWith(HTTP_ONLY_NGINX_CONF)
-  return res.json({ ok: result.ok, mode: 'http', message: result.ok ? 'Switched to HTTP — nginx reloaded' : 'HTTP mode saved but nginx reload failed', ...result })
+  const result = await reloadNginxWith(buildNginxConfForMode('http'))
+  return res.json({
+    ok: result.ok,
+    mode: 'http',
+    message: result.ok
+      ? 'Switched to HTTP — nginx config written and reloaded'
+      : 'HTTP config written but nginx reload failed',
+    ...result,
+  })
 })
 
 // ── POST /api/ssl/upload ────────────────────────────────────────────────────
@@ -266,8 +326,9 @@ router.post('/upload', authenticate, authorize('admin'), (req, res) => {
 
   try {
     ensureCertsDir()
-    writeFileSync(CERT_PATH, certPem + '\n', { mode: 0o640 })
-    writeFileSync(KEY_PATH,  keyPem  + '\n', { mode: 0o640 })
+    // nginx (uid 101) must read these from a separate container via shared volume
+    writeFileSync(CERT_PATH, certPem + '\n', { mode: 0o644 })
+    writeFileSync(KEY_PATH,  keyPem  + '\n', { mode: 0o644 })
     res.json({ ok: true, cert: readCertInfo() })
   } catch (err) {
     res.status(500).json({ error: `Failed to write certificate files: ${err.message}` })
@@ -275,40 +336,34 @@ router.post('/upload', authenticate, authorize('admin'), (req, res) => {
 })
 
 // ── POST /api/ssl/reload ────────────────────────────────────────────────────
-// Triggers `nginx -s reload` inside the nginx container — graceful reload,
-// no service restart, zero dropped connections.
+// Writes the saved HTTP/HTTPS nginx config, then reloads nginx.
 router.post('/reload', authenticate, authorize('admin'), async (_req, res) => {
-  if (!existsSync(CERT_PATH) || !existsSync(KEY_PATH)) {
+  const mode = readMode()
+  if (mode === 'https' && (!existsSync(CERT_PATH) || !existsSync(KEY_PATH))) {
     return res.status(400).json({ error: 'No certificate installed. Upload a certificate first.' })
   }
 
-  // Attempt 1: Docker exec into the nginx sidecar
-  try {
-    const { stdout, stderr } = await execAsync(
-      `docker exec ${NGINX_CTR} nginx -t && docker exec ${NGINX_CTR} nginx -s reload`,
-      { timeout: 15_000 },
-    )
-    return res.json({
-      ok:      true,
-      message: 'Nginx config tested and reloaded gracefully',
-      stdout:  stdout.trim(),
-      stderr:  stderr.trim(),
+  const result = await applyCurrentSslNginx()
+  if (!result.ok) {
+    return res.status(result.skipped ? 400 : 500).json({
+      ok: false,
+      error: result.error || 'Automatic nginx reload failed. Run the command below manually.',
+      detail: result.error,
+      manual: result.manual,
+      written: result.written,
     })
-  } catch (dockerErr) {
-    // Attempt 2: nginx running on the host (non-Docker deployments)
-    try {
-      const { stdout } = await execAsync('nginx -s reload', { timeout: 10_000 })
-      return res.json({ ok: true, message: 'Nginx reloaded gracefully (host)', stdout: stdout.trim() })
-    } catch {
-      // Neither worked — return the Docker error with manual instructions
-      return res.status(500).json({
-        ok:      false,
-        error:   'Automatic nginx reload failed. Run the command below manually.',
-        detail:  dockerErr.message,
-        manual:  `docker exec ${NGINX_CTR} nginx -s reload`,
-      })
-    }
   }
+
+  return res.json({
+    ok: true,
+    mode,
+    message: mode === 'https'
+      ? 'HTTPS nginx config applied and reloaded'
+      : 'HTTP nginx config applied and reloaded',
+    written: result.written,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  })
 })
 
 // ── POST /api/ssl/test ──────────────────────────────────────────────────────

@@ -4,7 +4,8 @@
 #      npm run build
 #    Or use the helper script (pull + build + recreate containers):
 #      npm run deploy:prod
-# 2) Set CORS_ORIGIN in ../.env to the URL users open in the browser (scheme + host + port), e.g. http://YOUR_SERVER
+# 2) Set CORS_ORIGIN in .env to the URL users open in the browser (scheme + host + port).
+#    After enabling HTTPS in Admin, use https://YOUR_HOST (not http://) or API calls will fail CORS.
 # 3) If you still get 403 after building: host paths must be readable/traversable by the container (nginx user ~101).
 #      chmod -R a+rX client/dist && chmod a+x . client client/dist
 #    SELinux (RHEL/CentOS): append ,Z to the dist volume line (e.g. :ro,Z) or use the baked nginx image below.
@@ -62,14 +63,17 @@ services:
     environment:
       NODE_ENV: production
       CERTS_DIR: /app/certs
+      NGINX_CONF_PATH: /app/nginx/default.conf
       NGINX_CONTAINER: netpulse-nginx
       # guacd runs as a sibling container on the internal Docker network.
       # The server talks to it via the service name, not localhost.
       GUACD_HOST: guacd
       GUACD_PORT: "4822"
     volumes:
-      # rw so the SSL route can write uploaded certs + nginx config snippets
+      # rw so the SSL route can write uploaded certs; nginx reads the same volume
       - ./certs:/app/certs:rw
+      # rw so Admin SSL can write HTTPS config without docker cp
+      - ./docker/nginx/default.conf:/app/nginx/default.conf:rw
       # Docker socket lets the server trigger `nginx -s reload` without restarting
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
