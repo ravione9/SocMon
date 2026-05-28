@@ -33,6 +33,7 @@ import sentinelOneRoutes from './routes/sentinelOne.js'
 import zabbixRoutes from './routes/zabbix.js'
 import sshSessionRoutes from './routes/sshSessions.js'
 import webMgmtRoutes, { proxyWsUpgrade } from './routes/webMgmt.js'
+import solarwindsRoutes from './routes/solarwinds.js'
 import rdpRoutes, { proxyRdpWsUpgrade } from './routes/rdp.js'
 import idcsRoutes from './routes/idcs.js'
 import adRoutes from './routes/ad.js'
@@ -40,6 +41,7 @@ import nexsRoutes from './routes/nexs.js'
 import emailSimRoutes from './routes/emailSim.js'
 import emailSimPublicRoutes from './routes/emailSimPublic.js'
 import customRoleRoutes from './routes/customRoles.js'
+import sslRoutes from './routes/ssl.js'
 import { errorHandler } from './middleware/errorHandler.js'
 
 /** CORS: localhost and 127.0.0.1 are different browser origins; allow both when either is configured. */
@@ -90,6 +92,7 @@ app.use(morgan('dev'))
 app.use(cors({ origin: corsOrigins }))
 // Web-mgmt proxy is mounted BEFORE compression / json so streamed device responses pass through untouched.
 app.use('/api/web-mgmt', webMgmtRoutes)
+app.use('/api/solarwinds', solarwindsRoutes)
 /** IDCS/XLSX export streams ZIP to the client — skip gzip (can corrupt binary). */
 app.use(
   compression({
@@ -111,6 +114,7 @@ app.use(
     validate: { xForwardedForHeader: false },
     skip: (req) =>
       req.path.startsWith('/web-mgmt/p/') ||
+      req.path.startsWith('/solarwinds/p/') ||
       (req.originalUrl || req.url || '').includes('idcs/export') ||
       (req.originalUrl || req.url || '').includes('/email-sim/pub'),
   }),
@@ -135,6 +139,7 @@ app.use('/api/idcs', idcsRoutes)
 app.use('/api/ad', adRoutes)
 app.use('/api/nexs', nexsRoutes)
 app.use('/api/email-sim', emailSimRoutes)
+app.use('/api/ssl', sslRoutes)
 app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.0.0', ai: process.env.AI_PROVIDER || 'claude' }))
 
 app.use(errorHandler)

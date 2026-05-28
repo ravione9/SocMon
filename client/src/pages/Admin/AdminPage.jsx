@@ -157,6 +157,13 @@ export default function AdminPage() {
   }))
   const [loading, setLoading] = useState(false)
 
+  // ── SSL state ────────────────────────────────────────────────────────────
+  const [ssl, setSsl]           = useState(null)      // { hasCert, hasKey, cert, mode }
+  const [sslLoading, setSslLoading] = useState(false)
+  const [sslModeLoading, setSslModeLoading] = useState(false)
+  const [sslForm, setSslForm]   = useState({ cert: '', key: '' })
+  const [sslPreview, setSslPreview] = useState(null)  // validated cert info before saving
+
   const f = key => val => setForm(p => ({ ...p, [key]: val }))
 
   const ADMIN_DEVICE_COLS = [160, 130, 100, 140, 88, 200, 128]
@@ -195,6 +202,17 @@ export default function AdminPage() {
   }
 
   useEffect(() => { loadAll() }, [])
+
+  async function loadSslStatus() {
+    try {
+      const { data } = await api.get('/api/ssl/status')
+      setSsl(data)
+    } catch { setSsl(null) }
+  }
+
+  useEffect(() => {
+    if (tab === 'system') loadSslStatus()
+  }, [tab])
 
   async function save() {
     if (!adminEditable) {
@@ -980,6 +998,271 @@ export default function AdminPage() {
               ))}
             </div>
           </div>
+
+          {/* ── SSL / HTTPS ─────────────────────────────────────────────── */}
+          <div className="card" style={{ borderRadius:14, border:'1px solid var(--border)', overflow:'hidden', gridColumn:'1 / -1' }}>
+            <div className="card-header" style={{ background:'var(--bg3)', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+              <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                <span className="card-title">SSL Certificate &amp; HTTPS</span>
+                {ssl?.hasCert && ssl?.cert && !ssl.cert.expired && (
+                  <span style={{ fontSize:10, padding:'3px 10px', borderRadius:999, fontFamily:'var(--mono)', fontWeight:600, color:'var(--green)', background:'rgba(34,211,160,0.1)', border:'1px solid var(--border)' }}>
+                    Active · {ssl.cert.daysLeft}d left
+                  </span>
+                )}
+                {ssl?.hasCert && ssl?.cert?.expired && (
+                  <span style={{ fontSize:10, padding:'3px 10px', borderRadius:999, fontFamily:'var(--mono)', fontWeight:600, color:'var(--red)', background:'rgba(245,83,79,0.12)', border:'1px solid var(--border)' }}>
+                    Expired
+                  </span>
+                )}
+                {!ssl?.hasCert && (
+                  <span style={{ fontSize:10, padding:'3px 10px', borderRadius:999, fontFamily:'var(--mono)', fontWeight:600, color:'var(--text3)', background:'var(--bg4)', border:'1px solid var(--border)' }}>
+                    No cert
+                  </span>
+                )}
+              </div>
+              <span className="badge badge-purple">TLS</span>
+            </div>
+            <div style={{ padding:18, display:'grid', gridTemplateColumns:'1fr 1fr', gap:24 }}>
+
+              {/* Left: current cert info */}
+              <div>
+                {/* HTTP / HTTPS toggle */}
+                <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:18, padding:'14px 16px', background:'var(--bg3)', borderRadius:12, border:'1px solid var(--border)' }}>
+                  <div>
+                    <div style={{ fontSize:13, fontWeight:700, color:'var(--text)', fontFamily:'var(--sans)', marginBottom:3 }}>
+                      Protocol mode
+                    </div>
+                    <div style={{ fontSize:11, color:'var(--text3)', fontFamily:'var(--mono)' }}>
+                      {ssl?.mode === 'https' ? 'HTTPS active — traffic is encrypted' : 'HTTP only — no encryption'}
+                    </div>
+                  </div>
+                  <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                    <span style={{ fontSize:11, fontFamily:'var(--mono)', color: ssl?.mode === 'http' ? 'var(--amber)' : 'var(--text3)' }}>HTTP</span>
+                    <div
+                      role="switch"
+                      aria-checked={ssl?.mode === 'https'}
+                      title={ssl?.mode === 'https' ? 'Switch to HTTP' : 'Enable HTTPS'}
+                      onClick={async () => {
+                        if (!adminEditable) return
+                        const next = ssl?.mode === 'https' ? 'http' : 'https'
+                        if (next === 'https' && !ssl?.hasCert) {
+                          toast.error('Upload a certificate first before enabling HTTPS.')
+                          return
+                        }
+                        if (next === 'http' && !window.confirm('Switch to HTTP? This will reload nginx without SSL and all traffic will be unencrypted.')) return
+                        setSslModeLoading(true)
+                        try {
+                          const { data } = await api.post('/api/ssl/mode', { mode: next })
+                          setSsl(prev => ({ ...prev, mode: data.mode }))
+                          toast.success(data.message || `Switched to ${next.toUpperCase()}`)
+                          if (!data.ok && data.manual) toast.error(`Nginx reload failed. Run: ${data.manual}`)
+                        } catch (err) {
+                          toast.error(err.response?.data?.error || 'Mode switch failed')
+                        } finally { setSslModeLoading(false) }
+                      }}
+                      style={{
+                        width:44, height:24, borderRadius:12, cursor: adminEditable ? 'pointer' : 'not-allowed',
+                        background: ssl?.mode === 'https' ? 'var(--green)' : 'var(--bg4)',
+                        border:'1px solid var(--border)', position:'relative', transition:'background 0.2s',
+                        opacity: sslModeLoading ? 0.5 : 1,
+                        flexShrink: 0,
+                      }}
+                    >
+                      <div style={{
+                        width:18, height:18, borderRadius:'50%', background:'white',
+                        position:'absolute', top:2, transition:'left 0.2s',
+                        left: ssl?.mode === 'https' ? 22 : 2,
+                        boxShadow:'0 1px 4px rgba(0,0,0,0.3)',
+                      }} />
+                    </div>
+                    <span style={{ fontSize:11, fontFamily:'var(--mono)', color: ssl?.mode === 'https' ? 'var(--green)' : 'var(--text3)' }}>HTTPS</span>
+                  </div>
+                </div>
+
+                <div style={{ fontSize:11, fontWeight:600, color:'var(--text3)', letterSpacing:1, textTransform:'uppercase', fontFamily:'var(--mono)', marginBottom:12 }}>Current certificate</div>
+                {ssl?.cert ? (
+                  <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                    {[
+                      { label:'Subject',     value: ssl.cert.subject?.replace(/\n/g,' ') },
+                      { label:'Issuer',      value: ssl.cert.issuer?.replace(/\n/g,' ') },
+                      { label:'Valid from',  value: ssl.cert.validFrom },
+                      { label:'Expires',     value: ssl.cert.validTo },
+                      { label:'Days left',   value: ssl.cert.expired ? 'EXPIRED' : `${ssl.cert.daysLeft} days`, danger: ssl.cert.expired || ssl.cert.daysLeft < 30 },
+                      { label:'Fingerprint', value: ssl.cert.fingerprint256 },
+                    ].map((r, i) => (
+                      <div key={i} style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', padding:'8px 0', borderBottom:'1px solid var(--border)', gap:12 }}>
+                        <span style={{ fontSize:11, color:'var(--text3)', fontFamily:'var(--mono)', flexShrink:0 }}>{r.label}</span>
+                        <span style={{ fontSize:11, color: r.danger ? 'var(--red)' : 'var(--cyan)', fontFamily:'var(--mono)', fontWeight:600, textAlign:'right', wordBreak:'break-all', maxWidth:'65%' }}>{r.value}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ padding:'18px 0', color:'var(--text3)', fontSize:12, fontFamily:'var(--mono)' }}>
+                    No certificate installed. Upload a PEM certificate and private key to enable HTTPS.
+                  </div>
+                )}
+
+                {ssl?.hasCert && (
+                  <div style={{ marginTop:16, display:'flex', gap:10, flexWrap:'wrap' }}>
+                    <Btn
+                      label={sslLoading ? 'Reloading...' : 'Apply & reload nginx'}
+                      color="green"
+                      disabled={sslLoading || !adminEditable}
+                      onClick={async () => {
+                        setSslLoading(true)
+                        try {
+                          const { data } = await api.post('/api/ssl/reload')
+                          toast.success(data.message || 'Nginx reloaded')
+                        } catch (err) {
+                          const d = err.response?.data
+                          if (d?.manual) {
+                            toast.error(`Auto-reload failed. Run: ${d.manual}`)
+                          } else {
+                            toast.error(d?.error || 'Nginx reload failed')
+                          }
+                        } finally { setSslLoading(false) }
+                      }}
+                    />
+                    <Btn
+                      label="Remove cert"
+                      danger
+                      disabled={sslLoading || !adminEditable}
+                      onClick={async () => {
+                        if (!window.confirm('Remove the installed certificate and key?')) return
+                        setSslLoading(true)
+                        try {
+                          await api.delete('/api/ssl')
+                          toast.success('Certificate removed')
+                          setSsl(null)
+                          setSslPreview(null)
+                        } catch (err) {
+                          toast.error(err.response?.data?.error || 'Remove failed')
+                        } finally { setSslLoading(false) }
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Right: upload form */}
+              <div>
+                <div style={{ fontSize:11, fontWeight:600, color:'var(--text3)', letterSpacing:1, textTransform:'uppercase', fontFamily:'var(--mono)', marginBottom:12 }}>Upload new certificate</div>
+
+                {/* PEM Certificate */}
+                <div style={{ marginBottom:14 }}>
+                  <label style={{ fontSize:10, fontWeight:600, color:'var(--text3)', letterSpacing:1, textTransform:'uppercase', fontFamily:'var(--mono)', display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:6 }}>
+                    Certificate (PEM)
+                    <span
+                      style={{ color:'var(--accent)', cursor:'pointer', textTransform:'none', letterSpacing:0 }}
+                      onClick={() => {
+                        const el = document.createElement('input')
+                        el.type = 'file'
+                        el.accept = '.pem,.crt,.cer'
+                        el.onchange = () => {
+                          const f = el.files[0]
+                          if (!f) return
+                          const reader = new FileReader()
+                          reader.onload = (e) => setSslForm(p => ({ ...p, cert: e.target.result }))
+                          reader.readAsText(f)
+                        }
+                        el.click()
+                      }}
+                    >Browse file</span>
+                  </label>
+                  <textarea
+                    value={sslForm.cert}
+                    onChange={e => { setSslForm(p => ({ ...p, cert: e.target.value })); setSslPreview(null) }}
+                    placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"
+                    rows={6}
+                    spellCheck={false}
+                    style={{ width:'100%', padding:'10px 14px', background:'var(--bg3)', border:'1px solid var(--border)', borderRadius:10, color:'var(--text)', fontSize:11, fontFamily:'var(--mono)', outline:'none', resize:'vertical', boxSizing:'border-box' }}
+                  />
+                </div>
+
+                {/* PEM Private key */}
+                <div style={{ marginBottom:14 }}>
+                  <label style={{ fontSize:10, fontWeight:600, color:'var(--text3)', letterSpacing:1, textTransform:'uppercase', fontFamily:'var(--mono)', display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:6 }}>
+                    Private key (PEM)
+                    <span
+                      style={{ color:'var(--accent)', cursor:'pointer', textTransform:'none', letterSpacing:0 }}
+                      onClick={() => {
+                        const el = document.createElement('input')
+                        el.type = 'file'
+                        el.accept = '.pem,.key'
+                        el.onchange = () => {
+                          const f = el.files[0]
+                          if (!f) return
+                          const reader = new FileReader()
+                          reader.onload = (e) => setSslForm(p => ({ ...p, key: e.target.result }))
+                          reader.readAsText(f)
+                        }
+                        el.click()
+                      }}
+                    >Browse file</span>
+                  </label>
+                  <textarea
+                    value={sslForm.key}
+                    onChange={e => { setSslForm(p => ({ ...p, key: e.target.value })); setSslPreview(null) }}
+                    placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"
+                    rows={6}
+                    spellCheck={false}
+                    style={{ width:'100%', padding:'10px 14px', background:'var(--bg3)', border:'1px solid var(--border)', borderRadius:10, color:'var(--text)', fontSize:11, fontFamily:'var(--mono)', outline:'none', resize:'vertical', boxSizing:'border-box' }}
+                  />
+                </div>
+
+                {/* Preview result */}
+                {sslPreview && (
+                  <div style={{ marginBottom:14, padding:'12px 14px', background:'rgba(34,211,160,0.07)', border:'1px solid var(--green)', borderRadius:10 }}>
+                    <div style={{ fontSize:11, fontWeight:600, color:'var(--green)', fontFamily:'var(--mono)', marginBottom:6 }}>Certificate looks valid</div>
+                    <div style={{ fontSize:11, color:'var(--text2)', fontFamily:'var(--mono)', lineHeight:1.6 }}>
+                      <div>Subject: {sslPreview.subject?.replace(/\n/g,' ')}</div>
+                      <div>Expires: {sslPreview.validTo} ({sslPreview.daysLeft}d)</div>
+                    </div>
+                  </div>
+                )}
+
+                <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
+                  <Btn
+                    label="Validate"
+                    variant="ghost"
+                    disabled={!sslForm.cert || !sslForm.key || sslLoading || !adminEditable}
+                    onClick={async () => {
+                      setSslLoading(true)
+                      setSslPreview(null)
+                      try {
+                        const { data } = await api.post('/api/ssl/test', sslForm)
+                        setSslPreview(data.cert)
+                        toast.success('Certificate and key match')
+                      } catch (err) {
+                        toast.error(err.response?.data?.error || 'Validation failed')
+                      } finally { setSslLoading(false) }
+                    }}
+                  />
+                  <Btn
+                    label={sslLoading ? 'Uploading...' : 'Upload & save'}
+                    disabled={!sslForm.cert || !sslForm.key || sslLoading || !adminEditable}
+                    onClick={async () => {
+                      setSslLoading(true)
+                      try {
+                        const { data } = await api.post('/api/ssl/upload', sslForm)
+                        setSsl(prev => ({ ...prev, hasCert: true, hasKey: true, cert: data.cert }))
+                        setSslForm({ cert: '', key: '' })
+                        setSslPreview(null)
+                        toast.success('Certificate uploaded. Click "Apply & reload nginx" to activate HTTPS.')
+                      } catch (err) {
+                        toast.error(err.response?.data?.error || 'Upload failed')
+                      } finally { setSslLoading(false) }
+                    }}
+                  />
+                </div>
+
+                <div style={{ marginTop:14, padding:'10px 14px', background:'var(--bg3)', borderRadius:10, border:'1px solid var(--border)', fontSize:11, color:'var(--text3)', fontFamily:'var(--mono)', lineHeight:1.6 }}>
+                  Paste or browse PEM files. After upload, click <strong style={{ color:'var(--text)' }}>Apply &amp; reload nginx</strong> — nginx reloads gracefully with zero downtime, no container restart.
+                </div>
+              </div>
+            </div>
+          </div>
+
         </div>
       )}
 

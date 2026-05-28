@@ -470,20 +470,17 @@ router.get('/stats', async (req, res) => {
     appendHostGroup(mustBase, req.query.hostGroup)
 
     const [total, activeC, resolvedC, discC, connC, threatHist] = await Promise.all([
-      es.count({ index: ix, body: { query: { bool: { must: mustBase } } } }),
-      es.count({ index: ix, body: { query: { bool: { must: [...mustBase, ACTIVE_THREAT_BOOL] } } } }),
-      es.count({ index: ix, body: { query: { bool: { must: [...mustBase, RESOLVED_THREAT_BOOL] } } } }),
-      es.count({ index: ix, body: { query: { bool: { must: [...mustBase, AGENT_DISCONNECTED_BOOL] } } } }),
-      es.count({ index: ix, body: { query: { bool: { must: [...mustBase, AGENT_CONNECTED_BOOL] } } } }),
-      es.search({
-        index: ix,
-        body: {
-          size: 0,
-          query: { bool: { must: mustBase } },
-          aggs: {
-            threats_over_time: {
-              date_histogram: { field: '@timestamp', fixed_interval: '1h', min_doc_count: 0 },
-            },
+      safeCount(es, ix, mustBase),
+      safeCount(es, ix, [...mustBase, ACTIVE_THREAT_BOOL]),
+      safeCount(es, ix, [...mustBase, RESOLVED_THREAT_BOOL]),
+      safeCount(es, ix, [...mustBase, AGENT_DISCONNECTED_BOOL]),
+      safeCount(es, ix, [...mustBase, AGENT_CONNECTED_BOOL]),
+      safeSearch(es, ix, {
+        size: 0,
+        query: { bool: { must: mustBase } },
+        aggs: {
+          threats_over_time: {
+            date_histogram: { field: '@timestamp', fixed_interval: '1h', min_doc_count: 0 },
           },
         },
       }),
@@ -634,6 +631,14 @@ async function safeCount(es, index, must) {
     return r.count ?? 0
   } catch {
     return 0
+  }
+}
+
+async function safeSearch(es, index, body) {
+  try {
+    return await es.search({ index, body })
+  } catch {
+    return { aggregations: {}, hits: { hits: [], total: { value: 0 } } }
   }
 }
 
@@ -847,39 +852,33 @@ router.get('/dashboard', async (req, res) => {
       safeCount(es, ix, [...mustBase, AGENT_DISCONNECTED_BOOL]),
       safeCount(es, ix, [...mustBase, AGENT_CONNECTED_BOOL]),
       safeCount(es, ix, [...mustBase, BLOCKED_OR_MITIGATED_BOOL]),
-      es.search({
-        index: ix,
-        body: {
-          size: 0,
-          query: { bool: { must: mustBase } },
-          aggs: {
-            h: {
-              date_histogram: {
-                field: '@timestamp',
-                fixed_interval: '1h',
-                min_doc_count: 0,
-              },
+      safeSearch(es, ix, {
+        size: 0,
+        query: { bool: { must: mustBase } },
+        aggs: {
+          h: {
+            date_histogram: {
+              field: '@timestamp',
+              fixed_interval: '1h',
+              min_doc_count: 0,
             },
           },
         },
       }),
-      es.search({
-        index: ix,
-        body: {
-          size: 0,
-          query: {
-            bool: {
-              must: [...mustBase, THREAT_DETECTED_BOOL],
-              must_not: [USB_PERIPHERAL_EVENT_BOOL],
-            },
+      safeSearch(es, ix, {
+        size: 0,
+        query: {
+          bool: {
+            must: [...mustBase, THREAT_DETECTED_BOOL],
+            must_not: [USB_PERIPHERAL_EVENT_BOOL],
           },
-          aggs: {
-            h: {
-              date_histogram: {
-                field: '@timestamp',
-                fixed_interval: '1h',
-                min_doc_count: 0,
-              },
+        },
+        aggs: {
+          h: {
+            date_histogram: {
+              field: '@timestamp',
+              fixed_interval: '1h',
+              min_doc_count: 0,
             },
           },
         },

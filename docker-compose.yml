@@ -5,6 +5,9 @@ services:
     build:
       context: ./client
       dockerfile: Dockerfile
+      args:
+        # false fixes npm "Exit handler never called" when registry hits SELF_SIGNED_CERT_IN_CHAIN (corp proxy).
+        NPM_STRICT_SSL: "false"
     container_name: netpulse-client
     ports:
       - "3000:3000"
@@ -13,7 +16,7 @@ services:
       # Isolated from the bind mount: install deps inside the container when package.json changes.
       - /app/node_modules
     # Ensures node_modules (in the volume above) matches mounted package.json / lockfile after git pull.
-    command: sh -c "npm install && npm run dev"
+    command: sh -c "npm config get strict-ssl | grep -q false || npm config set strict-ssl false; npm install --no-audit --no-fund --progress=false && npm run dev"
     environment:
       NODE_ENV: development
       # Proxy /api and /socket.io inside the compose network (browser must NOT call 127.0.0.1 — that
@@ -31,6 +34,8 @@ services:
     build:
       context: ./server
       dockerfile: Dockerfile
+      args:
+        NPM_STRICT_SSL: "false"
     container_name: netpulse-server
     ports:
       - "5000:5000"
@@ -39,9 +44,12 @@ services:
       - ./server:/app
       # Isolated from the bind mount: install deps inside the container when package.json changes.
       - /app/node_modules
-      - ./certs:/app/certs:ro
+      # rw so the SSL route can write uploaded certs; nginx reads the same volume
+      - ./certs:/app/certs:rw
+      # Docker socket lets the server trigger `nginx -s reload` without restarting the container
+      - /var/run/docker.sock:/var/run/docker.sock
     # Sync node_modules (in the volume above) with mounted package.json/lockfile, then start.
-    command: sh -c "npm install --no-audit --no-fund --progress=false && npm run dev"
+    command: sh -c "npm config get strict-ssl | grep -q false || npm config set strict-ssl false; npm install --no-audit --no-fund --progress=false && npm run dev"
     env_file:
       - .env
     environment:

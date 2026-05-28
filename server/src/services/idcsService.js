@@ -26,12 +26,51 @@ function assertIdcsConfigured() {
   }
 }
 
+function idcsTlsInsecure() {
+  return ['1', 'true', 'yes'].includes(String(process.env.IDCS_TLS_INSECURE || '').toLowerCase())
+}
+
+let idcsDispatcher
+/** Native fetch, or undici with relaxed TLS when IDCS_TLS_INSECURE=1 (corp SSL inspection). */
+async function idcsFetch(url, init) {
+  if (!idcsTlsInsecure()) {
+    try {
+      return await fetch(url, init)
+    } catch (err) {
+      throw mapIdcsFetchError(err)
+    }
+  }
+  try {
+    const { fetch: undiciFetch, Agent } = await import('undici')
+    if (!idcsDispatcher) {
+      idcsDispatcher = new Agent({ connect: { rejectUnauthorized: false } })
+    }
+    return await undiciFetch(url, { ...init, dispatcher: idcsDispatcher })
+  } catch (err) {
+    throw mapIdcsFetchError(err)
+  }
+}
+
+function mapIdcsFetchError(err) {
+  const cause = err?.cause?.code || err?.cause?.message || ''
+  const msg = String(err?.message || '')
+  if (/SELF_SIGNED|UNABLE_TO_VERIFY|CERT/i.test(`${cause} ${msg}`)) {
+    return Object.assign(
+      new Error(
+        'IDCS HTTPS failed (untrusted certificate — common behind corporate SSL inspection). Set IDCS_TLS_INSECURE=1 on the API server for testing, or install your enterprise CA (NODE_EXTRA_CA_CERTS).',
+      ),
+      { status: 502 },
+    )
+  }
+  return Object.assign(new Error(msg || 'IDCS request failed'), { status: 502 })
+}
+
 // ─── Token ───────────────────────────────────────────────────────────────────
 
 async function fetchFreshToken() {
   const creds = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64')
   const body  = 'grant_type=client_credentials&scope=urn%3Aopc%3Aidm%3A__myscopes__'
-  const res   = await fetch(TOKEN_URL, {
+  const res   = await idcsFetch(TOKEN_URL, {
     method:  'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Authorization: `Basic ${creds}` },
     body,
@@ -67,7 +106,7 @@ async function api(method, path, body = null, params = {}) {
   }
   if (body) opts.body = JSON.stringify(body)
 
-  const res = await fetch(url.toString(), opts)
+  const res = await idcsFetch(url.toString(), opts)
 
   // 204 No Content — success with no body
   if (res.status === 204) return {}
@@ -207,7 +246,7 @@ export async function createUser({ userName, firstName, lastName, email, recover
 
 export async function deleteUser(id) {
   const token = await getToken()
-  const res   = await fetch(`${ADMIN_BASE}/Users/${id}`, {
+  const res   = await idcsFetch(`${ADMIN_BASE}/Users/${id}`, {
     method:  'DELETE',
     headers: { Authorization: `Bearer ${token}` },
   })

@@ -44,7 +44,7 @@ function b64u(buf) {
  * Create a new signed, self-contained session token.
  * The token itself IS the session — nothing is stored server-side.
  */
-function signSession(data) {
+export function signSession(data) {
   const payload = b64u(Buffer.from(JSON.stringify(data)))
   const sig     = b64u(crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest())
   return `${payload}.${sig}`
@@ -54,7 +54,7 @@ function signSession(data) {
  * Verify a signed token and return its payload, or null if invalid/expired.
  * Constant-time HMAC comparison prevents timing-based forgery attacks.
  */
-function verifySignedToken(token) {
+export function verifySignedToken(token) {
   const dot = token.indexOf('.')
   if (dot < 0) return null
   const payload  = token.slice(0, dot)
@@ -417,7 +417,7 @@ router.post('/session/:deviceId', authenticate, async (req, res) => {
   }
 })
 
-const FRAME_BLOCK_HEADERS = [
+export const FRAME_BLOCK_HEADERS = [
   'x-frame-options',
   'content-security-policy',
   'content-security-policy-report-only',
@@ -461,7 +461,7 @@ function redirectIsToDevice(location, deviceIp, devicePort, scheme) {
   }
 }
 
-function rewriteLocation(loc, mountPath, deviceIp, devicePort, scheme) {
+export function rewriteLocation(loc, mountPath, deviceIp, devicePort, scheme) {
   if (!loc) return loc
   try {
     if (/^https?:\/\//i.test(loc)) {
@@ -478,7 +478,7 @@ function rewriteLocation(loc, mountPath, deviceIp, devicePort, scheme) {
   }
 }
 
-function rewriteSetCookie(arr, mountPath) {
+export function rewriteSetCookie(arr, mountPath) {
   if (!arr) return arr
   const list = Array.isArray(arr) ? arr : [arr]
   return list.map(c => {
@@ -650,7 +650,7 @@ function rewriteHtmlAttrs(html, mountPath) {
  *   blocks our <script> shim (no matching nonce) → blank page.
  *   Stripping these meta tags removes all content-level CSP so the shim can run.
  */
-function injectBaseTag(html, mountPath, deviceIp, subPath) {
+export function injectBaseTag(html, mountPath, deviceIp, subPath) {
   // Derive the directory portion of the response's path
   const sp  = subPath || '/'
   const dir = sp.endsWith('/') ? sp : sp.replace(/\/[^/]*$/, '/')
@@ -684,7 +684,7 @@ function injectBaseTag(html, mountPath, deviceIp, subPath) {
 }
 
 /** Rewrite absolute-path url() and @import references in CSS files. */
-function rewriteCss(css, mountPath) {
+export function rewriteCss(css, mountPath) {
   let out = css.replace(/url\(\s*(['"]?)\/(?!\/)([^)'"]*)\1\s*\)/gi,
     (_, q, path) => `url(${q}${mountPath}/${path}${q})`)
   out = out.replace(/@import\s+(['"])\/(?!\/)([^'"]*)\1/gi,
@@ -692,7 +692,7 @@ function rewriteCss(css, mountPath) {
   return out
 }
 
-function decompressBody(buf, enc) {
+export function decompressBody(buf, enc) {
   const e = (enc || '').toLowerCase()
   try {
     if (e === 'gzip')    return zlib.gunzipSync(buf)
@@ -702,7 +702,7 @@ function decompressBody(buf, enc) {
   return buf
 }
 
-function proxyErrHtml(title, detail) {
+export function proxyErrHtml(title, detail) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
 body{margin:0;padding:32px;font-family:monospace;background:#1a1a2e;color:#e0e0e0;}
 h2{color:#f5534f;margin:0 0 12px;}p{color:#aaa;margin:4px 0;word-break:break-all;}

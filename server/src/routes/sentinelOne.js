@@ -112,12 +112,26 @@ router.get('/whoami', async (req, res) => {
 router.get('/threats/count', async (req, res) => {
   try {
     if (!isSentinelOneConfigured()) {
-      return res.json({ configured: false, count: null })
+      return res.json({ configured: false, reachable: false, count: null })
     }
     const count = await fetchThreatsCount(req.query)
-    res.json({ configured: true, count })
+    res.json({ configured: true, reachable: true, count })
   } catch (err) {
-    sendS1Error(res, err, 'SentinelOne threat count failed')
+    // Return 200 so the UI can render an empty/unreachable state without treating it as a crash.
+    // The full error detail is still included so the admin can diagnose from the browser devtools.
+    const upstreamStatus = err.status != null ? Number(err.status) : null
+    const isNetwork = err.code === 'S1_NETWORK_ERROR' || !upstreamStatus
+    const hint = buildSentinelOneAuthHint(upstreamStatus, err.body)
+    return res.json({
+      configured: true,
+      reachable: false,
+      count: null,
+      error: err.message,
+      ...(err.code ? { code: err.code } : {}),
+      ...(upstreamStatus ? { upstreamStatus } : {}),
+      ...(hint ? { hint } : {}),
+      ...(isNetwork ? { tip: 'Check that SENTINEL_ONE_BASE_URL is reachable from the server container.' } : {}),
+    })
   }
 })
 

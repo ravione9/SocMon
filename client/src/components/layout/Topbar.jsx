@@ -7,7 +7,7 @@ const titles = {
   '/noc': 'Network Operations Center',
   '/sentinel': 'Sentinel XDR',
   '/infra': 'Infra Monitoring',
-  '/network': 'Network Access',
+  '/solarwinds': 'SolarWinds Orion',
   '/idcs': 'Oracle IDCS',
   '/ad': 'Active Directory',
   '/nexs': 'Nexs User Management',
