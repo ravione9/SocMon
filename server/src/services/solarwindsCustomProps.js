@@ -109,19 +109,21 @@ function buildCondition(prefix, field, value, mode) {
   return `${prefix}.${field} = '${v}'`
 }
 
-/** Carrier preset filters apply to the primary WAN (lowest InterfaceID on the node). */
-function buildPrimaryIfaceCarrierCondition(field, value, mode = 'equals') {
+/** Node matches when any NPM interface has the given carrier CP value. */
+function buildAnyIfaceCarrierCondition(field, value, mode = 'equals') {
   if (field !== 'CarrierName' || !isValidCol(field) || value == null || String(value).trim() === '') return null
-  if (mode === 'contains') return null
   const v = String(value).trim().replace(/'/g, "''")
+  if (mode === 'contains') {
+    return `n.NodeID IN (
+      SELECT DISTINCT i.NodeID FROM Orion.NPM.Interfaces i
+      INNER JOIN Orion.NPM.InterfacesCustomProperties icp ON i.InterfaceID = icp.InterfaceID
+      WHERE icp.${field} LIKE '%${v}%'
+    )`
+  }
   return `n.NodeID IN (
-    SELECT i.NodeID FROM Orion.NPM.Interfaces i
+    SELECT DISTINCT i.NodeID FROM Orion.NPM.Interfaces i
     INNER JOIN Orion.NPM.InterfacesCustomProperties icp ON i.InterfaceID = icp.InterfaceID
-    WHERE i.InterfaceID = (
-      SELECT TOP 1 i2.InterfaceID FROM Orion.NPM.Interfaces i2
-      WHERE i2.NodeID = i.NodeID ORDER BY i2.InterfaceID
-    )
-    AND icp.${field} = '${v}'
+    WHERE icp.${field} = '${v}'
   )`
 }
 
@@ -129,12 +131,26 @@ function ifaceCarrierValue(iface) {
   return String(iface?.cp?.CarrierName ?? '').trim()
 }
 
-function primaryIfaceMatchesCarrier(ifaces, value, mode = 'equals') {
-  if (!value || !ifaces?.length) return !value
-  const carrier = ifaceCarrierValue(ifaces[0])
+function ifaceMatchesCarrier(iface, value, mode = 'equals') {
+  if (!value) return true
+  const carrier = ifaceCarrierValue(iface)
   const v = String(value).trim()
   if (mode === 'contains') return carrier.toLowerCase().includes(v.toLowerCase())
   return carrier === v
+}
+
+function nodeHasMatchingCarrier(ifaces, value, mode = 'equals') {
+  if (!value) return true
+  if (!ifaces?.length) return false
+  return ifaces.some((iface) => ifaceMatchesCarrier(iface, value, mode))
+}
+
+/** Put carrier-matching interfaces first so the results table Carrier column matches the filter. */
+function orderIfacesForCarrierFilter(ifaces, carrierFilterVal, matchMode = 'equals') {
+  if (!carrierFilterVal || !ifaces?.length) return ifaces
+  const matching = ifaces.filter((i) => ifaceMatchesCarrier(i, carrierFilterVal, matchMode))
+  const rest = ifaces.filter((i) => !ifaceMatchesCarrier(i, carrierFilterVal, matchMode))
+  return [...matching, ...rest].slice(0, 2)
 }
 
 function toOrionDT(iso) {
@@ -287,11 +303,14 @@ export async function queryByCustomProperties(opts = {}) {
   ].filter(Boolean)
 
   const matchMode = opts.match === 'contains' ? 'contains' : 'equals'
-  const primaryCarrierCond = opts.ifaceProp1 === 'CarrierName' && opts.ifaceVal1
-    ? buildPrimaryIfaceCarrierCondition('CarrierName', opts.ifaceVal1, matchMode)
+  const carrierFilterVal = opts.ifaceProp1 === 'CarrierName' && opts.ifaceVal1
+    ? String(opts.ifaceVal1).trim()
     : null
-  const genericIfaceProp1 = primaryCarrierCond ? null : opts.ifaceProp1
-  const genericIfaceVal1 = primaryCarrierCond ? null : opts.ifaceVal1
+  const carrierCond = carrierFilterVal
+    ? buildAnyIfaceCarrierCondition('CarrierName', carrierFilterVal, matchMode)
+    : null
+  const genericIfaceProp1 = carrierCond ? null : opts.ifaceProp1
+  const genericIfaceVal1 = carrierCond ? null : opts.ifaceVal1
 
   const allConds = [...nodeConds]
 
@@ -299,8 +318,8 @@ export async function queryByCustomProperties(opts = {}) {
     allConds.push(`n.Status = ${STATUS_CODE[opts.status]}`)
   }
 
-  if (primaryCarrierCond) {
-    allConds.push(primaryCarrierCond)
+  if (carrierCond) {
+    allConds.push(carrierCond)
   }
 
   const genericIfaceConds = [
@@ -357,17 +376,15 @@ export async function queryByCustomProperties(opts = {}) {
     opts.from && opts.to ? nodeAvailabilityMap(nodeIds, opts.from, opts.to) : Promise.resolve(new Map()),
   ])
   const ifaceStats = statsMap
-  const carrierFilterVal = opts.ifaceProp1 === 'CarrierName' && opts.ifaceVal1
-    ? String(opts.ifaceVal1).trim()
-    : null
 
   const nodes = rows.map((r) => {
     const nodeCp = {}
     for (const f of nodeFields) nodeCp[f] = r[f] ?? null
-    const ifaces = ifaceMap.get(Number(r.NodeID)) || []
-    if (carrierFilterVal && !primaryIfaceMatchesCarrier(ifaces, carrierFilterVal, matchMode)) {
+    const rawIfaces = ifaceMap.get(Number(r.NodeID)) || []
+    if (carrierFilterVal && !nodeHasMatchingCarrier(rawIfaces, carrierFilterVal, matchMode)) {
       return null
     }
+    const ifaces = orderIfacesForCarrierFilter(rawIfaces, carrierFilterVal, matchMode)
     const stats = ifaceStats.get(Number(r.NodeID)) || null
     const statusCode = Number(r.Status)
     const sampledAvail = availMap.get(Number(r.NodeID))

@@ -5,6 +5,7 @@ import { useThemeStore } from '../../store/themeStore'
 import api from '../../api/client'
 import toast from 'react-hot-toast'
 import { getFirstAllowedPath } from '../../utils/pageAccess'
+import AppLogo from '../../components/brand/AppLogo.jsx'
 export default function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -26,7 +27,7 @@ export default function LoginPage() {
     <div style={{ minHeight:'var(--app-vh, 100vh)', background:'var(--bg)', display:'flex', alignItems:'center', justifyContent:'center' }}>
       <div style={{ width:380, background:'var(--bg2)', border:'1px solid var(--border)', borderRadius:16, padding:40 }}>
         <div style={{ textAlign:'center', marginBottom:32 }}>
-          <div style={{ width:48, height:48, margin:'0 auto 12px', background:'linear-gradient(135deg, var(--accent), var(--accent2))', borderRadius:12, display:'flex', alignItems:'center', justifyContent:'center', fontSize:20, fontWeight:800, color:'var(--on-accent)', fontFamily:'var(--mono)' }}>LK</div>
+          <AppLogo size={52} title="SocMon" style={{ margin: '0 auto 14px' }} />
           <div style={{ fontSize:20, fontWeight:700, color:'var(--text)' }}>Lenskart</div>
           <div style={{ fontSize:12, color:'var(--text3)', fontFamily:'var(--mono)', marginTop:4 }}>NOC / SOC PLATFORM</div>
         </div>

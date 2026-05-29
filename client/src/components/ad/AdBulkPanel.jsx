@@ -85,24 +85,38 @@ function parseCsv(text) {
   return out
 }
 
+function colName(col) {
+  return typeof col === 'string' ? col : col.name
+}
+
+function colRequired(col) {
+  return typeof col === 'string' ? false : col.required === true
+}
+
+function colNames(cols) {
+  return cols.map(colName)
+}
+
 function rowsToObjects(rows, expectedCols) {
   if (!rows.length) return { headers: [], data: [], missing: [] }
   const headerRow = rows[0].map((h) => String(h ?? '').trim())
   const lower = headerRow.map((h) => h.toLowerCase())
   const headerMap = new Map()
   for (const col of expectedCols) {
-    const idx = lower.indexOf(col.toLowerCase())
-    if (idx >= 0) headerMap.set(col, idx)
+    const name = colName(col)
+    const idx = lower.indexOf(name.toLowerCase())
+    if (idx >= 0) headerMap.set(name, idx)
   }
-  const missing = expectedCols.filter((c) => !headerMap.has(c) && c.required !== false)
+  const missing = expectedCols.filter((c) => colRequired(c) && !headerMap.has(colName(c))).map(colName)
   const data = []
   for (let r = 1; r < rows.length; r++) {
     const row = rows[r]
     if (row.every((c) => String(c).trim() === '')) continue
     const obj = { _row: r + 1 }
     for (const col of expectedCols) {
-      const idx = headerMap.get(col)
-      obj[col] = idx == null ? '' : String(row[idx] ?? '').trim()
+      const name = colName(col)
+      const idx = headerMap.get(name)
+      obj[name] = idx == null ? '' : String(row[idx] ?? '').trim()
     }
     data.push(obj)
   }
@@ -120,15 +134,78 @@ function parseBool(v, def) {
 }
 
 function buildCsv(columns, sample) {
+  const names = colNames(columns)
   const escape = (v) => {
     const s = v == null ? '' : String(v)
     return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
   }
-  const lines = [columns.map(escape).join(',')]
+  const lines = [names.map(escape).join(',')]
   for (const row of sample) {
-    lines.push(columns.map((c) => escape(row[c] ?? '')).join(','))
+    lines.push(names.map((c) => escape(row[c] ?? '')).join(','))
   }
   return '\uFEFF' + lines.join('\r\n')
+}
+
+function deriveUpn(sam, domainFqdn) {
+  const s = String(sam || '').trim()
+  const d = String(domainFqdn || '').trim().replace(/^@/, '')
+  if (!s || !d) return ''
+  return `${s}@${d}`
+}
+
+function fqdnToSampleBase(domainFqdn) {
+  const d = String(domainFqdn || '').trim().replace(/^@/, '')
+  if (!d) return 'DC=corp,DC=example,DC=com'
+  return d.split('.').map((p) => `DC=${p}`).join(',')
+}
+
+function validateRow(op, row, ctx) {
+  switch (op.id) {
+    case 'createUsers': {
+      const parentDn = row.parentDn || ctx.defaultParentDn
+      if (!parentDn) return 'parentDn is required (set per row or pick a default OU below).'
+      if (!row.samAccountName) return 'samAccountName is required.'
+      const enabled = parseBool(row.enabled, true)
+      if (enabled && !row.password) return 'password is required when enabled=true.'
+      return ''
+    }
+    case 'moveUsers':
+      if (!row.dn) return 'dn is required.'
+      if (!row.newParentDn) return 'newParentDn is required.'
+      return ''
+    case 'addToGroup':
+    case 'removeFromGroup':
+      if (!row.groupDn) return 'groupDn is required.'
+      if (!row.memberDn) return 'memberDn is required.'
+      return ''
+    case 'accountFlags': {
+      if (!row.dn) return 'dn is required.'
+      const hasFlag =
+        parseBool(row.disabled, null) !== null ||
+        parseBool(row.unlock, null) === true ||
+        parseBool(row.mustChangePassword, null) === true ||
+        parseBool(row.dontExpirePassword, null) !== null
+      if (!hasFlag) return 'Set at least one flag column (disabled, unlock, mustChangePassword, dontExpirePassword).'
+      return ''
+    }
+    case 'resetPasswords':
+      if (!row.dn) return 'dn is required.'
+      if (!row.newPassword) return 'newPassword is required.'
+      return ''
+    case 'updateAttributes':
+      if (!row.dn) return 'dn is required.'
+      return ''
+    case 'createGroups':
+      if (!row.parentDn) return 'parentDn is required.'
+      if (!row.cn) return 'cn is required.'
+      return ''
+    case 'createOus':
+      if (!row.parentDn) return 'parentDn is required.'
+      if (!row.name) return 'name is required.'
+      return ''
+    default:
+      return ''
+  }
 }
 
 function download(filename, contents) {
@@ -145,316 +222,365 @@ function download(filename, contents) {
 
 // ─── Operation registry ─────────────────────────────────────────────────────
 
-const SAMPLE_PARENT = 'OU=Users,DC=corp,DC=example,DC=com'
-const SAMPLE_GROUP = 'CN=All Staff,OU=Groups,DC=corp,DC=example,DC=com'
-const SAMPLE_TARGET_OU = 'OU=Finance,DC=corp,DC=example,DC=com'
-const SAMPLE_USER_DN = 'CN=John Doe,OU=Users,DC=corp,DC=example,DC=com'
+function buildOperations(domainFqdn) {
+  const baseDn = fqdnToSampleBase(domainFqdn)
+  const sampleParent = `OU=Users,${baseDn}`
+  const sampleGroup = `CN=All Staff,OU=Groups,${baseDn}`
+  const sampleTargetOu = `OU=Finance,${baseDn}`
+  const sampleUserDn = `CN=John Doe,${sampleParent}`
+  const sampleUpn = deriveUpn('jdoe', domainFqdn) || 'jdoe@corp.example.com'
+  const sampleMail = sampleUpn
 
-const OPERATIONS = [
-  {
-    id: 'createUsers',
-    label: 'Create users',
-    icon: '👤',
-    description: 'Add new AD user accounts. Password is required to start the account enabled.',
-    columns: [
-      'samAccountName',
-      'givenName',
-      'sn',
-      'displayName',
-      'userPrincipalName',
-      'mail',
-      'description',
-      'password',
-      'parentDn',
-      'enabled',
-      'dontExpirePassword',
-      'mustChangeNextLogon',
-    ],
-    sample: [
-      {
-        samAccountName: 'jdoe',
-        givenName: 'John',
-        sn: 'Doe',
-        displayName: 'John Doe',
-        userPrincipalName: 'jdoe@corp.example.com',
-        mail: 'jdoe@corp.example.com',
-        description: 'Joiner — Finance',
-        password: 'P@ssw0rd!2026',
-        parentDn: SAMPLE_PARENT,
-        enabled: 'true',
-        dontExpirePassword: 'false',
-        mustChangeNextLogon: 'true',
+  return [
+    {
+      id: 'createUsers',
+      label: 'Create users',
+      icon: '👤',
+      description: 'Add new AD user accounts. Password is required to start the account enabled.',
+      columns: [
+        { name: 'samAccountName', required: true },
+        { name: 'givenName' },
+        { name: 'sn' },
+        { name: 'displayName' },
+        { name: 'userPrincipalName' },
+        { name: 'mail' },
+        { name: 'description' },
+        { name: 'password' },
+        { name: 'parentDn' },
+        { name: 'enabled' },
+        { name: 'dontExpirePassword' },
+        { name: 'mustChangeNextLogon' },
+      ],
+      sample: [
+        {
+          samAccountName: 'jdoe',
+          givenName: 'John',
+          sn: 'Doe',
+          displayName: 'John Doe',
+          userPrincipalName: sampleUpn,
+          mail: sampleMail,
+          description: 'Joiner — Finance',
+          password: 'P@ssw0rd!2026',
+          parentDn: sampleParent,
+          enabled: 'true',
+          dontExpirePassword: 'false',
+          mustChangeNextLogon: 'true',
+        },
+        {
+          samAccountName: 'asmith',
+          givenName: 'Anna',
+          sn: 'Smith',
+          displayName: 'Anna Smith',
+          userPrincipalName: deriveUpn('asmith', domainFqdn) || 'asmith@corp.example.com',
+          mail: deriveUpn('asmith', domainFqdn) || 'asmith@corp.example.com',
+          description: '',
+          password: 'P@ssw0rd!2026',
+          parentDn: sampleParent,
+          enabled: 'true',
+          dontExpirePassword: 'true',
+          mustChangeNextLogon: 'false',
+        },
+      ],
+      run: (row, _idx, ctx) => {
+        const parentDn = row.parentDn || ctx.defaultParentDn
+        const userPrincipalName =
+          row.userPrincipalName || deriveUpn(row.samAccountName, ctx.domainFqdn) || undefined
+        return createAdUser({
+          parentDn,
+          samAccountName: row.samAccountName,
+          userPrincipalName,
+          cn: row.displayName || row.samAccountName,
+          displayName: row.displayName || undefined,
+          givenName: row.givenName || undefined,
+          sn: row.sn || undefined,
+          description: row.description || undefined,
+          mail: row.mail || undefined,
+          password: row.password || undefined,
+          enabled: parseBool(row.enabled, true),
+          dontExpirePassword: parseBool(row.dontExpirePassword, false),
+          mustChangeNextLogon: parseBool(row.mustChangeNextLogon, false),
+        })
       },
-      {
-        samAccountName: 'asmith',
-        givenName: 'Anna',
-        sn: 'Smith',
-        displayName: 'Anna Smith',
-        userPrincipalName: 'asmith@corp.example.com',
-        mail: 'asmith@corp.example.com',
-        description: '',
-        password: 'P@ssw0rd!2026',
-        parentDn: SAMPLE_PARENT,
-        enabled: 'true',
-        dontExpirePassword: 'true',
-        mustChangeNextLogon: 'false',
-      },
-    ],
-    run: (row) =>
-      createAdUser({
-        parentDn: row.parentDn,
-        samAccountName: row.samAccountName,
-        userPrincipalName: row.userPrincipalName || undefined,
-        cn: row.displayName || row.samAccountName,
-        displayName: row.displayName || undefined,
-        givenName: row.givenName || undefined,
-        sn: row.sn || undefined,
-        description: row.description || undefined,
-        mail: row.mail || undefined,
-        password: row.password || undefined,
-        enabled: parseBool(row.enabled, true),
-        dontExpirePassword: parseBool(row.dontExpirePassword, false),
-        mustChangeNextLogon: parseBool(row.mustChangeNextLogon, false),
-      }),
-    key: (row) => row.samAccountName || row.userPrincipalName || `row ${row._row}`,
-  },
-  {
-    id: 'moveUsers',
-    label: 'Move users to OU',
-    icon: '➡️',
-    description: 'Move (or any object) to a new OU/container using modifyDN.',
-    columns: ['dn', 'newParentDn'],
-    sample: [
-      { dn: SAMPLE_USER_DN, newParentDn: SAMPLE_TARGET_OU },
-      { dn: 'CN=Anna Smith,OU=Users,DC=corp,DC=example,DC=com', newParentDn: SAMPLE_TARGET_OU },
-    ],
-    run: (row) => moveAdUser({ dn: row.dn, newParentDn: row.newParentDn }),
-    key: (row) => row.dn || `row ${row._row}`,
-  },
-  {
-    id: 'addToGroup',
-    label: 'Add users to group',
-    icon: '➕',
-    description: 'Add one or more directory objects (users / groups / computers) to a group.',
-    columns: ['groupDn', 'memberDn'],
-    sample: [
-      { groupDn: SAMPLE_GROUP, memberDn: SAMPLE_USER_DN },
-      { groupDn: SAMPLE_GROUP, memberDn: 'CN=Anna Smith,OU=Users,DC=corp,DC=example,DC=com' },
-    ],
-    run: (row) => addAdGroupMembers({ dn: row.groupDn, members: [row.memberDn] }),
-    key: (row) => `${row.memberDn || ''} → ${row.groupDn || ''}`,
-  },
-  {
-    id: 'removeFromGroup',
-    label: 'Remove users from group',
-    icon: '➖',
-    description: 'Remove directory objects from a group.',
-    columns: ['groupDn', 'memberDn'],
-    sample: [{ groupDn: SAMPLE_GROUP, memberDn: SAMPLE_USER_DN }],
-    run: (row) => removeAdGroupMembers({ dn: row.groupDn, members: [row.memberDn] }),
-    key: (row) => `${row.memberDn || ''} ⨯ ${row.groupDn || ''}`,
-  },
-  {
-    id: 'accountFlags',
-    label: 'Set account flags',
-    icon: '🔧',
-    description:
-      'Toggle account state: disabled, unlock, mustChangePassword (pwdLastSet=0), dontExpirePassword. Leave a cell blank to skip that flag.',
-    columns: ['dn', 'disabled', 'unlock', 'mustChangePassword', 'dontExpirePassword'],
-    sample: [
-      { dn: SAMPLE_USER_DN, disabled: 'true', unlock: '', mustChangePassword: '', dontExpirePassword: '' },
-      { dn: 'CN=Anna Smith,OU=Users,DC=corp,DC=example,DC=com', disabled: '', unlock: 'true', mustChangePassword: '', dontExpirePassword: '' },
-      { dn: 'CN=Service Account,OU=Service Accounts,DC=corp,DC=example,DC=com', disabled: '', unlock: '', mustChangePassword: '', dontExpirePassword: 'true' },
-    ],
-    run: (row) => {
-      const body = { dn: row.dn }
-      const disabled = parseBool(row.disabled, null)
-      const unlock = parseBool(row.unlock, null)
-      const mustChangePassword = parseBool(row.mustChangePassword, null)
-      const dontExpirePassword = parseBool(row.dontExpirePassword, null)
-      if (disabled !== null) body.disabled = disabled
-      if (unlock === true) body.unlock = true
-      if (mustChangePassword === true) body.mustChangePassword = true
-      if (dontExpirePassword !== null) body.dontExpirePassword = dontExpirePassword
-      return setAdUserAccount(body)
+      key: (row) => row.samAccountName || row.userPrincipalName || `row ${row._row}`,
     },
-    key: (row) => row.dn || `row ${row._row}`,
-  },
-  {
-    id: 'resetPasswords',
-    label: 'Reset passwords',
-    icon: '🔑',
-    description:
-      'Set a new password for each user via LDAP unicodePwd. Requires encrypted LDAP (LDAPS / StartTLS) and reset rights.',
-    columns: ['dn', 'newPassword', 'mustChangeNextLogon'],
-    sample: [
-      { dn: SAMPLE_USER_DN, newPassword: 'P@ssw0rd!2026', mustChangeNextLogon: 'true' },
-    ],
-    run: (row) =>
-      resetAdUserPassword({
-        dn: row.dn,
-        newPassword: row.newPassword,
-        mustChangeNextLogon: parseBool(row.mustChangeNextLogon, false),
-      }),
-    key: (row) => row.dn || `row ${row._row}`,
-  },
-  {
-    id: 'updateAttributes',
-    label: 'Update user attributes',
-    icon: '✏️',
-    description:
-      'Patch standard user fields (display name, mail, phones, manager, address, profile). Leave a cell blank to skip an attribute; use NULL to clear it.',
-    columns: [
-      'dn',
-      'displayName',
-      'givenName',
-      'sn',
-      'mail',
-      'telephoneNumber',
-      'mobile',
-      'title',
-      'department',
-      'company',
-      'manager',
-      'description',
-    ],
-    sample: [
-      {
-        dn: SAMPLE_USER_DN,
-        displayName: 'John Doe',
-        givenName: 'John',
-        sn: 'Doe',
-        mail: 'jdoe@corp.example.com',
-        telephoneNumber: '',
-        mobile: '+1 555 0100',
-        title: 'Analyst',
-        department: 'Finance',
-        company: 'Lenskart',
-        manager: 'CN=Manager,OU=Users,DC=corp,DC=example,DC=com',
-        description: 'Imported via Netpulse bulk',
-      },
-    ],
-    run: (row) => {
-      const patch = {}
-      for (const k of [
-        'displayName',
-        'givenName',
-        'sn',
-        'mail',
-        'telephoneNumber',
-        'mobile',
-        'title',
-        'department',
-        'company',
-        'manager',
-        'description',
-      ]) {
-        const v = row[k]
-        if (v == null) continue
-        if (String(v).toUpperCase() === 'NULL') patch[k] = ''
-        else if (String(v).trim() === '') continue
-        else patch[k] = v
-      }
-      if (!Object.keys(patch).length) {
-        return Promise.reject(
-          Object.assign(new Error('No editable cells supplied on this row.'), {
-            response: { data: { code: 'AD_PATCH_EMPTY', error: 'Row had no editable cells.' } },
-          }),
-        )
-      }
-      return modifyAdUser({ dn: row.dn, patch })
+    {
+      id: 'moveUsers',
+      label: 'Move users to OU',
+      icon: '➡️',
+      description: 'Move (or any object) to a new OU/container using modifyDN.',
+      columns: [{ name: 'dn', required: true }, { name: 'newParentDn', required: true }],
+      sample: [
+        { dn: sampleUserDn, newParentDn: sampleTargetOu },
+        { dn: `CN=Anna Smith,${sampleParent}`, newParentDn: sampleTargetOu },
+      ],
+      run: (row) => moveAdUser({ dn: row.dn, newParentDn: row.newParentDn }),
+      key: (row) => row.dn || `row ${row._row}`,
     },
-    key: (row) => row.dn || `row ${row._row}`,
-  },
-  {
-    id: 'createGroups',
-    label: 'Create groups',
-    icon: '🗂️',
-    description: 'Add new AD groups. groupCategory = security | distribution. groupScope = global | domainLocal | universal.',
-    columns: [
-      'parentDn',
-      'cn',
-      'samAccountName',
-      'description',
-      'mail',
-      'groupCategory',
-      'groupScope',
-    ],
-    sample: [
-      {
-        parentDn: 'OU=Groups,DC=corp,DC=example,DC=com',
-        cn: 'All Staff',
-        samAccountName: 'AllStaff',
-        description: 'All employees',
-        mail: 'all-staff@corp.example.com',
-        groupCategory: 'security',
-        groupScope: 'global',
+    {
+      id: 'addToGroup',
+      label: 'Add users to group',
+      icon: '➕',
+      description: 'Add one or more directory objects (users / groups / computers) to a group.',
+      columns: [{ name: 'groupDn', required: true }, { name: 'memberDn', required: true }],
+      sample: [
+        { groupDn: sampleGroup, memberDn: sampleUserDn },
+        { groupDn: sampleGroup, memberDn: `CN=Anna Smith,${sampleParent}` },
+      ],
+      run: (row) => addAdGroupMembers({ dn: row.groupDn, members: [row.memberDn] }),
+      key: (row) => `${row.memberDn || ''} → ${row.groupDn || ''}`,
+    },
+    {
+      id: 'removeFromGroup',
+      label: 'Remove users from group',
+      icon: '➖',
+      description: 'Remove directory objects from a group.',
+      columns: [{ name: 'groupDn', required: true }, { name: 'memberDn', required: true }],
+      sample: [{ groupDn: sampleGroup, memberDn: sampleUserDn }],
+      run: (row) => removeAdGroupMembers({ dn: row.groupDn, members: [row.memberDn] }),
+      key: (row) => `${row.memberDn || ''} ⨯ ${row.groupDn || ''}`,
+    },
+    {
+      id: 'accountFlags',
+      label: 'Set account flags',
+      icon: '🔧',
+      description:
+        'Toggle account state: disabled, unlock, mustChangePassword (pwdLastSet=0), dontExpirePassword. Leave a cell blank to skip that flag.',
+      columns: [
+        { name: 'dn', required: true },
+        { name: 'disabled' },
+        { name: 'unlock' },
+        { name: 'mustChangePassword' },
+        { name: 'dontExpirePassword' },
+      ],
+      sample: [
+        { dn: sampleUserDn, disabled: 'true', unlock: '', mustChangePassword: '', dontExpirePassword: '' },
+        {
+          dn: `CN=Anna Smith,${sampleParent}`,
+          disabled: '',
+          unlock: 'true',
+          mustChangePassword: '',
+          dontExpirePassword: '',
+        },
+        {
+          dn: `CN=Service Account,OU=Service Accounts,${baseDn}`,
+          disabled: '',
+          unlock: '',
+          mustChangePassword: '',
+          dontExpirePassword: 'true',
+        },
+      ],
+      run: (row) => {
+        const body = { dn: row.dn }
+        const disabled = parseBool(row.disabled, null)
+        const unlock = parseBool(row.unlock, null)
+        const mustChangePassword = parseBool(row.mustChangePassword, null)
+        const dontExpirePassword = parseBool(row.dontExpirePassword, null)
+        if (disabled !== null) body.disabled = disabled
+        if (unlock === true) body.unlock = true
+        if (mustChangePassword === true) body.mustChangePassword = true
+        if (dontExpirePassword !== null) body.dontExpirePassword = dontExpirePassword
+        return setAdUserAccount(body)
       },
-    ],
-    run: (row) =>
-      createAdGroup({
-        parentDn: row.parentDn,
-        cn: row.cn,
-        samAccountName: row.samAccountName || row.cn,
-        description: row.description || undefined,
-        mail: row.mail || undefined,
-        groupCategory: row.groupCategory || 'security',
-        groupScope: row.groupScope || 'global',
-      }),
-    key: (row) => row.cn || `row ${row._row}`,
-  },
-  {
-    id: 'createOus',
-    label: 'Create OUs',
-    icon: '🌳',
-    description: 'Add new organizational units.',
-    columns: ['parentDn', 'name', 'description', 'managedBy'],
-    sample: [
-      {
-        parentDn: 'DC=corp,DC=example,DC=com',
-        name: 'Finance',
-        description: 'Finance department',
-        managedBy: '',
+      key: (row) => row.dn || `row ${row._row}`,
+    },
+    {
+      id: 'resetPasswords',
+      label: 'Reset passwords',
+      icon: '🔑',
+      description:
+        'Set a new password for each user via LDAP unicodePwd. Requires encrypted LDAP (LDAPS / StartTLS) and reset rights.',
+      columns: [
+        { name: 'dn', required: true },
+        { name: 'newPassword', required: true },
+        { name: 'mustChangeNextLogon' },
+      ],
+      sample: [{ dn: sampleUserDn, newPassword: 'P@ssw0rd!2026', mustChangeNextLogon: 'true' }],
+      run: (row) =>
+        resetAdUserPassword({
+          dn: row.dn,
+          newPassword: row.newPassword,
+          mustChangeNextLogon: parseBool(row.mustChangeNextLogon, false),
+        }),
+      key: (row) => row.dn || `row ${row._row}`,
+    },
+    {
+      id: 'updateAttributes',
+      label: 'Update user attributes',
+      icon: '✏️',
+      description:
+        'Patch standard user fields (display name, mail, phones, manager, address, profile). Leave a cell blank to skip an attribute; use NULL to clear it.',
+      columns: [
+        { name: 'dn', required: true },
+        { name: 'displayName' },
+        { name: 'givenName' },
+        { name: 'sn' },
+        { name: 'mail' },
+        { name: 'telephoneNumber' },
+        { name: 'mobile' },
+        { name: 'title' },
+        { name: 'department' },
+        { name: 'company' },
+        { name: 'manager' },
+        { name: 'description' },
+      ],
+      sample: [
+        {
+          dn: sampleUserDn,
+          displayName: 'John Doe',
+          givenName: 'John',
+          sn: 'Doe',
+          mail: sampleMail,
+          telephoneNumber: '',
+          mobile: '+1 555 0100',
+          title: 'Analyst',
+          department: 'Finance',
+          company: 'Lenskart',
+          manager: `CN=Manager,${sampleParent}`,
+          description: 'Imported via Netpulse bulk',
+        },
+      ],
+      run: (row) => {
+        const patch = {}
+        for (const k of [
+          'displayName',
+          'givenName',
+          'sn',
+          'mail',
+          'telephoneNumber',
+          'mobile',
+          'title',
+          'department',
+          'company',
+          'manager',
+          'description',
+        ]) {
+          const v = row[k]
+          if (v == null) continue
+          if (String(v).toUpperCase() === 'NULL') patch[k] = ''
+          else if (String(v).trim() === '') continue
+          else patch[k] = v
+        }
+        if (!Object.keys(patch).length) {
+          return Promise.reject(
+            Object.assign(new Error('No editable cells supplied on this row.'), {
+              response: { data: { code: 'AD_PATCH_EMPTY', error: 'Row had no editable cells.' } },
+            }),
+          )
+        }
+        return modifyAdUser({ dn: row.dn, patch })
       },
-      {
-        parentDn: 'OU=Finance,DC=corp,DC=example,DC=com',
-        name: 'AP',
-        description: 'Accounts payable',
-        managedBy: '',
-      },
-    ],
-    run: (row) =>
-      createAdOu({
-        parentDn: row.parentDn,
-        name: row.name,
-        description: row.description || undefined,
-        managedBy: row.managedBy || undefined,
-      }),
-    key: (row) => row.name || `row ${row._row}`,
-  },
-]
+      key: (row) => row.dn || `row ${row._row}`,
+    },
+    {
+      id: 'createGroups',
+      label: 'Create groups',
+      icon: '🗂️',
+      description: 'Add new AD groups. groupCategory = security | distribution. groupScope = global | domainLocal | universal.',
+      columns: [
+        { name: 'parentDn', required: true },
+        { name: 'cn', required: true },
+        { name: 'samAccountName' },
+        { name: 'description' },
+        { name: 'mail' },
+        { name: 'groupCategory' },
+        { name: 'groupScope' },
+      ],
+      sample: [
+        {
+          parentDn: `OU=Groups,${baseDn}`,
+          cn: 'All Staff',
+          samAccountName: 'AllStaff',
+          description: 'All employees',
+          mail: 'all-staff@corp.example.com',
+          groupCategory: 'security',
+          groupScope: 'global',
+        },
+      ],
+      run: (row) =>
+        createAdGroup({
+          parentDn: row.parentDn,
+          cn: row.cn,
+          samAccountName: row.samAccountName || row.cn,
+          description: row.description || undefined,
+          mail: row.mail || undefined,
+          groupCategory: row.groupCategory || 'security',
+          groupScope: row.groupScope || 'global',
+        }),
+      key: (row) => row.cn || `row ${row._row}`,
+    },
+    {
+      id: 'createOus',
+      label: 'Create OUs',
+      icon: '🌳',
+      description: 'Add new organizational units.',
+      columns: [
+        { name: 'parentDn', required: true },
+        { name: 'name', required: true },
+        { name: 'description' },
+        { name: 'managedBy' },
+      ],
+      sample: [
+        {
+          parentDn: baseDn,
+          name: 'Finance',
+          description: 'Finance department',
+          managedBy: '',
+        },
+        {
+          parentDn: `OU=Finance,${baseDn}`,
+          name: 'AP',
+          description: 'Accounts payable',
+          managedBy: '',
+        },
+      ],
+      run: (row) =>
+        createAdOu({
+          parentDn: row.parentDn,
+          name: row.name,
+          description: row.description || undefined,
+          managedBy: row.managedBy || undefined,
+        }),
+      key: (row) => row.name || `row ${row._row}`,
+    },
+  ]
+}
 
 const CONCURRENCY = 3
 
 // ─── Component ──────────────────────────────────────────────────────────────
 
-export default function AdBulkPanel() {
+export default function AdBulkPanel({ domainFqdn = '' }) {
+  const operations = useMemo(() => buildOperations(domainFqdn), [domainFqdn])
   const [opId, setOpId] = useState(null)
-  const op = useMemo(() => OPERATIONS.find((o) => o.id === opId) || null, [opId])
+  const op = useMemo(() => operations.find((o) => o.id === opId) || null, [operations, opId])
   const [rows, setRows] = useState([])
   const [missing, setMissing] = useState([])
+  const [parseError, setParseError] = useState('')
   const [filename, setFilename] = useState('')
+  const [defaultParentDn, setDefaultParentDn] = useState('')
   const [running, setRunning] = useState(false)
   const [results, setResults] = useState([])
   const cancelRef = useRef(false)
   const fileRef = useRef(null)
+  const runCtx = useMemo(
+    () => ({ domainFqdn, defaultParentDn: defaultParentDn.trim() }),
+    [domainFqdn, defaultParentDn],
+  )
 
   useEffect(() => {
     setRows([])
     setResults([])
     setMissing([])
+    setParseError('')
     setFilename('')
   }, [opId])
+
+  const rowIssues = useMemo(() => {
+    if (!op || !rows.length) return []
+    return rows.map((row) => validateRow(op, row, runCtx))
+  }, [op, rows, runCtx])
+
+  const invalidRowCount = useMemo(() => rowIssues.filter(Boolean).length, [rowIssues])
 
   const summary = useMemo(() => {
     let ok = 0
@@ -468,13 +594,42 @@ export default function AdBulkPanel() {
 
   const handleFile = async (file) => {
     if (!file || !op) return
-    const text = await file.text()
-    const raw = parseCsv(text)
-    const { data, missing: miss } = rowsToObjects(raw, op.columns)
-    setFilename(file.name)
-    setRows(data)
-    setMissing(miss)
-    setResults([])
+    setParseError('')
+    try {
+      const text = await file.text()
+      const raw = parseCsv(text)
+      if (raw.length < 1) {
+        setParseError('CSV file is empty.')
+        setRows([])
+        setMissing([])
+        setFilename(file.name)
+        return
+      }
+      if (raw.length < 2) {
+        setParseError('CSV must have a header row and at least one data row.')
+        setRows([])
+        setMissing([])
+        setFilename(file.name)
+        return
+      }
+      const { data, missing: miss } = rowsToObjects(raw, op.columns)
+      if (!data.length) {
+        setParseError('No data rows found after the header. Add at least one row of values.')
+        setRows([])
+        setMissing(miss)
+        setFilename(file.name)
+        return
+      }
+      setFilename(file.name)
+      setRows(data)
+      setMissing(miss)
+      setResults([])
+    } catch (e) {
+      setParseError(e?.message || 'Failed to read CSV file.')
+      setRows([])
+      setMissing([])
+      setFilename(file?.name || '')
+    }
   }
 
   const downloadSample = () => {
@@ -483,7 +638,7 @@ export default function AdBulkPanel() {
   }
 
   const start = async () => {
-    if (!op || !rows.length || running) return
+    if (!op || !rows.length || running || missing.length > 0 || invalidRowCount > 0) return
     cancelRef.current = false
     setRunning(true)
     const init = rows.map(() => ({ status: 'pending', message: '' }))
@@ -493,8 +648,17 @@ export default function AdBulkPanel() {
       while (!cancelRef.current) {
         const myIdx = idx++
         if (myIdx >= rows.length) return
+        const rowErr = validateRow(op, rows[myIdx], runCtx)
+        if (rowErr) {
+          setResults((prev) => {
+            const next = prev.slice()
+            next[myIdx] = { status: 'error', message: rowErr }
+            return next
+          })
+          continue
+        }
         try {
-          await op.run(rows[myIdx], myIdx)
+          await op.run(rows[myIdx], myIdx, runCtx)
           setResults((prev) => {
             const next = prev.slice()
             next[myIdx] = { status: 'ok', message: 'Success' }
@@ -522,7 +686,8 @@ export default function AdBulkPanel() {
 
   const downloadReport = () => {
     if (!op || !rows.length) return
-    const cols = ['_row', ...op.columns, '_status', '_message']
+    const names = colNames(op.columns)
+    const cols = ['_row', ...names, '_status', '_message']
     const data = rows.map((r, i) => ({
       ...r,
       _status: results[i]?.status || 'pending',
@@ -538,6 +703,13 @@ export default function AdBulkPanel() {
     download(`bulk-${op.id}-report-${stamp}.csv`, '\uFEFF' + lines.join('\r\n'))
   }
 
+  const opColumnLabel = (opDef) => {
+    const required = opDef.columns.filter(colRequired).map(colName)
+    const optional = opDef.columns.filter((c) => !colRequired(c)).map(colName)
+    if (!optional.length) return required.join(', ')
+    return `${required.join(', ')} (optional: ${optional.join(', ')})`
+  }
+
   if (!op) {
     return (
       <div className="space-y-4">
@@ -549,7 +721,7 @@ export default function AdBulkPanel() {
           </p>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
-          {OPERATIONS.map((o) => (
+          {operations.map((o) => (
             <button
               key={o.id}
               type="button"
@@ -561,8 +733,8 @@ export default function AdBulkPanel() {
                 <div className="min-w-0">
                   <div className={`font-semibold ${idcsCx.text}`}>{o.label}</div>
                   <p className={`text-xs mt-1 ${idcsCx.text2}`}>{o.description}</p>
-                  <p className={`text-[11px] font-mono mt-2 truncate ${idcsCx.text3}`}>
-                    {o.columns.join(', ')}
+                  <p className={`text-[11px] font-mono mt-2 line-clamp-2 ${idcsCx.text3}`} title={opColumnLabel(o)}>
+                    {opColumnLabel(o)}
                   </p>
                 </div>
               </div>
@@ -584,7 +756,13 @@ export default function AdBulkPanel() {
             </div>
             <p className={`text-sm mt-1 ${idcsCx.text2}`}>{op.description}</p>
             <p className={`text-[11px] font-mono mt-2 ${idcsCx.text3}`}>
-              Columns: {op.columns.join(', ')}
+              Required: {op.columns.filter(colRequired).map(colName).join(', ')}
+              {op.columns.some((c) => !colRequired(c)) && (
+                <>
+                  {' · '}
+                  Optional: {op.columns.filter((c) => !colRequired(c)).map(colName).join(', ')}
+                </>
+              )}
             </p>
           </div>
           <button type="button" className={`text-sm ${idcsBtnGhost()}`} onClick={() => setOpId(null)}>
@@ -593,7 +771,34 @@ export default function AdBulkPanel() {
         </div>
       </div>
 
-      <div className={`rounded-xl border p-4 ${idcsCx.border} ${idcsCx.bg3} flex flex-wrap items-center gap-3`}>
+      {op.id === 'createUsers' && (
+        <div className={`rounded-xl border p-4 ${idcsCx.border} ${idcsCx.bg2}`}>
+          <label className={`block text-xs font-semibold mb-1 ${idcsCx.text2}`}>
+            Default parent OU (optional)
+          </label>
+          <input
+            type="text"
+            value={defaultParentDn}
+            onChange={(e) => setDefaultParentDn(e.target.value)}
+            placeholder={`OU=Users,${fqdnToSampleBase(domainFqdn)}`}
+            className={`w-full text-sm font-mono rounded-lg px-3 py-2 border ${idcsCx.border} bg-[var(--bg1)] ${idcsCx.text}`}
+          />
+          <p className={`text-xs mt-1.5 ${idcsCx.text3}`}>
+            Used when a CSV row leaves <span className="font-mono">parentDn</span> blank. UPN is auto-filled from{' '}
+            <span className="font-mono">samAccountName@{domainFqdn || 'domain'}</span> when omitted.
+          </p>
+        </div>
+      )}
+
+      <div
+        className={`rounded-xl border p-4 ${idcsCx.border} ${idcsCx.bg3} flex flex-wrap items-center gap-3`}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => {
+          e.preventDefault()
+          const f = e.dataTransfer.files?.[0]
+          if (f) handleFile(f)
+        }}
+      >
         <button type="button" className={`text-sm ${idcsBtnGhost()}`} onClick={downloadSample}>
           Download sample CSV
         </button>
@@ -628,12 +833,31 @@ export default function AdBulkPanel() {
         )}
       </div>
 
+      {parseError && (
+        <div
+          className={`text-sm rounded-lg px-4 py-3 border ${idcsCx.border}`}
+          style={{ background: 'color-mix(in srgb, var(--red) 12%, var(--bg3))', color: 'var(--red)' }}
+        >
+          {parseError}
+        </div>
+      )}
+
       {missing.length > 0 && (
         <div
           className={`text-sm rounded-lg px-4 py-3 border ${idcsCx.border}`}
           style={{ background: 'color-mix(in srgb, var(--red) 12%, var(--bg3))', color: 'var(--red)' }}
         >
-          Missing required columns: <strong>{missing.join(', ')}</strong>. Re-export from the sample template.
+          Missing required columns: <strong>{missing.join(', ')}</strong>. Download the sample or add these headers.
+        </div>
+      )}
+
+      {rows.length > 0 && invalidRowCount > 0 && !running && (
+        <div
+          className={`text-sm rounded-lg px-4 py-3 border ${idcsCx.border}`}
+          style={{ background: 'color-mix(in srgb, var(--amber) 12%, var(--bg3))', color: 'var(--amber)' }}
+        >
+          {invalidRowCount} row{invalidRowCount !== 1 ? 's have' : ' has'} validation issues. Fix them before running
+          (see Message column below).
         </div>
       )}
 
@@ -643,7 +867,7 @@ export default function AdBulkPanel() {
             <button
               type="button"
               className={`text-sm ${idcsBtnPrimary()}`}
-              disabled={running || !rows.length || missing.length > 0}
+              disabled={running || !rows.length || missing.length > 0 || invalidRowCount > 0}
               onClick={start}
             >
               {running ? `Processing… ${summary.processed}/${summary.total}` : `Run ${rows.length} row${rows.length !== 1 ? 's' : ''}`}
@@ -672,7 +896,7 @@ export default function AdBulkPanel() {
                 <tr>
                   <th className="px-2 py-2 text-left">#</th>
                   <th className="px-2 py-2 text-left">Key</th>
-                  {op.columns.slice(0, 3).map((c) => (
+                  {colNames(op.columns).slice(0, 3).map((c) => (
                     <th key={c} className="px-2 py-2 text-left">
                       {c}
                     </th>
@@ -684,10 +908,11 @@ export default function AdBulkPanel() {
               <tbody className={`divide-y ${idcsCx.divide}`}>
                 {rows.map((r, i) => {
                   const st = results[i]
+                  const rowIssue = rowIssues[i]
                   const color =
                     st?.status === 'ok'
                       ? 'var(--green)'
-                      : st?.status === 'error'
+                      : st?.status === 'error' || rowIssue
                         ? 'var(--red)'
                         : st?.status === 'pending'
                           ? 'var(--text3)'
@@ -698,7 +923,7 @@ export default function AdBulkPanel() {
                       <td className={`px-2 py-1.5 font-mono break-all max-w-[16rem] ${idcsCx.text}`}>
                         {op.key(r)}
                       </td>
-                      {op.columns.slice(0, 3).map((c) => (
+                      {colNames(op.columns).slice(0, 3).map((c) => (
                         <td key={c} className={`px-2 py-1.5 font-mono break-all max-w-[12rem] ${idcsCx.text2}`}>
                           {r[c]}
                         </td>
@@ -708,12 +933,14 @@ export default function AdBulkPanel() {
                           ? '✓ ok'
                           : st?.status === 'error'
                             ? '✗ error'
-                            : st?.status === 'pending'
-                              ? '…'
-                              : '—'}
+                            : rowIssue
+                              ? '⚠ invalid'
+                              : st?.status === 'pending'
+                                ? '…'
+                                : '—'}
                       </td>
                       <td className={`px-2 py-1.5 max-w-[24rem] break-words ${idcsCx.text2}`}>
-                        {st?.message || ''}
+                        {st?.message || rowIssue || ''}
                       </td>
                     </tr>
                   )

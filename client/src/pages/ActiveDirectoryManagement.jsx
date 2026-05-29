@@ -1680,7 +1680,7 @@ export default function ActiveDirectoryManagement() {
       <>
         {panelTitle('Bulk management')}
         {configured && credentialsConfigured ? (
-          <AdBulkPanel />
+          <AdBulkPanel domainFqdn={status?.domainFqdn || ''} />
         ) : (
           <div className={`rounded-xl border p-6 ${idcsCx.border} ${idcsCx.bg3} text-sm ${idcsCx.text2}`}>
             Connect Active Directory on the server first (AD_DOMAIN, AD_DOMAIN_CONTROLLER, service account).
