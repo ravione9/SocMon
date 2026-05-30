@@ -1428,10 +1428,28 @@ function SwRadioGroup({ name, value, onChange, options }) {
   )
 }
 
+function LinkCell({ iface }) {
+  if (!iface) return <span style={{ color: 'var(--text3)' }}>—</span>
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <span style={{ fontWeight: 600 }}>{iface.name}</span>
+        {iface.status && <Pill label={iface.status} />}
+      </div>
+      {Number.isFinite(iface.availabilityPct) && (
+        <div style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)', marginTop: 2 }}>
+          {fmtPct(iface.availabilityPct)} avail
+        </div>
+      )}
+    </div>
+  )
+}
+
 function CustomPropertiesTab({
   presets, presetsLoading,
   results, loading, onSearch, onNodeClick,
   filters, onFiltersChange,
+  uptimeWindow,
 }) {
   const f = filters || {}
   const set = (key, val) => onFiltersChange?.({ ...f, [key]: val })
@@ -1457,7 +1475,11 @@ function CustomPropertiesTab({
       else if (c === 2) status.down++
       else status.other++
 
-      if (Number.isFinite(n.uptimePct)) { uptimeSum += n.uptimePct; uptimeCount++; if (n.uptimeSampled) uptimeSampled = true }
+      if (n.uptimeSampled && Number.isFinite(n.uptimePct)) {
+        uptimeSum += n.uptimePct
+        uptimeCount++
+        uptimeSampled = true
+      }
 
       const bw = Number(n.bandwidthPct)
       if (Number.isFinite(bw)) {
@@ -1497,6 +1519,17 @@ function CustomPropertiesTab({
     }],
   }), [summary])
 
+  const uptimeHint = useMemo(() => {
+    if (uptimeWindow?.from && uptimeWindow?.to) {
+      const from = new Date(uptimeWindow.from).toLocaleString()
+      const to = new Date(uptimeWindow.to).toLocaleString()
+      return uptimeWindow.defaulted
+        ? `Link availability (Orion NPM) — last 24h (${from} → ${to})`
+        : `Link availability (Orion NPM) — ${from} → ${to}`
+    }
+    return 'Link availability (Orion NPM) — last 24h when no include window is set'
+  }, [uptimeWindow])
+
   const doughnutOpts = useMemo(() => ({
     responsive: true,
     maintainAspectRatio: false,
@@ -1519,7 +1552,7 @@ function CustomPropertiesTab({
   const exportCsv = () => {
     const rows = Array.isArray(results) ? results : []
     if (!rows.length) return
-    const header = ['Name', 'IP', 'Status', 'Uptime %', 'Bandwidth %', 'Link', 'Org', 'Dept', 'If1', 'Carrier', 'If2']
+    const header = ['Name', 'IP', 'Node status', 'Link uptime %', 'Bandwidth %', 'Link', 'Org', 'Dept', 'Link1', 'Link1 health', 'Link1 avail %', 'Carrier', 'Link2', 'Link2 health', 'Link2 avail %']
     const cell = (v) => {
       if (v == null) return ''
       const s = String(v).replace(/"/g, '""')
@@ -1527,10 +1560,14 @@ function CustomPropertiesTab({
     }
     const body = rows.map((n) => [
       n.name, n.ip || '', n.status || '',
-      Number.isFinite(n.uptimePct) ? n.uptimePct.toFixed(1) : '',
+      n.uptimeSampled && Number.isFinite(n.uptimePct) ? n.uptimePct.toFixed(1) : '',
       Number.isFinite(n.bandwidthPct) ? n.bandwidthPct.toFixed(1) : '',
       n.nodeCp?.DUAL_LINKS || '', n.nodeCp?.ORGANIZATION || '', n.nodeCp?.Department || '',
-      n.interface1?.name || '', n.interface1?.cp?.CarrierName || '', n.interface2?.name || '',
+      n.interface1?.name || '', n.interface1?.status || '',
+      n.interface1?.availabilitySampled && Number.isFinite(n.interface1?.availabilityPct) ? n.interface1.availabilityPct.toFixed(1) : '',
+      n.interface1?.cp?.CarrierName || '',
+      n.interface2?.name || '', n.interface2?.status || '',
+      n.interface2?.availabilitySampled && Number.isFinite(n.interface2?.availabilityPct) ? n.interface2.availabilityPct.toFixed(1) : '',
     ].map(cell).join(','))
     const csv = [header.join(','), ...body].join('\n')
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
@@ -1700,9 +1737,9 @@ function CustomPropertiesTab({
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 10 }}>
                   <KpiCard
-                    label="Avg uptime"
+                    label="Avg link uptime"
                     value={summary.avgUptime != null ? fmtPct(summary.avgUptime) : '—'}
-                    sub={summary.uptimeSampled ? 'sampled from Orion.ResponseTime' : 'derived from current status'}
+                    sub={summary.uptimeSampled ? 'mean NPM interface availability' : 'no availability samples in window'}
                   />
                   <KpiCard
                     label="Avg bandwidth"
@@ -1725,10 +1762,10 @@ function CustomPropertiesTab({
               ) : (
                 <table className="sw-table">
                   <thead><tr>
-                    <th>Status</th><th>Name</th><th>IP</th>
-                    <th>Uptime</th><th>Bandwidth</th>
+                    <th>Node</th><th>Name</th><th>IP</th>
+                    <th>Link uptime</th><th>Bandwidth</th>
                     <th>Link</th><th>Org</th><th>Dept</th>
-                    <th>If1</th><th>Carrier</th><th>If2</th>
+                    <th>Link 1</th><th>Carrier</th><th>Link 2</th>
                   </tr></thead>
                   <tbody>
                     {results.map((n) => (
@@ -1738,9 +1775,8 @@ function CustomPropertiesTab({
                         <td><Pill label={n.status} /></td>
                         <td style={{ fontWeight: 600, color: 'var(--accent)' }}>{n.name}</td>
                         <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{n.ip || '—'}</td>
-                        <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: Number.isFinite(n.uptimePct) && n.uptimePct < 95 ? 'var(--amber)' : undefined }} title={n.uptimeSampled ? 'Average availability over selected window' : 'Derived from current node status (no time window)'}>
-                          {fmtPct(n.uptimePct)}
-                          {n.uptimeSampled && <span style={{ fontSize: 9, marginLeft: 4, color: 'var(--text3)' }}>•</span>}
+                        <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: Number.isFinite(n.uptimePct) && n.uptimePct < 95 ? 'var(--amber)' : undefined }} title={n.uptimeSampled ? uptimeHint : 'No Orion.InterfaceAvailability samples for these links in the window'}>
+                          {n.uptimeSampled ? fmtPct(n.uptimePct) : '—'}
                         </td>
                         <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: Number.isFinite(n.bandwidthPct) && n.bandwidthPct > 50 ? 'var(--amber)' : undefined }} title={Number.isFinite(n.bandwidthPeakPct) ? `Peak ${n.bandwidthPeakPct.toFixed(1)}%` : undefined}>
                           {fmtPct(n.bandwidthPct)}
@@ -1748,9 +1784,9 @@ function CustomPropertiesTab({
                         <td style={{ fontSize: 11 }}>{n.nodeCp?.DUAL_LINKS ?? '—'}</td>
                         <td style={{ fontSize: 11 }}>{n.nodeCp?.ORGANIZATION ?? '—'}</td>
                         <td style={{ fontSize: 11 }}>{n.nodeCp?.Department ?? '—'}</td>
-                        <td style={{ fontSize: 11 }}>{n.interface1?.name || '—'}</td>
+                        <td><LinkCell iface={n.interface1} /></td>
                         <td style={{ fontSize: 11, color: 'var(--text3)' }}>{n.interface1?.cp?.CarrierName ?? '—'}</td>
-                        <td style={{ fontSize: 11 }}>{n.interface2?.name || '—'}</td>
+                        <td><LinkCell iface={n.interface2} /></td>
                       </tr>
                     ))}
                   </tbody>
@@ -1989,6 +2025,7 @@ export default function SolarWindsPage() {
   const [cpPresets, setCpPresets] = useState(null)
   const [cpPresetsLoaded, setCpPresetsLoaded] = useState(false)
   const [cpResults, setCpResults] = useState(null)
+  const [cpUptimeWindow, setCpUptimeWindow] = useState(null)
   const [cpFilters, setCpFilters] = useState({
     link: 'all', carrier: 'all',
     uptime: 'all', bandwidth: 'all',
@@ -2090,9 +2127,11 @@ export default function SolarWindsPage() {
       const { data } = await api.get('/api/solarwinds/custom-properties/nodes', { params })
       applyReachability(data)
       setCpResults(data.nodes || [])
+      setCpUptimeWindow(data.uptimeWindow || null)
     } catch (e) {
       setError(e.response?.data?.error || e.message || 'Custom property search failed')
       setCpResults([])
+      setCpUptimeWindow(null)
     } finally {
       setTabBusy(false)
     }
@@ -2424,6 +2463,7 @@ export default function SolarWindsPage() {
               onFiltersChange={setCpFilters}
               onSearch={() => searchCustomProperties()}
               onNodeClick={goToSnapshot}
+              uptimeWindow={cpUptimeWindow}
             />
           )}
           {tab === 'snapshot' && (

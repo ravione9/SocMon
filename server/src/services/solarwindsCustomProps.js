@@ -217,32 +217,6 @@ async function nodeIdsInEventWindow(fromIso, toIso, bh = null) {
   return set
 }
 
-/** Average node availability (%) from Orion.ResponseTime over the window. */
-async function nodeAvailabilityMap(nodeIds, fromIso, toIso) {
-  const map = new Map()
-  if (!nodeIds?.length || !fromIso || !toIso) return map
-  const from = toOrionDT(fromIso)
-  const to = toOrionDT(toIso)
-  if (!from || !to) return map
-  const CHUNK = 100
-  for (let i = 0; i < nodeIds.length; i += CHUNK) {
-    const ids = nodeIds.slice(i, i + CHUNK).join(',')
-    try {
-      const data = await orionSwisQuery(
-        `SELECT NodeID, AVG(Availability) AS Avail
-         FROM Orion.ResponseTime
-         WHERE NodeID IN (${ids}) AND DateTime >= '${from}' AND DateTime <= '${to}'
-         GROUP BY NodeID`,
-      )
-      for (const r of data?.results || []) {
-        const v = Number(r.Avail)
-        if (Number.isFinite(v)) map.set(Number(r.NodeID), Math.max(0, Math.min(100, v)))
-      }
-    } catch { /* table absent on some Orion installs */ }
-  }
-  return map
-}
-
 /**
  * Query nodes filtered by node CPs and/or interface CPs, plus optional time windows.
  *
@@ -266,7 +240,7 @@ export async function getCustomPropertyPresets() {
       link: { field: 'DUAL_LINKS', label: 'Link', values: linkVals },
       carrier: { field: 'CarrierName', label: 'Carrier', entity: 'iface', values: carrierVals },
       uptime: {
-        label: 'Uptime / Status',
+        label: 'Node status (ICMP)',
         values: [
           { id: 'up', label: 'Up' },
           { id: 'down', label: 'Down' },
@@ -286,6 +260,112 @@ export async function getCustomPropertyPresets() {
 }
 
 const STATUS_CODE = { up: 1, down: 2, warning: 3 }
+
+/** When no include-time range is set, sample link availability over this window. */
+const DEFAULT_UPTIME_LOOKBACK_MS = 24 * 3600 * 1000
+
+const IFACE_STATUS_LABEL = {
+  0: 'Unknown', 1: 'Up', 2: 'Down', 3: 'Warning',
+  9: 'Unmanaged', 11: 'Unknown', 12: 'Unknown', 14: 'Unknown',
+}
+const IFACE_STATUS_COLOR = {
+  1: 'up', 2: 'down', 3: 'warning', 0: 'unknown',
+  9: 'unmanaged', 11: 'unknown', 12: 'unknown', 14: 'unknown',
+}
+
+function ifaceStatusLabel(code) {
+  return IFACE_STATUS_LABEL[Number(code)] || `Status ${code}`
+}
+function ifaceStatusColor(code) {
+  return IFACE_STATUS_COLOR[Number(code)] || 'unknown'
+}
+
+function resolveAvailabilityWindow(opts) {
+  if (opts.from && opts.to) {
+    return { from: opts.from, to: opts.to, defaulted: false }
+  }
+  const to = new Date()
+  const from = new Date(to.getTime() - DEFAULT_UPTIME_LOOKBACK_MS)
+  return { from: from.toISOString(), to: to.toISOString(), defaulted: true }
+}
+
+/** Average availability % per interface from Orion.NPM.InterfaceAvailability. */
+async function interfaceAvailabilityMap(ifaceIds, fromIso, toIso, bh = null) {
+  const map = new Map()
+  const ids = [...new Set((ifaceIds || []).map(Number).filter((id) => Number.isFinite(id) && id > 0))]
+  if (!ids.length) return map
+
+  const from = toOrionDT(fromIso)
+  const to = toOrionDT(toIso)
+  if (!from || !to) return map
+
+  const CHUNK = 80
+
+  if (!bh?.enabled) {
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const chunk = ids.slice(i, i + CHUNK).join(',')
+      try {
+        const data = await orionSwisQuery(
+          `SELECT InterfaceID, AVG(Availability) AS Avail
+           FROM Orion.NPM.InterfaceAvailability
+           WHERE InterfaceID IN (${chunk}) AND DateTime >= '${from}' AND DateTime <= '${to}'
+           GROUP BY InterfaceID`,
+        )
+        for (const r of data?.results || []) {
+          const v = Number(r.Avail)
+          if (Number.isFinite(v)) map.set(Number(r.InterfaceID), Math.max(0, Math.min(100, v)))
+        }
+      } catch { /* NPM availability history not licensed or table empty */ }
+    }
+    return map
+  }
+
+  const acc = new Map()
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK).join(',')
+    try {
+      const data = await orionSwisQuery(
+        `SELECT InterfaceID, DateTime, Availability
+         FROM Orion.NPM.InterfaceAvailability
+         WHERE InterfaceID IN (${chunk}) AND DateTime >= '${from}' AND DateTime <= '${to}'`,
+      )
+      for (const r of data?.results || []) {
+        const t = new Date(r.DateTime)
+        if (Number.isNaN(t.getTime()) || !inBusinessHours(t, bh)) continue
+        const id = Number(r.InterfaceID)
+        const v = Number(r.Availability)
+        if (!Number.isFinite(id) || !Number.isFinite(v)) continue
+        if (!acc.has(id)) acc.set(id, { sum: 0, n: 0 })
+        const a = acc.get(id)
+        a.sum += v
+        a.n++
+      }
+    } catch { /* ignore */ }
+  }
+  for (const [id, a] of acc) {
+    if (a.n) map.set(id, Math.max(0, Math.min(100, a.sum / a.n)))
+  }
+  return map
+}
+
+function enrichIfaceAvailability(ifaces, ifaceAvailMap) {
+  return (ifaces || []).map((iface) => {
+    const avail = ifaceAvailMap.get(iface.id)
+    return {
+      ...iface,
+      availabilityPct: avail != null ? avail : null,
+      availabilitySampled: avail != null,
+    }
+  })
+}
+
+/** Node uptime = average link availability across displayed interfaces (not node Status). */
+function computeLinkUptimePct(ifaces) {
+  const vals = (ifaces || []).map((i) => i.availabilityPct).filter((v) => Number.isFinite(v))
+  if (!vals.length) return { uptimePct: null, uptimeSampled: false }
+  const sum = vals.reduce((a, b) => a + b, 0)
+  return { uptimePct: Math.round((sum / vals.length) * 10) / 10, uptimeSampled: true }
+}
 
 export async function queryByCustomProperties(opts = {}) {
   const nodeFields = await discoverNodeCPFields()
@@ -369,13 +449,24 @@ export async function queryByCustomProperties(opts = {}) {
     })
   }
 
+  const uptimeWindow = resolveAvailabilityWindow(opts)
+
   // Fetch top-2 interfaces (with CPs) + aggregate stats in a single bulk pass.
   const nodeIds = rows.map((r) => Number(r.NodeID))
-  const [{ ifaceMap, statsMap }, availMap] = await Promise.all([
-    fetchInterfacesBulk(nodeIds, ifaceFields),
-    opts.from && opts.to ? nodeAvailabilityMap(nodeIds, opts.from, opts.to) : Promise.resolve(new Map()),
-  ])
+  const { ifaceMap, statsMap } = await fetchInterfacesBulk(nodeIds, ifaceFields)
   const ifaceStats = statsMap
+
+  const ifaceIdsForAvail = []
+  for (const nid of nodeIds) {
+    const list = ifaceMap.get(nid) || []
+    for (const iface of list.slice(0, 8)) ifaceIdsForAvail.push(iface.id)
+  }
+  const ifaceAvailMap = await interfaceAvailabilityMap(
+    ifaceIdsForAvail,
+    uptimeWindow.from,
+    uptimeWindow.to,
+    bh,
+  )
 
   const nodes = rows.map((r) => {
     const nodeCp = {}
@@ -384,16 +475,11 @@ export async function queryByCustomProperties(opts = {}) {
     if (carrierFilterVal && !nodeHasMatchingCarrier(rawIfaces, carrierFilterVal, matchMode)) {
       return null
     }
-    const ifaces = orderIfacesForCarrierFilter(rawIfaces, carrierFilterVal, matchMode)
+    const ordered = orderIfacesForCarrierFilter(rawIfaces, carrierFilterVal, matchMode)
+    const ifaces = enrichIfaceAvailability(ordered, ifaceAvailMap)
     const stats = ifaceStats.get(Number(r.NodeID)) || null
     const statusCode = Number(r.Status)
-    const sampledAvail = availMap.get(Number(r.NodeID))
-    const fallbackUptime =
-      statusCode === 1 ? 100 :
-      statusCode === 2 ? 0 :
-      statusCode === 3 ? 50 :
-      null
-    const uptimePct = sampledAvail != null ? sampledAvail : fallbackUptime
+    const { uptimePct, uptimeSampled } = computeLinkUptimePct(ifaces)
     return {
       id: r.NodeID,
       name: r.Caption,
@@ -407,7 +493,7 @@ export async function queryByCustomProperties(opts = {}) {
       vendor: r.Vendor || null,
       machineType: r.MachineType || null,
       uptimePct,
-      uptimeSampled: sampledAvail != null,
+      uptimeSampled,
       bandwidthPct: stats?.avgUtil ?? null,
       bandwidthPeakPct: stats?.peakUtil ?? null,
       nodeCp,
@@ -420,6 +506,7 @@ export async function queryByCustomProperties(opts = {}) {
     nodeFields,
     ifaceFields,
     timeWindow: opts.from && opts.to ? { from: opts.from, to: opts.to } : null,
+    uptimeWindow,
     businessHours: bh ? { enabled: true, startMin: bh.startMin, endMin: bh.endMin, days: [...bh.days].sort() } : null,
     nodes,
   }
@@ -447,14 +534,19 @@ async function fetchInterfacesBulk(nodeIds, ifaceFields) {
     const list = ifaceMap.get(nid)
     const ifaceCp = {}
     for (const f of ifaceFields) ifaceCp[f] = row[f] ?? null
+    const statusCode = Number(row.Status)
     list.push({
       id: row.InterfaceID,
       name: row.Caption,
-      statusCode: Number(row.Status),
+      statusCode,
+      status: ifaceStatusLabel(statusCode),
+      statusColor: ifaceStatusColor(statusCode),
       inBps: row.InBps != null ? Number(row.InBps) : null,
       outBps: row.OutBps != null ? Number(row.OutBps) : null,
       utilization: row.PercentUtil != null ? Number(row.PercentUtil) : null,
       cp: ifaceCp,
+      availabilityPct: null,
+      availabilitySampled: false,
     })
     const util = row.PercentUtil != null ? Number(row.PercentUtil) : null
     if (Number.isFinite(util) && util >= 0) {

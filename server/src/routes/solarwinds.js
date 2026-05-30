@@ -421,6 +421,7 @@ router.get('/custom-properties/nodes', async (req, res) => {
       nodeFields: result.nodeFields,
       ifaceFields: result.ifaceFields,
       timeWindow: result.timeWindow,
+      uptimeWindow: result.uptimeWindow,
       businessHours: result.businessHours,
       nodes,
       total: nodes.length,
