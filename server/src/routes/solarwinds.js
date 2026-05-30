@@ -340,7 +340,8 @@ router.get('/alerts/detail', async (req, res) => {
 router.get('/custom-properties/presets', async (req, res) => {
   if (!isOrionConfigured()) return res.status(503).json({ error: 'Set ORION_USERNAME and ORION_PASSWORD in server .env', configured: false })
   try {
-    const data = await withOrionTimeout(getCustomPropertyPresets(), 'CP presets')
+    const force = req.query.refresh === '1'
+    const data = await withOrionTimeout(getCustomPropertyPresets(force), 'CP presets')
     res.json({ reachable: true, configured: true, ...data })
   } catch (e) {
     swisErr(res, e, { presets: {}, nodeFields: [], ifaceFields: [] })

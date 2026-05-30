@@ -1432,10 +1432,7 @@ function LinkCell({ iface }) {
   if (!iface) return <span style={{ color: 'var(--text3)' }}>—</span>
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-        <span style={{ fontWeight: 600 }}>{iface.name}</span>
-        {iface.status && <Pill label={iface.status} />}
-      </div>
+      <div style={{ fontWeight: 600 }}>{iface.name}</div>
       {Number.isFinite(iface.availabilityPct) && (
         <div style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)', marginTop: 2 }}>
           {fmtPct(iface.availabilityPct)} avail
@@ -1469,7 +1466,7 @@ function CustomPropertiesTab({
     let bwSum = 0, bwCount = 0
     const bwBins = { low: 0, medium: 0, high: 0, none: 0 }
     for (const n of rows) {
-      const c = Number(n.statusCode)
+      const c = Number(n.linkStatusCode ?? n.link?.statusCode ?? n.statusCode)
       if (c === 1) status.up++
       else if (c === 3) status.warning++
       else if (c === 2) status.down++
@@ -1552,23 +1549,24 @@ function CustomPropertiesTab({
   const exportCsv = () => {
     const rows = Array.isArray(results) ? results : []
     if (!rows.length) return
-    const header = ['Name', 'IP', 'Node status', 'Link uptime %', 'Bandwidth %', 'Link', 'Org', 'Dept', 'Link1', 'Link1 health', 'Link1 avail %', 'Carrier', 'Link2', 'Link2 health', 'Link2 avail %']
+    const header = ['Name', 'IP', 'Link status', 'Link uptime %', 'Bandwidth %', 'Dual links', 'Org', 'Dept', 'Interface', 'Interface health', 'Avail %', 'Carrier']
     const cell = (v) => {
       if (v == null) return ''
       const s = String(v).replace(/"/g, '""')
       return /[",\n]/.test(s) ? `"${s}"` : s
     }
-    const body = rows.map((n) => [
-      n.name, n.ip || '', n.status || '',
-      n.uptimeSampled && Number.isFinite(n.uptimePct) ? n.uptimePct.toFixed(1) : '',
-      Number.isFinite(n.bandwidthPct) ? n.bandwidthPct.toFixed(1) : '',
-      n.nodeCp?.DUAL_LINKS || '', n.nodeCp?.ORGANIZATION || '', n.nodeCp?.Department || '',
-      n.interface1?.name || '', n.interface1?.status || '',
-      n.interface1?.availabilitySampled && Number.isFinite(n.interface1?.availabilityPct) ? n.interface1.availabilityPct.toFixed(1) : '',
-      n.interface1?.cp?.CarrierName || '',
-      n.interface2?.name || '', n.interface2?.status || '',
-      n.interface2?.availabilitySampled && Number.isFinite(n.interface2?.availabilityPct) ? n.interface2.availabilityPct.toFixed(1) : '',
-    ].map(cell).join(','))
+    const body = rows.map((n) => {
+      const link = n.link || n.interface1
+      return [
+        n.name, n.ip || '', n.linkStatus || link?.status || n.status || '',
+        n.uptimeSampled && Number.isFinite(n.uptimePct) ? n.uptimePct.toFixed(1) : '',
+        Number.isFinite(n.bandwidthPct) ? n.bandwidthPct.toFixed(1) : '',
+        n.nodeCp?.DUAL_LINKS || '', n.nodeCp?.ORGANIZATION || '', n.nodeCp?.Department || '',
+        link?.name || '', link?.status || '',
+        link?.availabilitySampled && Number.isFinite(link?.availabilityPct) ? link.availabilityPct.toFixed(1) : '',
+        link?.cp?.CarrierName || '',
+      ].map(cell).join(',')
+    })
     const csv = [header.join(','), ...body].join('\n')
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
@@ -1724,7 +1722,7 @@ function CustomPropertiesTab({
             <Widget title="Summary">
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, alignItems: 'stretch' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                  <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 6 }}>STATUS DISTRIBUTION</div>
+                  <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 6 }}>LINK STATUS DISTRIBUTION</div>
                   <div style={{ width: '100%', height: 180 }}>
                     <Doughnut data={statusDoughnut} options={doughnutOpts} />
                   </div>
@@ -1762,33 +1760,35 @@ function CustomPropertiesTab({
               ) : (
                 <table className="sw-table">
                   <thead><tr>
-                    <th>Node</th><th>Name</th><th>IP</th>
+                    <th>Link</th><th>Store</th><th>IP</th>
                     <th>Link uptime</th><th>Bandwidth</th>
-                    <th>Link</th><th>Org</th><th>Dept</th>
-                    <th>Link 1</th><th>Carrier</th><th>Link 2</th>
+                    <th>Dual</th><th>Org</th><th>Dept</th>
+                    <th>Interface</th><th>Carrier</th>
                   </tr></thead>
                   <tbody>
-                    {results.map((n) => (
-                      <tr key={n.id} className={onNodeClick ? 'sw-row-click' : undefined}
+                    {results.map((n) => {
+                      const link = n.link || n.interface1
+                      const linkLabel = n.linkStatus || link?.status
+                      return (
+                      <tr key={n.rowKey || `${n.id}-${link?.id || ''}`} className={onNodeClick ? 'sw-row-click' : undefined}
                         onClick={onNodeClick ? () => onNodeClick(n) : undefined}
                         title={onNodeClick ? 'Open device snapshot' : undefined}>
-                        <td><Pill label={n.status} /></td>
+                        <td><Pill label={linkLabel || n.status} /></td>
                         <td style={{ fontWeight: 600, color: 'var(--accent)' }}>{n.name}</td>
                         <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{n.ip || '—'}</td>
-                        <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: Number.isFinite(n.uptimePct) && n.uptimePct < 95 ? 'var(--amber)' : undefined }} title={n.uptimeSampled ? uptimeHint : 'No Orion.InterfaceAvailability samples for these links in the window'}>
+                        <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: Number.isFinite(n.uptimePct) && n.uptimePct < 95 ? 'var(--amber)' : undefined }} title={n.uptimeSampled ? uptimeHint : 'No Orion.InterfaceAvailability samples for this link in the window'}>
                           {n.uptimeSampled ? fmtPct(n.uptimePct) : '—'}
                         </td>
-                        <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: Number.isFinite(n.bandwidthPct) && n.bandwidthPct > 50 ? 'var(--amber)' : undefined }} title={Number.isFinite(n.bandwidthPeakPct) ? `Peak ${n.bandwidthPeakPct.toFixed(1)}%` : undefined}>
+                        <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: Number.isFinite(n.bandwidthPct) && n.bandwidthPct > 50 ? 'var(--amber)' : undefined }} title={Number.isFinite(link?.utilization) ? `Current util ${link.utilization.toFixed(1)}%` : undefined}>
                           {fmtPct(n.bandwidthPct)}
                         </td>
                         <td style={{ fontSize: 11 }}>{n.nodeCp?.DUAL_LINKS ?? '—'}</td>
                         <td style={{ fontSize: 11 }}>{n.nodeCp?.ORGANIZATION ?? '—'}</td>
                         <td style={{ fontSize: 11 }}>{n.nodeCp?.Department ?? '—'}</td>
-                        <td><LinkCell iface={n.interface1} /></td>
-                        <td style={{ fontSize: 11, color: 'var(--text3)' }}>{n.interface1?.cp?.CarrierName ?? '—'}</td>
-                        <td><LinkCell iface={n.interface2} /></td>
+                        <td><LinkCell iface={link} /></td>
+                        <td style={{ fontSize: 11, color: 'var(--text3)' }}>{link?.cp?.CarrierName ?? '—'}</td>
                       </tr>
-                    ))}
+                    )})}
                   </tbody>
                 </table>
               )}
@@ -2027,7 +2027,8 @@ export default function SolarWindsPage() {
   const [cpResults, setCpResults] = useState(null)
   const [cpUptimeWindow, setCpUptimeWindow] = useState(null)
   const [cpFilters, setCpFilters] = useState({
-    link: 'all', carrier: 'all',
+    link: 'all',
+    carrier: 'all',
     uptime: 'all', bandwidth: 'all',
     fromLocal: '', toLocal: '', excludeEnabled: false,
     excludeFromLocal: '', excludeToLocal: '',

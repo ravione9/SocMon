@@ -24,7 +24,26 @@ let cachedNodeFields = null
 let cachedIfaceFields = null
 let cachedNodeAt = 0
 let cachedIfaceAt = 0
+/** @type {Map<string, string>} Orion Metadata.Property Description per column */
+let cachedNodeFieldLabels = new Map()
+let cachedIfaceFieldLabels = new Map()
 const CACHE_MS = 60 * 60 * 1000
+
+function humanizeFieldName(field) {
+  return String(field || '')
+    .split('_')
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ')
+    .trim()
+}
+
+function cpFieldLabel(field, entity = 'node') {
+  const meta = entity === 'iface' ? cachedIfaceFieldLabels : cachedNodeFieldLabels
+  const desc = meta.get(field)
+  if (desc != null && String(desc).trim()) return String(desc).trim()
+  return humanizeFieldName(field)
+}
 
 function isValidCol(name) {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)
@@ -46,19 +65,31 @@ async function probeFields(entity, candidates) {
     ? 'Orion.NodesCustomProperties'
     : 'Orion.NPM.InterfacesCustomProperties'
 
+  const idCol = entity === 'Nodes' ? 'NodeID' : 'InterfaceID'
+  const labelMap = entity === 'Nodes' ? cachedNodeFieldLabels : cachedIfaceFieldLabels
+
   try {
     const data = await orionSwisQuery(
-      `SELECT Name FROM Metadata.Property WHERE EntityName = '${tableName}'`,
+      `SELECT Name, Description FROM Metadata.Property WHERE EntityName = '${tableName}'`,
     )
-    const known = new Set((data?.results || []).map((r) => String(r.Name || '')))
-    if (known.size) {
-      const validCandidates = candidates.filter(isValidCol)
-      const fromMeta = validCandidates.filter((c) => known.has(c))
-      if (fromMeta.length) return fromMeta
+    const rows = data?.results || []
+    if (rows.length) {
+      labelMap.clear()
+      const known = new Set()
+      for (const r of rows) {
+        const name = String(r.Name || '').trim()
+        if (!name || name === idCol || !isValidCol(name)) continue
+        known.add(name)
+        const desc = r.Description != null ? String(r.Description).trim() : ''
+        if (desc) labelMap.set(name, desc)
+      }
+      if (known.size) {
+        const fromMeta = candidates.filter(isValidCol).filter((c) => known.has(c))
+        if (fromMeta.length) return fromMeta
+      }
     }
   } catch { /* metadata table not exposed — fall through to probing */ }
 
-  const idCol = entity === 'Nodes' ? 'NodeID' : 'InterfaceID'
   const valid = candidates.filter(isValidCol)
   const settled = await Promise.allSettled(
     valid.map((col) =>
@@ -145,12 +176,24 @@ function nodeHasMatchingCarrier(ifaces, value, mode = 'equals') {
   return ifaces.some((iface) => ifaceMatchesCarrier(iface, value, mode))
 }
 
-/** Put carrier-matching interfaces first so the results table Carrier column matches the filter. */
-function orderIfacesForCarrierFilter(ifaces, carrierFilterVal, matchMode = 'equals') {
-  if (!carrierFilterVal || !ifaces?.length) return ifaces
-  const matching = ifaces.filter((i) => ifaceMatchesCarrier(i, carrierFilterVal, matchMode))
-  const rest = ifaces.filter((i) => !ifaceMatchesCarrier(i, carrierFilterVal, matchMode))
-  return [...matching, ...rest].slice(0, 2)
+/** Store WAN links: interfaces with CarrierName, or common BB/wan captions. */
+function isStoreWanInterface(iface) {
+  if (ifaceCarrierValue(iface)) return true
+  const name = String(iface?.name || '').trim().toLowerCase()
+  return /^(bb\d+|wan\d*)$/.test(name) || name === 'wan'
+}
+
+/**
+ * One table row per link. Carrier filter → only matching links; otherwise each tagged WAN link.
+ */
+function interfacesForLinkRows(ifaces, carrierFilterVal, matchMode = 'equals') {
+  if (!ifaces?.length) return []
+  if (carrierFilterVal) {
+    return ifaces.filter((i) => ifaceMatchesCarrier(i, carrierFilterVal, matchMode))
+  }
+  const tagged = ifaces.filter(isStoreWanInterface)
+  if (tagged.length) return tagged
+  return ifaces.slice(0, 2)
 }
 
 function toOrionDT(iso) {
@@ -226,10 +269,10 @@ async function nodeIdsInEventWindow(fromIso, toIso, bh = null) {
  *  match ('equals'|'contains'), from, to, excludeFrom, excludeTo
  */
 /** Preset radio dimensions → field names and distinct values (one round-trip for the UI). */
-export async function getCustomPropertyPresets() {
+export async function getCustomPropertyPresets(force = false) {
   const [nodeFields, ifaceFields, linkVals, carrierVals] = await Promise.all([
-    discoverNodeCPFields(),
-    discoverIfaceCPFields(),
+    discoverNodeCPFields(force),
+    discoverIfaceCPFields(force),
     getNodeCPValues('DUAL_LINKS').catch(() => []),
     getIfaceCPValues('CarrierName').catch(() => []),
   ])
@@ -237,8 +280,17 @@ export async function getCustomPropertyPresets() {
     nodeFields,
     ifaceFields,
     presets: {
-      link: { field: 'DUAL_LINKS', label: 'Link', values: linkVals },
-      carrier: { field: 'CarrierName', label: 'Carrier', entity: 'iface', values: carrierVals },
+      link: {
+        field: 'DUAL_LINKS',
+        label: cpFieldLabel('DUAL_LINKS', 'node'),
+        values: linkVals,
+      },
+      carrier: {
+        field: 'CarrierName',
+        label: cpFieldLabel('CarrierName', 'iface'),
+        entity: 'iface',
+        values: carrierVals,
+      },
       uptime: {
         label: 'Node status (ICMP)',
         values: [
@@ -359,12 +411,37 @@ function enrichIfaceAvailability(ifaces, ifaceAvailMap) {
   })
 }
 
-/** Node uptime = average link availability across displayed interfaces (not node Status). */
-function computeLinkUptimePct(ifaces) {
-  const vals = (ifaces || []).map((i) => i.availabilityPct).filter((v) => Number.isFinite(v))
-  if (!vals.length) return { uptimePct: null, uptimeSampled: false }
-  const sum = vals.reduce((a, b) => a + b, 0)
-  return { uptimePct: Math.round((sum / vals.length) * 10) / 10, uptimeSampled: true }
+/** Flatten nodes into one result row per WAN link. */
+function expandNodesToLinkRows(nodeRows, ifaceMap, ifaceAvailMap, carrierFilterVal, matchMode) {
+  const out = []
+  for (const base of nodeRows) {
+    const rawIfaces = ifaceMap.get(base.nodeId) || []
+    if (carrierFilterVal && !nodeHasMatchingCarrier(rawIfaces, carrierFilterVal, matchMode)) continue
+    const ifaces = enrichIfaceAvailability(
+      interfacesForLinkRows(rawIfaces, carrierFilterVal, matchMode),
+      ifaceAvailMap,
+    )
+    for (const iface of ifaces) {
+      const uptimePct = iface.availabilitySampled && Number.isFinite(iface.availabilityPct)
+        ? Math.round(iface.availabilityPct * 10) / 10
+        : null
+      out.push({
+        ...base,
+        rowKey: `${base.nodeId}-${iface.id}`,
+        link: iface,
+        uptimePct,
+        uptimeSampled: iface.availabilitySampled,
+        bandwidthPct: Number.isFinite(iface.utilization) ? iface.utilization : null,
+        bandwidthPeakPct: Number.isFinite(iface.utilization) ? iface.utilization : null,
+        linkStatus: iface.status,
+        linkStatusCode: iface.statusCode,
+        linkStatusColor: iface.statusColor,
+        interface1: iface,
+        interface2: null,
+      })
+    }
+  }
+  return out
 }
 
 export async function queryByCustomProperties(opts = {}) {
@@ -459,7 +536,9 @@ export async function queryByCustomProperties(opts = {}) {
   const ifaceIdsForAvail = []
   for (const nid of nodeIds) {
     const list = ifaceMap.get(nid) || []
-    for (const iface of list.slice(0, 8)) ifaceIdsForAvail.push(iface.id)
+    for (const iface of interfacesForLinkRows(list, carrierFilterVal, matchMode)) {
+      ifaceIdsForAvail.push(iface.id)
+    }
   }
   const ifaceAvailMap = await interfaceAvailabilityMap(
     ifaceIdsForAvail,
@@ -468,23 +547,18 @@ export async function queryByCustomProperties(opts = {}) {
     bh,
   )
 
-  const nodes = rows.map((r) => {
+  const nodeRows = rows.map((r) => {
     const nodeCp = {}
     for (const f of nodeFields) nodeCp[f] = r[f] ?? null
-    const rawIfaces = ifaceMap.get(Number(r.NodeID)) || []
-    if (carrierFilterVal && !nodeHasMatchingCarrier(rawIfaces, carrierFilterVal, matchMode)) {
-      return null
-    }
-    const ordered = orderIfacesForCarrierFilter(rawIfaces, carrierFilterVal, matchMode)
-    const ifaces = enrichIfaceAvailability(ordered, ifaceAvailMap)
     const stats = ifaceStats.get(Number(r.NodeID)) || null
     const statusCode = Number(r.Status)
-    const { uptimePct, uptimeSampled } = computeLinkUptimePct(ifaces)
     return {
+      nodeId: r.NodeID,
       id: r.NodeID,
       name: r.Caption,
       ip: r.IPAddress,
       statusCode,
+      status: null,
       statusDescription: r.StatusDescription || null,
       responseTime: r.ResponseTime != null ? Number(r.ResponseTime) : null,
       packetLoss: r.PercentLoss != null ? Number(r.PercentLoss) : null,
@@ -492,15 +566,15 @@ export async function queryByCustomProperties(opts = {}) {
       memory: r.PercentMemoryUsed != null ? Number(r.PercentMemoryUsed) : null,
       vendor: r.Vendor || null,
       machineType: r.MachineType || null,
-      uptimePct,
-      uptimeSampled,
+      uptimePct: null,
+      uptimeSampled: false,
       bandwidthPct: stats?.avgUtil ?? null,
       bandwidthPeakPct: stats?.peakUtil ?? null,
       nodeCp,
-      interface1: ifaces[0] || null,
-      interface2: ifaces[1] || null,
     }
-  }).filter(Boolean)
+  })
+
+  const nodes = expandNodesToLinkRows(nodeRows, ifaceMap, ifaceAvailMap, carrierFilterVal, matchMode)
 
   return {
     nodeFields,
