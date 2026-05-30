@@ -7,6 +7,10 @@ const api = axios.create({ baseURL: apiBase, timeout: 30000 })
 api.interceptors.request.use(config => {
   const token = useAuthStore.getState().token
   if (token) config.headers.Authorization = `Bearer ${token}`
+  const reqUrl = String(config.url || '')
+  if (reqUrl.includes('/zabbix') || reqUrl.includes('/store-zabbix') || reqUrl.includes('/store-monitor')) {
+    config.timeout = config.timeout ?? 120000
+  }
   return config
 })
 api.interceptors.response.use(res => res, err => {

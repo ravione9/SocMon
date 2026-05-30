@@ -8,6 +8,8 @@ const nav = [
   { pageKey:'noc',      to:'/noc',     label:'NOC',     icon:'🌐' },
   { pageKey:'sentinel', to:'/sentinel', label:'XDR',    icon:'🛡️' },
   { pageKey:'infra',    to:'/infra',   label:'Infra',  icon:'📡' },
+  { pageKey:'storeZabbix', to:'/store-zabbix', label:'Store Zabbix', icon:'🏪' },
+  { pageKey:'storeMonitor', to:'/store-monitor', label:'Store Monitor', icon:'📶' },
   { pageKey:'solarwinds', to:'/solarwinds', label:'Orion', icon:'☀️' },
   { pageKey:'idcs',     to:'/idcs',    label:'IDCS',   icon:'🪪' },
   { pageKey:'ad',       to:'/ad',      label:'AD',     icon:'🏢' },

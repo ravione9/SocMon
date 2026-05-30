@@ -33,6 +33,9 @@ import statsRoutes from './routes/stats.js'
 import sentinelRoutes from './routes/sentinel.js'
 import sentinelOneRoutes from './routes/sentinelOne.js'
 import zabbixRoutes from './routes/zabbix.js'
+import storeZabbixRoutes from './routes/storeZabbix.js'
+import storeMonitorRoutes from './routes/storeMonitor.js'
+import storeAlertsRoutes from './routes/storeAlerts.js'
 import sshSessionRoutes from './routes/sshSessions.js'
 import webMgmtRoutes, { proxyWsUpgrade } from './routes/webMgmt.js'
 import solarwindsRoutes from './routes/solarwinds.js'
@@ -144,6 +147,9 @@ app.use('/api/stats',   statsRoutes)
 app.use('/api/sentinel', sentinelRoutes)
 app.use('/api/sentinel-one', sentinelOneRoutes)
 app.use('/api/zabbix', zabbixRoutes)
+app.use('/api/store-zabbix', storeZabbixRoutes)
+app.use('/api/store-monitor', storeMonitorRoutes)
+app.use('/api/store-alerts', storeAlertsRoutes)
 app.use('/api/ssh-sessions', sshSessionRoutes)
 app.use('/api/rdp',  rdpRoutes)
 app.use('/api/idcs', idcsRoutes)

@@ -14,6 +14,8 @@ const ReportsPage = lazy(() => import('./pages/Reports/ReportsPage.jsx'))
 const AIPage = lazy(() => import('./pages/AI/AIPage.jsx'))
 const SentinelPage = lazy(() => import('./pages/Sentinel/SentinelPage.jsx'))
 const InfraMonitoringPage = lazy(() => import('./pages/Infra/InfraMonitoringPage.jsx'))
+const StoreZabbixPage = lazy(() => import('./pages/StoreZabbix/StoreZabbixPage.jsx'))
+const StoreMonitorPage = lazy(() => import('./pages/StoreMonitor/StoreMonitorPage.jsx'))
 const SolarWindsPage = lazy(() => import('./pages/SolarWinds/SolarWindsPage.jsx'))
 const NoAccessPage = lazy(() => import('./pages/NoAccess/NoAccessPage.jsx'))
 const IdcsPage     = lazy(() => import('./pages/IdcsManagement.jsx'))
@@ -52,6 +54,8 @@ export default function App() {
           <Route path="reports"  element={<PageRoute pageKey="reports"><ReportsPage /></PageRoute>} />
           <Route path="sentinel" element={<PageRoute pageKey="sentinel"><SentinelPage /></PageRoute>} />
           <Route path="infra"    element={<PageRoute pageKey="infra"><InfraMonitoringPage /></PageRoute>} />
+          <Route path="store-zabbix" element={<PageRoute pageKey="storeZabbix"><StoreZabbixPage /></PageRoute>} />
+          <Route path="store-monitor" element={<PageRoute pageKey="storeMonitor"><StoreMonitorPage /></PageRoute>} />
           <Route path="solarwinds" element={<PageRoute pageKey="solarwinds"><SolarWindsPage /></PageRoute>} />
           <Route path="ai"       element={<PageRoute pageKey="ai"><AIPage /></PageRoute>} />
           <Route path="idcs"     element={<PageRoute pageKey="idcs"><IdcsPage /></PageRoute>} />
