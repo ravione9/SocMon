@@ -854,8 +854,19 @@ export default function StoreMonitorPage() {
   }
 
   /* ── alert form helpers ── */
+  const EVAL_RANGES = [
+    { key: '-15m', label: '15 minutes' },
+    { key: '-30m', label: '30 minutes' },
+    { key: '-1h',  label: '1 hour' },
+    { key: '-3h',  label: '3 hours' },
+    { key: '-6h',  label: '6 hours' },
+    { key: '-12h', label: '12 hours' },
+    { key: '-24h', label: '24 hours' },
+  ]
+
   function blankRule() {
-    return { name:'', description:'', enabled:true, group:'all', severity:'high', cooldownMinutes:30,
+    return { name:'', description:'', enabled:true, group:'all', severity:'high',
+      evaluationRange:'-1h', cooldownMinutes:30,
       condition:{ metric:'offline', operator:'gt', threshold:0, target:'' }, channels:[] }
   }
   function openAlertModal(rule) {
@@ -2100,6 +2111,7 @@ export default function StoreMonitorPage() {
                 <div className="sm-tr-body" style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(180px,1fr))',gap:'6px 20px',fontSize:12}}>
                   <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>CONDITION </span><br/>{rule.condition.metric} {BOOLEAN_METRICS.has(rule.condition.metric)?'=true':`${rule.condition.operator||'>'} ${rule.condition.threshold}`}</div>
                   <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>GROUP </span><br/>{rule.group}</div>
+                  <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>EVAL RANGE </span><br/>{rule.evaluationRange||'-1h'}</div>
                   <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>COOLDOWN </span><br/>{rule.cooldownMinutes} min</div>
                   <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>CHANNELS </span><br/>{(rule.channels||[]).map((c)=>c.type).join(', ')||'None'}</div>
                   {rule.lastFiredAt && <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>LAST FIRED </span><br/>{new Date(rule.lastFiredAt).toLocaleString()}</div>}
@@ -2153,6 +2165,23 @@ export default function StoreMonitorPage() {
                   <input className="sm-input" type="number" min={1} max={1440} value={alertForm.cooldownMinutes}
                     onChange={(e)=>setAlertForm((f)=>({...f,cooldownMinutes:+e.target.value}))}/>
                 </div>
+
+              {/* Evaluation range — full width below the 2-col row */}
+              </div>
+              <div className="sm-form-field">
+                <label className="sm-form-label">Evaluation Time Range</label>
+                <div style={{display:'flex',alignItems:'center',gap:8}}>
+                  <select className="sm-select" style={{flex:1}} value={alertForm.evaluationRange||'-1h'}
+                    onChange={(e)=>setAlertForm((f)=>({...f,evaluationRange:e.target.value}))}>
+                    {EVAL_RANGES.map((r)=><option key={r.key} value={r.key}>{r.label}</option>)}
+                  </select>
+                  <span style={{fontSize:11,color:'var(--text3)',flex:2,lineHeight:1.4}}>
+                    Metrics are averaged/last-sampled over this window when checking the condition.
+                    E.g. "1 hour" checks the latest value within the past hour.
+                  </span>
+                </div>
+              </div>
+              <div className="sm-form-row" style={{display:'none'}}>{/* spacer to maintain layout */}
               </div>
 
               {/* condition */}

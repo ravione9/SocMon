@@ -52,10 +52,18 @@ router.post('/evaluate', async (req, res, next) => {
     const rules = await StoreAlertRule.find({ enabled: true }).lean()
     if (!rules.length) return res.json({ fired: 0, results: [] })
 
-    const stores = await fetchStoreSnapshot(10, '-1h')
+    // Group rules by evaluationRange so we only query InfluxDB once per range
+    const VALID_EVAL_RANGES = new Set(['-15m', '-30m', '-1h', '-3h', '-6h', '-12h', '-24h'])
+    const rangeMap = new Map()
+    for (const rule of rules) {
+      const r = VALID_EVAL_RANGES.has(rule.evaluationRange) ? rule.evaluationRange : '-1h'
+      if (!rangeMap.has(r)) rangeMap.set(r, await fetchStoreSnapshot(10, r))
+    }
     const results = []
 
     for (const rule of rules) {
+      const evalRange = VALID_EVAL_RANGES.has(rule.evaluationRange) ? rule.evaluationRange : '-1h'
+      const stores = rangeMap.get(evalRange) || []
       const affected = stores.filter((s) => {
         if (rule.group !== 'all') {
           const grp = deriveGroupServer(s.hostname, s.gatewayVendor, s.isFortinet)

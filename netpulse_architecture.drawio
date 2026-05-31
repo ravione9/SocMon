@@ -1,0 +1,268 @@
+<mxfile host="app.diagrams.net" modified="2026-05-31T00:00:00.000Z" agent="Claude" version="21.0.0" type="device">
+  <diagram id="netpulse-lld" name="Netpulse Low-Level Architecture">
+    <mxGraphModel dx="1800" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- ZONE LABELS -->
+        <!-- ═══════════════════════════════════════════════════ -->
+
+        <!-- Internet / Client Zone -->
+        <mxCell id="z1" value="Internet / Client Zone" style="swimlane;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;fontSize=13;align=center;rounded=1;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="30" y="30" width="280" height="200" as="geometry" />
+        </mxCell>
+
+        <!-- DMZ Zone -->
+        <mxCell id="z2" value="DMZ — nginx Reverse Proxy" style="swimlane;startSize=30;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;fontSize=13;align=center;rounded=1;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="370" y="30" width="280" height="200" as="geometry" />
+        </mxCell>
+
+        <!-- Application Zone -->
+        <mxCell id="z3" value="Application Zone" style="swimlane;startSize=30;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;fontSize=13;align=center;rounded=1;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="710" y="30" width="300" height="500" as="geometry" />
+        </mxCell>
+
+        <!-- Data Zone -->
+        <mxCell id="z4" value="Data Zone" style="swimlane;startSize=30;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;fontSize=13;align=center;rounded=1;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="1070" y="30" width="260" height="500" as="geometry" />
+        </mxCell>
+
+        <!-- External Systems Zone -->
+        <mxCell id="z5" value="External Systems" style="swimlane;startSize=30;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;fontSize=13;align=center;rounded=1;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="30" y="280" width="620" height="440" as="geometry" />
+        </mxCell>
+
+        <!-- AI Zone -->
+        <mxCell id="z6" value="AI Providers" style="swimlane;startSize=30;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1;fontSize=13;align=center;rounded=1;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="1070" y="580" width="260" height="140" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- CLIENT ZONE NODES -->
+        <!-- ═══════════════════════════════════════════════════ -->
+
+        <!-- Web Browser -->
+        <mxCell id="browser" value="&lt;b&gt;Web Browser&lt;/b&gt;&lt;br/&gt;React SPA (Vite build)&lt;br/&gt;Tailwind · Chart.js · xterm.js&lt;br/&gt;Zustand state · Socket.IO client" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="90" width="220" height="110" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- DMZ ZONE NODES -->
+        <!-- ═══════════════════════════════════════════════════ -->
+
+        <!-- nginx -->
+        <mxCell id="nginx" value="&lt;b&gt;nginx 1.27-alpine&lt;/b&gt;&lt;br/&gt;Port 80 / 443 (TLS)&lt;br/&gt;— Static SPA (client/dist)&lt;br/&gt;— /api/* proxy → :5000&lt;br/&gt;— /socket.io proxy → :5000&lt;br/&gt;— /api/web-mgmt WS proxy&lt;br/&gt;— /api/rdp/ws WS proxy" style="rounded=1;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="400" y="60" width="220" height="140" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- APPLICATION ZONE NODES -->
+        <!-- ═══════════════════════════════════════════════════ -->
+
+        <!-- Node.js API -->
+        <mxCell id="nodeapi" value="&lt;b&gt;Node.js API Server&lt;/b&gt;&lt;br/&gt;Express 4 · Port 5000&lt;br/&gt;Helmet · CORS · Rate-limit&lt;br/&gt;JWT Auth · RBAC middleware&lt;br/&gt;Winston logger · Compression" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="730" y="60" width="260" height="110" as="geometry" />
+        </mxCell>
+
+        <!-- Socket.IO -->
+        <mxCell id="socketio" value="&lt;b&gt;Socket.IO Server&lt;/b&gt;&lt;br/&gt;Real-time events&lt;br/&gt;Alert broadcasts&lt;br/&gt;Device status updates" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="730" y="200" width="260" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Alert Engine -->
+        <mxCell id="alertengine" value="&lt;b&gt;Alert Engine&lt;/b&gt;&lt;br/&gt;Polls AlertRule / StoreAlertRule&lt;br/&gt;Emits Socket.IO events&lt;br/&gt;Sends email (nodemailer)&lt;br/&gt;Posts Slack webhooks" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="730" y="320" width="260" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- WebSocket Proxies -->
+        <mxCell id="wsproxy" value="&lt;b&gt;WS Upgrade Handlers&lt;/b&gt;&lt;br/&gt;/api/web-mgmt/p/:token → device UI&lt;br/&gt;/api/rdp/ws → guacd :4822&lt;br/&gt;(ssh2 for browser SSH terminal)" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="730" y="450" width="260" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- DATA ZONE NODES -->
+        <!-- ═══════════════════════════════════════════════════ -->
+
+        <!-- MongoDB -->
+        <mxCell id="mongo" value="&lt;b&gt;MongoDB 7&lt;/b&gt;&lt;br/&gt;Primary application DB&lt;br/&gt;Users · Devices · Sites&lt;br/&gt;Tickets · AlertRules&lt;br/&gt;EmailSim · Credentials&lt;br/&gt;AdAuditLog · IdcsAuditLog" style="shape=cylinder3;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1090" y="60" width="210" height="130" as="geometry" />
+        </mxCell>
+
+        <!-- Redis -->
+        <mxCell id="redis" value="&lt;b&gt;Redis 7&lt;/b&gt;&lt;br/&gt;Session cache&lt;br/&gt;Alert engine pub/sub&lt;br/&gt;Rate-limit counters" style="shape=cylinder3;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1090" y="220" width="210" height="110" as="geometry" />
+        </mxCell>
+
+        <!-- Elasticsearch -->
+        <mxCell id="elastic" value="&lt;b&gt;Elasticsearch 8&lt;/b&gt;&lt;br/&gt;TLS + basic auth&lt;br/&gt;Indices:&lt;br/&gt;firewall-* · cisco-*&lt;br/&gt;sentinel-*&lt;br/&gt;Streaming CSV export" style="shape=cylinder3;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1090" y="360" width="210" height="130" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- AI ZONE NODES -->
+        <!-- ═══════════════════════════════════════════════════ -->
+
+        <mxCell id="claude" value="&lt;b&gt;Anthropic Claude&lt;/b&gt;&lt;br/&gt;@anthropic-ai/sdk" style="rounded=1;whiteSpace=wrap;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1085" y="610" width="190" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="openai" value="&lt;b&gt;OpenAI GPT&lt;/b&gt;&lt;br/&gt;openai sdk" style="rounded=1;whiteSpace=wrap;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1085" y="665" width="190" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="ollama" value="&lt;b&gt;Ollama (self-hosted)&lt;/b&gt;&lt;br/&gt;HTTP REST API" style="rounded=1;whiteSpace=wrap;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1085" y="720" width="190" height="45" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- EXTERNAL SYSTEMS NODES -->
+        <!-- ═══════════════════════════════════════════════════ -->
+
+        <!-- Zabbix -->
+        <mxCell id="zabbix" value="&lt;b&gt;Zabbix&lt;/b&gt;&lt;br/&gt;JSON-RPC API&lt;br/&gt;Hosts · Triggers · Graphs&lt;br/&gt;Store views" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="55" y="320" width="170" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- SolarWinds -->
+        <mxCell id="solarwinds" value="&lt;b&gt;SolarWinds&lt;/b&gt;&lt;br/&gt;REST API + transparent proxy&lt;br/&gt;Nodes · Interfaces · Traffic&lt;br/&gt;Reports · Snapshots" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="240" y="320" width="170" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- SentinelOne -->
+        <mxCell id="s1" value="&lt;b&gt;SentinelOne XDR&lt;/b&gt;&lt;br/&gt;Management API&lt;br/&gt;Agents · Threats&lt;br/&gt;Power queries · Isolation" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="425" y="320" width="170" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Microsoft Sentinel -->
+        <mxCell id="sentinel" value="&lt;b&gt;Microsoft Sentinel&lt;/b&gt;&lt;br/&gt;Azure Log Analytics&lt;br/&gt;Incidents · Events&lt;br/&gt;Streaming export" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="55" y="440" width="170" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Active Directory -->
+        <mxCell id="ad" value="&lt;b&gt;Active Directory&lt;/b&gt;&lt;br/&gt;LDAP (ldapjs)&lt;br/&gt;Users · Groups&lt;br/&gt;Audit logs · Auth" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="240" y="440" width="170" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Oracle IDCS -->
+        <mxCell id="idcs" value="&lt;b&gt;Oracle IDCS&lt;/b&gt;&lt;br/&gt;REST API&lt;br/&gt;Audit log ingestion&lt;br/&gt;CSV export" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="425" y="440" width="170" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- NEXS -->
+        <mxCell id="nexs" value="&lt;b&gt;NEXS&lt;/b&gt;&lt;br/&gt;Network service proxy&lt;br/&gt;Dedicated auth flow" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="55" y="560" width="170" height="75" as="geometry" />
+        </mxCell>
+
+        <!-- guacd -->
+        <mxCell id="guacd" value="&lt;b&gt;guacd 1.5.5&lt;/b&gt;&lt;br/&gt;Apache Guacamole daemon&lt;br/&gt;RDP bridge (port 4822)&lt;br/&gt;Internal Docker network only" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="240" y="560" width="170" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- SMTP -->
+        <mxCell id="smtp" value="&lt;b&gt;SMTP Server&lt;/b&gt;&lt;br/&gt;nodemailer&lt;br/&gt;Alert emails&lt;br/&gt;Phishing sim campaigns" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="425" y="560" width="170" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════ -->
+        <!-- EDGES -->
+        <!-- ═══════════════════════════════════════════════════ -->
+
+        <!-- Browser → nginx (HTTPS) -->
+        <mxCell id="e1" value="HTTPS/WSS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#6c8ebf;fontColor=#6c8ebf;fontSize=10;" edge="1" source="browser" target="nginx" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- nginx → Node API (HTTP proxy) -->
+        <mxCell id="e2" value="/api/* proxy" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#82b366;fontColor=#82b366;fontSize=10;" edge="1" source="nginx" target="nodeapi" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- nginx → Socket.IO (WS proxy) -->
+        <mxCell id="e3" value="/socket.io WS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#82b366;fontColor=#82b366;fontSize=10;dashed=1;" edge="1" source="nginx" target="socketio" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- nginx → WS Proxies -->
+        <mxCell id="e4" value="WS upgrades" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#82b366;fontColor=#82b366;fontSize=10;dashed=1;" edge="1" source="nginx" target="wsproxy" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Node API → MongoDB -->
+        <mxCell id="e5" value="Mongoose ODM" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#b85450;fontColor=#b85450;fontSize=10;" edge="1" source="nodeapi" target="mongo" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Node API → Redis -->
+        <mxCell id="e6" value="ioredis" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#b85450;fontColor=#b85450;fontSize=10;" edge="1" source="nodeapi" target="redis" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Node API → Elasticsearch -->
+        <mxCell id="e7" value="ES client (TLS)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#b85450;fontColor=#b85450;fontSize=10;" edge="1" source="nodeapi" target="elastic" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Alert Engine → Redis (pub/sub) -->
+        <mxCell id="e8" value="pub/sub" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#b85450;fontColor=#b85450;fontSize=10;dashed=1;" edge="1" source="alertengine" target="redis" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Alert Engine → Socket.IO (emit) -->
+        <mxCell id="e9" value="emit alerts" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#82b366;fontColor=#82b366;fontSize=10;" edge="1" source="alertengine" target="socketio" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Node API → AI Providers -->
+        <mxCell id="e10" value="AI_PROVIDER" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#d79b00;fontColor=#d79b00;fontSize=10;" edge="1" source="nodeapi" target="claude" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Node API → Zabbix -->
+        <mxCell id="e11" value="JSON-RPC" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#9673a6;fontColor=#9673a6;fontSize=10;" edge="1" source="nodeapi" target="zabbix" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Node API → SolarWinds -->
+        <mxCell id="e12" value="REST" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#9673a6;fontColor=#9673a6;fontSize=10;" edge="1" source="nodeapi" target="solarwinds" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Node API → SentinelOne -->
+        <mxCell id="e13" value="REST API" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#9673a6;fontColor=#9673a6;fontSize=10;" edge="1" source="nodeapi" target="s1" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Node API → Sentinel -->
+        <mxCell id="e14" value="Azure API" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#9673a6;fontColor=#9673a6;fontSize=10;" edge="1" source="nodeapi" target="sentinel" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Node API → AD -->
+        <mxCell id="e15" value="LDAP" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#9673a6;fontColor=#9673a6;fontSize=10;" edge="1" source="nodeapi" target="ad" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Node API → IDCS -->
+        <mxCell id="e16" value="REST" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#9673a6;fontColor=#9673a6;fontSize=10;" edge="1" source="nodeapi" target="idcs" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Node API → NEXS -->
+        <mxCell id="e17" value="REST + auth proxy" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#9673a6;fontColor=#9673a6;fontSize=10;" edge="1" source="nodeapi" target="nexs" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- WS Proxy → guacd -->
+        <mxCell id="e18" value="TCP :4822 (Guacamole protocol)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#9673a6;fontColor=#9673a6;fontSize=10;dashed=1;" edge="1" source="wsproxy" target="guacd" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Alert Engine → SMTP -->
+        <mxCell id="e19" value="nodemailer" style="edgeStyle=orthogonalEdgeStyle;rounded=0;strokeColor=#9673a6;fontColor=#9673a6;fontSize=10;" edge="1" source="alertengine" target="smtp" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

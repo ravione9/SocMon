@@ -18,6 +18,8 @@ const storeAlertRuleSchema = new mongoose.Schema({
     target:    { type: String, default: '' },
   },
   severity:  { type: String, enum: ['critical', 'high', 'warning'], default: 'high' },
+  /** Flux range for snapshot evaluation e.g. '-15m', '-1h', '-6h', '-24h' */
+  evaluationRange: { type: String, default: '-1h' },
   channels:  [channelSchema],
   cooldownMinutes: { type: Number, default: 30 },
   lastFiredAt: { type: Date, default: null },
