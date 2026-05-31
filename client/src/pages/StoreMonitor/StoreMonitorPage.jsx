@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { io as ioClient } from 'socket.io-client'
+import { resolvedWsUrl } from '../../utils/backendOrigin.js'
+import { useAuthStore } from '../../store/authStore.js'
 import { Bar, Doughnut, Line } from 'react-chartjs-2'
 import {
   ArcElement,
@@ -485,6 +488,14 @@ const CSS = `
 .sm-picker-item-meta { font-size:10px; font-family:var(--mono); color:var(--text3); flex-shrink:0; }
 .sm-picker-empty { padding:20px; text-align:center; color:var(--text3); font-size:12px; }
 .sm-picker-count { padding:4px 11px 6px; font-size:10px; font-family:var(--mono); color:var(--text3); border-top:1px solid var(--border); background:var(--bg2); }
+/* ── live alert notifications ── */
+.sm-alert-stack { position:fixed; top:70px; right:16px; z-index:300; display:flex; flex-direction:column; gap:8px; max-width:420px; pointer-events:none; }
+.sm-alert-toast { pointer-events:all; background:var(--bg); border-radius:10px; box-shadow:0 4px 24px rgba(0,0,0,.5); overflow:hidden; animation:smSlideIn .25s ease; }
+@keyframes smSlideIn { from { opacity:0; transform:translateX(24px); } to { opacity:1; transform:none; } }
+.sm-alert-toast-hd { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 12px 8px; }
+.sm-alert-toast-body { padding:0 12px 10px; font-size:11px; font-family:var(--mono); color:var(--text3); }
+.sm-alert-toast-stores { display:flex; flex-direction:column; gap:2px; margin-top:5px; }
+.sm-alert-toast-store { font-size:10px; color:var(--text3); }
 `
 
 /* ─── component ──────────────────────────────────── */
@@ -542,6 +553,9 @@ export default function StoreMonitorPage() {
   /* alert engine status */
   const [evalStatus, setEvalStatus] = useState(null)
   const [evalRunning, setEvalRunning] = useState(false)
+  /* real-time alert notifications */
+  const [liveAlerts, setLiveAlerts] = useState([])   // [{ id, ...alertEvent }]
+  const socketRef = useRef(null)
 
   /* alerts */
   const [alertRules, setAlertRules]     = useState([])
@@ -567,6 +581,30 @@ export default function StoreMonitorPage() {
     document.addEventListener('mousedown', handle)
     return () => document.removeEventListener('mousedown', handle)
   }, [storePickerOpen])
+
+  /* ── load meta once ── */
+  /* ── Socket.IO: subscribe for real-time store alerts ── */
+  useEffect(() => {
+    const token = useAuthStore.getState().token
+    const ws    = resolvedWsUrl()
+    const sock  = ws ? ioClient(ws, { auth: { token }, transports: ['websocket', 'polling'] })
+                     : ioClient({ auth: { token }, transports: ['websocket', 'polling'] })
+    socketRef.current = sock
+    sock.emit('subscribe:store-alerts')
+    sock.on('store:alert', (event) => {
+      const id = `${Date.now()}-${Math.random()}`
+      setLiveAlerts((prev) => [{ id, ...event }, ...prev].slice(0, 20))
+      // Bump tab badge so user notices even from another tab
+      if (tab !== 'alerts') {
+        setTabRaw('alerts')
+      }
+    })
+    return () => {
+      sock.emit('unsubscribe:store-alerts')
+      sock.disconnect()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   /* ── load meta once ── */
   useEffect(() => { api.get('/api/store-monitor/meta').then((r) => setMeta(r.data)).catch(() => {}) }, [])
@@ -999,6 +1037,52 @@ export default function StoreMonitorPage() {
   return (
     <div className="sm">
       <style>{CSS}</style>
+
+      {/* ── Real-time alert notification stack ── */}
+      {liveAlerts.length > 0 && (
+        <div className="sm-alert-stack">
+          {liveAlerts.map((ev) => {
+            const sevColor = SEV_COLORS[ev.severity] || '#64748b'
+            return (
+              <div key={ev.id} className="sm-alert-toast" style={{borderLeft:`3px solid ${sevColor}`}}>
+                <div className="sm-alert-toast-hd">
+                  <div style={{display:'flex',alignItems:'center',gap:8}}>
+                    <span style={{fontSize:16}}>{ev.severity==='critical'?'🔴':ev.severity==='high'?'🟠':'🟡'}</span>
+                    <div>
+                      <div style={{fontWeight:700,fontSize:13,color:'var(--text)'}}>{ev.ruleName}</div>
+                      <div style={{fontSize:10,fontFamily:'var(--mono)',color:sevColor}}>
+                        {ev.severity.toUpperCase()} · {ev.affectedCount} store{ev.affectedCount!==1?'s':''} affected
+                        {ev.group!=='all'?` · ${ev.group}`:''}
+                      </div>
+                    </div>
+                  </div>
+                  <button style={{background:'none',border:'none',color:'var(--text3)',cursor:'pointer',fontSize:16,lineHeight:1,padding:0}}
+                    onClick={()=>setLiveAlerts(p=>p.filter(x=>x.id!==ev.id))}>✕</button>
+                </div>
+                <div className="sm-alert-toast-body">
+                  <div style={{marginBottom:4}}>
+                    Condition: <strong style={{color:'var(--text2)'}}>{ev.condition?.metric} {ev.condition?.operator||''} {ev.condition?.threshold??''}</strong>
+                    {' · '}<span style={{color:'var(--text3)'}}>{new Date(ev.firedAt).toLocaleTimeString()}</span>
+                  </div>
+                  <div className="sm-alert-toast-stores">
+                    {ev.stores?.slice(0,5).map((s,i)=>(
+                      <span key={i} className="sm-alert-toast-store">
+                        ● {s.hostname} ({s.serial}) · {s.connState} · {s.gatewayIp||'?'}
+                      </span>
+                    ))}
+                    {ev.hasMore && <span style={{color:'var(--accent)',fontSize:10}}>…and {ev.affectedCount-10} more</span>}
+                  </div>
+                  <div style={{marginTop:6,display:'flex',gap:6}}>
+                    <button className="sm-btn sm-sm" style={{fontSize:10}} onClick={()=>{setTabRaw('alerts');setLiveAlerts(p=>p.filter(x=>x.id!==ev.id))}}>View rules</button>
+                    <button className="sm-btn sm-sm" style={{fontSize:10}} onClick={()=>setLiveAlerts(p=>p.filter(x=>x.id!==ev.id))}>Dismiss</button>
+                    <button className="sm-btn sm-sm" style={{fontSize:10}} onClick={()=>setLiveAlerts([])}>Dismiss all</button>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
 
       {/* ── page header ── */}
       <div style={{borderBottom:'1px solid var(--border)',paddingBottom:10,marginBottom:10}}>

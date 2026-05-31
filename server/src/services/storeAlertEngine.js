@@ -68,6 +68,7 @@ function isWithinSchedule(schedule) {
 
 let lastEvalAt = null
 let lastEvalStats = null
+let _io = null   // Socket.IO instance, injected by startStoreAlertEngine
 
 export function getEvalStatus() {
   return { lastEvalAt, lastEvalStats, intervalMs: EVAL_INTERVAL_MS }
@@ -116,6 +117,32 @@ export async function runStoreAlertEval() {
       // 4. Fire!
       const dispatch = await dispatchAlertNotifications(rule, affected)
       await StoreAlertRule.findByIdAndUpdate(rule._id, { lastFiredAt: new Date() })
+
+      // Build a compact event payload for WebSocket broadcast
+      const alertEvent = {
+        ruleId:    rule._id,
+        ruleName:  rule.name,
+        severity:  rule.severity,
+        group:     rule.group,
+        condition: rule.condition,
+        affectedCount: affected.length,
+        /** Top 10 affected store summaries — keeps payload small */
+        stores: affected.slice(0, 10).map((s) => ({
+          hostname:    s.hostname,
+          serial:      s.serial,
+          storeTag:    s.storeTag,
+          connState:   s.connState,
+          gatewayIp:   s.gatewayIp,
+          lastSeen:    s.lastSeen,
+        })),
+        hasMore: affected.length > 10,
+        firedAt: new Date().toISOString(),
+        dispatch,
+      }
+
+      // Broadcast to all connected clients (room 'store-alerts')
+      if (_io) _io.to('store-alerts').emit('store:alert', alertEvent)
+
       results.push({ rule: rule.name, fired: true, affected: affected.length, dispatch })
       fired++
       console.log(`[storeAlertEngine] 🔔 Fired: "${rule.name}" (${rule.severity}) — ${affected.length} stores affected`)
@@ -132,10 +159,21 @@ export async function runStoreAlertEval() {
   return { ...stats, results }
 }
 
-export function startStoreAlertEngine() {
+export function startStoreAlertEngine(io) {
+  _io = io || null
   if (!isInfluxStoreConfigured()) {
     console.log('[storeAlertEngine] InfluxDB not configured — auto-evaluation disabled')
     return
+  }
+  // Let clients subscribe to 'store-alerts' room for real-time push notifications
+  if (_io) {
+    _io.on('connection', (socket) => {
+      socket.on('subscribe:store-alerts', () => {
+        socket.join('store-alerts')
+        socket.emit('store-alerts:subscribed', { ok: true })
+      })
+      socket.on('unsubscribe:store-alerts', () => socket.leave('store-alerts'))
+    })
   }
   console.log(`[storeAlertEngine] Starting — evaluating every ${EVAL_INTERVAL_MS / 1000}s`)
 

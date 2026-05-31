@@ -191,7 +191,7 @@ async function start() {
   await connectRedis()
   initWebSocket(io)
   startAlertEngine(io)
-  startStoreAlertEngine()
+  startStoreAlertEngine(io)
   const PORT = process.env.PORT || 5000
   httpServer.listen(PORT, () => {
     console.log(`Lenskart server running on port ${PORT}`)
