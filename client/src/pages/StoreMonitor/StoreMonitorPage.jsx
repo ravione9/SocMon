@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { io as ioClient } from 'socket.io-client'
-import { resolvedWsUrl } from '../../utils/backendOrigin.js'
-import { useAuthStore } from '../../store/authStore.js'
 import { Bar, Doughnut, Line } from 'react-chartjs-2'
 import {
   ArcElement,
@@ -21,7 +19,7 @@ import { useUrlTab } from '../../hooks/useUrlTab.js'
 import { useThemeStore } from '../../store/themeStore.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
 import { useAuthStore } from '../../store/authStore.js'
-import { resolvedApiBase } from '../../utils/backendOrigin.js'
+import { resolvedApiBase, resolvedWsUrl } from '../../utils/backendOrigin.js'
 
 ChartJS.register(ArcElement, BarElement, CategoryScale, Filler, Legend, LinearScale, LineElement, PointElement, Tooltip)
 
