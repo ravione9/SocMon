@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bar, Doughnut, Line } from 'react-chartjs-2'
 import {
   ArcElement,
@@ -2106,15 +2106,44 @@ export default function StoreMonitorPage() {
       {/* ══════════ ALERT RULES ══════════ */}
       {tab==='alerts' && (
         <>
-          <div className="sm-toolbar">
-            <h3 style={{margin:0,fontSize:14,fontWeight:700,flex:1}}>Alert Rules</h3>
-            <button className="sm-btn primary" onClick={()=>openAlertModal(null)}>+ New Rule</button>
-          </div>
-
-          <div className="sm-info" style={{fontSize:11}}>
-            Rules evaluate live store data. Notifications go to Slack, Google Chat, or Email when conditions are met.
-            Cooldown prevents repeated alerts.
-          </div>
+          {/* engine status + controls */}
+          {(()=>{
+            const [evalStatus, setEvalStatus] = React.useState(null)
+            const [running, setRunning] = React.useState(false)
+            React.useEffect(()=>{
+              api.get('/api/store-alerts/status').then(r=>setEvalStatus(r.data)).catch(()=>{})
+            },[])
+            async function runNow(){
+              setRunning(true)
+              try{
+                const {data}=await api.post('/api/store-alerts/evaluate')
+                setEvalStatus(s=>({...s,lastEvalAt:data.evaluatedAt,lastEvalStats:data}))
+                await loadAlerts()
+              }catch(e){alert(e.response?.data?.error||e.message)}
+              finally{setRunning(false)}
+            }
+            return (
+              <div style={{display:'flex',alignItems:'center',gap:12,padding:'9px 14px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:'var(--sm-r)',marginBottom:10,flexWrap:'wrap'}}>
+                <div style={{flex:1,fontSize:11,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                  <span style={{color:'var(--green)',marginRight:6}}>●</span>
+                  Auto-evaluates every 2 min · Last run:{' '}
+                  <strong style={{color:'var(--text2)'}}>{evalStatus?.lastEvalAt ? relAge(evalStatus.lastEvalAt)+' ago' : 'not yet'}</strong>
+                  {evalStatus?.lastEvalStats && (
+                    <span style={{marginLeft:10}}>
+                      {evalStatus.lastEvalStats.fired>0
+                        ? <span style={{color:'var(--red)',fontWeight:700}}>🔔 {evalStatus.lastEvalStats.fired} fired</span>
+                        : <span style={{color:'var(--green)'}}>✓ {evalStatus.lastEvalStats.total} rules checked, 0 fired</span>}
+                      {' · '}{evalStatus.lastEvalStats.storesChecked} stores
+                    </span>
+                  )}
+                </div>
+                <button className="sm-btn sm-sm primary" onClick={runNow} disabled={running}>
+                  {running?'⏳ Running…':'▶ Run now'}
+                </button>
+                <button className="sm-btn sm-sm primary" onClick={()=>openAlertModal(null)}>+ New Rule</button>
+              </div>
+            )
+          })()}
 
           {!alertRules.length
             ? <div className="sm-empty">No alert rules yet. Create one to get started.</div>

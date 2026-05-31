@@ -36,6 +36,7 @@ import zabbixRoutes from './routes/zabbix.js'
 import storeZabbixRoutes from './routes/storeZabbix.js'
 import storeMonitorRoutes from './routes/storeMonitor.js'
 import storeAlertsRoutes from './routes/storeAlerts.js'
+import { startStoreAlertEngine } from './services/storeAlertEngine.js'
 import sshSessionRoutes from './routes/sshSessions.js'
 import webMgmtRoutes, { proxyWsUpgrade } from './routes/webMgmt.js'
 import solarwindsRoutes from './routes/solarwinds.js'
@@ -190,6 +191,7 @@ async function start() {
   await connectRedis()
   initWebSocket(io)
   startAlertEngine(io)
+  startStoreAlertEngine()
   const PORT = process.env.PORT || 5000
   httpServer.listen(PORT, () => {
     console.log(`Lenskart server running on port ${PORT}`)
