@@ -20,6 +20,19 @@ const storeAlertRuleSchema = new mongoose.Schema({
   severity:  { type: String, enum: ['critical', 'high', 'warning'], default: 'high' },
   /** Flux range for snapshot evaluation e.g. '-15m', '-1h', '-6h', '-24h' */
   evaluationRange: { type: String, default: '-1h' },
+  /**
+   * Trigger schedule — when this alert is ALLOWED to fire.
+   * If enabled, notifications are suppressed outside the defined window.
+   */
+  schedule: {
+    enabled:  { type: Boolean, default: false },
+    /** Hour of day (0-23) when alert window opens */
+    fromHour: { type: Number, default: 9  },
+    /** Hour of day (0-23) when alert window closes */
+    toHour:   { type: Number, default: 18 },
+    /** Days of week (0=Sun … 6=Sat) when alert is active */
+    weekdays: { type: [Number], default: [1, 2, 3, 4, 5] },
+  },
   channels:  [channelSchema],
   cooldownMinutes: { type: Number, default: 30 },
   lastFiredAt: { type: Date, default: null },

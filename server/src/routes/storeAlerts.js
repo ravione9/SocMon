@@ -74,6 +74,20 @@ router.post('/evaluate', async (req, res, next) => {
 
       if (!affected.length) continue
 
+      // Check trigger schedule: is it within the allowed day/hour window?
+      if (rule.schedule?.enabled) {
+        const now = new Date()
+        const dayOk  = (rule.schedule.weekdays || [1,2,3,4,5]).includes(now.getDay())
+        const hour   = now.getHours()
+        const from   = rule.schedule.fromHour ?? 9
+        const to     = rule.schedule.toHour   ?? 18
+        const hourOk = from <= to ? (hour >= from && hour < to) : (hour >= from || hour < to)
+        if (!dayOk || !hourOk) {
+          results.push({ rule: rule.name, skipped: true, reason: 'outside schedule', affected: affected.length })
+          continue
+        }
+      }
+
       const cooldownMs = (rule.cooldownMinutes || 30) * 60 * 1000
       const lastFired = rule.lastFiredAt ? new Date(rule.lastFiredAt).getTime() : 0
       if (Date.now() - lastFired < cooldownMs) {

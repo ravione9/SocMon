@@ -867,6 +867,7 @@ export default function StoreMonitorPage() {
   function blankRule() {
     return { name:'', description:'', enabled:true, group:'all', severity:'high',
       evaluationRange:'-1h', cooldownMinutes:30,
+      schedule:{ enabled:false, fromHour:9, toHour:18, weekdays:[1,2,3,4,5] },
       condition:{ metric:'offline', operator:'gt', threshold:0, target:'' }, channels:[] }
   }
   function openAlertModal(rule) {
@@ -2113,6 +2114,14 @@ export default function StoreMonitorPage() {
                   <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>GROUP </span><br/>{rule.group}</div>
                   <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>EVAL RANGE </span><br/>{rule.evaluationRange||'-1h'}</div>
                   <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>COOLDOWN </span><br/>{rule.cooldownMinutes} min</div>
+                  <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>TRIGGER SCHEDULE </span><br/>
+                    {rule.schedule?.enabled
+                      ? <span style={{color:'var(--accent)',fontSize:11}}>
+                          {(rule.schedule.weekdays||[]).map((d)=>['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d]).join('/')}
+                          {' '}{rule.schedule.fromHour??9}:00–{rule.schedule.toHour??18}:00
+                        </span>
+                      : <span style={{color:'var(--text3)'}}>24/7</span>}
+                  </div>
                   <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>CHANNELS </span><br/>{(rule.channels||[]).map((c)=>c.type).join(', ')||'None'}</div>
                   {rule.lastFiredAt && <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>LAST FIRED </span><br/>{new Date(rule.lastFiredAt).toLocaleString()}</div>}
                 </div>
@@ -2209,6 +2218,69 @@ export default function StoreMonitorPage() {
                 {(alertForm.condition.metric==='latency'||alertForm.condition.metric==='packet_loss') && (
                   <input className="sm-input" placeholder="Ping target (default: 8.8.8.8)" style={{marginTop:6}} value={alertForm.condition.target}
                     onChange={(e)=>setAlertForm((f)=>({...f,condition:{...f.condition,target:e.target.value}}))}/>
+                )}
+              </div>
+
+              {/* ── Trigger Schedule ── */}
+              <div className="sm-form-field" style={{background:'var(--bg3)',border:'1px solid var(--border)',borderRadius:'var(--sm-r)',padding:'10px 12px'}}>
+                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:alertForm.schedule?.enabled?10:0}}>
+                  <label className="sm-form-label" style={{margin:0}}>🕐 Trigger Schedule</label>
+                  <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:'var(--text2)',cursor:'pointer'}}>
+                    <input type="checkbox"
+                      checked={!!alertForm.schedule?.enabled}
+                      onChange={(e)=>setAlertForm((f)=>({...f,schedule:{...f.schedule,enabled:e.target.checked}}))}/>
+                    {alertForm.schedule?.enabled ? 'Active — alert only in defined window' : 'Disabled — alert any time (24/7)'}
+                  </label>
+                </div>
+
+                {alertForm.schedule?.enabled && (
+                  <div style={{display:'flex',flexDirection:'column',gap:10}}>
+                    {/* Day selector */}
+                    <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                      <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',minWidth:60}}>Active days:</span>
+                      {BH_DAYS.map((d)=>(
+                        <button key={d.val} type="button"
+                          className={`sm-bh-dayBtn${(alertForm.schedule.weekdays||[]).includes(d.val)?' on':''}`}
+                          onClick={()=>{
+                            const cur = alertForm.schedule.weekdays || []
+                            const next = cur.includes(d.val) ? cur.filter((x)=>x!==d.val) : [...cur,d.val].sort()
+                            setAlertForm((f)=>({...f,schedule:{...f.schedule,weekdays:next}}))
+                          }}>
+                          {d.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Hour range */}
+                    <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                      <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',minWidth:60}}>Active hours:</span>
+                      <div style={{display:'flex',alignItems:'center',gap:6,fontSize:12}}>
+                        <input type="number" min={0} max={23} className="sm-input"
+                          style={{width:52,textAlign:'center'}}
+                          value={alertForm.schedule.fromHour??9}
+                          onChange={(e)=>setAlertForm((f)=>({...f,schedule:{...f.schedule,fromHour:+e.target.value}}))}/>
+                        <span style={{color:'var(--text3)'}}>:00 to</span>
+                        <input type="number" min={0} max={24} className="sm-input"
+                          style={{width:52,textAlign:'center'}}
+                          value={alertForm.schedule.toHour??18}
+                          onChange={(e)=>setAlertForm((f)=>({...f,schedule:{...f.schedule,toHour:+e.target.value}}))}/>
+                        <span style={{color:'var(--text3)'}}>:00</span>
+                        {/* Quick presets */}
+                        {[['Business (9–18)',[1,2,3,4,5],9,18],['Office+ (8–20)',[1,2,3,4,5],8,20],['Always (0–24)',[0,1,2,3,4,5,6],0,24]].map(([lbl,days,fh,th])=>(
+                          <button key={lbl} type="button" className="sm-btn sm-sm" style={{fontSize:10,padding:'2px 7px'}}
+                            onClick={()=>setAlertForm((f)=>({...f,schedule:{...f.schedule,weekdays:days,fromHour:fh,toHour:th}}))}>
+                            {lbl}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Preview */}
+                    <div style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--accent)',background:'rgba(79,126,245,.08)',borderRadius:5,padding:'5px 8px'}}>
+                      ⏰ Alert fires only on {(alertForm.schedule.weekdays||[]).map((d)=>BH_DAYS.find((x)=>x.val===d)?.label).join(', ')||'—'}
+                      {' '}between {alertForm.schedule.fromHour??9}:00 – {alertForm.schedule.toHour??18}:00
+                    </div>
+                  </div>
                 )}
               </div>
 
