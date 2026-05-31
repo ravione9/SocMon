@@ -265,6 +265,12 @@ from(bucket: "${fluxEscape(cfg().bucket)}")
   }
 }
 
+/**
+ * Get the LATEST row per store for a measurement that uses extra tag columns.
+ * Groups by all tag columns so every unique tag combination is a separate row.
+ * The caller merges multiple rows per store — this lets the JS layer prefer
+ * the most-meaningful value (e.g. non-"unknown" gateway_vendor).
+ */
 async function fetchTaggedLatest(measurement, tagColumns, range = '-15m') {
   const cols = ['store_tag', 'hostname', 'serial', ...tagColumns, '_field'].map((c) => `"${c}"`).join(', ')
   const flux = `
@@ -356,23 +362,59 @@ function detectIssues(store, staleMinutes = 10) {
 }
 
 /**
- * @param {number} staleMinutes - minutes without heartbeat before marking offline
- * @param {string} metricRange  - Flux range string for metrics e.g. '-1h', '-24h', '-7d'
+ * @param {number}  staleMinutes
+ * @param {string}  metricRange   Flux relative range e.g. '-24h'
+ * @param {number}  [fromTs]      Custom window start (Unix sec) — overrides metricRange
+ * @param {number}  [toTs]        Custom window end   (Unix sec)
  */
-export async function fetchStoreSnapshot(staleMinutes = 10, metricRange = '-24h') {
+export async function fetchStoreSnapshot(staleMinutes = 10, metricRange = '-24h', fromTs, toTs) {
   const discoveryRange = '-30d'
-  // Heartbeat staleness window must be at least as wide as metricRange so we see all stores
-  const heartbeatRange = metricRange
+
+  // When custom from/to is provided build an explicit Flux range clause
+  let rangeClause
+  if (fromTs && Number.isFinite(Number(fromTs))) {
+    const startISO = new Date(Number(fromTs) * 1000).toISOString()
+    const stopISO  = toTs && Number.isFinite(Number(toTs))
+      ? new Date(Number(toTs) * 1000).toISOString()
+      : new Date().toISOString()
+    rangeClause = `start: ${startISO}, stop: ${stopISO}`
+  } else {
+    rangeClause = `start: ${metricRange}`
+  }
+
+  const isCustom = rangeClause !== `start: ${metricRange}`
+  const bucket = fluxEscape(cfg().bucket)
+
+  /* Run a tagged-latest or measurement-latest query using the resolved range clause */
+  async function runTagged(measurement, tagColumns) {
+    if (!isCustom) return fetchTaggedLatest(measurement, tagColumns, metricRange)
+    const cols = ['store_tag', 'hostname', 'serial', ...tagColumns, '_field'].map((c) => `"${c}"`).join(', ')
+    const flux = `from(bucket: "${bucket}") |> range(${rangeClause}) |> filter(fn: (r) => r._measurement == "${fluxEscape(measurement)}") |> group(columns: [${cols}]) |> last()`
+    try { return await queryFlux(flux) } catch (e) { console.warn(`[influxStore] runTagged(${measurement}):`, e.message); return [] }
+  }
+
+  async function runMeasurement(measurement) {
+    if (!isCustom) return fetchMeasurementLatest(measurement, metricRange)
+    const flux = `from(bucket: "${bucket}") |> range(${rangeClause}) |> filter(fn: (r) => r._measurement == "${fluxEscape(measurement)}") |> group(columns: ["store_tag", "hostname", "serial", "_field"]) |> last()`
+    try { return await queryFlux(flux) } catch (e) { console.warn(`[influxStore] runMeasurement(${measurement}):`, e.message); return [] }
+  }
+
+  async function runHeartbeats() {
+    if (!isCustom) return fetchHeartbeats(metricRange)
+    const flux = `from(bucket: "${bucket}") |> range(${rangeClause}) |> filter(fn: (r) => r._measurement == "heartbeat" and r._field == "online") |> group(columns: ["store_tag", "hostname", "serial"]) |> last()`
+    try { return await queryFlux(flux) } catch (e) { console.warn('[influxStore] runHeartbeats:', e.message); return [] }
+  }
+
   const speedRange = metricRange === '-7d' ? '-7d' : '-24h'
   const [identityRows, heartbeats, connectivity, pingRows, dnsRows, httpRows, systemRows, speedRows] = await Promise.all([
     fetchStoreIdentityLatest(discoveryRange),
-    fetchHeartbeats(heartbeatRange),
-    fetchTaggedLatest('connectivity', ['conn_state', 'active_interface', 'active_ssid', 'gateway_ip', 'gateway_vendor'], metricRange),
-    fetchTaggedLatest('ping', ['target'], metricRange),
-    fetchTaggedLatest('dns_query', ['domain'], metricRange),
-    fetchTaggedLatest('http_response', ['url'], metricRange),
-    fetchMeasurementLatest('system', metricRange),
-    fetchMeasurementLatest('speedtest', speedRange),
+    runHeartbeats(),
+    runTagged('connectivity', ['conn_state', 'active_interface', 'active_ssid', 'gateway_ip', 'gateway_vendor']),
+    runTagged('ping', ['target']),
+    runTagged('dns_query', ['domain']),
+    runTagged('http_response', ['url']),
+    runMeasurement('system'),
+    isCustom ? runMeasurement('speedtest') : fetchMeasurementLatest('speedtest', speedRange),
   ])
 
   const stores = new Map()
@@ -403,14 +445,34 @@ export async function fetchStoreSnapshot(staleMinutes = 10, metricRange = '-24h'
     s.serial = row.serial || s.serial
   }
 
+  // Placeholder values written by the PS agent when detection fails — not real vendors
+  const VENDOR_FALLBACKS = new Set(['unknown', 'unidentified', '', 'n/a', 'none'])
+
+  function isMeaningfulVendor(v) {
+    return v && !VENDOR_FALLBACKS.has(String(v).toLowerCase().trim())
+  }
+
   for (const row of connectivity) {
     const s = ensureStore(stores, row)
     if (!s) continue
-    s.connState = row.conn_state || s.connState
-    s.activeInterface = row.active_interface || s.activeInterface
-    s.activeSsid = row.active_ssid || s.activeSsid
-    s.gatewayIp = row.gateway_ip || s.gatewayIp
-    s.gatewayVendor = row.gateway_vendor || s.gatewayVendor
+
+    // Prefer non-fallback connectivity values; only overwrite if the new value is better
+    if (row.conn_state && row.conn_state !== 'unknown') s.connState = row.conn_state
+    else if (!s.connState || s.connState === 'unknown') s.connState = row.conn_state || s.connState
+
+    if (row.active_interface) s.activeInterface = row.active_interface
+    if (row.active_ssid && row.active_ssid !== 'n/a') s.activeSsid = row.active_ssid
+
+    if (row.gateway_ip && row.gateway_ip !== 'n/a') s.gatewayIp = row.gateway_ip
+
+    // Prefer any known vendor over "unknown"/"unidentified"
+    const rowVendor = row.gateway_vendor
+    if (isMeaningfulVendor(rowVendor)) {
+      s.gatewayVendor = rowVendor
+    } else if (!isMeaningfulVendor(s.gatewayVendor)) {
+      s.gatewayVendor = rowVendor || s.gatewayVendor
+    }
+
     if (row._field === 'is_hotspot') s.isHotspot = String(row._value).toLowerCase() === 'true'
     if (row._field === 'is_fortinet') s.isFortinet = String(row._value).toLowerCase() === 'true'
     if (!s.lastSeen && row._time) s.lastSeen = rowTime(row)
@@ -471,16 +533,34 @@ export async function fetchStoreSnapshot(staleMinutes = 10, metricRange = '-24h'
   return list
 }
 
-export async function fetchStoreHistory(storeTag, rangeSec = 3600) {
+/**
+ * @param {string}  storeTag
+ * @param {number}  rangeSec   - relative seconds back from now (used when fromSec/toSec absent)
+ * @param {number}  [fromSec]  - Unix epoch seconds (custom range start)
+ * @param {number}  [toSec]    - Unix epoch seconds (custom range stop)
+ */
+export async function fetchStoreHistory(storeTag, rangeSec = 3600, fromSec, toSec) {
   const tag = fluxEscape(storeTag)
-  const start = rangeSec >= 86400 ? `-${Math.ceil(rangeSec / 86400)}d` : `-${rangeSec}s`
   const synthetic = parseSyntheticStoreTag(storeTag)
   const filterExpr = synthetic
     ? `r.hostname == "${fluxEscape(synthetic.hostname)}" and r.serial == "${fluxEscape(synthetic.serial)}"`
     : `r.store_tag == "${tag}"`
+
+  let rangeClause
+  if (fromSec && Number.isFinite(Number(fromSec))) {
+    const startISO = new Date(Number(fromSec) * 1000).toISOString()
+    const stopISO  = toSec && Number.isFinite(Number(toSec))
+      ? new Date(Number(toSec) * 1000).toISOString()
+      : new Date().toISOString()
+    rangeClause = `start: ${startISO}, stop: ${stopISO}`
+  } else {
+    const start = rangeSec >= 86400 ? `-${Math.ceil(rangeSec / 86400)}d` : `-${rangeSec}s`
+    rangeClause = `start: ${start}`
+  }
+
   const flux = `
 from(bucket: "${fluxEscape(cfg().bucket)}")
-  |> range(start: ${start})
+  |> range(${rangeClause})
   |> filter(fn: (r) => ${filterExpr})
   |> filter(fn: (r) => r._measurement == "ping" or r._measurement == "system" or r._measurement == "speedtest" or r._measurement == "connectivity")
   |> group(columns: ["_measurement", "_field", "target"])
@@ -510,10 +590,24 @@ from(bucket: "${fluxEscape(cfg().bucket)}")
     }
   }
 
+  const allPoints = [...seriesMap.values()].flatMap((s) => s.points.map((p) => p.clock))
+  const minClock = allPoints.length ? Math.min(...allPoints) : null
+  const maxClock = allPoints.length ? Math.max(...allPoints) : null
+
+  // Compute the actual requested window so the client can anchor the chart axes
+  const nowSec = Math.floor(Date.now() / 1000)
+  const requestedFromSec = fromSec ? Number(fromSec) : nowSec - rangeSec
+  const requestedToSec   = toSec   ? Number(toSec)   : nowSec
+
   return {
     storeTag,
     rangeSec,
-    series: [...seriesMap.values()],
+    requestedFrom: new Date(requestedFromSec * 1000).toISOString(),
+    requestedTo:   new Date(requestedToSec   * 1000).toISOString(),
+    dataFrom:   minClock ? new Date(minClock * 1000).toISOString() : null,
+    dataTo:     maxClock ? new Date(maxClock * 1000).toISOString() : null,
+    pointCount: allPoints.length,
+    series:     [...seriesMap.values()],
   }
 }
 

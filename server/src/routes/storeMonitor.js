@@ -54,9 +54,11 @@ router.get('/overview', async (req, res, next) => {
       return res.status(503).json({ error: 'InfluxDB not configured', ...getInfluxStoreMeta() })
     }
     const staleMinutes = Math.min(Math.max(parseInt(String(req.query.staleMinutes || '10'), 10) || 10, 2), 60)
-    const rawRange = String(req.query.range || '-24h')
+    const rawRange    = String(req.query.range || '-24h')
     const metricRange = VALID_RANGES.has(rawRange) ? rawRange : '-24h'
-    let stores = await fetchStoreSnapshot(staleMinutes, metricRange)
+    const fromTs      = req.query.from ? parseInt(String(req.query.from), 10) : undefined
+    const toTs        = req.query.to   ? parseInt(String(req.query.to),   10) : undefined
+    let stores = await fetchStoreSnapshot(staleMinutes, metricRange, fromTs, toTs)
     const q = String(req.query.q || '').trim().toLowerCase()
     const conn = String(req.query.connState || '').trim()
     const issuesOnly = ['1', 'true', 'yes'].includes(String(req.query.issuesOnly || '').toLowerCase())
@@ -77,6 +79,8 @@ router.get('/overview', async (req, res, next) => {
       stores,
       staleMinutes,
       metricRange,
+      customFrom: fromTs ? new Date(fromTs * 1000).toISOString() : null,
+      customTo:   toTs   ? new Date(toTs   * 1000).toISOString() : null,
       fetchedAt: new Date().toISOString(),
     })
   } catch (e) {
@@ -119,9 +123,12 @@ router.get('/stores/:storeTag/history', async (req, res, next) => {
     if (!isInfluxStoreConfigured()) {
       return res.status(503).json({ error: 'InfluxDB not configured' })
     }
-    const rangeSec = Math.min(Math.max(parseInt(String(req.query.rangeSec || '3600'), 10) || 3600, 300), 7 * 86400)
     const storeTag = decodeURIComponent(req.params.storeTag)
-    const payload = await fetchStoreHistory(storeTag, rangeSec)
+    const fromSec  = req.query.from ? parseInt(String(req.query.from), 10) : undefined
+    const toSec    = req.query.to   ? parseInt(String(req.query.to),   10) : undefined
+    // rangeSec is a fallback when no custom from/to is supplied; allow up to 30d
+    const rangeSec = Math.min(Math.max(parseInt(String(req.query.rangeSec || '3600'), 10) || 3600, 300), 30 * 86400)
+    const payload = await fetchStoreHistory(storeTag, rangeSec, fromSec, toSec)
     res.json(payload)
   } catch (e) {
     next(e)

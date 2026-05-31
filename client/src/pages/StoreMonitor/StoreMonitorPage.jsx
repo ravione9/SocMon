@@ -50,7 +50,19 @@ const TIME_RANGES = [
   { key: '-2d',  label: '2 Days' },
   { key: '-7d',  label: '7 Days' },
 ]
-const HISTORY_SECS = { '-1h': 3600, '-3h': 10800, '-6h': 21600, '-12h': 43200, '-24h': 86400, '-2d': 172800, '-7d': 604800 }
+const HISTORY_SECS = { '-1h': 3600, '-3h': 10800, '-6h': 21600, '-12h': 43200, '-24h': 86400, '-2d': 172800, '-7d': 604800, '-30d': 30 * 86400 }
+
+function toLocalInput(date) {
+  const d = date instanceof Date ? date : new Date(date)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+function fromLocalInput(str) {
+  if (!str) return null
+  const d = new Date(str)
+  return Number.isNaN(d.getTime()) ? null : Math.floor(d.getTime() / 1000)
+}
 
 const CONN_COLORS = {
   lan_healthy: '#22c55e', wifi_healthy: '#06b6d4', hotspot: '#f97316',
@@ -105,6 +117,8 @@ function relAge(iso) {
 const fmtMs   = (v) => v == null || !Number.isFinite(v) ? '—' : v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${v.toFixed(0)}ms`
 const fmtPct  = (v) => v == null || !Number.isFinite(v) ? '—' : `${Number(v).toFixed(1)}%`
 const fmtMbps = (v) => v == null || !Number.isFinite(v) ? '—' : `${Number(v).toFixed(1)} Mbps`
+const VENDOR_FALLBACKS = new Set(['unknown', 'unidentified', 'n/a', 'none', ''])
+const fmtVendor = (v) => (!v || VENDOR_FALLBACKS.has(String(v).toLowerCase().trim())) ? '—' : v
 const pct     = (n, d) => (!d ? 0 : Math.round((n / d) * 1000) / 10)
 const primaryPing = (s) => s?.ping?.['8.8.8.8'] || s?.ping?.['google.com'] || Object.values(s?.ping || {})[0]
 
@@ -122,20 +136,136 @@ function chartOpts(tc, extras = {}) {
 
 const PAL = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#f97316', '#ec4899']
 
-function buildTimeChart(series, tc, yLabel = '', maxPts = 350) {
+/**
+ * Build a time-series chart anchored to the FULL requested window.
+ *
+ * Key behaviours:
+ * - Generates a uniform time grid from windowFromSec → windowToSec so the
+ *   x-axis always shows the full range (e.g. 6 hours), not just where data exists.
+ * - Periods with no data (device offline) appear as gaps / blank space.
+ * - spanGaps=false (default) means Chart.js does NOT connect across nulls → visible gaps.
+ *
+ * @param {object[]} series
+ * @param {object}   tc               theme colours
+ * @param {string}   [yLabel]
+ * @param {object}   [opts]
+ * @param {number}   [opts.yMin]
+ * @param {number}   [opts.yMax]
+ * @param {number}   [opts.windowFromSec]  start of range (Unix sec); anchors left edge
+ * @param {number}   [opts.windowToSec]    end of range (Unix sec); anchors right edge
+ * @param {number}   [opts.agentIntervalSec=60]   expected gap between data points
+ * @param {number}   [opts.maxTicks=400]   max x-axis ticks (downsampled if needed)
+ */
+function buildTimeChart(series, tc, yLabel = '', _legacy = 350, opts = {}) {
+  const {
+    yMin, yMax,
+    windowFromSec, windowToSec,
+    agentIntervalSec = 60,
+    maxTicks = 400,
+  } = opts
+
   const active = (series || []).filter((s) => (s.points || []).length > 0)
-  if (!active.length) return null
-  const clockSet = new Set()
-  for (const s of active) for (const p of s.points) { const c = Number(p.clock); if (Number.isFinite(c)) clockSet.add(c) }
-  let clocks = [...clockSet].sort((a, b) => a - b)
-  if (clocks.length > maxPts) { const step = Math.ceil(clocks.length / maxPts); clocks = clocks.filter((_, i) => i % step === 0) }
-  const labels = clocks.map((c) => new Date(c * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }))
+
+  // Even if no data, if we have a window we can render the empty range
+  const nowSec = Math.floor(Date.now() / 1000)
+  const winFrom = windowFromSec ?? (active.length
+    ? Math.min(...active.flatMap((s) => s.points.map((p) => Number(p.clock))))
+    : nowSec - 3600)
+  const winTo   = windowToSec ?? (active.length
+    ? Math.max(...active.flatMap((s) => s.points.map((p) => Number(p.clock))))
+    : nowSec)
+
+  // Generate a uniform grid every agentIntervalSec across the full window
+  const rawTicks = []
+  for (let t = winFrom; t <= winTo + agentIntervalSec; t += agentIntervalSec) rawTicks.push(t)
+
+  // Downsample if needed
+  let ticks = rawTicks
+  if (ticks.length > maxTicks) {
+    const step = Math.ceil(ticks.length / maxTicks)
+    ticks = ticks.filter((_, i) => i % step === 0 || i === ticks.length - 1)
+  }
+
+  // Always include winFrom and winTo as boundary ticks
+  if (ticks[0] > winFrom) ticks.unshift(winFrom)
+  if (ticks[ticks.length - 1] < winTo) ticks.push(winTo)
+
+  const labels = ticks.map((c) =>
+    new Date(c * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  )
+
+  if (!active.length) {
+    // No data — return empty chart with correct x-axis
+    return {
+      data: { labels, datasets: [{ label: 'No data', data: ticks.map(() => null), borderColor: '#475569', backgroundColor: 'transparent', borderWidth: 0 }] },
+      yLabel, scaleOpts: { min: yMin, max: yMax },
+      isEmpty: true,
+    }
+  }
+
+  const tolerance = agentIntervalSec * 1.6   // ±1.6 intervals to match a tick to a data point
+
   const datasets = active.slice(0, 8).map((s, i) => {
     const hex = PAL[i % PAL.length]
-    const by = Object.fromEntries((s.points || []).map((p) => [Number(p.clock), Number(p.value)]).filter(([c, v]) => Number.isFinite(c) && Number.isFinite(v)))
-    return { label: s.name, data: clocks.map((t) => by[t] ?? null), borderColor: hex, backgroundColor: `${hex}22`, tension: 0.3, spanGaps: true, pointRadius: 0, pointHoverRadius: 4, borderWidth: 2, fill: true }
+    // Map clock → value
+    const pts = (s.points || [])
+      .map((p) => ({ t: Number(p.clock), v: Number(p.value) }))
+      .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.v))
+      .sort((a, b) => a.t - b.t)
+
+    const data = ticks.map((tick) => {
+      // Binary-search for the nearest point within tolerance
+      let lo = 0; let hi = pts.length - 1; let best = null; let bestDist = Infinity
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1
+        const dist = Math.abs(pts[mid].t - tick)
+        if (dist < bestDist) { bestDist = dist; best = pts[mid] }
+        if (pts[mid].t < tick) lo = mid + 1; else hi = mid - 1
+      }
+      return best && bestDist <= tolerance ? best.v : null
+    })
+
+    const cleanName = (s.field || s.name || '')
+      .replace(/^(ping\.|system\.|speedtest\.|connectivity\.)/,'')
+      .replace(/_/g,' ')
+    const targetSuffix = s.target ? ` (${s.target})` : ''
+
+    return {
+      label: cleanName + targetSuffix,
+      data,
+      borderColor: hex,
+      backgroundColor: 'transparent',
+      tension: 0.25,
+      spanGaps: false,      // ← gaps = offline periods, never connect
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      borderWidth: 1.5,
+      fill: false,
+    }
   })
-  return { data: { labels, datasets }, yLabel }
+
+  const scaleOpts = {}
+  if (yMin !== undefined) scaleOpts.min = yMin
+  if (yMax !== undefined) scaleOpts.max = yMax
+
+  return { data: { labels, datasets }, yLabel, scaleOpts }
+}
+
+function buildChartOptions(tc, yLabel = '', scaleOpts = {}, extras = {}) {
+  return {
+    responsive: true, maintainAspectRatio: false,
+    plugins: {
+      legend: { position: 'top', labels: { color: tc.text2, boxWidth: 10, font: { size: 10 }, padding: 10 } },
+      tooltip: { mode: 'index', intersect: false, callbacks: {
+        label: (ctx) => ctx.parsed.y !== null ? ` ${ctx.dataset.label}: ${ctx.parsed.y}${yLabel ? ' ' + yLabel : ''}` : null,
+      }},
+    },
+    scales: {
+      x: { ticks: { color: tc.text3, font: { size: 10 }, maxTicksLimit: 8 }, grid: { color: tc.border } },
+      y: { ticks: { color: tc.text3, font: { size: 10 } }, grid: { color: tc.border }, ...scaleOpts },
+    },
+    ...extras,
+  }
 }
 
 function applyBusinessHours(series, bh) {
@@ -349,6 +479,13 @@ export default function StoreMonitorPage() {
   const tc         = useMemo(() => getThemeCssColors(theme), [theme])
   const [tab, setTabRaw] = useUrlTab('noc', TABS.map((t) => t.id), 'smtab')
   const [range, setRange] = useState('-24h')
+  /* global custom time range */
+  const _nowDef = new Date()
+  const [globalCustom, setGlobalCustom] = useState({
+    enabled: false,
+    from: toLocalInput(new Date(_nowDef.getTime() - 24 * 3600 * 1000)),
+    to:   toLocalInput(_nowDef),
+  })
   const [meta, setMeta] = useState(null)
   const [overview, setOverview] = useState(null)
   const [problems, setProblems] = useState([])
@@ -371,6 +508,15 @@ export default function StoreMonitorPage() {
   const [history, setHistory] = useState(null)
   const [histLoading, setHistLoading] = useState(false)
   const [bh, setBh] = useState({ enabled: false, startHour: 9, endHour: 18, weekdays: [1,2,3,4,5] })
+
+  /* custom time range for charts */
+  const now = new Date()
+  const defaultFrom = new Date(now.getTime() - 6 * 3600 * 1000)
+  const [customHist, setCustomHist] = useState({
+    enabled: false,
+    from: toLocalInput(defaultFrom),
+    to:   toLocalInput(now),
+  })
   /* searchable store picker */
   const [storeSearch, setStoreSearch] = useState('')
   const [storePickerOpen, setStorePickerOpen] = useState(false)
@@ -412,15 +558,18 @@ export default function StoreMonitorPage() {
   const loadOverview = useCallback(async () => {
     setError('')
     try {
-      const { data } = await api.get('/api/store-monitor/overview', { params: { range } })
+      const params = globalCustom.enabled && globalCustom.from
+        ? { from: fromLocalInput(globalCustom.from), to: fromLocalInput(globalCustom.to) || Math.floor(Date.now()/1000) }
+        : { range }
+      const { data } = await api.get('/api/store-monitor/overview', { params })
       setOverview(data)
       if (!selectedTag && data.stores?.length) setSelectedTag(data.stores[0].storeTag)
     } catch (e) {
       setError(e.response?.data?.error || e.message || 'Failed to fetch data')
     } finally { setLoading(false) }
-  }, [range, selectedTag])
+  }, [range, selectedTag, globalCustom])
 
-  useSmartPolling(loadOverview, 60_000, [range])
+  useSmartPolling(loadOverview, 60_000, [range, globalCustom])
 
   /* ── load problems ── */
   const loadProblems = useCallback(async () => {
@@ -437,13 +586,25 @@ export default function StoreMonitorPage() {
     if (!tag) return
     setHistLoading(true)
     try {
-      const { data } = await api.get(`/api/store-monitor/stores/${encodeURIComponent(tag)}/history`, {
-        params: { rangeSec: HISTORY_SECS[range] || 86400 },
-      })
+      let params
+      if (customHist.enabled && customHist.from) {
+        // Chart-level custom range takes highest priority
+        const fromSec = fromLocalInput(customHist.from)
+        const toSec   = customHist.to ? fromLocalInput(customHist.to) : Math.floor(Date.now() / 1000)
+        params = { from: fromSec, to: toSec }
+      } else if (globalCustom.enabled && globalCustom.from) {
+        // Fall back to global custom range
+        const fromSec = fromLocalInput(globalCustom.from)
+        const toSec   = globalCustom.to ? fromLocalInput(globalCustom.to) : Math.floor(Date.now() / 1000)
+        params = { from: fromSec, to: toSec }
+      } else {
+        params = { rangeSec: HISTORY_SECS[range] || 86400 }
+      }
+      const { data } = await api.get(`/api/store-monitor/stores/${encodeURIComponent(tag)}/history`, { params })
       setHistory(data)
     } catch { setHistory(null) }
     finally { setHistLoading(false) }
-  }, [range])
+  }, [range, customHist, globalCustom])
 
   useEffect(() => { if (tab === 'detail' && selectedTag) loadHistory(selectedTag) }, [tab, selectedTag, loadHistory])
 
@@ -601,22 +762,45 @@ export default function StoreMonitorPage() {
 
   const latChart = useMemo(() => {
     if (!netHealth.latRows.length) return null
-    return { data:{ labels:netHealth.latRows.map((r)=>r.target), datasets:[{ label:'Avg Latency (ms)', data:netHealth.latRows.map((r)=>+r.avgMs.toFixed(1)), backgroundColor:'#3b82f688' }] }, options:chartOpts(tc) }
+    return { data:{ labels:netHealth.latRows.map((r)=>r.target), datasets:[{ label:'Avg Latency (ms)', data:netHealth.latRows.map((r)=>+r.avgMs.toFixed(1)), backgroundColor:'#3b82f688', borderRadius:4 }] }, options:buildChartOptions(tc,'ms',{min:0}) }
   }, [netHealth, tc])
   const lossChart = useMemo(() => {
     if (!netHealth.lossRows.length) return null
-    return { data:{ labels:netHealth.lossRows.map((r)=>r.target), datasets:[{ label:'Packet Loss (%)', data:netHealth.lossRows.map((r)=>+r.lossPct.toFixed(1)), backgroundColor:'#f59e0b88' }] }, options:chartOpts(tc) }
+    return { data:{ labels:netHealth.lossRows.map((r)=>r.target), datasets:[{ label:'Packet Loss (%)', data:netHealth.lossRows.map((r)=>+r.lossPct.toFixed(1)), backgroundColor:'#f59e0b88', borderRadius:4 }] }, options:buildChartOptions(tc,'%',{min:0,max:100}) }
   }, [netHealth, tc])
   const histSeries = useMemo(() => {
     const raw = history?.series || []
     return applyBusinessHours(raw, bh)
   }, [history, bh])
 
-  const pingChart     = useMemo(() => buildTimeChart(histSeries.filter((s) => s.measurement === 'ping'   && s.field === 'average_response_ms'), tc, 'ms'), [histSeries, tc])
-  const lossHistChart = useMemo(() => buildTimeChart(histSeries.filter((s) => s.measurement === 'ping'   && s.field === 'packet_loss_pct'),    tc, '%'), [histSeries, tc])
-  const cpuChart      = useMemo(() => buildTimeChart(histSeries.filter((s) => s.measurement === 'system' && (s.field==='cpu_usage_pct'||s.field==='mem_used_pct')), tc, '%'), [histSeries, tc])
-  const speedChart    = useMemo(() => buildTimeChart(histSeries.filter((s) => s.measurement === 'speedtest'), tc, 'Mbps'), [histSeries, tc])
-  const connHistChart = useMemo(() => buildTimeChart(histSeries.filter((s) => s.measurement === 'connectivity'), tc), [histSeries, tc])
+  // Compute window anchors from the history response (so charts cover the FULL requested range)
+  const histWindowFrom = useMemo(() => history?.requestedFrom ? Math.floor(new Date(history.requestedFrom).getTime() / 1000) : undefined, [history])
+  const histWindowTo   = useMemo(() => history?.requestedTo   ? Math.floor(new Date(history.requestedTo  ).getTime() / 1000) : undefined, [history])
+
+  const pingChart = useMemo(() => buildTimeChart(
+    histSeries.filter((s) => s.measurement === 'ping' && s.field === 'average_response_ms'),
+    tc, 'ms', 350, { yMin: 0, windowFromSec: histWindowFrom, windowToSec: histWindowTo }
+  ), [histSeries, tc, histWindowFrom, histWindowTo])
+
+  const lossHistChart = useMemo(() => buildTimeChart(
+    histSeries.filter((s) => s.measurement === 'ping' && s.field === 'packet_loss_pct'),
+    tc, '%', 350, { yMin: 0, yMax: 100, windowFromSec: histWindowFrom, windowToSec: histWindowTo }
+  ), [histSeries, tc, histWindowFrom, histWindowTo])
+
+  const cpuChart = useMemo(() => buildTimeChart(
+    histSeries.filter((s) => s.measurement === 'system' && (s.field === 'cpu_usage_pct' || s.field === 'mem_used_pct')),
+    tc, '%', 350, { yMin: 0, yMax: 100, windowFromSec: histWindowFrom, windowToSec: histWindowTo }
+  ), [histSeries, tc, histWindowFrom, histWindowTo])
+
+  const speedChart = useMemo(() => buildTimeChart(
+    histSeries.filter((s) => s.measurement === 'speedtest'),
+    tc, 'Mbps', 350, { yMin: 0, agentIntervalSec: 600, windowFromSec: histWindowFrom, windowToSec: histWindowTo }
+  ), [histSeries, tc, histWindowFrom, histWindowTo])
+
+  const connHistChart = useMemo(() => buildTimeChart(
+    histSeries.filter((s) => s.measurement === 'connectivity'),
+    tc, '', 350, { yMin: 0, windowFromSec: histWindowFrom, windowToSec: histWindowTo }
+  ), [histSeries, tc, histWindowFrom, histWindowTo])
 
   const selected = stores.find((s) => s.storeTag === selectedTag)
 
@@ -766,27 +950,87 @@ export default function StoreMonitorPage() {
     <div className="sm">
       <style>{CSS}</style>
 
-      {/* ── header ── */}
-      <div className="sm-hd">
-        <div className="sm-hd-left">
-          <h1 className="sm-title">
-            <span className={`sm-dot ${meta?.connected?'sm-online':meta?.configured?'':'sm-offline'}`} style={meta?.configured&&!meta?.connected?{background:'var(--amber)'}:{}}/>
-            Store Network Monitor
+      {/* ── page header ── */}
+      <div style={{borderBottom:'1px solid var(--border)',paddingBottom:10,marginBottom:10}}>
+
+        {/* row 1: title + controls */}
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,flexWrap:'wrap'}}>
+          {/* left: title */}
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <span className={`sm-dot ${meta?.connected?'sm-online':meta?.configured?'':'sm-offline'}`}
+              style={meta?.configured&&!meta?.connected?{background:'var(--amber)'}:{}}/>
+            <h1 className="sm-title" style={{margin:0}}>Store Network Monitor</h1>
             {meta?.connected && <span className="sm-live">LIVE</span>}
-          </h1>
-          <p className="sm-sub">
+          </div>
+
+          {/* right: range controls */}
+          <div style={{display:'flex',alignItems:'center',gap:6,flexShrink:0}}>
+            <span style={{fontSize:10,color:'var(--text3)',fontFamily:'var(--mono)'}}>Range:</span>
+            {!globalCustom.enabled ? (
+              <select className="sm-select" value={range}
+                onChange={(e)=>{ if(e.target.value==='custom') setGlobalCustom(c=>({...c,enabled:true})); else setRange(e.target.value) }}
+                style={{minWidth:120}}>
+                {TIME_RANGES.map((r)=><option key={r.key} value={r.key}>{r.label}</option>)}
+                <option value="custom">📅 Custom…</option>
+              </select>
+            ) : (
+              <button className="sm-btn sm-sm" style={{color:'var(--accent)',borderColor:'rgba(79,126,245,.3)',background:'rgba(79,126,245,.1)'}}
+                onClick={()=>setGlobalCustom(c=>({...c,enabled:false}))}>
+                📅 Custom ✕
+              </button>
+            )}
+            <button className="sm-btn sm-sm" onClick={loadOverview} style={{gap:4}}>↻ Refresh</button>
+          </div>
+        </div>
+
+        {/* row 2: subtitle */}
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:4,flexWrap:'wrap',gap:6}}>
+          <p className="sm-sub" style={{margin:0}}>
             InfluxDB · {meta?.bucket||'store-monitoring'}
             {meta?.url ? ` · ${meta.url}` : ''}
-            {overview?.fetchedAt ? ` · updated ${relAge(overview.fetchedAt)} ago` : ''}
+            {globalCustom.enabled && globalCustom.from
+              ? <> · <strong style={{color:'var(--accent)'}}>{new Date(globalCustom.from).toLocaleString()} → {globalCustom.to ? new Date(globalCustom.to).toLocaleString() : 'now'}</strong></>
+              : ` · ${TIME_RANGES.find(r=>r.key===range)?.label||range}`}
+            {overview?.fetchedAt
+              ? <span style={{color:'var(--text3)'}}> · updated {relAge(overview.fetchedAt)} ago</span>
+              : null}
           </p>
+          {overview?.summary && (
+            <div style={{display:'flex',gap:10,alignItems:'center',fontSize:11,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+              <span>{overview.summary.total} stores</span>
+              <span style={{color:'#22c55e'}}>{overview.summary.online} online</span>
+              <span style={{color:'#ef4444'}}>{overview.summary.offline} offline</span>
+              {overview.summary.withIssues > 0 && <span style={{color:'#eab308'}}>⚠ {overview.summary.withIssues} issues</span>}
+            </div>
+          )}
         </div>
-        <div className="sm-hd-right">
-          <span style={{fontSize:11,color:'var(--text3)',fontFamily:'var(--mono)'}}>Range:</span>
-          <select className="sm-select" value={range} onChange={(e)=>setRange(e.target.value)}>
-            {TIME_RANGES.map((r)=><option key={r.key} value={r.key}>{r.label}</option>)}
-          </select>
-          <button className="sm-btn sm-sm" onClick={loadOverview}>↻ Refresh</button>
-        </div>
+
+        {/* row 3: custom date pickers (only when custom enabled) */}
+        {globalCustom.enabled && (
+          <div style={{marginTop:8,display:'flex',flexWrap:'wrap',alignItems:'center',gap:6,
+            padding:'8px 12px',background:'var(--bg2)',border:'1px solid rgba(79,126,245,.25)',
+            borderRadius:'var(--sm-r)',}}>
+            <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',whiteSpace:'nowrap'}}>FROM</span>
+            <input type="datetime-local" className="sm-input" style={{fontSize:11,padding:'4px 8px'}}
+              value={globalCustom.from} onChange={(e)=>setGlobalCustom(c=>({...c,from:e.target.value}))}/>
+            <span style={{color:'var(--text3)',fontSize:12}}>→</span>
+            <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',whiteSpace:'nowrap'}}>TO</span>
+            <input type="datetime-local" className="sm-input" style={{fontSize:11,padding:'4px 8px'}}
+              value={globalCustom.to} onChange={(e)=>setGlobalCustom(c=>({...c,to:e.target.value}))}/>
+            <div style={{display:'flex',gap:3,flexWrap:'wrap'}}>
+              {[['30m',30*60],['1h',3600],['3h',3*3600],['6h',6*3600],['12h',12*3600],['24h',86400],['3d',3*86400],['7d',7*86400],['30d',30*86400]].map(([lbl,sec])=>(
+                <button key={lbl} type="button" className="sm-btn sm-sm"
+                  style={{minWidth:34,justifyContent:'center',fontSize:10,padding:'2px 6px'}}
+                  onClick={()=>{
+                    const t=new Date(); const f=new Date(t.getTime()-sec*1000)
+                    setGlobalCustom(c=>({...c,enabled:true,from:toLocalInput(f),to:toLocalInput(t)}))
+                    setTimeout(loadOverview, 50)
+                  }}>{lbl}</button>
+              ))}
+            </div>
+            <button className="sm-btn sm-sm primary" style={{marginLeft:'auto'}} onClick={loadOverview}>Apply</button>
+          </div>
+        )}
       </div>
 
       {error && <div className="sm-err">⚠ {error}</div>}
@@ -1001,7 +1245,7 @@ export default function StoreMonitorPage() {
                         {s.activeSsid && s.activeSsid!=='n/a' ? s.activeSsid : '—'}
                       </td>
                       <td style={{fontFamily:'var(--mono)',fontSize:11}}>{s.gatewayIp||'—'}</td>
-                      <td>{s.gatewayVendor||'—'}</td>
+                      <td>{fmtVendor(s.gatewayVendor)}</td>
                       <td style={{fontFamily:'var(--mono)'}}>{fmtMs(ping?.avgMs)}</td>
                       <td style={{color: ping?.packetLossPct>10?'var(--red)':ping?.packetLossPct>0?'var(--amber)':'var(--green)'}}>{ping?.packetLossPct!=null?fmtPct(ping.packetLossPct):'—'}</td>
                       <td style={{color:s.cpuPct>90?'var(--red)':s.cpuPct>70?'var(--amber)':'var(--text)'}}>{fmtPct(s.cpuPct)}</td>
@@ -1050,7 +1294,7 @@ export default function StoreMonitorPage() {
                         <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--text3)'}}>{p.serial}</td>
                         <td>{p.message}</td>
                         <td><ConnPill state={p.connState}/></td>
-                        <td>{p.gatewayVendor||'—'}</td>
+                        <td>{fmtVendor(p.gatewayVendor)}</td>
                         <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--text3)'}}>{relAge(p.lastSeen)}</td>
                       </tr>
                     )
@@ -1253,172 +1497,174 @@ export default function StoreMonitorPage() {
               )
             })()}
 
-            <button className="sm-btn sm-sm" onClick={() => loadHistory(selectedTag)} disabled={histLoading}>
-              {histLoading ? '⏳' : '↻'} Refresh
+            <button className="sm-btn sm-sm" onClick={() => { loadHistory(selectedTag) }} disabled={histLoading}>
+              {histLoading ? '⏳' : '↻'} Refresh charts
             </button>
+            {!customHist.enabled && (
+              <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                Using global range: {TIME_RANGES.find(r=>r.key===range)?.label}
+              </span>
+            )}
           </div>
 
           {selected ? (
             <>
-              {/* ── KPI row (Zabbix-style snapshot header) ── */}
-              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:10,marginBottom:14}}>
+              {/* ── KPI banner: fixed 5-column grid, uniform card height ── */}
+              {(() => {
+                const p = primaryPing(selected)
+                const pingColor = !p ? '#64748b' : p.avgMs > 200 ? '#ef4444' : p.avgMs > 100 ? '#eab308' : '#22c55e'
+                const cpuColor  = selected.cpuPct  > 90 ? '#ef4444' : selected.cpuPct  > 70 ? '#eab308' : '#22c55e'
+                const memColor  = selected.memPct  > 90 ? '#ef4444' : selected.memPct  > 70 ? '#eab308' : '#22c55e'
+                const ifaceIsWifi = String(selected.activeInterface||'').toLowerCase().includes('wi')
 
-                {/* Status */}
-                <div className="sm-kpi" style={{borderLeft:`3px solid ${selected.online?'#22c55e':'#ef4444'}`}}>
-                  <div className="sm-kpi-label">Status</div>
-                  <div className="sm-kpi-val" style={{fontSize:16}}><OnlineBadge online={selected.online}/></div>
-                  <div className="sm-kpi-sub">Last seen {relAge(selected.lastSeen)} ago</div>
-                </div>
+                return (
+                  <div style={{display:'grid', gridTemplateColumns:'repeat(5,1fr)', gap:8, marginBottom:10}}>
 
-                {/* Group */}
-                <div className="sm-kpi" style={{borderLeft:`3px solid ${GROUP_MAP[selected.systemGroup]?.color||'#64748b'}`}}>
-                  <div className="sm-kpi-label">Group</div>
-                  <div style={{marginTop:4}}><GroupBadge group={selected.systemGroup}/></div>
-                  {selected.isFortinet && <div className="sm-kpi-sub">Fortinet / SD-WAN</div>}
-                </div>
-
-                {/* Interface & Connectivity */}
-                <div className="sm-kpi">
-                  <div className="sm-kpi-label">Interface</div>
-                  <div className="sm-kpi-val" style={{fontSize:13,marginTop:2}}>
-                    {selected.activeInterface
-                      ? <span style={{color:String(selected.activeInterface).toLowerCase().includes('wi')?'#06b6d4':'#22c55e'}}>
-                          {String(selected.activeInterface).toLowerCase().includes('wi')?'📶':'🔌'} {selected.activeInterface}
-                        </span>
-                      : '—'}
-                  </div>
-                  <div className="sm-kpi-sub"><ConnPill state={selected.connState}/></div>
-                  {selected.activeSsid && selected.activeSsid!=='n/a' &&
-                    <div className="sm-kpi-sub">SSID: {selected.activeSsid}</div>}
-                </div>
-
-                {/* Gateway */}
-                <div className="sm-kpi">
-                  <div className="sm-kpi-label">Gateway</div>
-                  <div className="sm-kpi-val" style={{fontSize:13}}>{selected.gatewayIp||'—'}</div>
-                  <div className="sm-kpi-sub">{selected.gatewayVendor||'Unknown vendor'}</div>
-                </div>
-
-                {/* Ping (8.8.8.8) */}
-                {(() => { const p = primaryPing(selected); return (
-                  <div className="sm-kpi" style={{borderLeft:`3px solid ${p?.avgMs>200?'#ef4444':p?.avgMs>100?'#eab308':'#22c55e'}`}}>
-                    <div className="sm-kpi-label">Ping 8.8.8.8</div>
-                    <div className="sm-kpi-val" style={{fontSize:18,color:p?.avgMs>200?'var(--red)':p?.avgMs>100?'var(--amber)':'var(--green)'}}>
-                      {fmtMs(p?.avgMs)}
+                    {/* 1 Status */}
+                    <div className="sm-kpi" style={{borderTop:`2px solid ${selected.online?'#22c55e':'#ef4444'}`}}>
+                      <div className="sm-kpi-label">Status</div>
+                      <div style={{marginTop:4,marginBottom:2}}><OnlineBadge online={selected.online}/></div>
+                      <div className="sm-kpi-sub">Last seen: {relAge(selected.lastSeen)}</div>
+                      <div className="sm-kpi-sub" style={{marginTop:2}}><GroupBadge group={selected.systemGroup}/></div>
                     </div>
-                    <div className="sm-kpi-sub">Loss {fmtPct(p?.packetLossPct)} · min {fmtMs(p?.minMs)} · max {fmtMs(p?.maxMs)}</div>
+
+                    {/* 2 Network */}
+                    <div className="sm-kpi" style={{borderTop:`2px solid ${CONN_COLORS[selected.connState]||'#64748b'}`}}>
+                      <div className="sm-kpi-label">Network</div>
+                      <div style={{marginTop:3,fontWeight:700,fontSize:12,color:ifaceIsWifi?'#06b6d4':'#22c55e'}}>
+                        {ifaceIsWifi?'📶':'🔌'} {selected.activeInterface||'—'}
+                      </div>
+                      <div style={{marginTop:3}}><ConnPill state={selected.connState}/></div>
+                      {selected.activeSsid && selected.activeSsid!=='n/a' &&
+                        <div className="sm-kpi-sub" style={{marginTop:3}}>SSID: {selected.activeSsid}</div>}
+                      <div className="sm-kpi-sub" style={{marginTop:3}}>GW: {selected.gatewayIp||'—'} · {fmtVendor(selected.gatewayVendor)}</div>
+                    </div>
+
+                    {/* 3 Ping */}
+                    <div className="sm-kpi" style={{borderTop:`2px solid ${pingColor}`}}>
+                      <div className="sm-kpi-label">Ping (8.8.8.8)</div>
+                      <div className="sm-kpi-val" style={{color:pingColor,marginTop:2}}>{fmtMs(p?.avgMs)}</div>
+                      <div className="sm-kpi-sub" style={{marginTop:4}}>Loss: {fmtPct(p?.packetLossPct)}</div>
+                      <div className="sm-kpi-sub">Min {fmtMs(p?.minMs)} · Max {fmtMs(p?.maxMs)}</div>
+                    </div>
+
+                    {/* 4 CPU + RAM combined */}
+                    <div className="sm-kpi" style={{borderTop:`2px solid ${cpuColor}`}}>
+                      <div className="sm-kpi-label">CPU / Memory</div>
+                      <div style={{display:'flex',alignItems:'baseline',gap:6,marginTop:2}}>
+                        <span className="sm-kpi-val" style={{color:cpuColor}}>{fmtPct(selected.cpuPct)}</span>
+                        <span style={{color:'var(--text3)',fontSize:10}}>/</span>
+                        <span className="sm-kpi-val" style={{color:memColor,fontSize:18}}>{fmtPct(selected.memPct)}</span>
+                      </div>
+                      <div style={{marginTop:5,display:'flex',flexDirection:'column',gap:3}}>
+                        <div style={{display:'flex',alignItems:'center',gap:6}}>
+                          <span style={{fontSize:9,fontFamily:'var(--mono)',color:'var(--text3)',width:26}}>CPU</span>
+                          <div style={{flex:1}}><HealthBar pct={selected.cpuPct||0}/></div>
+                        </div>
+                        <div style={{display:'flex',alignItems:'center',gap:6}}>
+                          <span style={{fontSize:9,fontFamily:'var(--mono)',color:'var(--text3)',width:26}}>RAM</span>
+                          <div style={{flex:1}}><HealthBar pct={selected.memPct||0}/></div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 5 Speedtest */}
+                    <div className="sm-kpi" style={{borderTop:'2px solid #3b82f6'}}>
+                      <div className="sm-kpi-label">Speedtest</div>
+                      <div style={{display:'flex',flexDirection:'column',gap:4,marginTop:3}}>
+                        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                          <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>↓ DL</span>
+                          <span style={{fontWeight:700,fontSize:16,color:'#3b82f6',fontFamily:'var(--mono)'}}>{fmtMbps(selected.downloadMbps)}</span>
+                        </div>
+                        <div style={{height:1,background:'var(--border)'}}/>
+                        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                          <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>↑ UL</span>
+                          <span style={{fontWeight:700,fontSize:16,color:'#8b5cf6',fontFamily:'var(--mono)'}}>{fmtMbps(selected.uploadMbps)}</span>
+                        </div>
+                      </div>
+                      <div className="sm-kpi-sub" style={{marginTop:4}}>Last speedtest</div>
+                    </div>
                   </div>
-                )})()}
+                )
+              })()}
 
-                {/* CPU */}
-                <div className="sm-kpi" style={{borderLeft:`3px solid ${selected.cpuPct>90?'#ef4444':selected.cpuPct>70?'#eab308':'#22c55e'}`}}>
-                  <div className="sm-kpi-label">CPU Usage</div>
-                  <div className="sm-kpi-val" style={{color:selected.cpuPct>90?'var(--red)':selected.cpuPct>70?'var(--amber)':'var(--green)'}}>{fmtPct(selected.cpuPct)}</div>
-                  <div style={{marginTop:4}}><HealthBar pct={selected.cpuPct||0}/></div>
-                </div>
-
-                {/* RAM */}
-                <div className="sm-kpi" style={{borderLeft:`3px solid ${selected.memPct>90?'#ef4444':selected.memPct>70?'#eab308':'#22c55e'}`}}>
-                  <div className="sm-kpi-label">Memory</div>
-                  <div className="sm-kpi-val" style={{color:selected.memPct>90?'var(--red)':selected.memPct>70?'var(--amber)':'var(--green)'}}>{fmtPct(selected.memPct)}</div>
-                  <div style={{marginTop:4}}><HealthBar pct={selected.memPct||0}/></div>
-                </div>
-
-                {/* Download */}
-                <div className="sm-kpi" style={{borderLeft:'3px solid #3b82f6'}}>
-                  <div className="sm-kpi-label">↓ Download</div>
-                  <div className="sm-kpi-val" style={{color:'#3b82f6'}}>{fmtMbps(selected.downloadMbps)}</div>
-                  <div className="sm-kpi-sub">Last speedtest</div>
-                </div>
-
-                {/* Upload */}
-                <div className="sm-kpi" style={{borderLeft:'3px solid #8b5cf6'}}>
-                  <div className="sm-kpi-label">↑ Upload</div>
-                  <div className="sm-kpi-val" style={{color:'#8b5cf6'}}>{fmtMbps(selected.uploadMbps)}</div>
-                  <div className="sm-kpi-sub">Last speedtest</div>
-                </div>
-              </div>
-
-              {/* ── Device snapshot (all metrics, Zabbix style) ── */}
+              {/* ── Device Snapshot: 2-column grouped table ── */}
               <div className="sm-tr sm-section-mb">
                 <div className="sm-tr-hd">
                   <span className="sm-tr-title">📋 Device Snapshot</span>
-                  <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>Hostname: {selected.hostname} · Serial: {selected.serial}</span>
-                </div>
-                <div className="sm-tr-body">
-                  <div className="sm-snapshot-grid">
-                    {/* identity */}
-                    {[
-                      ['Hostname',       selected.hostname,      ''],
-                      ['Serial',         selected.serial,        ''],
-                      ['Store Tag',      selected.storeTag,      ''],
-                      ['Interface',      selected.activeInterface||'—', ''],
-                      ['Connectivity',   CONN_LABELS[selected.connState]||selected.connState, CONN_COLORS[selected.connState]||''],
-                      ['SSID',           selected.activeSsid && selected.activeSsid!=='n/a' ? selected.activeSsid : '—', ''],
-                      ['Gateway IP',     selected.gatewayIp||'—', ''],
-                      ['Gateway Vendor', selected.gatewayVendor||'—', ''],
-                      ['Is Hotspot',     selected.isHotspot ? 'YES' : 'No', selected.isHotspot?'#f97316':''],
-                      ['Is Fortinet',    selected.isFortinet ? 'YES' : 'No', selected.isFortinet?'#8b5cf6':''],
-                    ].map(([k,v,c])=>(
-                      <div key={k} className="sm-snap-item">
-                        <span className="sm-snap-label">{k}</span>
-                        <span className="sm-snap-val" style={{color:c||'var(--text)',fontFamily:'var(--mono)',fontSize:12,textAlign:'right',maxWidth:'55%',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{v}</span>
-                      </div>
-                    ))}
-                    {/* ping per target */}
-                    {Object.entries(selected.ping||{}).flatMap(([t,p])=>[
-                      [`Ping ${t} avg`,   fmtMs(p.avgMs),          p.avgMs>200?'var(--red)':p.avgMs>100?'var(--amber)':'var(--green)'],
-                      [`Ping ${t} loss`,  fmtPct(p.packetLossPct), p.packetLossPct>10?'var(--red)':p.packetLossPct>0?'var(--amber)':'var(--green)'],
-                    ]).map(([k,v,c])=>(
-                      <div key={k} className="sm-snap-item">
-                        <span className="sm-snap-label">{k}</span>
-                        <span className="sm-snap-val" style={{color:c||'var(--text)'}}>{v}</span>
-                      </div>
-                    ))}
-                    {/* DNS */}
-                    {Object.entries(selected.dns||{}).map(([d,v])=>(
-                      <div key={`dns-${d}`} className="sm-snap-item">
-                        <span className="sm-snap-label">DNS {d}</span>
-                        <span className="sm-snap-val" style={{color:v.success?'var(--green)':'var(--red)'}}>{v.success?`OK ${fmtMs(v.responseMs)}`:'FAIL'}</span>
-                      </div>
-                    ))}
-                    {/* HTTP */}
-                    {Object.entries(selected.http||{}).map(([u,v])=>(
-                      <div key={`http-${u}`} className="sm-snap-item">
-                        <span className="sm-snap-label" style={{maxWidth:'55%',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{u.replace(/^https?:\/\//,'')}</span>
-                        <span className="sm-snap-val" style={{color:v.success?'var(--green)':'var(--red)'}}>{v.success?`${v.statusCode||200} ${fmtMs(v.responseMs)}`:'FAIL'}</span>
-                      </div>
-                    ))}
-                    {/* CPU / MEM / Speed */}
-                    {[
-                      ['CPU Usage',      fmtPct(selected.cpuPct),      selected.cpuPct>90?'var(--red)':selected.cpuPct>70?'var(--amber)':'var(--green)'],
-                      ['Memory Used',    fmtPct(selected.memPct),      selected.memPct>90?'var(--red)':selected.memPct>70?'var(--amber)':'var(--green)'],
-                      ['Download Speed', fmtMbps(selected.downloadMbps), '#3b82f6'],
-                      ['Upload Speed',   fmtMbps(selected.uploadMbps),   '#8b5cf6'],
-                    ].map(([k,v,c])=>(
-                      <div key={k} className="sm-snap-item">
-                        <span className="sm-snap-label">{k}</span>
-                        <span className="sm-snap-val" style={{color:c||'var(--text)'}}>{v}</span>
-                      </div>
-                    ))}
-                    {/* issues */}
-                    {selected.issues?.length>0 && (
-                      <div className="sm-snap-item" style={{gridColumn:'1/-1',background:'rgba(239,68,68,.07)',borderColor:'rgba(239,68,68,.25)'}}>
-                        <span className="sm-snap-label" style={{color:'var(--red)'}}>Active Issues</span>
-                        <span className="sm-snap-val" style={{color:'var(--red)'}}>{selected.issueCount} issue{selected.issueCount!==1?'s':''} · {selected.severity}</span>
-                      </div>
+                  <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                    {selected.hostname} · {selected.serial}
+                    {selected.issues?.length > 0 && (
+                      <span style={{marginLeft:10,color:SEV_COLORS[selected.severity],fontWeight:700}}>
+                        ● {selected.issueCount} issue{selected.issueCount!==1?'s':''} ({selected.severity})
+                      </span>
                     )}
+                  </span>
+                </div>
+                <div className="sm-tr-body" style={{padding:'10px 14px'}}>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'0 24px'}}>
+                    {/* ─ left column ─ */}
+                    <table style={{borderCollapse:'collapse',width:'100%',fontSize:12}}>
+                      <tbody>
+                        {[
+                          ['Hostname',    selected.hostname,   ''],
+                          ['Serial',      selected.serial,     'var(--text3)'],
+                          ['Group',       null, null, <GroupBadge key="g" group={selected.systemGroup}/>],
+                          ['Interface',   selected.activeInterface||'—', String(selected.activeInterface||'').toLowerCase().includes('wi')?'#06b6d4':'#22c55e'],
+                          ['Connectivity',null, null, <ConnPill key="c" state={selected.connState}/>],
+                          ['SSID',        selected.activeSsid&&selected.activeSsid!=='n/a'?selected.activeSsid:'—', ''],
+                          ['Gateway IP',  selected.gatewayIp||'—',  ''],
+                          ['Vendor',      fmtVendor(selected.gatewayVendor), ''],
+                          ['Is Hotspot',  selected.isHotspot?'YES':'No', selected.isHotspot?'#f97316':'var(--text3)'],
+                          ['Is Fortinet', selected.isFortinet?'YES':'No', selected.isFortinet?'#8b5cf6':'var(--text3)'],
+                        ].map(([k,v,c,node],i)=>(
+                          <tr key={k} style={{borderBottom:'1px solid var(--border)'}}>
+                            <td style={{padding:'5px 8px 5px 0',color:'var(--text3)',fontFamily:'var(--mono)',fontSize:10,whiteSpace:'nowrap',width:'40%'}}>{k}</td>
+                            <td style={{padding:'5px 0',fontWeight:600,color:c||'var(--text)'}}>{node||v}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {/* ─ right column ─ */}
+                    <table style={{borderCollapse:'collapse',width:'100%',fontSize:12}}>
+                      <tbody>
+                        {[
+                          ['CPU Usage',   fmtPct(selected.cpuPct),  selected.cpuPct>90?'var(--red)':selected.cpuPct>70?'var(--amber)':'var(--green)'],
+                          ['Memory',      fmtPct(selected.memPct),  selected.memPct>90?'var(--red)':selected.memPct>70?'var(--amber)':'var(--green)'],
+                          ['Download',    fmtMbps(selected.downloadMbps), '#3b82f6'],
+                          ['Upload',      fmtMbps(selected.uploadMbps),   '#8b5cf6'],
+                          ...Object.entries(selected.ping||{}).flatMap(([t,p])=>[
+                            [`Ping ${t}`,   fmtMs(p.avgMs),          p.avgMs>200?'var(--red)':p.avgMs>100?'var(--amber)':'var(--green)'],
+                            [`Loss ${t}`,   fmtPct(p.packetLossPct), p.packetLossPct>10?'var(--red)':p.packetLossPct>0?'var(--amber)':'var(--green)'],
+                          ]),
+                          ...Object.entries(selected.dns||{}).map(([d,v])=>[
+                            `DNS ${d}`, v.success?`OK · ${fmtMs(v.responseMs)}`:'FAIL', v.success?'var(--green)':'var(--red)',
+                          ]),
+                          ...Object.entries(selected.http||{}).map(([u,v])=>[
+                            u.replace(/^https?:\/\//,'').slice(0,28), v.success?`${v.statusCode||200} · ${fmtMs(v.responseMs)}`:'FAIL', v.success?'var(--green)':'var(--red)',
+                          ]),
+                        ].map(([k,v,c])=>(
+                          <tr key={k} style={{borderBottom:'1px solid var(--border)'}}>
+                            <td style={{padding:'5px 8px 5px 0',color:'var(--text3)',fontFamily:'var(--mono)',fontSize:10,whiteSpace:'nowrap',width:'40%'}}>{k}</td>
+                            <td style={{padding:'5px 0',fontWeight:600,color:c||'var(--text)',fontFamily:'var(--mono)'}}>{v}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
               </div>
 
-              {/* ── Issues list ── */}
-              {selected.issues?.length>0 && (
-                <div className="sm-tr sm-section-mb">
-                  <div className="sm-tr-hd"><span className="sm-tr-title">⚠ Active Issues — {selected.issues.length}</span></div>
-                  <div className="sm-tr-body">
-                    {selected.issues.map((issue,i)=>(
-                      <div key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'7px 0',borderBottom:'1px solid var(--border)'}}>
+              {/* ── Active Issues (only shown when issues exist) ── */}
+              {selected.issues?.length > 0 && (
+                <div className="sm-tr sm-section-mb" style={{borderLeft:`3px solid ${SEV_COLORS[selected.severity]||'#64748b'}`}}>
+                  <div className="sm-tr-hd">
+                    <span className="sm-tr-title">⚠ Active Issues ({selected.issues.length})</span>
+                    <span style={{fontSize:10,fontFamily:'var(--mono)',color:SEV_COLORS[selected.severity]}}>{selected.severity.toUpperCase()}</span>
+                  </div>
+                  <div className="sm-tr-body" style={{padding:'6px 14px'}}>
+                    {selected.issues.map((issue, i) => (
+                      <div key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'6px 0',borderBottom:'1px solid var(--border)'}}>
                         <SevBadge sev={issue.severity}/>
                         <span style={{fontSize:12,flex:1}}>{issue.message}</span>
                         <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>{issue.code}</span>
@@ -1428,97 +1674,173 @@ export default function StoreMonitorPage() {
                 </div>
               )}
 
-              {/* ── Business Hours + time-range control ── */}
-              <div className="sm-bh-row">
-                <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:'var(--text2)',cursor:'pointer',fontWeight:700}}>
-                  <input type="checkbox" checked={bh.enabled} onChange={(e)=>setBh((b)=>({...b,enabled:e.target.checked}))}/>
-                  Business Hours Filter
-                </label>
-                {bh.enabled && (
-                  <>
-                    <div style={{display:'flex',alignItems:'center',gap:4}}>
-                      {BH_DAYS.map((d)=>(
-                        <button key={d.val} type="button"
-                          className={`sm-bh-dayBtn${bh.weekdays.includes(d.val)?' on':''}`}
-                          onClick={()=>setBh((b)=>({...b,weekdays:b.weekdays.includes(d.val)?b.weekdays.filter((x)=>x!==d.val):[...b.weekdays,d.val].sort()}))}>
-                          {d.label}
+              {/* ── Time Range + Custom picker + Business Hours ── */}
+              <div style={{background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:'var(--sm-r-lg)',padding:'10px 14px',marginBottom:10,display:'flex',flexDirection:'column',gap:10}}>
+
+                {/* row 1: preset + custom toggle + data info */}
+                <div style={{display:'flex',flexWrap:'wrap',alignItems:'center',gap:8}}>
+                  <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.06em',whiteSpace:'nowrap'}}>Chart range:</span>
+                  <label style={{display:'flex',alignItems:'center',gap:5,fontSize:11,color:'var(--text2)',cursor:'pointer'}}>
+                    <input type="radio" name="histRangeMode" checked={!customHist.enabled}
+                      onChange={()=>setCustomHist((c)=>({...c,enabled:false}))}/>
+                    Global ({TIME_RANGES.find(r=>r.key===range)?.label||range})
+                  </label>
+                  <label style={{display:'flex',alignItems:'center',gap:5,fontSize:11,color:'var(--text2)',cursor:'pointer'}}>
+                    <input type="radio" name="histRangeMode" checked={customHist.enabled}
+                      onChange={()=>setCustomHist((c)=>({...c,enabled:true}))}/>
+                    Custom range
+                  </label>
+
+                  {/* data availability info */}
+                  {history && (
+                    <span style={{marginLeft:'auto',fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',textAlign:'right'}}>
+                      {history.pointCount > 0
+                        ? <>Data: {new Date(history.dataFrom).toLocaleString()} → {new Date(history.dataTo).toLocaleString()} · {history.pointCount} pts</>
+                        : <span style={{color:'var(--amber)'}}>⚠ No data in selected range</span>}
+                    </span>
+                  )}
+                </div>
+
+                {/* row 2: custom date-time pickers (only when custom enabled) */}
+                {customHist.enabled && (
+                  <div style={{display:'flex',flexWrap:'wrap',alignItems:'center',gap:8}}>
+                    <div style={{display:'flex',alignItems:'center',gap:6}}>
+                      <span style={{fontSize:10,color:'var(--text3)',fontFamily:'var(--mono)'}}>FROM</span>
+                      <input type="datetime-local" className="sm-input" value={customHist.from}
+                        onChange={(e)=>setCustomHist((c)=>({...c,from:e.target.value}))}
+                        style={{fontSize:11,padding:'4px 8px'}}/>
+                    </div>
+                    <div style={{display:'flex',alignItems:'center',gap:6}}>
+                      <span style={{fontSize:10,color:'var(--text3)',fontFamily:'var(--mono)'}}>TO</span>
+                      <input type="datetime-local" className="sm-input" value={customHist.to}
+                        onChange={(e)=>setCustomHist((c)=>({...c,to:e.target.value}))}
+                        style={{fontSize:11,padding:'4px 8px'}}/>
+                    </div>
+                    <button className="sm-btn sm-sm primary" onClick={()=>loadHistory(selectedTag)} disabled={histLoading}>
+                      {histLoading?'⏳':'▶'} Apply
+                    </button>
+                    {/* quick presets */}
+                    <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
+                      {[
+                        ['30m',30*60],['1h',3600],['3h',3*3600],['6h',6*3600],
+                        ['12h',12*3600],['24h',86400],['3d',3*86400],['7d',7*86400],
+                      ].map(([lbl,sec])=>(
+                        <button key={lbl} type="button" className="sm-btn sm-sm"
+                          style={{minWidth:36,justifyContent:'center'}}
+                          onClick={()=>{
+                            const now2 = new Date()
+                            const from2 = new Date(now2.getTime()-sec*1000)
+                            setCustomHist((c)=>({...c,enabled:true,from:toLocalInput(from2),to:toLocalInput(now2)}))
+                          }}>
+                          {lbl}
                         </button>
                       ))}
                     </div>
-                    <div style={{display:'flex',alignItems:'center',gap:6,fontSize:12}}>
-                      <span style={{color:'var(--text3)'}}>From</span>
-                      <input type="number" min={0} max={23} value={bh.startHour} className="sm-input"
-                        style={{width:54}} onChange={(e)=>setBh((b)=>({...b,startHour:+e.target.value}))}/>
-                      <span style={{color:'var(--text3)'}}>:00 to</span>
-                      <input type="number" min={1} max={24} value={bh.endHour} className="sm-input"
-                        style={{width:54}} onChange={(e)=>setBh((b)=>({...b,endHour:+e.target.value}))}/>
-                      <span style={{color:'var(--text3)'}}>:00</span>
-                    </div>
-                    <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',marginLeft:'auto'}}>
-                      Charts show only selected hours
-                    </span>
-                  </>
+                  </div>
                 )}
+
+                {/* row 3: business hours filter */}
+                <div style={{display:'flex',flexWrap:'wrap',alignItems:'center',gap:8,borderTop:'1px solid var(--border)',paddingTop:8}}>
+                  <label style={{display:'flex',alignItems:'center',gap:5,fontSize:11,color:'var(--text2)',cursor:'pointer',fontWeight:600}}>
+                    <input type="checkbox" checked={bh.enabled} onChange={(e)=>setBh((b)=>({...b,enabled:e.target.checked}))}/>
+                    Business Hours only
+                  </label>
+                  {bh.enabled && (
+                    <>
+                      <div style={{display:'flex',alignItems:'center',gap:3}}>
+                        {BH_DAYS.map((d)=>(
+                          <button key={d.val} type="button"
+                            className={`sm-bh-dayBtn${bh.weekdays.includes(d.val)?' on':''}`}
+                            onClick={()=>setBh((b)=>({...b,weekdays:b.weekdays.includes(d.val)?b.weekdays.filter((x)=>x!==d.val):[...b.weekdays,d.val].sort()}))}>
+                            {d.label}
+                          </button>
+                        ))}
+                      </div>
+                      <div style={{display:'flex',alignItems:'center',gap:5,fontSize:11}}>
+                        <input type="number" min={0} max={23} value={bh.startHour} className="sm-input"
+                          style={{width:48,textAlign:'center'}} onChange={(e)=>setBh((b)=>({...b,startHour:+e.target.value}))}/>
+                        <span style={{color:'var(--text3)'}}>:00 — </span>
+                        <input type="number" min={1} max={24} value={bh.endHour} className="sm-input"
+                          style={{width:48,textAlign:'center'}} onChange={(e)=>setBh((b)=>({...b,endHour:+e.target.value}))}/>
+                        <span style={{color:'var(--text3)'}}>:00</span>
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
 
               {/* ── Periodic charts ── */}
               <div style={{display:'flex',flexDirection:'column',gap:12}}>
 
-                {/* Ping latency */}
-                <div className="sm-tr">
-                  <div className="sm-tr-hd">
-                    <span className="sm-tr-title">📡 Ping Latency over Time</span>
-                    <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>All targets · ms</span>
+                {/* ── chart window info ── */}
+                {history && (
+                  <div style={{display:'flex',flexWrap:'wrap',alignItems:'center',gap:12,padding:'8px 12px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:'var(--sm-r)',fontSize:11,fontFamily:'var(--mono)'}}>
+                    <span style={{color:'var(--text3)'}}>
+                      📅 Requested: <strong style={{color:'var(--text2)'}}>
+                        {new Date(history.requestedFrom).toLocaleString()} → {new Date(history.requestedTo).toLocaleString()}
+                      </strong>
+                    </span>
+                    {history.pointCount > 0 ? (
+                      <span style={{color:'var(--text3)'}}>
+                        📊 Data available: <strong style={{color:'var(--green)'}}>
+                          {new Date(history.dataFrom).toLocaleString()} → {new Date(history.dataTo).toLocaleString()}
+                        </strong>
+                        <span style={{marginLeft:8,color:'var(--text3)'}}>{history.pointCount} pts</span>
+                      </span>
+                    ) : (
+                      <span style={{color:'var(--amber)'}}>
+                        ⚠ No data in this range — device may have been offline
+                      </span>
+                    )}
+                    {bh.enabled && <span style={{color:'var(--amber)',marginLeft:'auto'}}>● BH filter active</span>}
                   </div>
-                  <div className="sm-tr-body sm-chart-tall">
-                    {histLoading ? <div className="sm-empty">Loading…</div>
-                      : pingChart
-                        ? <Line data={pingChart.data} options={chartOpts(tc,{ plugins:{ legend:{ position:'top', labels:{color:tc.text2,boxWidth:10,font:{size:10}} } } })}/>
-                        : <div className="sm-empty">No ping history for this range</div>}
-                  </div>
-                </div>
+                )}
 
-                {/* Packet loss */}
-                <div className="sm-tr">
-                  <div className="sm-tr-hd">
-                    <span className="sm-tr-title">📉 Packet Loss over Time</span>
-                    <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>All targets · %</span>
+                {/* ── helper: render a Line chart card ── */}
+                {[
+                  {
+                    title: '📡 Ping Latency', sub: 'ms — gaps = device offline',
+                    chart: pingChart,
+                    empty: 'No ping data in this range',
+                    opts:  buildChartOptions(tc, 'ms', { min: 0 }),
+                  },
+                  {
+                    title: '📉 Packet Loss', sub: '% — 0 is good · gaps = device offline',
+                    chart: lossHistChart,
+                    empty: 'No packet-loss data in this range',
+                    opts:  buildChartOptions(tc, '%', { min: 0, max: 100 }),
+                  },
+                  {
+                    title: '🖥 CPU & Memory', sub: '% used',
+                    chart: cpuChart,
+                    empty: 'No CPU/memory data in this range',
+                    opts:  buildChartOptions(tc, '%', { min: 0, max: 100 }),
+                  },
+                  {
+                    title: '⚡ Speedtest', sub: 'Mbps · runs every ~10 min · gaps = no test run',
+                    chart: speedChart,
+                    empty: 'No speedtest data in this range',
+                    opts:  buildChartOptions(tc, 'Mbps', { min: 0 }),
+                  },
+                ].map(({ title, sub, chart, empty, opts }) => (
+                  <div key={title} className="sm-tr">
+                    <div className="sm-tr-hd">
+                      <span className="sm-tr-title">{title}</span>
+                      <span style={{fontSize:9.5,fontFamily:'var(--mono)',color:'var(--text3)'}}>{sub}</span>
+                    </div>
+                    <div className="sm-tr-body sm-chart-tall">
+                      {histLoading
+                        ? <div className="sm-empty">Loading…</div>
+                        : chart
+                          ? <Line data={chart.data}
+                              options={buildChartOptions(tc, chart.yLabel, chart.scaleOpts || {})}/>
+                          : <div className="sm-empty" style={{padding:24}}>
+                              <div style={{fontSize:28,marginBottom:8}}>—</div>
+                              <div>{empty}</div>
+                            </div>}
+                    </div>
                   </div>
-                  <div className="sm-tr-body sm-chart-tall">
-                    {histLoading ? <div className="sm-empty">Loading…</div>
-                      : lossHistChart
-                        ? <Line data={lossHistChart.data} options={chartOpts(tc,{})}/>
-                        : <div className="sm-empty">No loss history</div>}
-                  </div>
-                </div>
-
-                {/* CPU & Memory */}
-                <div className="sm-tr">
-                  <div className="sm-tr-hd">
-                    <span className="sm-tr-title">🖥 CPU &amp; Memory over Time</span>
-                    <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>%</span>
-                  </div>
-                  <div className="sm-tr-body sm-chart-tall">
-                    {histLoading ? <div className="sm-empty">Loading…</div>
-                      : cpuChart
-                        ? <Line data={cpuChart.data} options={chartOpts(tc,{ scales:{ y:{ min:0, max:100, ticks:{color:tc.text3}, grid:{color:tc.border} }, x:{ ticks:{color:tc.text3,maxTicksLimit:8}, grid:{color:tc.border} } } })}/>
-                        : <div className="sm-empty">No CPU/memory history</div>}
-                  </div>
-                </div>
-
-                {/* Speedtest */}
-                <div className="sm-tr">
-                  <div className="sm-tr-hd">
-                    <span className="sm-tr-title">⚡ Speedtest History</span>
-                    <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>Download &amp; Upload · Mbps</span>
-                  </div>
-                  <div className="sm-tr-body sm-chart-tall">
-                    {histLoading ? <div className="sm-empty">Loading…</div>
-                      : speedChart
-                        ? <Line data={speedChart.data} options={chartOpts(tc,{})}/>
-                        : <div className="sm-empty">No speedtest history</div>}
-                  </div>
-                </div>
+                ))}
 
                 {/* Ping targets current snapshot table */}
                 <div className="sm-tr">
@@ -1567,9 +1889,14 @@ export default function StoreMonitorPage() {
             <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
               <div style={{display:'flex',flexDirection:'column',gap:3}}>
                 <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.05em'}}>Time range</span>
-                <select className="sm-select" value={range} onChange={(e)=>setRange(e.target.value)}>
-                  {TIME_RANGES.map((r)=><option key={r.key} value={r.key}>{r.label}</option>)}
-                </select>
+                {globalCustom.enabled
+                  ? <span style={{padding:'5px 9px',background:'rgba(79,126,245,.12)',border:'1px solid rgba(79,126,245,.25)',borderRadius:7,fontSize:11,fontFamily:'var(--mono)',color:'var(--accent)'}}>
+                      Custom: {globalCustom.from?.slice(0,16)} → {(globalCustom.to||'').slice(0,16)||'now'}
+                    </span>
+                  : <select className="sm-select" value={range} onChange={(e)=>setRange(e.target.value)}>
+                      {TIME_RANGES.map((r)=><option key={r.key} value={r.key}>{r.label}</option>)}
+                    </select>
+                }
               </div>
               <div style={{display:'flex',flexDirection:'column',gap:3}}>
                 <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.05em'}}>Group</span>
