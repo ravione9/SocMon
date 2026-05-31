@@ -866,7 +866,7 @@ export default function StoreMonitorPage() {
 
   function blankRule() {
     return { name:'', description:'', enabled:true, group:'all', severity:'high',
-      evaluationRange:'-1h', cooldownMinutes:30,
+      cooldownMinutes:30,
       schedule:{ enabled:false, fromHour:9, toHour:18, weekdays:[1,2,3,4,5] },
       condition:{ metric:'offline', operator:'gt', threshold:0, target:'' }, channels:[] }
   }
@@ -2112,7 +2112,7 @@ export default function StoreMonitorPage() {
                 <div className="sm-tr-body" style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(180px,1fr))',gap:'6px 20px',fontSize:12}}>
                   <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>CONDITION </span><br/>{rule.condition.metric} {BOOLEAN_METRICS.has(rule.condition.metric)?'=true':`${rule.condition.operator||'>'} ${rule.condition.threshold}`}</div>
                   <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>GROUP </span><br/>{rule.group}</div>
-                  <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>EVAL RANGE </span><br/>{rule.evaluationRange||'-1h'}</div>
+                  <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>MODE </span><br/><span style={{color:'var(--green)',fontSize:11}}>Real-time</span></div>
                   <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>COOLDOWN </span><br/>{rule.cooldownMinutes} min</div>
                   <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>TRIGGER SCHEDULE </span><br/>
                     {rule.schedule?.enabled
@@ -2175,22 +2175,6 @@ export default function StoreMonitorPage() {
                     onChange={(e)=>setAlertForm((f)=>({...f,cooldownMinutes:+e.target.value}))}/>
                 </div>
 
-              {/* Evaluation range — full width below the 2-col row */}
-              </div>
-              <div className="sm-form-field">
-                <label className="sm-form-label">Evaluation Time Range</label>
-                <div style={{display:'flex',alignItems:'center',gap:8}}>
-                  <select className="sm-select" style={{flex:1}} value={alertForm.evaluationRange||'-1h'}
-                    onChange={(e)=>setAlertForm((f)=>({...f,evaluationRange:e.target.value}))}>
-                    {EVAL_RANGES.map((r)=><option key={r.key} value={r.key}>{r.label}</option>)}
-                  </select>
-                  <span style={{fontSize:11,color:'var(--text3)',flex:2,lineHeight:1.4}}>
-                    Metrics are averaged/last-sampled over this window when checking the condition.
-                    E.g. "1 hour" checks the latest value within the past hour.
-                  </span>
-                </div>
-              </div>
-              <div className="sm-form-row" style={{display:'none'}}>{/* spacer to maintain layout */}
               </div>
 
               {/* condition */}

@@ -18,8 +18,7 @@ const storeAlertRuleSchema = new mongoose.Schema({
     target:    { type: String, default: '' },
   },
   severity:  { type: String, enum: ['critical', 'high', 'warning'], default: 'high' },
-  /** Flux range for snapshot evaluation e.g. '-15m', '-1h', '-6h', '-24h' */
-  evaluationRange: { type: String, default: '-1h' },
+  // evaluationRange removed — alerts always evaluate against real-time data (last 15 min)
   /**
    * Trigger schedule — when this alert is ALLOWED to fire.
    * If enabled, notifications are suppressed outside the defined window.
