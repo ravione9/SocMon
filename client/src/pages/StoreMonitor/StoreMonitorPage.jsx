@@ -97,13 +97,27 @@ const METRIC_OPTS = [
 const BOOLEAN_METRICS = new Set(['offline', 'isp_down', 'hotspot', 'dns_fail', 'http_fail'])
 
 /* ─── helpers ────────────────────────────────────── */
-function deriveGroup(hostname, vendor, isFortinet) {
+/**
+ * Returns ALL groups a device belongs to.
+ * A device with RP prefix AND Fortinet vendor → ['RP Group', 'SD-WAN Group']
+ * Rules are ADDITIVE — Fortinet never replaces the hostname-based group.
+ */
+function deriveGroups(hostname, vendor, isFortinet) {
   const h = String(hostname || '').toUpperCase()
   const v = String(vendor || '').toLowerCase()
-  if (isFortinet || v.includes('fortinet')) return 'SD-WAN Group'
-  if (h.startsWith('RP')) return 'RP Group'
-  if (h.startsWith('LK')) return 'POS System Group'
-  return 'General Group'
+  const groups = []
+  // Hostname-based group (primary identity)
+  if (h.startsWith('RP')) groups.push('RP Group')
+  else if (h.startsWith('LK')) groups.push('POS System Group')
+  // Fortinet / SD-WAN is ADDITIVE — a device can belong to both RP Group and SD-WAN Group
+  if (isFortinet || v.includes('fortinet') || v.includes('fortigate')) groups.push('SD-WAN Group')
+  // If nothing matched fall back to General
+  if (groups.length === 0) groups.push('General Group')
+  return groups
+}
+/** Convenience: primary group (first in list, used for single-badge contexts) */
+function deriveGroup(hostname, vendor, isFortinet) {
+  return deriveGroups(hostname, vendor, isFortinet)[0]
 }
 
 function relAge(iso) {
@@ -617,7 +631,10 @@ export default function StoreMonitorPage() {
 
   /* ── derived stores with group ── */
   const stores = useMemo(
-    () => (overview?.stores || []).map((s) => ({ ...s, systemGroup: deriveGroup(s.hostname, s.gatewayVendor, s.isFortinet) })),
+    () => (overview?.stores || []).map((s) => {
+      const groups = deriveGroups(s.hostname, s.gatewayVendor, s.isFortinet)
+      return { ...s, systemGroups: groups, systemGroup: groups[0] }
+    }),
     [overview?.stores],
   )
 
@@ -630,7 +647,7 @@ export default function StoreMonitorPage() {
     const q = search.trim().toLowerCase()
     if (q)                out = out.filter((s) => [s.hostname, s.serial, s.gatewayIp, s.storeTag, s.activeSsid].some((v) => String(v || '').toLowerCase().includes(q)))
     if (activeConnFilter) out = out.filter((s) => s.connState === activeConnFilter)
-    if (activeGroupFilter)out = out.filter((s) => s.systemGroup === activeGroupFilter)
+    if (activeGroupFilter)out = out.filter((s) => (s.systemGroups||[s.systemGroup]).includes(activeGroupFilter))
     if (statusFilter)     out = out.filter((s) => statusFilter === 'online' ? s.online : !s.online)
     if (ifaceFilter)      out = out.filter((s) => {
       const iface = String(s.activeInterface || '').toLowerCase()
@@ -654,17 +671,20 @@ export default function StoreMonitorPage() {
     setTabRaw('stores')
   }, [setTabRaw])
 
-  /* ── group summary ── */
+  /* ── group summary — a store counted in each group it belongs to ── */
   const groupSummary = useMemo(() => {
     const map = {}
     for (const g of GROUP_DEFS) map[g.id] = { ...g, total: 0, online: 0, issues: 0, avgPingMs: 0, pingCount: 0 }
     for (const s of stores) {
-      const g = map[s.systemGroup] || map['General Group']
-      g.total++
-      if (s.online) g.online++
-      if ((s.issueCount || 0) > 0) g.issues++
-      const p = primaryPing(s)
-      if (p?.avgMs != null && Number.isFinite(p.avgMs)) { g.avgPingMs += p.avgMs; g.pingCount++ }
+      const memberGroups = s.systemGroups || [s.systemGroup || 'General Group']
+      for (const gid of memberGroups) {
+        const g = map[gid] || map['General Group']
+        g.total++
+        if (s.online) g.online++
+        if ((s.issueCount || 0) > 0) g.issues++
+        const p = primaryPing(s)
+        if (p?.avgMs != null && Number.isFinite(p.avgMs)) { g.avgPingMs += p.avgMs; g.pingCount++ }
+      }
     }
     return GROUP_DEFS.map((gd) => {
       const g = map[gd.id]
@@ -1240,7 +1260,11 @@ export default function StoreMonitorPage() {
                     <tr key={s.storeTag} className="clickable" onClick={()=>{setSelectedTag(s.storeTag);setTab('detail')}}>
                       <td><OnlineBadge online={s.online}/></td>
                       <td style={{fontWeight:600}}>{s.hostname}</td>
-                      <td><GroupBadge group={s.systemGroup}/></td>
+                      <td>
+                        <div style={{display:'flex',flexWrap:'wrap',gap:3}}>
+                          {(s.systemGroups||[s.systemGroup]).map((g)=><GroupBadge key={g} group={g}/>)}
+                        </div>
+                      </td>
                       <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--text3)'}}>{s.serial}</td>
                       <td>
                         {s.activeInterface
@@ -1295,14 +1319,14 @@ export default function StoreMonitorPage() {
               <thead><tr><th>Severity</th><th>Hostname</th><th>Group</th><th>Serial</th><th>Problem</th><th>Connectivity</th><th>Vendor</th><th>Last seen</th></tr></thead>
               <tbody>
                 {problems
-                  .filter((p)=>!groupFilter||deriveGroup(p.hostname,p.gatewayVendor,false)===groupFilter)
+                  .filter((p)=>!groupFilter||deriveGroups(p.hostname,p.gatewayVendor,false).includes(groupFilter))
                   .map((p,i)=>{
-                    const grp = deriveGroup(p.hostname,p.gatewayVendor,false)
+                    const grps = deriveGroups(p.hostname,p.gatewayVendor,false)
                     return (
                       <tr key={`${p.storeTag}-${p.code}-${i}`} className="clickable" onClick={()=>{setSelectedTag(p.storeTag);setTab('detail')}}>
                         <td><SevBadge sev={p.severity}/></td>
                         <td style={{fontWeight:600}}>{p.hostname}</td>
-                        <td><GroupBadge group={grp}/></td>
+                        <td><div style={{display:'flex',flexWrap:'wrap',gap:3}}>{grps.map((g)=><GroupBadge key={g} group={g}/>)}</div></td>
                         <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--text3)'}}>{p.serial}</td>
                         <td>{p.message}</td>
                         <td><ConnPill state={p.connState}/></td>
@@ -1487,7 +1511,7 @@ export default function StoreMonitorPage() {
                           >
                             <span style={{ color: s.online ? '#22c55e' : '#ef4444', fontSize: 10, flexShrink: 0 }}>●</span>
                             <span className="sm-picker-item-name">{s.hostname} — {s.serial}</span>
-                            <span className="sm-picker-item-meta">{s.systemGroup}</span>
+                            <span className="sm-picker-item-meta">{(s.systemGroups||[s.systemGroup]).map(g=>g.replace(' Group','')).join(' · ')}</span>
                             {s.issueCount > 0 && (
                               <span style={{ background: `${SEV_COLORS[s.severity] || '#64748b'}22`, color: SEV_COLORS[s.severity] || '#64748b', borderRadius: 4, padding: '1px 5px', fontSize: 10, fontWeight: 700, flexShrink: 0 }}>
                                 {s.issueCount} issue{s.issueCount !== 1 ? 's' : ''}
@@ -1537,7 +1561,9 @@ export default function StoreMonitorPage() {
                       <div className="sm-kpi-label">Status</div>
                       <div style={{marginTop:4,marginBottom:2}}><OnlineBadge online={selected.online}/></div>
                       <div className="sm-kpi-sub">Last seen: {relAge(selected.lastSeen)}</div>
-                      <div className="sm-kpi-sub" style={{marginTop:2}}><GroupBadge group={selected.systemGroup}/></div>
+                      <div style={{marginTop:3,display:'flex',flexWrap:'wrap',gap:3}}>
+                        {(selected.systemGroups||[selected.systemGroup]).map((g)=><GroupBadge key={g} group={g}/>)}
+                      </div>
                     </div>
 
                     {/* 2 Network */}
@@ -1621,7 +1647,7 @@ export default function StoreMonitorPage() {
                         {[
                           ['Hostname',    selected.hostname,   ''],
                           ['Serial',      selected.serial,     'var(--text3)'],
-                          ['Group',       null, null, <GroupBadge key="g" group={selected.systemGroup}/>],
+                          ['Group', null, null, <span key="grps" style={{display:'flex',flexWrap:'wrap',gap:3}}>{(selected.systemGroups||[selected.systemGroup]).map((g)=><GroupBadge key={g} group={g}/>)}</span>],
                           ['Interface',   selected.activeInterface||'—', String(selected.activeInterface||'').toLowerCase().includes('wi')?'#06b6d4':'#22c55e'],
                           ['Connectivity',null, null, <ConnPill key="c" state={selected.connState}/>],
                           ['SSID',        selected.activeSsid&&selected.activeSsid!=='n/a'?selected.activeSsid:'—', ''],
@@ -1915,7 +1941,7 @@ export default function StoreMonitorPage() {
                 <select className="sm-select" value={reportGroup} onChange={(e)=>setReportGroup(e.target.value)}>
                   <option value="all">All Groups ({stores.length} stores)</option>
                   {GROUP_DEFS.map((g)=>{
-                    const cnt = stores.filter(s=>s.systemGroup===g.id).length
+                    const cnt = stores.filter(s=>(s.systemGroups||[s.systemGroup]).includes(g.id)).length
                     return <option key={g.id} value={g.id}>{g.icon} {g.id} ({cnt})</option>
                   })}
                 </select>
@@ -1931,7 +1957,7 @@ export default function StoreMonitorPage() {
           {/* active filter banner */}
           {reportGroup !== 'all' && (() => {
             const g = GROUP_MAP[reportGroup]
-            const cnt = stores.filter(s=>s.systemGroup===reportGroup).length
+            const cnt = stores.filter(s=>(s.systemGroups||[s.systemGroup]).includes(reportGroup)).length
             return (
               <div className="sm-info" style={{marginBottom:12,padding:'8px 14px',fontSize:12}}>
                 {g?.icon} Reporting on <strong style={{color:g?.color}}>{reportGroup}</strong> only
@@ -1942,7 +1968,7 @@ export default function StoreMonitorPage() {
 
           {/* compute report-scoped stores */}
           {(()=>{
-            const rStores = reportGroup==='all' ? stores : stores.filter(s=>s.systemGroup===reportGroup)
+            const rStores = reportGroup==='all' ? stores : stores.filter(s=>(s.systemGroups||[s.systemGroup]).includes(reportGroup))
             const connBk  = overview?.summary?.connBreakdown || {}
             const rConnBk = reportGroup==='all' ? connBk : Object.fromEntries(
               Object.entries(connBk).map(([k])=>[k, rStores.filter(s=>s.connState===k).length]).filter(([,v])=>v>0)
@@ -2042,7 +2068,7 @@ export default function StoreMonitorPage() {
 
           {/* issue detail table for quick view */}
           {(()=>{
-            const rStores2 = reportGroup==='all' ? stores : stores.filter(s=>s.systemGroup===reportGroup)
+            const rStores2 = reportGroup==='all' ? stores : stores.filter(s=>(s.systemGroups||[s.systemGroup]).includes(reportGroup))
             return (
           <div className="sm-tr" style={{marginTop:16}}>
             <div className="sm-tr-hd">
@@ -2060,7 +2086,7 @@ export default function StoreMonitorPage() {
                       <tr key={`${s.storeTag}-${iss.code}-${i}`} className="clickable" onClick={()=>{setSelectedTag(s.storeTag);setTab('detail')}}>
                         <td><SevBadge sev={iss.severity}/></td>
                         <td style={{fontWeight:600}}>{s.hostname}</td>
-                        <td><GroupBadge group={s.systemGroup}/></td>
+                        <td><div style={{display:'flex',flexWrap:'wrap',gap:3}}>{(s.systemGroups||[s.systemGroup]).map((g)=><GroupBadge key={g} group={g}/>)}</div></td>
                         <td>{iss.message}</td>
                         <td style={{fontFamily:'var(--mono)',fontSize:10,color:'var(--text3)'}}>{iss.code}</td>
                         <td><ConnPill state={s.connState}/></td>

@@ -58,14 +58,17 @@ function addSummaryHeader(wb, reportTitle, range, generatedAt) {
   return ws
 }
 
-function deriveGroup(hostname, vendor, isFortinet) {
+function deriveGroups(hostname, vendor, isFortinet) {
   const h = String(hostname || '').toUpperCase()
   const v = String(vendor || '').toLowerCase()
-  if (isFortinet || v.includes('fortinet')) return 'SD-WAN Group'
-  if (h.startsWith('RP')) return 'RP Group'
-  if (h.startsWith('LK')) return 'POS System Group'
-  return 'General Group'
+  const groups = []
+  if (h.startsWith('RP'))  groups.push('RP Group')
+  else if (h.startsWith('LK')) groups.push('POS System Group')
+  if (isFortinet || v.includes('fortinet') || v.includes('fortigate')) groups.push('SD-WAN Group')
+  if (groups.length === 0) groups.push('General Group')
+  return groups
 }
+function deriveGroup(hostname, vendor, isFortinet) { return deriveGroups(hostname, vendor, isFortinet)[0] }
 
 function primaryPing(s) {
   return s?.ping?.['8.8.8.8'] || s?.ping?.['google.com'] || Object.values(s?.ping || {})[0]

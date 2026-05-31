@@ -59,8 +59,8 @@ router.post('/evaluate', async (req, res, next) => {
     for (const rule of rules) {
       const affected = stores.filter((s) => {
         if (rule.group !== 'all') {
-          const grp = deriveGroupServer(s.hostname, s.gatewayVendor, s.isFortinet)
-          if (grp !== rule.group) return false
+          const grps = deriveGroupsServer(s.hostname, s.gatewayVendor, s.isFortinet)
+          if (!grps.includes(rule.group)) return false
         }
         return evaluateCondition(rule.condition, s)
       })
@@ -97,13 +97,15 @@ router.post('/evaluate', async (req, res, next) => {
   } catch (e) { next(e) }
 })
 
-function deriveGroupServer(hostname, gatewayVendor, isFortinet) {
+function deriveGroupsServer(hostname, gatewayVendor, isFortinet) {
   const h = String(hostname || '').trim().toUpperCase()
   const v = String(gatewayVendor || '').trim().toLowerCase()
-  if (isFortinet || v.includes('fortinet')) return 'SD-WAN Group'
-  if (h.startsWith('RP')) return 'RP Group'
-  if (h.startsWith('LK')) return 'POS System Group'
-  return 'General Group'
+  const groups = []
+  if (h.startsWith('RP'))  groups.push('RP Group')
+  else if (h.startsWith('LK')) groups.push('POS System Group')
+  if (isFortinet || v.includes('fortinet') || v.includes('fortigate')) groups.push('SD-WAN Group')
+  if (groups.length === 0) groups.push('General Group')
+  return groups
 }
 
 function evaluateCondition(cond, store) {
