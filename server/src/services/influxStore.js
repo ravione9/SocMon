@@ -118,7 +118,7 @@ function httpPost(url, headers, body, tlsInsecure) {
       port: u.port || (u.protocol === 'https:' ? 443 : 80),
       path: `${u.pathname}${u.search}`,
       headers: { ...headers, 'Content-Length': Buffer.byteLength(body) },
-      timeout: 45000,
+      timeout: 90000,
     }
     if (tlsInsecure && u.protocol === 'https:') {
       opts.rejectUnauthorized = false
@@ -150,7 +150,7 @@ async function httpPostFetch(url, headers, body, tlsInsecure) {
       method: 'POST',
       headers,
       body,
-      signal: AbortSignal.timeout(45000),
+      signal: AbortSignal.timeout(90000),
       ...(tlsInsecure && url.startsWith('https:') ? { dispatcher: undefined } : {}),
     })
     const text = await res.text()

@@ -11,7 +11,7 @@ api.interceptors.request.use(config => {
   if (reqUrl.includes('/zabbix') || reqUrl.includes('/store-zabbix')) {
     config.timeout = 120000
   } else if (reqUrl.includes('/store-monitor')) {
-    config.timeout = 180000
+    config.timeout = 300000
   }
   return config
 })
