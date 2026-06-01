@@ -334,7 +334,7 @@ function detectIssues(store, staleMinutes = 10) {
   const pingEntries = Object.entries(store.ping)
   if (pingEntries.length) {
     const lossEntries = pingEntries.filter(([, p]) => p.packetLossPct != null)
-    if (lossEntries.length && lossEntries.every(([, p]) => p.packetLossPct >= 20)) {
+    if (lossEntries.length && lossEntries.every(([, p]) => p.packetLossPct >= 5)) {
       const worst = lossEntries.reduce((a, b) => b[1].packetLossPct > a[1].packetLossPct ? b : a)
       issues.push({ severity: 'high', code: 'packet_loss', message: `High packet loss to all targets (worst: ${worst[0]} ${worst[1].packetLossPct}%)` })
     }
