@@ -31,11 +31,19 @@ function storeCodeCandidates(store) {
   if (tag)    out.add(tag)
   if (host) {
     out.add(host)
-    // Strip standard prefix (RP / LK) so "252" matches "RP252" but NOT "RP2525"
     const m = host.match(/^(RP|LK)(.+)/)
     if (m) {
-      out.add(m[2])           // e.g. "252" for "RP252"
-      out.add(`${m[1]}${m[2]}`) // redundant but explicit: "RP252"
+      const suffix = m[2]               // e.g. "544-PG049C7V" or "544"
+      out.add(suffix)                   // full suffix
+      out.add(`${m[1]}${suffix}`)       // "RP544-PG049C7V"
+
+      // Also add the part before the first dash so "RP544" matches "RP544-PG049C7V"
+      const dashIdx = suffix.indexOf('-')
+      if (dashIdx > 0) {
+        const beforeDash = suffix.slice(0, dashIdx)  // "544"
+        out.add(beforeDash)                           // "544"
+        out.add(`${m[1]}${beforeDash}`)               // "RP544"
+      }
     }
   }
   if (serial) out.add(serial)
