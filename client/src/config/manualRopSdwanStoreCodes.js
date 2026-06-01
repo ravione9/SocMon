@@ -25,18 +25,17 @@ export function normalizeStoreCode(code) {
 
 function storeCodeCandidates(store) {
   const out = new Set()
-  const tag = normalizeStoreCode(store?.storeTag)
-  const host = String(store?.hostname || '').trim().toUpperCase()
-  const serial = String(store?.serial || '').trim().toUpperCase()
-  if (tag) out.add(tag)
+  const tag    = normalizeStoreCode(store?.storeTag)
+  const host   = String(store?.hostname || '').trim().toUpperCase()
+  const serial = String(store?.serial   || '').trim().toUpperCase()
+  if (tag)    out.add(tag)
   if (host) {
     out.add(host)
-    const m = host.match(/^(RP|LK)([A-Z0-9-]+)/)
+    // Strip standard prefix (RP / LK) so "252" matches "RP252" but NOT "RP2525"
+    const m = host.match(/^(RP|LK)(.+)/)
     if (m) {
-      out.add(m[2])
-      out.add(`${m[1]}${m[2]}`)
-      const num = m[2].match(/^(\d+)/)
-      if (num) out.add(num[1])
+      out.add(m[2])           // e.g. "252" for "RP252"
+      out.add(`${m[1]}${m[2]}`) // redundant but explicit: "RP252"
     }
   }
   if (serial) out.add(serial)
@@ -46,11 +45,8 @@ function storeCodeCandidates(store) {
 export function storeMatchesManualCode(store, code) {
   const norm = normalizeStoreCode(code)
   if (!norm) return false
-  const candidates = storeCodeCandidates(store)
-  if (candidates.has(norm)) return true
-  return [store?.storeTag, store?.hostname, store?.serial].some((v) =>
-    String(v || '').toUpperCase().includes(norm),
-  )
+  // Exact match only — no substring/includes to prevent "RP252" matching "RP2525"
+  return storeCodeCandidates(store).has(norm)
 }
 
 export function placeholderManualStore(code) {
