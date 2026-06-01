@@ -593,6 +593,7 @@ export default function StoreMonitorPage() {
   const [histTotal, setHistTotal] = useState(0)
   const [alertHistLoading, setAlertHistLoading] = useState(false)
   const socketRef = useRef(null)
+  const loadOverviewRef = useRef(null)
 
   /* alerts */
   const [alertRules, setAlertRules]     = useState([])
@@ -614,6 +615,7 @@ export default function StoreMonitorPage() {
   const [probHistSearch, setProbHistSearch] = useState('')
   const [probHistPage, setProbHistPage] = useState(1)
   const [probHistSnapping, setProbHistSnapping] = useState(false)
+  const [probHistStatus, setProbHistStatus] = useState('') // '' | 'active' | 'resolved'
   const [manualRopCodesText, setManualRopCodesText] = useState('')
   const [manualRopCodesOpen, setManualRopCodesOpen] = useState(false)
   const [manualRopCodesSaving, setManualRopCodesSaving] = useState(false)
@@ -652,8 +654,12 @@ export default function StoreMonitorPage() {
     sock.on('store:alert', (event) => {
       const id = `${Date.now()}-${Math.random()}`
       setLiveAlerts((prev) => [{ id, ...event }, ...prev].slice(0, 50))
-      // Prepend to history feed if user is looking at history
       setAlertHistory((prev) => [{ ...event }, ...prev].slice(0, 200))
+    })
+    // When the problem tracker detects new/resolved problems — reload overview so
+    // Problems tab reflects changes immediately without waiting for the 60s poll
+    sock.on('store:problems:changed', () => {
+      if (loadOverviewRef.current) loadOverviewRef.current()
     })
     return () => {
       sock.emit('unsubscribe:store-alerts')
@@ -698,6 +704,8 @@ export default function StoreMonitorPage() {
   }, [range, globalCustom])
 
   useSmartPolling(loadOverview, 60_000, [range, globalCustom])
+  // keep ref always current so socket handler can call it without stale closure
+  useEffect(() => { loadOverviewRef.current = loadOverview }, [loadOverview])
 
   /* ── load problems: derived from overview stores to avoid a duplicate Influx round-trip ── */
   useEffect(() => {
@@ -754,6 +762,7 @@ export default function StoreMonitorPage() {
     try {
       const params = { range: probHistRange, page, limit: 200 }
       if (probHistSeverity) params.severity = probHistSeverity
+      if (probHistStatus)   params.status   = probHistStatus
       if (probHistSearch.trim()) params.q = probHistSearch.trim()
       const { data } = await api.get('/api/store-monitor/problem-history', { params })
       setProbHist(data)
@@ -765,7 +774,7 @@ export default function StoreMonitorPage() {
   useEffect(() => {
     if (tab === 'probHist') loadProbHist(1)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, probHistRange, probHistSeverity])
+  }, [tab, probHistRange, probHistSeverity, probHistStatus])
   useEffect(() => {
     if (tab === 'alerts') {
       loadAlerts()
@@ -2924,6 +2933,11 @@ export default function StoreMonitorPage() {
                 <option value='high'>High</option>
                 <option value='warning'>Warning</option>
               </select>
+              <select className="sm-select" value={probHistStatus} onChange={(e) => setProbHistStatus(e.target.value)}>
+                <option value=''>Active + Resolved</option>
+                <option value='active'>🔴 Active only</option>
+                <option value='resolved'>✅ Resolved only</option>
+              </select>
               <input className="sm-input" placeholder="Search store / issue…"
                 value={probHistSearch} onChange={(e) => setProbHistSearch(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && loadProbHist(1)}
@@ -3025,11 +3039,11 @@ export default function StoreMonitorPage() {
                     <div className="sm-tr-body" style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8 }}>
                       {[
                         { label:'Total Events', val: probHist.total, color:'var(--text)' },
+                        { label:'Currently Active', val: probHist.activeCount ?? '—', color:'#ef4444' },
                         { label:'Critical', val: probHist.trend.reduce((a,t)=>a+t.critical,0), color:'#ef4444' },
                         { label:'High',     val: probHist.trend.reduce((a,t)=>a+t.high,0),     color:'#f97316' },
                         { label:'Warning',  val: probHist.trend.reduce((a,t)=>a+t.warning,0),  color:'#eab308' },
-                        { label:'Snapshots', val: trendData.length, color:'var(--text3)' },
-                        { label:'Showing',  val: `${probHist.records?.length} / ${probHist.total}`, color:'var(--text3)' },
+                        { label:'Resolved', val: probHist.trend.reduce((a,t)=>a+(t.resolved||0),0), color:'#22c55e' },
                       ].map((k) => (
                         <div key={k.label} style={{ background:'var(--bg3)', borderRadius:7, padding:'7px 10px', textAlign:'center' }}>
                           <div style={{ fontSize:17, fontWeight:700, color: k.color, lineHeight:1.1 }}>{k.val}</div>
@@ -3049,30 +3063,48 @@ export default function StoreMonitorPage() {
                   <table className="sm-tbl">
                     <thead>
                       <tr>
-                        <th>Snapshot time</th><th>Severity</th><th>Hostname</th><th>Serial</th>
-                        <th>Issue code</th><th>Message</th><th>Connectivity</th><th>Online</th>
+                        <th>Status</th><th>First seen</th><th>Resolved at</th><th>Duration</th>
+                        <th>Severity</th><th>Hostname</th><th>Serial</th>
+                        <th>Issue code</th><th>Message</th><th>Connectivity</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {probHist.records.map((r, i) => (
-                        <tr key={`${r._id || i}`} className="clickable"
-                          onClick={() => { setSelectedTag(r.storeTag); setTab('detail') }}>
-                          <td style={{ fontFamily:'var(--mono)', fontSize:11, whiteSpace:'nowrap' }}>
-                            {new Date(r.snapshotAt).toLocaleString()}
-                          </td>
-                          <td>
-                            <span className="sm-pill" style={{ background:`${SEV_COLORS[r.severity] || '#64748b'}22`, color: SEV_COLORS[r.severity] || 'var(--text3)', textTransform:'capitalize' }}>
-                              {r.severity}
-                            </span>
-                          </td>
-                          <td style={{ fontWeight:600 }}>{r.hostname || r.storeTag}</td>
-                          <td style={{ fontFamily:'var(--mono)', fontSize:11, color:'var(--text3)' }}>{r.serial || '—'}</td>
-                          <td style={{ fontFamily:'var(--mono)', fontSize:11 }}>{r.code}</td>
-                          <td style={{ fontSize:11 }}>{r.message}</td>
-                          <td><ConnPill state={r.connState} /></td>
-                          <td><OnlineBadge online={r.online} /></td>
-                        </tr>
-                      ))}
+                      {probHist.records.map((r, i) => {
+                        const durSec = r.durationMs ? Math.floor(r.durationMs / 1000) : null
+                        const durLabel = durSec == null ? '—'
+                          : durSec < 60 ? `${durSec}s`
+                          : durSec < 3600 ? `${Math.floor(durSec/60)}m`
+                          : `${Math.floor(durSec/3600)}h ${Math.floor((durSec%3600)/60)}m`
+                        return (
+                          <tr key={`${r._id || i}`} className="clickable"
+                            onClick={() => { setSelectedTag(r.storeTag); setTab('detail') }}>
+                            <td>
+                              {r.status === 'active'
+                                ? <span className="sm-pill" style={{ background:'rgba(239,68,68,.15)', color:'#ef4444' }}>● Active</span>
+                                : <span className="sm-pill" style={{ background:'rgba(34,197,94,.15)', color:'#22c55e' }}>✓ Resolved</span>}
+                            </td>
+                            <td style={{ fontFamily:'var(--mono)', fontSize:10.5, whiteSpace:'nowrap' }}>
+                              {new Date(r.firstSeenAt).toLocaleString()}
+                            </td>
+                            <td style={{ fontFamily:'var(--mono)', fontSize:10.5, whiteSpace:'nowrap', color:'var(--text3)' }}>
+                              {r.resolvedAt ? new Date(r.resolvedAt).toLocaleString() : '—'}
+                            </td>
+                            <td style={{ fontFamily:'var(--mono)', fontSize:11, color: durSec && durSec > 3600 ? 'var(--amber)' : 'var(--text3)' }}>
+                              {durLabel}
+                            </td>
+                            <td>
+                              <span className="sm-pill" style={{ background:`${SEV_COLORS[r.severity] || '#64748b'}22`, color: SEV_COLORS[r.severity] || 'var(--text3)', textTransform:'capitalize' }}>
+                                {r.severity}
+                              </span>
+                            </td>
+                            <td style={{ fontWeight:600 }}>{r.hostname || r.storeTag}</td>
+                            <td style={{ fontFamily:'var(--mono)', fontSize:11, color:'var(--text3)' }}>{r.serial || '—'}</td>
+                            <td style={{ fontFamily:'var(--mono)', fontSize:11 }}>{r.code}</td>
+                            <td style={{ fontSize:11 }}>{r.message}</td>
+                            <td><ConnPill state={r.connState} /></td>
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>

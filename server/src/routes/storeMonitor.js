@@ -303,14 +303,14 @@ router.get('/reports/:type', async (req, res, next) => {
 
 /** GET /api/store-monitor/problem-history
  *  Query params:
- *    range   — '1h' | '6h' | '24h' | '7d' | '30d'  (default '24h')
- *    from    — Unix seconds (overrides range)
- *    to      — Unix seconds
- *    severity— 'critical' | 'high' | 'warning'
- *    q       — search in hostname / storeTag / code
- *    code    — exact issue code filter
- *    page    — page number (default 1)
- *    limit   — page size (default 200, max 1000)
+ *    range    — '1h' | '6h' | '24h' | '7d' | '30d'  (default '24h')
+ *    from     — Unix seconds (overrides range)
+ *    to       — Unix seconds
+ *    status   — 'active' | 'resolved' | '' (default = both)
+ *    severity — 'critical' | 'high' | 'warning'
+ *    q        — search in hostname / storeTag / code / message
+ *    page     — page number (default 1)
+ *    limit    — page size (default 200, max 1000)
  */
 router.get('/problem-history', async (req, res, next) => {
   try {
@@ -326,51 +326,59 @@ router.get('/problem-history', async (req, res, next) => {
       fromDate = new Date(toDate.getTime() - rangeSec * 1000)
     }
 
-    const filter = { snapshotAt: { $gte: fromDate, $lte: toDate } }
+    const statusFilter = String(req.query.status || '')
+    // Match records that were active at any point in the requested window:
+    // firstSeenAt <= toDate AND (resolvedAt >= fromDate OR status='active')
+    const filter = {
+      firstSeenAt: { $lte: toDate },
+      $or: [
+        { status: 'active' },
+        { resolvedAt: { $gte: fromDate } },
+      ],
+    }
+    if (statusFilter === 'active')   { delete filter.$or; filter.status = 'active' }
+    if (statusFilter === 'resolved') { delete filter.$or; filter.status = 'resolved'; filter.resolvedAt = { $gte: fromDate, $lte: toDate } }
     if (req.query.severity) filter.severity = String(req.query.severity)
-    if (req.query.code)     filter.code = String(req.query.code)
     const q = String(req.query.q || '').trim()
     if (q) {
       const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
-      filter.$or = [{ hostname: re }, { storeTag: re }, { serial: re }, { code: re }, { message: re }]
+      filter.$and = [{ $or: [{ hostname: re }, { storeTag: re }, { serial: re }, { code: re }, { message: re }] }]
+      if (filter.$or) { filter.$and.push({ $or: filter.$or }); delete filter.$or }
     }
 
-    const limit  = Math.min(parseInt(String(req.query.limit || '200'), 10) || 200, 1000)
-    const page   = Math.max(parseInt(String(req.query.page || '1'), 10) || 1, 1)
-    const skip   = (page - 1) * limit
+    const limit = Math.min(parseInt(String(req.query.limit || '200'), 10) || 200, 1000)
+    const page  = Math.max(parseInt(String(req.query.page  || '1'),   10) || 1,   1)
+    const skip  = (page - 1) * limit
 
-    const [records, total, snapshotTimes] = await Promise.all([
-      StoreProblemHistory.find(filter).sort({ snapshotAt: -1 }).skip(skip).limit(limit).lean(),
+    const [records, total, activeCount] = await Promise.all([
+      StoreProblemHistory.find(filter).sort({ firstSeenAt: -1 }).skip(skip).limit(limit).lean(),
       StoreProblemHistory.countDocuments(filter),
-      // Distinct snapshot timestamps for the timeline chart (capped to 200 points)
-      StoreProblemHistory.distinct('snapshotAt', { snapshotAt: { $gte: fromDate, $lte: toDate } })
-        .then((times) => times.sort((a, b) => new Date(a) - new Date(b)).slice(-200)),
+      StoreProblemHistory.countDocuments({ status: 'active' }),
     ])
 
-    // Aggregate for trend chart: problems per snapshot
-    const trendMap = {}
-    for (const t of snapshotTimes) {
-      trendMap[new Date(t).toISOString()] = { critical: 0, high: 0, warning: 0, total: 0 }
-    }
-    // Fill trend from returned records (approximate — uses the page data)
+    // Trend: bucket records by hour (firstSeenAt) for the chart
     const allForTrend = await StoreProblemHistory.find(
-      { snapshotAt: { $gte: fromDate, $lte: toDate } },
-      { snapshotAt: 1, severity: 1 },
+      { firstSeenAt: { $gte: fromDate, $lte: toDate } },
+      { firstSeenAt: 1, severity: 1, status: 1 },
     ).lean()
-    for (const r of allForTrend) {
-      const key = new Date(r.snapshotAt).toISOString()
-      if (trendMap[key]) {
-        trendMap[key][r.severity] = (trendMap[key][r.severity] || 0) + 1
-        trendMap[key].total++
-      }
-    }
-    const trend = Object.entries(trendMap).map(([ts, counts]) => ({ ts, ...counts }))
 
-    // Top problem codes
-    const codeCount = {}
+    // Build hourly buckets
+    const bucketMs = rangeSec <= 3600 ? 5 * 60_000        // 5-min buckets for 1h
+                   : rangeSec <= 86400 ? 30 * 60_000       // 30-min buckets for ≤24h
+                   : 4 * 3600_000                          // 4-hour buckets for multi-day
+    const trendMap = new Map()
     for (const r of allForTrend) {
-      codeCount[r.code] = (codeCount[r.code] || 0) + 1
+      const ts = Math.floor(new Date(r.firstSeenAt).getTime() / bucketMs) * bucketMs
+      if (!trendMap.has(ts)) trendMap.set(ts, { ts: new Date(ts).toISOString(), critical: 0, high: 0, warning: 0, resolved: 0 })
+      const b = trendMap.get(ts)
+      b[r.severity] = (b[r.severity] || 0) + 1
+      if (r.status === 'resolved') b.resolved++
     }
+    const trend = [...trendMap.values()].sort((a, b) => new Date(a.ts) - new Date(b.ts))
+
+    // Top problem codes in window
+    const codeCount = {}
+    for (const r of allForTrend) codeCount[r.code] = (codeCount[r.code] || 0) + 1
     const topCodes = Object.entries(codeCount).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([code, count]) => ({ code, count }))
 
     res.json({
@@ -379,6 +387,7 @@ router.get('/problem-history', async (req, res, next) => {
       page,
       limit,
       pages: Math.ceil(total / limit),
+      activeCount,
       fromDate: fromDate.toISOString(),
       toDate:   toDate.toISOString(),
       trend,
@@ -388,7 +397,7 @@ router.get('/problem-history', async (req, res, next) => {
   } catch (e) { next(e) }
 })
 
-/** POST /api/store-monitor/problem-history/snapshot — trigger an immediate snapshot */
+/** POST /api/store-monitor/problem-history/snapshot — trigger an immediate tracking run */
 router.post('/problem-history/snapshot', requirePageWrite('storeMonitor'), async (_req, res, next) => {
   try {
     const result = await runProblemSnapshot()
@@ -396,7 +405,7 @@ router.post('/problem-history/snapshot', requirePageWrite('storeMonitor'), async
   } catch (e) { next(e) }
 })
 
-/** DELETE /api/store-monitor/problem-history — clear all history (admin only) */
+/** DELETE /api/store-monitor/problem-history — clear all history */
 router.delete('/problem-history', requirePageWrite('storeMonitor'), async (_req, res, next) => {
   try {
     const result = await StoreProblemHistory.deleteMany({})
