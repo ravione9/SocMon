@@ -6,6 +6,7 @@
  * Also exported so the /evaluate route can call it on demand.
  */
 import StoreAlertRule from '../models/StoreAlertRule.js'
+import StoreAlertEvent from '../models/StoreAlertEvent.js'
 import { dispatchAlertNotifications } from './storeAlertNotify.js'
 import { fetchStoreSnapshot, isInfluxStoreConfigured } from './influxStore.js'
 
@@ -118,29 +119,44 @@ export async function runStoreAlertEval() {
       const dispatch = await dispatchAlertNotifications(rule, affected)
       await StoreAlertRule.findByIdAndUpdate(rule._id, { lastFiredAt: new Date() })
 
-      // Build a compact event payload for WebSocket broadcast
-      const alertEvent = {
-        ruleId:    rule._id,
-        ruleName:  rule.name,
-        severity:  rule.severity,
-        group:     rule.group,
-        condition: rule.condition,
+      const topStores = affected.slice(0, 10).map((s) => ({
+        hostname:  s.hostname,
+        serial:    s.serial,
+        storeTag:  s.storeTag,
+        connState: s.connState,
+        gatewayIp: s.gatewayIp,
+        lastSeen:  s.lastSeen,
+      }))
+
+      // Persist to DB
+      const savedEvent = await StoreAlertEvent.create({
+        ruleId:        rule._id,
+        ruleName:      rule.name,
+        severity:      rule.severity,
+        group:         rule.group,
+        condition:     rule.condition,
         affectedCount: affected.length,
-        /** Top 10 affected store summaries — keeps payload small */
-        stores: affected.slice(0, 10).map((s) => ({
-          hostname:    s.hostname,
-          serial:      s.serial,
-          storeTag:    s.storeTag,
-          connState:   s.connState,
-          gatewayIp:   s.gatewayIp,
-          lastSeen:    s.lastSeen,
-        })),
-        hasMore: affected.length > 10,
-        firedAt: new Date().toISOString(),
+        stores:        topStores,
+        hasMore:       affected.length > 10,
+        dispatch,
+        firedAt:       new Date(),
+      })
+
+      const alertEvent = {
+        _id:           savedEvent._id,
+        ruleId:        rule._id,
+        ruleName:      rule.name,
+        severity:      rule.severity,
+        group:         rule.group,
+        condition:     rule.condition,
+        affectedCount: affected.length,
+        stores:        topStores,
+        hasMore:       affected.length > 10,
+        firedAt:       savedEvent.firedAt.toISOString(),
         dispatch,
       }
 
-      // Broadcast to all connected clients (room 'store-alerts')
+      // Broadcast to all subscribed clients in real-time
       if (_io) _io.to('store-alerts').emit('store:alert', alertEvent)
 
       results.push({ rule: rule.name, fired: true, affected: affected.length, dispatch })

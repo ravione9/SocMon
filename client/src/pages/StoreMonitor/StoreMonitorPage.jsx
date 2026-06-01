@@ -505,14 +505,17 @@ const CSS = `
   border-radius:999px; min-width:15px; height:15px; display:inline-flex; align-items:center; justify-content:center; padding:0 3px; }
 .sm-subtab.active .sm-subtab-count { background:rgba(0,0,0,.12); }
 
-/* ── live alert notifications ── */
-.sm-alert-stack { position:fixed; top:70px; right:16px; z-index:300; display:flex; flex-direction:column; gap:8px; max-width:420px; pointer-events:none; }
-.sm-alert-toast { pointer-events:all; background:var(--bg); border-radius:10px; box-shadow:0 4px 24px rgba(0,0,0,.5); overflow:hidden; animation:smSlideIn .25s ease; }
-@keyframes smSlideIn { from { opacity:0; transform:translateX(24px); } to { opacity:1; transform:none; } }
-.sm-alert-toast-hd { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 12px 8px; }
-.sm-alert-toast-body { padding:0 12px 10px; font-size:11px; font-family:var(--mono); color:var(--text3); }
-.sm-alert-toast-stores { display:flex; flex-direction:column; gap:2px; margin-top:5px; }
-.sm-alert-toast-store { font-size:10px; color:var(--text3); }
+/* ── alert feed ── */
+.sm-alert-feed { display:flex; flex-direction:column; gap:6px; }
+.sm-alert-card { background:var(--bg2); border:1px solid var(--border); border-radius:var(--sm-r); overflow:hidden; }
+.sm-alert-card-hd { display:flex; align-items:center; gap:10px; padding:9px 13px; border-bottom:1px solid var(--border); background:var(--bg3); }
+.sm-alert-card-body { padding:10px 13px; font-size:11px; }
+.sm-alert-stores { display:flex; flex-direction:column; gap:2px; margin-top:6px; }
+.sm-alert-store-row { font-size:10px; font-family:var(--mono); color:var(--text3); padding:2px 0; }
+.sm-alert-subtabs { display:flex; gap:2px; margin-bottom:10px; border-bottom:1px solid var(--border); }
+.sm-alert-subtab { padding:6px 14px; border:none; background:transparent; color:var(--text3); font-size:12px; font-weight:600; cursor:pointer; border-bottom:2px solid transparent; font-family:var(--sans); transition:all .12s; }
+.sm-alert-subtab:hover { color:var(--text2); }
+.sm-alert-subtab.active { color:var(--accent); border-bottom-color:var(--accent); }
 `
 
 /* ─── component ──────────────────────────────────── */
@@ -570,8 +573,12 @@ export default function StoreMonitorPage() {
   /* alert engine status */
   const [evalStatus, setEvalStatus] = useState(null)
   const [evalRunning, setEvalRunning] = useState(false)
-  /* real-time alert notifications */
-  const [liveAlerts, setLiveAlerts] = useState([])   // [{ id, ...alertEvent }]
+  /* alert sub-tabs and feeds */
+  const [alertSubTab, setAlertSubTab] = useState('live')  // 'rules' | 'live' | 'history'
+  const [liveAlerts, setLiveAlerts] = useState([])         // WebSocket events this session
+  const [alertHistory, setAlertHistory] = useState([])    // DB history
+  const [histTotal, setHistTotal] = useState(0)
+  const [histLoading, setHistLoading] = useState(false)
   const socketRef = useRef(null)
 
   /* alerts */
@@ -613,11 +620,9 @@ export default function StoreMonitorPage() {
     sock.emit('subscribe:store-alerts')
     sock.on('store:alert', (event) => {
       const id = `${Date.now()}-${Math.random()}`
-      setLiveAlerts((prev) => [{ id, ...event }, ...prev].slice(0, 20))
-      // Bump tab badge so user notices even from another tab
-      if (tab !== 'alerts') {
-        setTabRaw('alerts')
-      }
+      setLiveAlerts((prev) => [{ id, ...event }, ...prev].slice(0, 50))
+      // Prepend to history feed if user is looking at history
+      setAlertHistory((prev) => [{ ...event }, ...prev].slice(0, 200))
     })
     return () => {
       sock.emit('unsubscribe:store-alerts')
@@ -694,6 +699,16 @@ export default function StoreMonitorPage() {
       api.get('/api/store-alerts/status').then((r) => setEvalStatus(r.data)).catch(() => {})
     }
   }, [tab, loadAlerts])
+
+  useEffect(() => {
+    if (tab === 'alerts' && alertSubTab === 'history') {
+      setHistLoading(true)
+      api.get('/api/store-alerts/events', { params: { limit: 100 } })
+        .then(({ data }) => { setAlertHistory(data.events || []); setHistTotal(data.total || 0) })
+        .catch(() => {})
+        .finally(() => setHistLoading(false))
+    }
+  }, [tab, alertSubTab])
 
   async function runAlertsNow() {
     setEvalRunning(true)
@@ -1126,51 +1141,7 @@ export default function StoreMonitorPage() {
     <div className="sm">
       <style>{CSS}</style>
 
-      {/* ── Real-time alert notification stack ── */}
-      {liveAlerts.length > 0 && (
-        <div className="sm-alert-stack">
-          {liveAlerts.map((ev) => {
-            const sevColor = SEV_COLORS[ev.severity] || '#64748b'
-            return (
-              <div key={ev.id} className="sm-alert-toast" style={{borderLeft:`3px solid ${sevColor}`}}>
-                <div className="sm-alert-toast-hd">
-                  <div style={{display:'flex',alignItems:'center',gap:8}}>
-                    <span style={{fontSize:16}}>{ev.severity==='critical'?'🔴':ev.severity==='high'?'🟠':'🟡'}</span>
-                    <div>
-                      <div style={{fontWeight:700,fontSize:13,color:'var(--text)'}}>{ev.ruleName}</div>
-                      <div style={{fontSize:10,fontFamily:'var(--mono)',color:sevColor}}>
-                        {ev.severity.toUpperCase()} · {ev.affectedCount} store{ev.affectedCount!==1?'s':''} affected
-                        {ev.group!=='all'?` · ${ev.group}`:''}
-                      </div>
-                    </div>
-                  </div>
-                  <button style={{background:'none',border:'none',color:'var(--text3)',cursor:'pointer',fontSize:16,lineHeight:1,padding:0}}
-                    onClick={()=>setLiveAlerts(p=>p.filter(x=>x.id!==ev.id))}>✕</button>
-                </div>
-                <div className="sm-alert-toast-body">
-                  <div style={{marginBottom:4}}>
-                    Condition: <strong style={{color:'var(--text2)'}}>{ev.condition?.metric} {ev.condition?.operator||''} {ev.condition?.threshold??''}</strong>
-                    {' · '}<span style={{color:'var(--text3)'}}>{new Date(ev.firedAt).toLocaleTimeString()}</span>
-                  </div>
-                  <div className="sm-alert-toast-stores">
-                    {ev.stores?.slice(0,5).map((s,i)=>(
-                      <span key={i} className="sm-alert-toast-store">
-                        ● {s.hostname} ({s.serial}) · {s.connState} · {s.gatewayIp||'?'}
-                      </span>
-                    ))}
-                    {ev.hasMore && <span style={{color:'var(--accent)',fontSize:10}}>…and {ev.affectedCount-10} more</span>}
-                  </div>
-                  <div style={{marginTop:6,display:'flex',gap:6}}>
-                    <button className="sm-btn sm-sm" style={{fontSize:10}} onClick={()=>{setTabRaw('alerts');setLiveAlerts(p=>p.filter(x=>x.id!==ev.id))}}>View rules</button>
-                    <button className="sm-btn sm-sm" style={{fontSize:10}} onClick={()=>setLiveAlerts(p=>p.filter(x=>x.id!==ev.id))}>Dismiss</button>
-                    <button className="sm-btn sm-sm" style={{fontSize:10}} onClick={()=>setLiveAlerts([])}>Dismiss all</button>
-                  </div>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      )}
+      {/* No more floating popups — alerts shown in the Alerts tab */}
 
       {/* ── page header ── */}
       <div style={{borderBottom:'1px solid var(--border)',paddingBottom:10,marginBottom:10}}>
@@ -2296,30 +2267,53 @@ export default function StoreMonitorPage() {
       {/* ══════════ ALERT RULES ══════════ */}
       {tab==='alerts' && (
         <>
-          {/* engine status + controls */}
-          <div style={{display:'flex',alignItems:'center',gap:12,padding:'9px 14px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:'var(--sm-r)',marginBottom:10,flexWrap:'wrap'}}>
-            <div style={{flex:1,fontSize:11,fontFamily:'var(--mono)',color:'var(--text3)'}}>
-              <span style={{color:'var(--green)',marginRight:6}}>●</span>
-              Auto-evaluates every 2 min · Last run:{' '}
-              <strong style={{color:'var(--text2)'}}>
-                {evalStatus?.lastEvalAt ? `${relAge(evalStatus.lastEvalAt)} ago` : 'not yet (restart server)'}
-              </strong>
-              {evalStatus?.lastEvalStats && (
-                <span style={{marginLeft:10}}>
-                  {evalStatus.lastEvalStats.fired > 0
-                    ? <span style={{color:'var(--red)',fontWeight:700}}>🔔 {evalStatus.lastEvalStats.fired} fired</span>
-                    : <span style={{color:'var(--green)'}}>✓ {evalStatus.lastEvalStats.total} rules checked, 0 fired</span>}
-                  {' · '}{evalStatus.lastEvalStats.storesChecked} stores
-                </span>
-              )}
+          {/* engine status bar */}
+          <div style={{display:'flex',alignItems:'center',gap:10,padding:'7px 12px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:'var(--sm-r)',marginBottom:10,flexWrap:'wrap',fontSize:11,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+            <span style={{color:'var(--green)'}}>●</span>
+            Auto-evaluates every 2 min · Last run:{' '}
+            <strong style={{color:'var(--text2)'}}>
+              {evalStatus?.lastEvalAt ? `${relAge(evalStatus.lastEvalAt)} ago` : 'not yet — restart server'}
+            </strong>
+            {evalStatus?.lastEvalStats && (
+              <span>
+                {evalStatus.lastEvalStats.fired > 0
+                  ? <span style={{color:'var(--red)',fontWeight:700}}>· 🔔 {evalStatus.lastEvalStats.fired} fired</span>
+                  : <span style={{color:'var(--green)'}}>· ✓ {evalStatus.lastEvalStats.total} rules, 0 fired</span>}
+                {' '}· {evalStatus.lastEvalStats.storesChecked} stores checked
+              </span>
+            )}
+            <div style={{marginLeft:'auto',display:'flex',gap:6}}>
+              <button className="sm-btn sm-sm" onClick={runAlertsNow} disabled={evalRunning}>
+                {evalRunning ? '⏳' : '▶'} Run now
+              </button>
             </div>
-            <button className="sm-btn sm-sm primary" onClick={runAlertsNow} disabled={evalRunning}>
-              {evalRunning ? '⏳ Running…' : '▶ Run now'}
-            </button>
-            <button className="sm-btn sm-sm primary" onClick={()=>openAlertModal(null)}>+ New Rule</button>
           </div>
 
-          {!alertRules.length
+          {/* sub-tabs */}
+          <div className="sm-alert-subtabs">
+            {[
+              { id:'rules',   label:'⚙ Alert Rules',  badge: alertRules.length },
+              { id:'live',    label:'🔴 Live Alerts',  badge: liveAlerts.length },
+              { id:'history', label:'📋 History',      badge: histTotal || null },
+            ].map((t)=>(
+              <button key={t.id} type="button"
+                className={`sm-alert-subtab${alertSubTab===t.id?' active':''}`}
+                onClick={()=>setAlertSubTab(t.id)}>
+                {t.label}
+                {t.badge > 0 && <span style={{marginLeft:5,background:t.id==='live'?'var(--red)':'var(--accent)',color:'#fff',borderRadius:999,fontSize:9,fontWeight:800,padding:'1px 5px'}}>{t.badge}</span>}
+              </button>
+            ))}
+            {alertSubTab==='rules' && <button className="sm-btn sm-sm primary" style={{marginLeft:'auto',marginBottom:4}} onClick={()=>openAlertModal(null)}>+ New Rule</button>}
+            {alertSubTab==='history' && alertHistory.length > 0 && (
+              <button className="sm-btn sm-sm danger" style={{marginLeft:'auto',marginBottom:4}}
+                onClick={()=>api.delete('/api/store-alerts/events').then(()=>{ setAlertHistory([]); setHistTotal(0) }).catch(()=>{})}>
+                🗑 Clear history
+              </button>
+            )}
+          </div>
+
+          {/* ── Rules sub-tab ── */}
+          {alertSubTab==='rules' && !alertRules.length
             ? <div className="sm-empty">No alert rules yet. Create one to get started.</div>
             : alertRules.map((rule) => (
               <div key={rule._id} className="sm-tr sm-section-mb" style={{borderLeft:`3px solid ${SEV_COLORS[rule.severity]||'#64748b'}`}}>
@@ -2357,6 +2351,111 @@ export default function StoreMonitorPage() {
               </div>
             ))
           }
+
+          {/* ── Live Alerts sub-tab ── */}
+          {alertSubTab==='live' && (
+            <div className="sm-alert-feed">
+              {liveAlerts.length === 0 ? (
+                <div className="sm-empty">
+                  <div style={{fontSize:28,marginBottom:8}}>🔔</div>
+                  No alerts fired this session. Live alerts appear here instantly when rules trigger.
+                </div>
+              ) : liveAlerts.map((ev)=>{
+                const sevColor = SEV_COLORS[ev.severity]||'#64748b'
+                return (
+                  <div key={ev.id||ev._id} className="sm-alert-card" style={{borderLeft:`3px solid ${sevColor}`}}>
+                    <div className="sm-alert-card-hd">
+                      <span style={{fontSize:15}}>{ev.severity==='critical'?'🔴':ev.severity==='high'?'🟠':'🟡'}</span>
+                      <div style={{flex:1}}>
+                        <div style={{fontWeight:700,fontSize:13}}>{ev.ruleName}</div>
+                        <div style={{fontSize:10,fontFamily:'var(--mono)',color:sevColor}}>
+                          {ev.severity?.toUpperCase()} · {ev.affectedCount} store{ev.affectedCount!==1?'s':''} affected
+                          {ev.group&&ev.group!=='all'?` · ${ev.group}`:''}
+                        </div>
+                      </div>
+                      <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',whiteSpace:'nowrap'}}>
+                        {new Date(ev.firedAt).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="sm-alert-card-body">
+                      <div style={{marginBottom:4,color:'var(--text2)'}}>
+                        Condition: <strong>{ev.condition?.metric} {BOOLEAN_METRICS.has(ev.condition?.metric)?'= true':`${ev.condition?.operator||'>'} ${ev.condition?.threshold??''}`}</strong>
+                      </div>
+                      <div className="sm-alert-stores">
+                        {(ev.stores||[]).slice(0,5).map((s,i)=>(
+                          <div key={i} className="sm-alert-store-row">
+                            ● {s.hostname} ({s.serial}) · <span style={{color:CONN_COLORS[s.connState]||'var(--text3)'}}>{CONN_LABELS[s.connState]||s.connState}</span> · {s.gatewayIp||'?'}
+                          </div>
+                        ))}
+                        {ev.hasMore && <div style={{color:'var(--accent)',fontSize:10}}>…and {ev.affectedCount-10} more stores</div>}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+              {liveAlerts.length > 0 && (
+                <button className="sm-btn sm-sm danger" style={{alignSelf:'flex-start'}} onClick={()=>setLiveAlerts([])}>
+                  🗑 Clear live feed
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* ── History sub-tab ── */}
+          {alertSubTab==='history' && (
+            <div className="sm-alert-feed">
+              {histLoading ? (
+                <div className="sm-empty">Loading alert history…</div>
+              ) : alertHistory.length === 0 ? (
+                <div className="sm-empty">
+                  <div style={{fontSize:28,marginBottom:8}}>📋</div>
+                  No alert history yet. History is recorded every time a rule fires.
+                </div>
+              ) : alertHistory.map((ev,idx)=>{
+                const sevColor = SEV_COLORS[ev.severity]||'#64748b'
+                return (
+                  <div key={ev._id||idx} className="sm-alert-card" style={{borderLeft:`3px solid ${sevColor}`}}>
+                    <div className="sm-alert-card-hd">
+                      <span style={{fontSize:15}}>{ev.severity==='critical'?'🔴':ev.severity==='high'?'🟠':'🟡'}</span>
+                      <div style={{flex:1}}>
+                        <div style={{fontWeight:700,fontSize:13}}>{ev.ruleName}</div>
+                        <div style={{fontSize:10,fontFamily:'var(--mono)',color:sevColor}}>
+                          {ev.severity?.toUpperCase()} · {ev.affectedCount} store{ev.affectedCount!==1?'s':''} affected
+                          {ev.group&&ev.group!=='all'?` · ${ev.group}`:''}
+                        </div>
+                      </div>
+                      <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',whiteSpace:'nowrap'}}>
+                        {new Date(ev.firedAt).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="sm-alert-card-body">
+                      <div style={{marginBottom:4,color:'var(--text2)'}}>
+                        Condition: <strong>{ev.condition?.metric} {BOOLEAN_METRICS.has(ev.condition?.metric)?'= true':`${ev.condition?.operator||'>'} ${ev.condition?.threshold??''}`}</strong>
+                        {(ev.dispatch||[]).length > 0 && (
+                          <span style={{marginLeft:10,color:'var(--text3)'}}>
+                            Sent via: {ev.dispatch.filter(d=>d.ok).map(d=>d.channel).join(', ')||'—'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="sm-alert-stores">
+                        {(ev.stores||[]).slice(0,5).map((s,i)=>(
+                          <div key={i} className="sm-alert-store-row">
+                            ● {s.hostname} ({s.serial}) · <span style={{color:CONN_COLORS[s.connState]||'var(--text3)'}}>{CONN_LABELS[s.connState]||s.connState}</span> · {s.gatewayIp||'?'}
+                          </div>
+                        ))}
+                        {ev.hasMore && <div style={{color:'var(--accent)',fontSize:10}}>…and {ev.affectedCount-10} more stores</div>}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+              {histTotal > alertHistory.length && (
+                <div style={{textAlign:'center',fontSize:11,fontFamily:'var(--mono)',color:'var(--text3)',padding:10}}>
+                  Showing {alertHistory.length} of {histTotal} events
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
 

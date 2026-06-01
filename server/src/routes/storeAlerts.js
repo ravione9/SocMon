@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { authenticate } from '../middleware/auth.js'
 import { requireAppPage } from '../middleware/requireAppPage.js'
 import StoreAlertRule from '../models/StoreAlertRule.js'
+import StoreAlertEvent from '../models/StoreAlertEvent.js'
 import { testChannel } from '../services/storeAlertNotify.js'
 import { runStoreAlertEval, getEvalStatus } from '../services/storeAlertEngine.js'
 
@@ -58,6 +59,29 @@ router.post('/evaluate', async (_req, res, next) => {
 /* Status — last evaluation time + stats */
 router.get('/status', async (_req, res) => {
   res.json(getEvalStatus())
+})
+
+/* Alert event history */
+router.get('/events', async (req, res, next) => {
+  try {
+    const limit  = Math.min(parseInt(String(req.query.limit  || '100'), 10) || 100, 500)
+    const skip   = parseInt(String(req.query.skip || '0'), 10) || 0
+    const ruleId = req.query.ruleId || null
+    const filter = ruleId ? { ruleId } : {}
+    const [events, total] = await Promise.all([
+      StoreAlertEvent.find(filter).sort({ firedAt: -1 }).skip(skip).limit(limit).lean(),
+      StoreAlertEvent.countDocuments(filter),
+    ])
+    res.json({ events, total, limit, skip })
+  } catch (e) { next(e) }
+})
+
+/* Delete alert history */
+router.delete('/events', async (_req, res, next) => {
+  try {
+    const result = await StoreAlertEvent.deleteMany({})
+    res.json({ deleted: result.deletedCount })
+  } catch (e) { next(e) }
 })
 
 export default router
