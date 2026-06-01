@@ -578,7 +578,7 @@ export default function StoreMonitorPage() {
   const [liveAlerts, setLiveAlerts] = useState([])         // WebSocket events this session
   const [alertHistory, setAlertHistory] = useState([])    // DB history
   const [histTotal, setHistTotal] = useState(0)
-  const [histLoading, setHistLoading] = useState(false)
+  const [alertHistLoading, setAlertHistLoading] = useState(false)
   const socketRef = useRef(null)
 
   /* alerts */
@@ -702,11 +702,11 @@ export default function StoreMonitorPage() {
 
   useEffect(() => {
     if (tab === 'alerts' && alertSubTab === 'history') {
-      setHistLoading(true)
+      setAlertHistLoading(true)
       api.get('/api/store-alerts/events', { params: { limit: 100 } })
         .then(({ data }) => { setAlertHistory(data.events || []); setHistTotal(data.total || 0) })
         .catch(() => {})
-        .finally(() => setHistLoading(false))
+        .finally(() => setAlertHistLoading(false))
     }
   }, [tab, alertSubTab])
 
@@ -2404,7 +2404,7 @@ export default function StoreMonitorPage() {
           {/* ── History sub-tab ── */}
           {alertSubTab==='history' && (
             <div className="sm-alert-feed">
-              {histLoading ? (
+              {alertHistLoading ? (
                 <div className="sm-empty">Loading alert history…</div>
               ) : alertHistory.length === 0 ? (
                 <div className="sm-empty">
