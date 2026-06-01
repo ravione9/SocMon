@@ -19,6 +19,9 @@ import {
   buildConnectivityReport,
   buildSpeedtestReport,
 } from '../services/storeReports.js'
+import { getManualRopSdwanStoreCodes } from '../utils/manualRopStoreCodes.js'
+import StoreMonitorSetting from '../models/StoreMonitorSetting.js'
+import { requirePageWrite } from '../middleware/requireAppPage.js'
 
 const router = Router()
 router.use(authenticate, requireAppPage('storeMonitor'))
@@ -31,6 +34,7 @@ router.get('/meta', async (_req, res, next) => {
         configured: false,
         connected: false,
         message: `Set ${meta.urlEnv}, ${meta.tokenEnv}, ${meta.orgEnv}, ${meta.bucketEnv} in server env`,
+        manualRopSdwanStoreCodes: getManualRopSdwanStoreCodes(),
         ...meta,
       })
     }
@@ -40,6 +44,7 @@ router.get('/meta', async (_req, res, next) => {
       connected: ping.ok,
       hasData: ping.hasData ?? null,
       error: ping.error || null,
+      manualRopSdwanStoreCodes: getManualRopSdwanStoreCodes(),
     })
   } catch (e) {
     next(e)
@@ -290,6 +295,47 @@ router.get('/reports/:type', async (req, res, next) => {
   } catch (e) {
     next(e)
   }
+})
+
+/* ── Store Monitor Settings ─────────────────────────────── */
+
+/** GET /api/store-monitor/settings — readable by any authorised store-monitor user */
+router.get('/settings', async (_req, res, next) => {
+  try {
+    const doc = await StoreMonitorSetting.findOne().lean()
+    const envCodes = getManualRopSdwanStoreCodes()
+    const rawText = doc?.manualRopSdwanCodes ?? ''
+    const codes = rawText.trim()
+      ? [...new Set(rawText.split(/[\n,;|\t]+/).map((c) => c.trim().toUpperCase().replace(/^STORE[-_\s]*/i, '')).filter(Boolean))]
+      : envCodes
+    res.json({
+      manualRopSdwanCodes: rawText,
+      manualRopSdwanCodeList: codes,
+      updatedBy: doc?.updatedBy ?? null,
+      updatedAt: doc?.updatedAt ?? null,
+    })
+  } catch (e) { next(e) }
+})
+
+/** PUT /api/store-monitor/settings — requires write access or admin */
+router.put('/settings', requirePageWrite('storeMonitor'), async (req, res, next) => {
+  try {
+    const raw = String(req.body.manualRopSdwanCodes ?? '').trim()
+    const doc = await StoreMonitorSetting.findOneAndUpdate(
+      {},
+      { manualRopSdwanCodes: raw, updatedBy: req.user?._id },
+      { new: true, upsert: true, runValidators: true },
+    ).lean()
+    const codes = raw
+      ? [...new Set(raw.split(/[\n,;|\t]+/).map((c) => c.trim().toUpperCase().replace(/^STORE[-_\s]*/i, '')).filter(Boolean))]
+      : []
+    res.json({
+      ok: true,
+      manualRopSdwanCodes: doc.manualRopSdwanCodes,
+      manualRopSdwanCodeList: codes,
+      updatedAt: doc.updatedAt,
+    })
+  } catch (e) { next(e) }
 })
 
 export default router

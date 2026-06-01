@@ -20,6 +20,10 @@ import { useThemeStore } from '../../store/themeStore.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
 import { useAuthStore } from '../../store/authStore.js'
 import { resolvedApiBase, resolvedWsUrl } from '../../utils/backendOrigin.js'
+import {
+  buildManualRopStoreList,
+  parseManualStoreCodes,
+} from '../../config/manualRopSdwanStoreCodes.js'
 
 ChartJS.register(ArcElement, BarElement, CategoryScale, Filler, Legend, LinearScale, LineElement, PointElement, Tooltip)
 
@@ -36,9 +40,10 @@ const TABS = [
 ]
 
 const ROP_SUBTABS = [
-  { id: 'all',      label: 'All ROP',            icon: '📡' },
-  { id: 'sdwan',    label: 'ROP + SD-WAN',        icon: '🛡' },
-  { id: 'no_sdwan', label: 'ROP without SD-WAN',  icon: '🔗' },
+  { id: 'all',          label: 'All ROP',              icon: '📡' },
+  { id: 'sdwan',        label: 'ROP + SD-WAN',          icon: '🛡' },
+  { id: 'no_sdwan',     label: 'ROP without SD-WAN',    icon: '🔗' },
+  { id: 'manual_sdwan', label: 'Manual ROP + SD-WAN',   icon: '📋' },
 ]
 
 const REPORT_TYPES = [
@@ -126,6 +131,13 @@ function deriveGroups(hostname, vendor, isFortinet) {
 /** Convenience: primary group (first in list, used for single-badge contexts) */
 function deriveGroup(hostname, vendor, isFortinet) {
   return deriveGroups(hostname, vendor, isFortinet)[0]
+}
+
+function ropSubTabLabel(id) {
+  if (id === 'sdwan') return 'ROP + SD-WAN'
+  if (id === 'no_sdwan') return 'ROP without SD-WAN'
+  if (id === 'manual_sdwan') return 'Manual ROP + SD-WAN'
+  return 'All ROP'
 }
 
 function relAge(iso) {
@@ -590,6 +602,13 @@ export default function StoreMonitorPage() {
 
   const [ropSubTab, setRopSubTab] = useState('all')
   const [ropSearch, setRopSearch] = useState('')
+  const [manualRopCodesText, setManualRopCodesText] = useState('')
+  const [manualRopCodesOpen, setManualRopCodesOpen] = useState(false)
+  const [manualRopCodesSaving, setManualRopCodesSaving] = useState(false)
+  const [manualRopCodesSaved, setManualRopCodesSaved] = useState(false)
+  const [manualRopCodesUpdatedAt, setManualRopCodesUpdatedAt] = useState(null)
+  const [manualRopCodesDraft, setManualRopCodesDraft] = useState('')
+  const manualCodesInitRef = useRef(false)
 
   const setTab = useCallback((id) => {
     setTabRaw(id)
@@ -633,6 +652,20 @@ export default function StoreMonitorPage() {
 
   /* ── load meta once ── */
   useEffect(() => { api.get('/api/store-monitor/meta').then((r) => setMeta(r.data)).catch(() => {}) }, [])
+
+  /* ── load server-side store settings (manual ROP codes shared for all users) ── */
+  useEffect(() => {
+    if (manualCodesInitRef.current) return
+    manualCodesInitRef.current = true
+    api.get('/api/store-monitor/settings')
+      .then((r) => {
+        const raw = r.data?.manualRopSdwanCodes ?? ''
+        setManualRopCodesText(raw)
+        setManualRopCodesDraft(raw)
+        setManualRopCodesUpdatedAt(r.data?.updatedAt ?? null)
+      })
+      .catch(() => {})
+  }, [])
 
   /* ── load overview ── */
   const loadOverview = useCallback(async () => {
@@ -805,16 +838,30 @@ export default function StoreMonitorPage() {
     () => ropAllStores.filter((s) => !(s.systemGroups || [s.systemGroup]).includes('SD-WAN Group')),
     [ropAllStores]
   )
+  const manualRopCodeList = useMemo(
+    () => parseManualStoreCodes(manualRopCodesText),
+    [manualRopCodesText],
+  )
+  const ropManualStores = useMemo(
+    () => buildManualRopStoreList(stores, manualRopCodeList),
+    [stores, manualRopCodeList],
+  )
   const ropActiveStores = useMemo(() => {
-    if (ropSubTab === 'sdwan')    return ropSdwanStores
-    if (ropSubTab === 'no_sdwan') return ropOnlyStores
+    if (ropSubTab === 'sdwan')        return ropSdwanStores
+    if (ropSubTab === 'no_sdwan')     return ropOnlyStores
+    if (ropSubTab === 'manual_sdwan') return ropManualStores
     return ropAllStores
-  }, [ropSubTab, ropAllStores, ropSdwanStores, ropOnlyStores])
+  }, [ropSubTab, ropAllStores, ropSdwanStores, ropOnlyStores, ropManualStores])
+  useEffect(() => {
+    if (tab === 'rop' && ropSubTab === 'manual_sdwan' && !manualRopCodeList.length) {
+      setManualRopCodesOpen(true)
+    }
+  }, [tab, ropSubTab, manualRopCodeList.length])
   const ropFilteredStores = useMemo(() => {
     const q = ropSearch.trim().toLowerCase()
     if (!q) return ropActiveStores
     return ropActiveStores.filter((s) =>
-      [s.hostname, s.serial, s.gatewayIp, s.storeTag].some((v) => String(v || '').toLowerCase().includes(q))
+      [s.hostname, s.serial, s.gatewayIp, s.storeTag, s.storeCode].some((v) => String(v || '').toLowerCase().includes(q))
     )
   }, [ropActiveStores, ropSearch])
   function ropKpi(list) {
@@ -2487,6 +2534,8 @@ export default function StoreMonitorPage() {
       {/* ══════════ ROP GROUPS ══════════ */}
       {tab==='rop' && (() => {
         const kpi = ropKpi(ropActiveStores)
+        const manualMatched = ropManualStores.filter((s) => !s.isPlaceholder).length
+        const manualMissing = ropManualStores.length - manualMatched
         return (
           <>
             {/* sub-tab bar */}
@@ -2494,6 +2543,7 @@ export default function StoreMonitorPage() {
               {ROP_SUBTABS.map((st) => {
                 const count = st.id === 'all' ? ropAllStores.length
                   : st.id === 'sdwan' ? ropSdwanStores.length
+                  : st.id === 'manual_sdwan' ? ropManualStores.length
                   : ropOnlyStores.length
                 return (
                   <button key={st.id} type="button"
@@ -2505,6 +2555,69 @@ export default function StoreMonitorPage() {
                 )
               })}
             </div>
+
+            {ropSubTab === 'manual_sdwan' && (
+              <div className="sm-tr sm-section-mb">
+                <div className="sm-tr-hd" style={{ cursor:'pointer' }} onClick={() => setManualRopCodesOpen((v) => !v)}>
+                  <span className="sm-tr-title">⚙ Manual ROP + SD-WAN — Store Code Settings</span>
+                  <span style={{ fontSize:10, color:'var(--text3)', fontFamily:'var(--mono)' }}>
+                    {manualRopCodeList.length} configured · {manualMatched} matched · {manualMissing} no data
+                    {manualRopCodesUpdatedAt && ` · saved ${relAge(manualRopCodesUpdatedAt)} ago`}
+                  </span>
+                  <span style={{ marginLeft:'auto', fontSize:10, color:'var(--text3)' }}>{manualRopCodesOpen ? '▲' : '▼'}</span>
+                </div>
+                {manualRopCodesOpen && (
+                  <div className="sm-tr-body" style={{ display:'flex', flexDirection:'column', gap:10 }}>
+                    <div style={{ fontSize:11, color:'var(--text3)', lineHeight:1.6 }}>
+                      Paste store codes — one per line, or comma / semicolon separated.<br />
+                      Matches by store tag, hostname (e.g. <code style={{ fontFamily:'var(--mono)' }}>RP1234</code>), or serial number.<br />
+                      <strong style={{ color:'var(--text2)' }}>Changes are saved to the server and visible to all users.</strong>
+                    </div>
+                    <textarea
+                      className="sm-input"
+                      rows={8}
+                      placeholder={'S001\nS002\nRP1234\n1234'}
+                      value={manualRopCodesDraft}
+                      onChange={(e) => { setManualRopCodesDraft(e.target.value); setManualRopCodesSaved(false) }}
+                      style={{ width:'100%', minHeight:140, fontFamily:'var(--mono)', fontSize:11.5, resize:'vertical', lineHeight:1.7 }}
+                    />
+                    <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center' }}>
+                      <button
+                        type="button"
+                        className="sm-btn sm-sm primary"
+                        disabled={manualRopCodesSaving}
+                        onClick={async () => {
+                          setManualRopCodesSaving(true)
+                          setManualRopCodesSaved(false)
+                          try {
+                            const { data } = await api.put('/api/store-monitor/settings', { manualRopSdwanCodes: manualRopCodesDraft })
+                            setManualRopCodesText(data.manualRopSdwanCodes ?? manualRopCodesDraft)
+                            setManualRopCodesUpdatedAt(data.updatedAt ?? new Date().toISOString())
+                            setManualRopCodesSaved(true)
+                          } catch (e) {
+                            alert(e.response?.data?.error || e.message || 'Failed to save')
+                          } finally { setManualRopCodesSaving(false) }
+                        }}>
+                        {manualRopCodesSaving ? 'Saving…' : '💾 Save to server'}
+                      </button>
+                      <button
+                        type="button"
+                        className="sm-btn sm-sm"
+                        disabled={manualRopCodesSaving}
+                        onClick={() => { setManualRopCodesDraft(manualRopCodesText); setManualRopCodesSaved(false) }}>
+                        ✕ Cancel
+                      </button>
+                      {manualRopCodesSaved && (
+                        <span style={{ fontSize:11, color:'var(--green)', fontFamily:'var(--mono)' }}>✓ Saved — visible to all users</span>
+                      )}
+                      <span style={{ marginLeft:'auto', fontSize:10, color:'var(--text3)', fontFamily:'var(--mono)' }}>
+                        {parseManualStoreCodes(manualRopCodesDraft).length} codes
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* KPI strip */}
             <div className="sm-g4 sm-section-mb">
@@ -2531,7 +2644,7 @@ export default function StoreMonitorPage() {
                 <div className="sm-tr-hd">
                   <span className="sm-tr-title">Uptime &amp; Health</span>
                   <span style={{ fontSize:10, color:'var(--text3)', fontFamily:'var(--mono)' }}>
-                    {ropSubTab === 'sdwan' ? 'ROP + SD-WAN' : ropSubTab === 'no_sdwan' ? 'ROP without SD-WAN' : 'All ROP'} · {kpi.total} devices
+                    {ropSubTabLabel(ropSubTab)} · {kpi.total} devices
                   </span>
                 </div>
                 <div className="sm-tr-body" style={{ display:'flex', flexDirection:'column', gap:14 }}>
@@ -2626,7 +2739,9 @@ export default function StoreMonitorPage() {
               <table className="sm-tbl">
                 <thead>
                   <tr>
-                    <th>Status</th><th>Hostname</th><th>Groups</th><th>Serial</th>
+                    <th>Status</th>
+                    {ropSubTab === 'manual_sdwan' && <th>Store code</th>}
+                    <th>Hostname</th><th>Groups</th><th>Serial</th>
                     <th>Interface</th><th>Connectivity</th><th>Gateway IP</th><th>Vendor</th>
                     <th>Ping</th><th>Loss</th><th>CPU</th><th>RAM</th>
                     <th>↓ Speed</th><th>↑ Speed</th><th>Last seen</th><th>Issues</th>
@@ -2636,10 +2751,15 @@ export default function StoreMonitorPage() {
                   {ropFilteredStores.map((s) => {
                     const ping = primaryPing(s)
                     const grps = s.systemGroups || [s.systemGroup]
+                    const clickable = !s.isPlaceholder
                     return (
-                      <tr key={s.storeTag} className="clickable"
-                        onClick={() => { setSelectedTag(s.storeTag); setTab('detail') }}>
+                      <tr key={s.storeTag} className={clickable ? 'clickable' : ''}
+                        style={s.isPlaceholder ? { opacity: 0.72 } : undefined}
+                        onClick={clickable ? () => { setSelectedTag(s.storeTag); setTab('detail') } : undefined}>
                         <td><OnlineBadge online={s.online} /></td>
+                        {ropSubTab === 'manual_sdwan' && (
+                          <td style={{ fontFamily:'var(--mono)', fontWeight:700, fontSize:11 }}>{s.storeCode || '—'}</td>
+                        )}
                         <td style={{ fontWeight: 600 }}>{s.hostname}</td>
                         <td>
                           <div style={{ display:'flex', flexWrap:'wrap', gap:3 }}>
@@ -2678,9 +2798,11 @@ export default function StoreMonitorPage() {
                     )
                   })}
                   {!ropFilteredStores.length && (
-                    <tr><td colSpan={16} className="sm-empty">
-                      {ropActiveStores.length === 0
-                        ? `No ${ropSubTab === 'sdwan' ? 'ROP + SD-WAN' : ropSubTab === 'no_sdwan' ? 'ROP-only' : 'ROP'} devices found`
+                    <tr><td colSpan={ropSubTab === 'manual_sdwan' ? 17 : 16} className="sm-empty">
+                      {ropSubTab === 'manual_sdwan' && manualRopCodeList.length === 0
+                        ? 'Add store codes above to build the Manual ROP + SD-WAN dashboard'
+                        : ropActiveStores.length === 0
+                        ? `No ${ropSubTabLabel(ropSubTab)} devices found`
                         : 'No devices match search'}
                     </td></tr>
                   )}
