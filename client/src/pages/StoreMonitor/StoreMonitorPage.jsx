@@ -523,12 +523,12 @@ export default function StoreMonitorPage() {
   const theme      = useThemeStore((s) => s.theme)
   const tc         = useMemo(() => getThemeCssColors(theme), [theme])
   const [tab, setTabRaw] = useUrlTab('noc', TABS.map((t) => t.id), 'smtab')
-  const [range, setRange] = useState('-24h')
+  const [range, setRange] = useState('-1h')
   /* global custom time range */
   const _nowDef = new Date()
   const [globalCustom, setGlobalCustom] = useState({
     enabled: false,
-    from: toLocalInput(new Date(_nowDef.getTime() - 24 * 3600 * 1000)),
+    from: toLocalInput(new Date(_nowDef.getTime() - 1 * 3600 * 1000)),
     to:   toLocalInput(_nowDef),
   })
   const [meta, setMeta] = useState(null)
@@ -645,7 +645,10 @@ export default function StoreMonitorPage() {
       setOverview(data)
       if (data.stores?.length) setSelectedTag((prev) => prev || data.stores[0].storeTag)
     } catch (e) {
-      setError(e.response?.data?.error || e.message || 'Failed to fetch data')
+      const isTimeout = e.code === 'ECONNABORTED' || /timeout/i.test(e.message)
+      setError(isTimeout
+        ? 'Request timed out — InfluxDB is taking too long. Try a shorter time range or click Retry.'
+        : e.response?.data?.error || e.message || 'Failed to fetch data')
     } finally { setLoading(false) }
   }, [range, globalCustom])
 
@@ -1141,7 +1144,18 @@ export default function StoreMonitorPage() {
     return <div className="sm-bar"><div className="sm-bar-fill" style={{ width:`${p}%`, background:col }}/></div>
   }
 
-  if (loading && !overview) return <div style={{padding:40,textAlign:'center',color:'var(--text3)'}}>Loading Store Network Monitor…</div>
+  if (loading && !overview) return (
+    <div style={{padding:40,textAlign:'center',color:'var(--text3)'}}>
+      {error ? (
+        <div>
+          <div style={{color:'#f97316',marginBottom:12,fontSize:14}}>⚠ {error}</div>
+          <button className="sm-btn sm-sm primary" onClick={() => { setLoading(true); loadOverview() }}>↺ Retry</button>
+        </div>
+      ) : (
+        <div>Loading Store Network Monitor…</div>
+      )}
+    </div>
+  )
 
   return (
     <div className="sm">
@@ -1232,7 +1246,12 @@ export default function StoreMonitorPage() {
         )}
       </div>
 
-      {error && <div className="sm-err">⚠ {error}</div>}
+      {error && (
+        <div className="sm-err" style={{display:'flex',alignItems:'center',gap:10}}>
+          <span>⚠ {error}</span>
+          <button className="sm-btn sm-sm" style={{marginLeft:'auto',flexShrink:0}} onClick={() => { setLoading(true); loadOverview() }}>↺ Retry</button>
+        </div>
+      )}
       {meta?.configured && !meta?.connected && meta?.error && <div className="sm-err">{meta.error}</div>}
       {!meta?.configured && <div className="sm-info">Set INFLUX_URL, INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET in server env</div>}
 
