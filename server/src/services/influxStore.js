@@ -329,24 +329,43 @@ function detectIssues(store, staleMinutes = 10) {
   if (store.connState === 'isp_down') issues.push({ severity: 'critical', code: 'isp_down', message: 'ISP / internet down' })
   if (store.connState === 'hotspot' || store.isHotspot) issues.push({ severity: 'high', code: 'hotspot', message: 'Running on mobile hotspot' })
   if (store.connState === 'no_connectivity') issues.push({ severity: 'high', code: 'no_connectivity', message: 'No network connectivity' })
-  for (const [target, p] of Object.entries(store.ping)) {
-    if (p.packetLossPct != null && p.packetLossPct >= 20) {
-      issues.push({ severity: 'high', code: 'packet_loss', message: `High packet loss to ${target} (${p.packetLossPct}%)` })
+
+  // Ping: only flag if ALL targets with data show the problem (one healthy target = no issue)
+  const pingEntries = Object.entries(store.ping)
+  if (pingEntries.length) {
+    const lossEntries = pingEntries.filter(([, p]) => p.packetLossPct != null)
+    if (lossEntries.length && lossEntries.every(([, p]) => p.packetLossPct >= 20)) {
+      const worst = lossEntries.reduce((a, b) => b[1].packetLossPct > a[1].packetLossPct ? b : a)
+      issues.push({ severity: 'high', code: 'packet_loss', message: `High packet loss to all targets (worst: ${worst[0]} ${worst[1].packetLossPct}%)` })
     }
-    if (p.avgMs != null && p.avgMs >= 200) {
-      issues.push({ severity: 'warning', code: 'latency', message: `High latency to ${target} (${p.avgMs} ms)` })
+    const latEntries = pingEntries.filter(([, p]) => p.avgMs != null)
+    if (latEntries.length && latEntries.every(([, p]) => p.avgMs >= 200)) {
+      const worst = latEntries.reduce((a, b) => b[1].avgMs > a[1].avgMs ? b : a)
+      issues.push({ severity: 'warning', code: 'latency', message: `High latency to all targets (worst: ${worst[0]} ${worst[1].avgMs} ms)` })
     }
   }
+
   if (store.cpuPct != null && store.cpuPct >= 90) issues.push({ severity: 'warning', code: 'cpu', message: `High CPU (${store.cpuPct}%)` })
   if (store.memPct != null && store.memPct >= 90) issues.push({ severity: 'warning', code: 'memory', message: `High memory (${store.memPct}%)` })
-  for (const [domain, d] of Object.entries(store.dns)) {
-    if (d.success === false) issues.push({ severity: 'high', code: 'dns', message: `DNS failure: ${domain}` })
-  }
-  for (const [url, h] of Object.entries(store.http)) {
-    if (h.success === false || (h.statusCode != null && h.statusCode >= 500)) {
-      issues.push({ severity: 'high', code: 'http', message: `HTTP check failed: ${url}` })
+
+  // DNS: only flag if ALL domains fail (one passing domain = no issue)
+  const dnsEntries = Object.entries(store.dns)
+  if (dnsEntries.length) {
+    const withResult = dnsEntries.filter(([, d]) => d.success != null)
+    if (withResult.length && withResult.every(([, d]) => d.success === false)) {
+      issues.push({ severity: 'high', code: 'dns', message: `DNS failure on all checks (${withResult.map(([d]) => d).join(', ')})` })
     }
   }
+
+  // HTTP: only flag if ALL URLs fail (one passing URL = no issue)
+  const httpEntries = Object.entries(store.http)
+  if (httpEntries.length) {
+    const withResult = httpEntries.filter(([, h]) => h.success != null || h.statusCode != null)
+    if (withResult.length && withResult.every(([, h]) => h.success === false || (h.statusCode != null && h.statusCode >= 500))) {
+      issues.push({ severity: 'high', code: 'http', message: `HTTP check failed on all URLs (${withResult.map(([u]) => u).join(', ')})` })
+    }
+  }
+
   if (store.downloadMbps === 0 || store.uploadMbps === 0) {
     issues.push({ severity: 'warning', code: 'speedtest', message: 'Speedtest download/upload reported 0 Mbps' })
   }
