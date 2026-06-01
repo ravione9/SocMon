@@ -21,7 +21,9 @@ import {
 } from '../services/storeReports.js'
 import { getManualRopSdwanStoreCodes } from '../utils/manualRopStoreCodes.js'
 import StoreMonitorSetting from '../models/StoreMonitorSetting.js'
+import StoreProblemHistory from '../models/StoreProblemHistory.js'
 import { requirePageWrite } from '../middleware/requireAppPage.js'
+import { runProblemSnapshot, getProblemSnapshotStatus } from '../services/storeProblemSnapshotter.js'
 
 const router = Router()
 router.use(authenticate, requireAppPage('storeMonitor'))
@@ -295,6 +297,111 @@ router.get('/reports/:type', async (req, res, next) => {
   } catch (e) {
     next(e)
   }
+})
+
+/* ── Problem History ────────────────────────────────────── */
+
+/** GET /api/store-monitor/problem-history
+ *  Query params:
+ *    range   — '1h' | '6h' | '24h' | '7d' | '30d'  (default '24h')
+ *    from    — Unix seconds (overrides range)
+ *    to      — Unix seconds
+ *    severity— 'critical' | 'high' | 'warning'
+ *    q       — search in hostname / storeTag / code
+ *    code    — exact issue code filter
+ *    page    — page number (default 1)
+ *    limit   — page size (default 200, max 1000)
+ */
+router.get('/problem-history', async (req, res, next) => {
+  try {
+    const RANGE_MAP = { '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 30 * 86400 }
+    const rangeSec = RANGE_MAP[String(req.query.range || '24h')] ?? 86400
+
+    let fromDate, toDate
+    if (req.query.from) {
+      fromDate = new Date(parseInt(String(req.query.from), 10) * 1000)
+      toDate   = req.query.to ? new Date(parseInt(String(req.query.to), 10) * 1000) : new Date()
+    } else {
+      toDate   = new Date()
+      fromDate = new Date(toDate.getTime() - rangeSec * 1000)
+    }
+
+    const filter = { snapshotAt: { $gte: fromDate, $lte: toDate } }
+    if (req.query.severity) filter.severity = String(req.query.severity)
+    if (req.query.code)     filter.code = String(req.query.code)
+    const q = String(req.query.q || '').trim()
+    if (q) {
+      const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+      filter.$or = [{ hostname: re }, { storeTag: re }, { serial: re }, { code: re }, { message: re }]
+    }
+
+    const limit  = Math.min(parseInt(String(req.query.limit || '200'), 10) || 200, 1000)
+    const page   = Math.max(parseInt(String(req.query.page || '1'), 10) || 1, 1)
+    const skip   = (page - 1) * limit
+
+    const [records, total, snapshotTimes] = await Promise.all([
+      StoreProblemHistory.find(filter).sort({ snapshotAt: -1 }).skip(skip).limit(limit).lean(),
+      StoreProblemHistory.countDocuments(filter),
+      // Distinct snapshot timestamps for the timeline chart (capped to 200 points)
+      StoreProblemHistory.distinct('snapshotAt', { snapshotAt: { $gte: fromDate, $lte: toDate } })
+        .then((times) => times.sort((a, b) => new Date(a) - new Date(b)).slice(-200)),
+    ])
+
+    // Aggregate for trend chart: problems per snapshot
+    const trendMap = {}
+    for (const t of snapshotTimes) {
+      trendMap[new Date(t).toISOString()] = { critical: 0, high: 0, warning: 0, total: 0 }
+    }
+    // Fill trend from returned records (approximate — uses the page data)
+    const allForTrend = await StoreProblemHistory.find(
+      { snapshotAt: { $gte: fromDate, $lte: toDate } },
+      { snapshotAt: 1, severity: 1 },
+    ).lean()
+    for (const r of allForTrend) {
+      const key = new Date(r.snapshotAt).toISOString()
+      if (trendMap[key]) {
+        trendMap[key][r.severity] = (trendMap[key][r.severity] || 0) + 1
+        trendMap[key].total++
+      }
+    }
+    const trend = Object.entries(trendMap).map(([ts, counts]) => ({ ts, ...counts }))
+
+    // Top problem codes
+    const codeCount = {}
+    for (const r of allForTrend) {
+      codeCount[r.code] = (codeCount[r.code] || 0) + 1
+    }
+    const topCodes = Object.entries(codeCount).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([code, count]) => ({ code, count }))
+
+    res.json({
+      records,
+      total,
+      page,
+      limit,
+      pages: Math.ceil(total / limit),
+      fromDate: fromDate.toISOString(),
+      toDate:   toDate.toISOString(),
+      trend,
+      topCodes,
+      snapshotStatus: getProblemSnapshotStatus(),
+    })
+  } catch (e) { next(e) }
+})
+
+/** POST /api/store-monitor/problem-history/snapshot — trigger an immediate snapshot */
+router.post('/problem-history/snapshot', requirePageWrite('storeMonitor'), async (_req, res, next) => {
+  try {
+    const result = await runProblemSnapshot()
+    res.json(result)
+  } catch (e) { next(e) }
+})
+
+/** DELETE /api/store-monitor/problem-history — clear all history (admin only) */
+router.delete('/problem-history', requirePageWrite('storeMonitor'), async (_req, res, next) => {
+  try {
+    const result = await StoreProblemHistory.deleteMany({})
+    res.json({ deleted: result.deletedCount })
+  } catch (e) { next(e) }
 })
 
 /* ── Store Monitor Settings ─────────────────────────────── */

@@ -29,14 +29,15 @@ ChartJS.register(ArcElement, BarElement, CategoryScale, Filler, Legend, LinearSc
 
 /* ─── constants ──────────────────────────────────── */
 const TABS = [
-  { id: 'noc',       label: 'NOC Overview', icon: '🖥' },
-  { id: 'stores',    label: 'Stores',       icon: '🏪' },
-  { id: 'problems',  label: 'Problems',     icon: '⚠' },
-  { id: 'netHealth', label: 'Net Health',   icon: '📶' },
-  { id: 'detail',    label: 'Store Detail', icon: '🔍' },
-  { id: 'rop',       label: 'ROP Groups',   icon: '📡' },
-  { id: 'reports',   label: 'Reports',      icon: '📊' },
-  { id: 'alerts',    label: 'Alert Rules',  icon: '🔔' },
+  { id: 'noc',        label: 'NOC Overview',    icon: '🖥' },
+  { id: 'stores',     label: 'Stores',          icon: '🏪' },
+  { id: 'problems',   label: 'Problems',        icon: '⚠' },
+  { id: 'netHealth',  label: 'Net Health',      icon: '📶' },
+  { id: 'detail',     label: 'Store Detail',    icon: '🔍' },
+  { id: 'rop',        label: 'ROP Groups',      icon: '📡' },
+  { id: 'probHist',   label: 'Problem History', icon: '🕓' },
+  { id: 'reports',    label: 'Reports',         icon: '📊' },
+  { id: 'alerts',     label: 'Alert Rules',     icon: '🔔' },
 ]
 
 const ROP_SUBTABS = [
@@ -602,8 +603,17 @@ export default function StoreMonitorPage() {
 
   const [ropSubTab, setRopSubTab] = useState('all')
   const [ropSearch, setRopSearch] = useState('')
-  const [ropStatusFilter, setRopStatusFilter] = useState('') // 'online' | 'offline' | 'issues' | ''
-  const [ropConnFilter, setRopConnFilter] = useState('')     // conn_state key | ''
+  const [ropStatusFilter, setRopStatusFilter] = useState('')
+  const [ropConnFilter, setRopConnFilter] = useState('')
+
+  /* ── problem history tab ── */
+  const [probHist, setProbHist] = useState(null)
+  const [probHistLoading, setProbHistLoading] = useState(false)
+  const [probHistRange, setProbHistRange] = useState('24h')
+  const [probHistSeverity, setProbHistSeverity] = useState('')
+  const [probHistSearch, setProbHistSearch] = useState('')
+  const [probHistPage, setProbHistPage] = useState(1)
+  const [probHistSnapping, setProbHistSnapping] = useState(false)
   const [manualRopCodesText, setManualRopCodesText] = useState('')
   const [manualRopCodesOpen, setManualRopCodesOpen] = useState(false)
   const [manualRopCodesSaving, setManualRopCodesSaving] = useState(false)
@@ -737,6 +747,25 @@ export default function StoreMonitorPage() {
     try { const { data } = await api.get('/api/store-alerts'); setAlertRules(data) }
     catch { setAlertRules([]) }
   }, [])
+
+  /* ── load problem history ── */
+  const loadProbHist = useCallback(async (page = 1) => {
+    setProbHistLoading(true)
+    try {
+      const params = { range: probHistRange, page, limit: 200 }
+      if (probHistSeverity) params.severity = probHistSeverity
+      if (probHistSearch.trim()) params.q = probHistSearch.trim()
+      const { data } = await api.get('/api/store-monitor/problem-history', { params })
+      setProbHist(data)
+      setProbHistPage(page)
+    } catch { setProbHist(null) }
+    finally { setProbHistLoading(false) }
+  }, [probHistRange, probHistSeverity, probHistSearch])
+
+  useEffect(() => {
+    if (tab === 'probHist') loadProbHist(1)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, probHistRange, probHistSeverity])
   useEffect(() => {
     if (tab === 'alerts') {
       loadAlerts()
@@ -2866,6 +2895,201 @@ export default function StoreMonitorPage() {
                 </tbody>
               </table>
             </div>
+          </>
+        )
+      })()}
+
+      {/* ══════════ PROBLEM HISTORY ══════════ */}
+      {tab === 'probHist' && (() => {
+        const PHRANGES = [
+          { key: '1h',  label: '1 Hour' },
+          { key: '6h',  label: '6 Hours' },
+          { key: '24h', label: '24 Hours' },
+          { key: '7d',  label: '7 Days' },
+          { key: '30d', label: '30 Days' },
+        ]
+        const snapStatus = probHist?.snapshotStatus
+        return (
+          <>
+            {/* toolbar */}
+            <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center', marginBottom:12,
+              padding:'8px 12px', background:'var(--bg2)', border:'1px solid var(--border)', borderRadius:'var(--sm-r-lg)' }}>
+              <span style={{ fontSize:11, color:'var(--text3)', fontFamily:'var(--mono)', flexShrink:0 }}>Range:</span>
+              <select className="sm-select" value={probHistRange} onChange={(e) => setProbHistRange(e.target.value)}>
+                {PHRANGES.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
+              </select>
+              <select className="sm-select" value={probHistSeverity} onChange={(e) => setProbHistSeverity(e.target.value)}>
+                <option value=''>All severities</option>
+                <option value='critical'>Critical</option>
+                <option value='high'>High</option>
+                <option value='warning'>Warning</option>
+              </select>
+              <input className="sm-input" placeholder="Search store / issue…"
+                value={probHistSearch} onChange={(e) => setProbHistSearch(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && loadProbHist(1)}
+                style={{ minWidth:180, flex:'1 1 180px' }} />
+              <button className="sm-btn sm-sm primary" onClick={() => loadProbHist(1)} disabled={probHistLoading}>
+                {probHistLoading ? 'Loading…' : '⟳ Refresh'}
+              </button>
+              <button className="sm-btn sm-sm" title="Take an immediate snapshot now"
+                disabled={probHistSnapping}
+                onClick={async () => {
+                  setProbHistSnapping(true)
+                  try {
+                    await api.post('/api/store-monitor/problem-history/snapshot')
+                    setTimeout(() => loadProbHist(1), 1000)
+                  } catch (e) { alert(e.response?.data?.error || e.message) }
+                  finally { setProbHistSnapping(false) }
+                }}>
+                {probHistSnapping ? 'Snapping…' : '📸 Snapshot now'}
+              </button>
+              {snapStatus?.lastSnapAt && (
+                <span style={{ fontSize:10, color:'var(--text3)', fontFamily:'var(--mono)', marginLeft:'auto', whiteSpace:'nowrap' }}>
+                  Last snap {relAge(snapStatus.lastSnapAt)} ago · {snapStatus.lastSnapCount} problems
+                </span>
+              )}
+            </div>
+
+            {probHistLoading && !probHist && (
+              <div style={{ padding:40, textAlign:'center', color:'var(--text3)' }}>Loading problem history…</div>
+            )}
+
+            {probHist && !probHist.trend?.length && !probHist.records?.length && (
+              <div className="sm-empty" style={{ padding:40 }}>
+                No problem history yet for this period.<br />
+                <span style={{ fontSize:11 }}>Snapshots are taken every 30 minutes automatically. Click <strong>Snapshot now</strong> to capture the first one.</span>
+              </div>
+            )}
+
+            {probHist?.trend?.length > 0 && (() => {
+              const trendData = probHist.trend
+              const labels = trendData.map((t) => {
+                const d = new Date(t.ts)
+                return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
+              })
+              const chartData = {
+                labels,
+                datasets: [
+                  { label: 'Critical', data: trendData.map((t) => t.critical), backgroundColor: '#ef444488', borderColor: '#ef4444', borderWidth: 1.5, fill: true },
+                  { label: 'High',     data: trendData.map((t) => t.high),     backgroundColor: '#f9731688', borderColor: '#f97316', borderWidth: 1.5, fill: true },
+                  { label: 'Warning',  data: trendData.map((t) => t.warning),  backgroundColor: '#eab30888', borderColor: '#eab308', borderWidth: 1.5, fill: true },
+                ],
+              }
+              const chartOpts = {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { labels: { color: tc.text2, boxWidth: 12, font: { size: 10 } } } },
+                scales: {
+                  x: { stacked: true, ticks: { color: tc.text3, maxTicksLimit: 12, font: { size: 9 } }, grid: { color: tc.border } },
+                  y: { stacked: true, ticks: { color: tc.text3, font: { size: 9 } }, grid: { color: tc.border } },
+                },
+              }
+              return (
+                <div className="sm-g2 sm-section-mb">
+                  {/* trend chart */}
+                  <div className="sm-tr" style={{ gridColumn: '1 / -1' }}>
+                    <div className="sm-tr-hd">
+                      <span className="sm-tr-title">Problem Trend</span>
+                      <span style={{ fontSize:10, color:'var(--text3)', fontFamily:'var(--mono)' }}>
+                        {trendData.length} snapshots · {probHist.fromDate?.slice(0,16).replace('T',' ')} → {probHist.toDate?.slice(0,16).replace('T',' ')}
+                      </span>
+                    </div>
+                    <div className="sm-tr-body sm-chart" style={{ minHeight:180 }}>
+                      <Bar data={chartData} options={chartOpts} />
+                    </div>
+                  </div>
+
+                  {/* top codes */}
+                  {probHist.topCodes?.length > 0 && (
+                    <div className="sm-tr">
+                      <div className="sm-tr-hd"><span className="sm-tr-title">Top Issue Codes</span></div>
+                      <div className="sm-tr-body" style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                        {probHist.topCodes.map(({ code, count }) => {
+                          const maxCount = probHist.topCodes[0].count
+                          return (
+                            <div key={code} style={{ display:'flex', alignItems:'center', gap:8 }}>
+                              <span style={{ fontFamily:'var(--mono)', fontSize:11, minWidth:110, color:'var(--text2)' }}>{code}</span>
+                              <div style={{ flex:1, height:8, background:'var(--bg3)', borderRadius:4, overflow:'hidden' }}>
+                                <div style={{ height:'100%', width:`${(count/maxCount)*100}%`, background:'var(--accent)', borderRadius:4, transition:'width .4s' }}/>
+                              </div>
+                              <span style={{ fontFamily:'var(--mono)', fontSize:11, color:'var(--text3)', minWidth:40, textAlign:'right' }}>{count}</span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* KPI summary */}
+                  <div className="sm-tr">
+                    <div className="sm-tr-hd"><span className="sm-tr-title">Period Summary</span></div>
+                    <div className="sm-tr-body" style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8 }}>
+                      {[
+                        { label:'Total Events', val: probHist.total, color:'var(--text)' },
+                        { label:'Critical', val: probHist.trend.reduce((a,t)=>a+t.critical,0), color:'#ef4444' },
+                        { label:'High',     val: probHist.trend.reduce((a,t)=>a+t.high,0),     color:'#f97316' },
+                        { label:'Warning',  val: probHist.trend.reduce((a,t)=>a+t.warning,0),  color:'#eab308' },
+                        { label:'Snapshots', val: trendData.length, color:'var(--text3)' },
+                        { label:'Showing',  val: `${probHist.records?.length} / ${probHist.total}`, color:'var(--text3)' },
+                      ].map((k) => (
+                        <div key={k.label} style={{ background:'var(--bg3)', borderRadius:7, padding:'7px 10px', textAlign:'center' }}>
+                          <div style={{ fontSize:17, fontWeight:700, color: k.color, lineHeight:1.1 }}>{k.val}</div>
+                          <div style={{ fontSize:9, fontFamily:'var(--mono)', color:'var(--text3)', textTransform:'uppercase', letterSpacing:'.05em', marginTop:2 }}>{k.label}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )
+            })()}
+
+            {/* records table */}
+            {probHist?.records?.length > 0 && (
+              <>
+                <div className="sm-tbl-wrap">
+                  <table className="sm-tbl">
+                    <thead>
+                      <tr>
+                        <th>Snapshot time</th><th>Severity</th><th>Hostname</th><th>Serial</th>
+                        <th>Issue code</th><th>Message</th><th>Connectivity</th><th>Online</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {probHist.records.map((r, i) => (
+                        <tr key={`${r._id || i}`} className="clickable"
+                          onClick={() => { setSelectedTag(r.storeTag); setTab('detail') }}>
+                          <td style={{ fontFamily:'var(--mono)', fontSize:11, whiteSpace:'nowrap' }}>
+                            {new Date(r.snapshotAt).toLocaleString()}
+                          </td>
+                          <td>
+                            <span className="sm-pill" style={{ background:`${SEV_COLORS[r.severity] || '#64748b'}22`, color: SEV_COLORS[r.severity] || 'var(--text3)', textTransform:'capitalize' }}>
+                              {r.severity}
+                            </span>
+                          </td>
+                          <td style={{ fontWeight:600 }}>{r.hostname || r.storeTag}</td>
+                          <td style={{ fontFamily:'var(--mono)', fontSize:11, color:'var(--text3)' }}>{r.serial || '—'}</td>
+                          <td style={{ fontFamily:'var(--mono)', fontSize:11 }}>{r.code}</td>
+                          <td style={{ fontSize:11 }}>{r.message}</td>
+                          <td><ConnPill state={r.connState} /></td>
+                          <td><OnlineBadge online={r.online} /></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {/* pagination */}
+                {probHist.pages > 1 && (
+                  <div style={{ display:'flex', gap:8, justifyContent:'center', marginTop:10, flexWrap:'wrap' }}>
+                    <button className="sm-btn sm-sm" disabled={probHistPage <= 1}
+                      onClick={() => loadProbHist(probHistPage - 1)}>← Prev</button>
+                    <span style={{ fontFamily:'var(--mono)', fontSize:11, color:'var(--text3)', padding:'4px 0' }}>
+                      Page {probHistPage} / {probHist.pages}
+                    </span>
+                    <button className="sm-btn sm-sm" disabled={probHistPage >= probHist.pages}
+                      onClick={() => loadProbHist(probHistPage + 1)}>Next →</button>
+                  </div>
+                )}
+              </>
+            )}
           </>
         )
       })()}
