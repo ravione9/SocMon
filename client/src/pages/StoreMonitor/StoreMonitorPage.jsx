@@ -602,6 +602,8 @@ export default function StoreMonitorPage() {
 
   const [ropSubTab, setRopSubTab] = useState('all')
   const [ropSearch, setRopSearch] = useState('')
+  const [ropStatusFilter, setRopStatusFilter] = useState('') // 'online' | 'offline' | 'issues' | ''
+  const [ropConnFilter, setRopConnFilter] = useState('')     // conn_state key | ''
   const [manualRopCodesText, setManualRopCodesText] = useState('')
   const [manualRopCodesOpen, setManualRopCodesOpen] = useState(false)
   const [manualRopCodesSaving, setManualRopCodesSaving] = useState(false)
@@ -858,12 +860,17 @@ export default function StoreMonitorPage() {
     }
   }, [tab, ropSubTab, manualRopCodeList.length])
   const ropFilteredStores = useMemo(() => {
+    let out = ropActiveStores
     const q = ropSearch.trim().toLowerCase()
-    if (!q) return ropActiveStores
-    return ropActiveStores.filter((s) =>
+    if (q) out = out.filter((s) =>
       [s.hostname, s.serial, s.gatewayIp, s.storeTag, s.storeCode].some((v) => String(v || '').toLowerCase().includes(q))
     )
-  }, [ropActiveStores, ropSearch])
+    if (ropStatusFilter === 'online')  out = out.filter((s) => s.online)
+    if (ropStatusFilter === 'offline') out = out.filter((s) => !s.online)
+    if (ropStatusFilter === 'issues')  out = out.filter((s) => s.issueCount > 0)
+    if (ropConnFilter)                 out = out.filter((s) => s.connState === ropConnFilter)
+    return out
+  }, [ropActiveStores, ropSearch, ropStatusFilter, ropConnFilter])
   function ropKpi(list) {
     const total   = list.length
     const online  = list.filter((s) => s.online).length
@@ -2548,7 +2555,7 @@ export default function StoreMonitorPage() {
                 return (
                   <button key={st.id} type="button"
                     className={`sm-subtab${ropSubTab === st.id ? ' active' : ''}`}
-                    onClick={() => { setRopSubTab(st.id); setRopSearch('') }}>
+                    onClick={() => { setRopSubTab(st.id); setRopSearch(''); setRopStatusFilter(''); setRopConnFilter('') }}>
                     {st.icon} {st.label}
                     <span className="sm-subtab-count">{count}</span>
                   </button>
@@ -2622,18 +2629,25 @@ export default function StoreMonitorPage() {
             {/* KPI strip */}
             <div className="sm-g4 sm-section-mb">
               {[
-                { label: 'Total Devices', val: kpi.total,   color: 'var(--text)' },
-                { label: 'Online',        val: kpi.online,  color: 'var(--green)', sub: kpi.total ? `${pct(kpi.online, kpi.total).toFixed(1)}% uptime` : undefined },
-                { label: 'Offline',       val: kpi.offline, color: 'var(--red)',   sub: kpi.total ? `${pct(kpi.offline, kpi.total).toFixed(1)}% down` : undefined },
-                { label: 'With Issues',   val: kpi.issues,  color: kpi.issues > 0 ? 'var(--amber)' : 'var(--text)' },
-                { label: 'Avg Ping',      val: kpi.avgPing != null ? `${kpi.avgPing.toFixed(0)} ms` : '—', color: 'var(--text)' },
-              ].map((k) => (
-                <div key={k.label} className="sm-kpi">
-                  <div className="sm-kpi-label">{k.label}</div>
-                  <div className="sm-kpi-val" style={{ color: k.color }}>{k.val}</div>
-                  {k.sub && <div className="sm-kpi-sub">{k.sub}</div>}
-                </div>
-              ))}
+                { label: 'Total Devices', val: kpi.total,   color: 'var(--text)',  filter: '' },
+                { label: 'Online',        val: kpi.online,  color: 'var(--green)', sub: kpi.total ? `${pct(kpi.online, kpi.total).toFixed(1)}% uptime` : undefined, filter: 'online' },
+                { label: 'Offline',       val: kpi.offline, color: 'var(--red)',   sub: kpi.total ? `${pct(kpi.offline, kpi.total).toFixed(1)}% down` : undefined,   filter: 'offline' },
+                { label: 'With Issues',   val: kpi.issues,  color: kpi.issues > 0 ? 'var(--amber)' : 'var(--text)', filter: 'issues' },
+                { label: 'Avg Ping',      val: kpi.avgPing != null ? `${kpi.avgPing.toFixed(0)} ms` : '—', color: 'var(--text)', filter: null },
+              ].map((k) => {
+                const isActive = k.filter != null && ropStatusFilter === k.filter && k.filter !== ''
+                const clickable = k.filter != null
+                return (
+                  <div key={k.label} className="sm-kpi"
+                    style={{ cursor: clickable ? 'pointer' : 'default', outline: isActive ? '2px solid var(--accent)' : 'none', borderRadius: 'var(--sm-r-lg)', transition: 'outline .15s' }}
+                    onClick={clickable ? () => setRopStatusFilter((p) => p === k.filter ? '' : k.filter) : undefined}
+                    title={clickable ? (isActive ? 'Click to clear filter' : `Filter by ${k.label}`) : undefined}>
+                    <div className="sm-kpi-label">{k.label}</div>
+                    <div className="sm-kpi-val" style={{ color: k.color }}>{k.val}</div>
+                    {k.sub && <div className="sm-kpi-sub">{k.sub}</div>}
+                  </div>
+                )
+              })}
             </div>
 
             {/* widgets row: uptime health + connectivity breakdown */}
@@ -2674,15 +2688,21 @@ export default function StoreMonitorPage() {
                         {/* online / offline / issues row */}
                         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8 }}>
                           {[
-                            { label:'Online',     val: kpi.online,  color:'#22c55e' },
-                            { label:'Offline',    val: kpi.offline, color:'#ef4444' },
-                            { label:'Issues',     val: kpi.issues,  color:'#eab308' },
-                          ].map((s) => (
-                            <div key={s.label} style={{ background:'var(--bg3)', borderRadius:7, padding:'7px 10px', textAlign:'center' }}>
-                              <div style={{ fontSize:18, fontWeight:700, color: s.color, lineHeight:1.1 }}>{s.val}</div>
-                              <div style={{ fontSize:9, fontFamily:'var(--mono)', color:'var(--text3)', textTransform:'uppercase', letterSpacing:'.05em', marginTop:2 }}>{s.label}</div>
-                            </div>
-                          ))}
+                            { label:'Online',  val: kpi.online,  color:'#22c55e', filter:'online' },
+                            { label:'Offline', val: kpi.offline, color:'#ef4444', filter:'offline' },
+                            { label:'Issues',  val: kpi.issues,  color:'#eab308', filter:'issues' },
+                          ].map((s) => {
+                            const isActive = ropStatusFilter === s.filter
+                            return (
+                              <div key={s.label} onClick={() => setRopStatusFilter((p) => p === s.filter ? '' : s.filter)}
+                                style={{ background: isActive ? `${s.color}22` : 'var(--bg3)', borderRadius:7, padding:'7px 10px', textAlign:'center', cursor:'pointer',
+                                  outline: isActive ? `2px solid ${s.color}` : 'none', transition:'all .15s' }}
+                                title={isActive ? 'Click to clear filter' : `Filter by ${s.label}`}>
+                                <div style={{ fontSize:18, fontWeight:700, color: s.color, lineHeight:1.1 }}>{s.val}</div>
+                                <div style={{ fontSize:9, fontFamily:'var(--mono)', color:'var(--text3)', textTransform:'uppercase', letterSpacing:'.05em', marginTop:2 }}>{s.label}</div>
+                              </div>
+                            )
+                          })}
                         </div>
                       </>
                     )
@@ -2696,24 +2716,48 @@ export default function StoreMonitorPage() {
                   <span className="sm-tr-title">Connectivity Breakdown</span>
                   <span style={{ fontSize:10, color:'var(--text3)', fontFamily:'var(--mono)' }}>
                     {Object.keys(ropConnBreakdown).length} states · {kpi.total} devices
+                    {ropConnFilter && <span style={{ color: CONN_COLORS[ropConnFilter] || 'var(--accent)', marginLeft:6 }}>· {CONN_LABELS[ropConnFilter] || ropConnFilter}</span>}
                   </span>
+                  {ropConnFilter && (
+                    <button className="sm-btn sm-sm" style={{ marginLeft:'auto' }} onClick={() => setRopConnFilter('')}>✕ Clear</button>
+                  )}
                 </div>
-                <div className="sm-tr-body sm-chart">
+                <div className="sm-tr-body sm-chart" style={{ cursor: Object.keys(ropConnBreakdown).length ? 'pointer' : 'default' }}
+                  onClick={() => {
+                    // clicking the chart area clears the filter; individual legend pills set it
+                    if (ropConnFilter) setRopConnFilter('')
+                  }}>
                   {ropConnChart
-                    ? <Doughnut data={ropConnChart.data} options={ropConnChart.options} />
+                    ? <Doughnut data={ropConnChart.data} options={{
+                        ...ropConnChart.options,
+                        onClick: (_e, elements) => {
+                          if (!elements.length) { setRopConnFilter(''); return }
+                          const idx = elements[0].index
+                          const key = Object.keys(ropConnBreakdown)[idx]
+                          if (key) setRopConnFilter((p) => p === key ? '' : key)
+                        },
+                      }} />
                     : <div className="sm-empty">No connectivity data</div>}
                 </div>
                 {/* legend row under chart */}
                 {Object.keys(ropConnBreakdown).length > 0 && (
                   <div style={{ padding:'0 14px 12px', display:'flex', flexWrap:'wrap', gap:'6px 14px' }}>
-                    {Object.entries(ropConnBreakdown).map(([k, v]) => (
-                      <div key={k} style={{ display:'flex', alignItems:'center', gap:5, fontSize:10, fontFamily:'var(--mono)', color:'var(--text2)' }}>
-                        <span style={{ width:8, height:8, borderRadius:2, background: CONN_COLORS[k] || '#64748b', flexShrink:0 }}/>
-                        <span>{CONN_LABELS[k] || k}</span>
-                        <span style={{ color: CONN_COLORS[k] || 'var(--text3)', fontWeight:700 }}>{v}</span>
-                        <span style={{ color:'var(--text3)' }}>({kpi.total ? pct(v, kpi.total).toFixed(0) : 0}%)</span>
-                      </div>
-                    ))}
+                    {Object.entries(ropConnBreakdown).map(([k, v]) => {
+                      const isActive = ropConnFilter === k
+                      return (
+                        <div key={k} onClick={() => setRopConnFilter((p) => p === k ? '' : k)}
+                          style={{ display:'flex', alignItems:'center', gap:5, fontSize:10, fontFamily:'var(--mono)', color:'var(--text2)',
+                            cursor:'pointer', opacity: ropConnFilter && !isActive ? 0.45 : 1,
+                            padding:'2px 6px', borderRadius:4, background: isActive ? `${CONN_COLORS[k] || '#64748b'}22` : 'transparent',
+                            outline: isActive ? `1px solid ${CONN_COLORS[k] || '#64748b'}` : 'none', transition:'all .15s' }}
+                          title={isActive ? 'Click to clear filter' : `Filter by ${CONN_LABELS[k] || k}`}>
+                          <span style={{ width:8, height:8, borderRadius:2, background: CONN_COLORS[k] || '#64748b', flexShrink:0 }}/>
+                          <span>{CONN_LABELS[k] || k}</span>
+                          <span style={{ color: CONN_COLORS[k] || 'var(--text3)', fontWeight:700 }}>{v}</span>
+                          <span style={{ color:'var(--text3)' }}>({kpi.total ? pct(v, kpi.total).toFixed(0) : 0}%)</span>
+                        </div>
+                      )
+                    })}
                   </div>
                 )}
               </div>
@@ -2727,7 +2771,22 @@ export default function StoreMonitorPage() {
                 value={ropSearch} onChange={(e) => setRopSearch(e.target.value)}
                 style={{ minWidth: 200, flex: '1 1 200px' }} />
               {ropSearch && (
-                <button className="sm-btn sm-sm danger" onClick={() => setRopSearch('')}>✕ Clear</button>
+                <button className="sm-btn sm-sm danger" onClick={() => setRopSearch('')}>✕ Search</button>
+              )}
+              {ropStatusFilter && (
+                <button className="sm-btn sm-sm" onClick={() => setRopStatusFilter('')}
+                  style={{ color: ropStatusFilter === 'online' ? 'var(--green)' : ropStatusFilter === 'offline' ? 'var(--red)' : 'var(--amber)' }}>
+                  ✕ {ropStatusFilter === 'online' ? 'Online' : ropStatusFilter === 'offline' ? 'Offline' : 'Issues'}
+                </button>
+              )}
+              {ropConnFilter && (
+                <button className="sm-btn sm-sm" onClick={() => setRopConnFilter('')}
+                  style={{ color: CONN_COLORS[ropConnFilter] || 'var(--accent)' }}>
+                  ✕ {CONN_LABELS[ropConnFilter] || ropConnFilter}
+                </button>
+              )}
+              {(ropStatusFilter || ropConnFilter) && (
+                <button className="sm-btn sm-sm danger" onClick={() => { setRopStatusFilter(''); setRopConnFilter('') }}>Clear all</button>
               )}
               <span style={{ marginLeft:'auto', fontSize:10.5, color:'var(--text3)', fontFamily:'var(--mono)', whiteSpace:'nowrap' }}>
                 {ropFilteredStores.length}/{ropActiveStores.length} devices
