@@ -82,20 +82,22 @@ export function placeholderManualStore(code) {
   }
 }
 
-/** One row per configured code — live store when matched, placeholder otherwise. */
+/** Matched stores only — codes with no monitoring data in InfluxDB are silently skipped. */
 export function buildManualRopStoreList(stores, codes) {
   const list = parseManualStoreCodes(codes)
   if (!list.length) return []
   const used = new Set()
-  return list.map((code) => {
+  const result = []
+  for (const code of list) {
     const norm = normalizeStoreCode(code)
     const match = stores.find((s) => !used.has(s.storeTag) && storeMatchesManualCode(s, code))
     if (match) {
       used.add(match.storeTag)
-      return { ...match, storeCode: norm }
+      result.push({ ...match, storeCode: norm })
     }
-    return placeholderManualStore(norm)
-  })
+    // codes with no match are intentionally omitted — only real devices are shown
+  }
+  return result
 }
 
 export function loadManualStoreCodesFromStorage() {

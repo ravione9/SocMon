@@ -2534,8 +2534,8 @@ export default function StoreMonitorPage() {
       {/* ══════════ ROP GROUPS ══════════ */}
       {tab==='rop' && (() => {
         const kpi = ropKpi(ropActiveStores)
-        const manualMatched = ropManualStores.filter((s) => !s.isPlaceholder).length
-        const manualMissing = ropManualStores.length - manualMatched
+        const manualMatched = ropManualStores.length
+        const manualMissing = manualRopCodeList.length - manualMatched
         return (
           <>
             {/* sub-tab bar */}
@@ -2751,11 +2751,9 @@ export default function StoreMonitorPage() {
                   {ropFilteredStores.map((s) => {
                     const ping = primaryPing(s)
                     const grps = s.systemGroups || [s.systemGroup]
-                    const clickable = !s.isPlaceholder
                     return (
-                      <tr key={s.storeTag} className={clickable ? 'clickable' : ''}
-                        style={s.isPlaceholder ? { opacity: 0.72 } : undefined}
-                        onClick={clickable ? () => { setSelectedTag(s.storeTag); setTab('detail') } : undefined}>
+                      <tr key={s.storeTag} className="clickable"
+                        onClick={() => { setSelectedTag(s.storeTag); setTab('detail') }}>
                         <td><OnlineBadge online={s.online} /></td>
                         {ropSubTab === 'manual_sdwan' && (
                           <td style={{ fontFamily:'var(--mono)', fontWeight:700, fontSize:11 }}>{s.storeCode || '—'}</td>
