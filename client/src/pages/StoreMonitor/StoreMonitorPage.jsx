@@ -643,23 +643,29 @@ export default function StoreMonitorPage() {
         : { range }
       const { data } = await api.get('/api/store-monitor/overview', { params })
       setOverview(data)
-      if (!selectedTag && data.stores?.length) setSelectedTag(data.stores[0].storeTag)
+      if (data.stores?.length) setSelectedTag((prev) => prev || data.stores[0].storeTag)
     } catch (e) {
       setError(e.response?.data?.error || e.message || 'Failed to fetch data')
     } finally { setLoading(false) }
-  }, [range, selectedTag, globalCustom])
+  }, [range, globalCustom])
 
   useSmartPolling(loadOverview, 60_000, [range, globalCustom])
 
-  /* ── load problems ── */
-  const loadProblems = useCallback(async () => {
-    try {
-      const { data } = await api.get('/api/store-monitor/problems')
-      setProblems(data.problems || [])
-    } catch { setProblems([]) }
-  }, [])
-
-  useEffect(() => { if (tab === 'problems') loadProblems() }, [tab, loadProblems])
+  /* ── load problems: derived from overview stores to avoid a duplicate Influx round-trip ── */
+  useEffect(() => {
+    if (tab !== 'problems') return
+    const stores = overview?.stores
+    if (!stores?.length) { setProblems([]); return }
+    const flat = []
+    for (const s of stores) {
+      for (const issue of s.issues ?? []) {
+        flat.push({ storeTag: s.storeTag, hostname: s.hostname, serial: s.serial, lastSeen: s.lastSeen, connState: s.connState, gatewayVendor: s.gatewayVendor, ...issue })
+      }
+    }
+    const sev = { critical: 0, high: 1, warning: 2 }
+    flat.sort((a, b) => (sev[a.severity] ?? 9) - (sev[b.severity] ?? 9))
+    setProblems(flat)
+  }, [tab, overview])
 
   /* ── load history ── */
   const loadHistory = useCallback(async (tag) => {

@@ -141,7 +141,9 @@ router.get('/problems', async (req, res, next) => {
       return res.status(503).json({ error: 'InfluxDB not configured' })
     }
     const staleMinutes = Math.min(Math.max(parseInt(String(req.query.staleMinutes || '10'), 10) || 10, 2), 60)
-    const stores = await fetchStoreSnapshot(staleMinutes)
+    const rawRange    = String(req.query.range || '-24h')
+    const metricRange = VALID_RANGES.has(rawRange) ? rawRange : '-24h'
+    const stores = await fetchStoreSnapshot(staleMinutes, metricRange)
     const problems = []
     for (const s of stores) {
       for (const issue of s.issues) {

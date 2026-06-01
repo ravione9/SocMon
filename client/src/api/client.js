@@ -8,8 +8,10 @@ api.interceptors.request.use(config => {
   const token = useAuthStore.getState().token
   if (token) config.headers.Authorization = `Bearer ${token}`
   const reqUrl = String(config.url || '')
-  if (reqUrl.includes('/zabbix') || reqUrl.includes('/store-zabbix') || reqUrl.includes('/store-monitor')) {
-    config.timeout = config.timeout ?? 120000
+  if (reqUrl.includes('/zabbix') || reqUrl.includes('/store-zabbix')) {
+    config.timeout = 120000
+  } else if (reqUrl.includes('/store-monitor')) {
+    config.timeout = 180000
   }
   return config
 })

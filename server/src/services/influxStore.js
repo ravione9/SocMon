@@ -361,6 +361,36 @@ function detectIssues(store, staleMinutes = 10) {
         : 'ok'
 }
 
+/* ── Snapshot cache ──────────────────────────────────────────────────────────
+ * Caches the last fetchStoreSnapshot result keyed by (metricRange, fromTs, toTs).
+ * Default TTL = 90 s — prevents concurrent requests and the alert-engine poll
+ * from each firing 8 parallel Influx queries.
+ * Custom time-range results are cached for only 30 s.
+ * ─────────────────────────────────────────────────────────────────────────── */
+const _snapshotCache = new Map()
+const CACHE_TTL_DEFAULT_MS = 90_000
+const CACHE_TTL_CUSTOM_MS  = 30_000
+
+function _snapshotCacheKey(metricRange, fromTs, toTs) {
+  return `${metricRange}|${fromTs ?? ''}|${toTs ?? ''}`
+}
+
+function _getCachedSnapshot(key) {
+  const entry = _snapshotCache.get(key)
+  if (!entry) return null
+  if (Date.now() - entry.ts > entry.ttl) { _snapshotCache.delete(key); return null }
+  return entry.data
+}
+
+function _setCachedSnapshot(key, data, isCustom) {
+  _snapshotCache.set(key, { data, ts: Date.now(), ttl: isCustom ? CACHE_TTL_CUSTOM_MS : CACHE_TTL_DEFAULT_MS })
+  // Keep map small — evict oldest entries beyond 10 slots
+  if (_snapshotCache.size > 10) {
+    const oldest = [..._snapshotCache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0]
+    if (oldest) _snapshotCache.delete(oldest[0])
+  }
+}
+
 /**
  * @param {number}  staleMinutes
  * @param {string}  metricRange   Flux relative range e.g. '-24h'
@@ -368,7 +398,17 @@ function detectIssues(store, staleMinutes = 10) {
  * @param {number}  [toTs]        Custom window end   (Unix sec)
  */
 export async function fetchStoreSnapshot(staleMinutes = 10, metricRange = '-24h', fromTs, toTs) {
-  const discoveryRange = '-30d'
+  const cacheKey = _snapshotCacheKey(metricRange, fromTs, toTs)
+  const cached = _getCachedSnapshot(cacheKey)
+  if (cached) return cached
+
+  // If a fetch for the same key is already in-flight, wait for it instead of
+  // launching a duplicate set of 8 parallel Influx queries.
+  if (_snapshotCache.has(`inflight:${cacheKey}`)) {
+    return _snapshotCache.get(`inflight:${cacheKey}`)
+  }
+
+  const discoveryRange = '-7d'
 
   // When custom from/to is provided build an explicit Flux range clause
   let rangeClause
@@ -384,6 +424,19 @@ export async function fetchStoreSnapshot(staleMinutes = 10, metricRange = '-24h'
 
   const isCustom = rangeClause !== `start: ${metricRange}`
   const bucket = fluxEscape(cfg().bucket)
+
+  const fetchPromise = _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, rangeClause, isCustom, bucket)
+  _snapshotCache.set(`inflight:${cacheKey}`, fetchPromise)
+  try {
+    const result = await fetchPromise
+    _setCachedSnapshot(cacheKey, result, isCustom)
+    return result
+  } finally {
+    _snapshotCache.delete(`inflight:${cacheKey}`)
+  }
+}
+
+async function _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, rangeClause, isCustom, bucket) {
 
   /* Run a tagged-latest or measurement-latest query using the resolved range clause */
   async function runTagged(measurement, tagColumns) {
