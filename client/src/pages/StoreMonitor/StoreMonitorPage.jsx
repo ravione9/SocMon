@@ -30,8 +30,15 @@ const TABS = [
   { id: 'problems',  label: 'Problems',     icon: '⚠' },
   { id: 'netHealth', label: 'Net Health',   icon: '📶' },
   { id: 'detail',    label: 'Store Detail', icon: '🔍' },
+  { id: 'rop',       label: 'ROP Groups',   icon: '📡' },
   { id: 'reports',   label: 'Reports',      icon: '📊' },
   { id: 'alerts',    label: 'Alert Rules',  icon: '🔔' },
+]
+
+const ROP_SUBTABS = [
+  { id: 'all',      label: 'All ROP',            icon: '📡' },
+  { id: 'sdwan',    label: 'ROP + SD-WAN',        icon: '🛡' },
+  { id: 'no_sdwan', label: 'ROP without SD-WAN',  icon: '🔗' },
 ]
 
 const REPORT_TYPES = [
@@ -486,6 +493,18 @@ const CSS = `
 .sm-picker-item-meta { font-size:10px; font-family:var(--mono); color:var(--text3); flex-shrink:0; }
 .sm-picker-empty { padding:20px; text-align:center; color:var(--text3); font-size:12px; }
 .sm-picker-count { padding:4px 11px 6px; font-size:10px; font-family:var(--mono); color:var(--text3); border-top:1px solid var(--border); background:var(--bg2); }
+/* ── rop sub-tabs ── */
+.sm-subtabs { display:flex; gap:2px; flex-wrap:wrap; margin-bottom:12px;
+  background:var(--bg3); border:1px solid var(--border); border-radius:var(--sm-r); padding:3px; }
+.sm-subtab { display:inline-flex; align-items:center; gap:5px; padding:4px 14px; border-radius:6px; border:none;
+  background:transparent; color:var(--text3); font-size:11px; font-weight:600; cursor:pointer;
+  transition:all .12s; font-family:var(--sans); white-space:nowrap; }
+.sm-subtab:hover { background:var(--bg2); color:var(--text2); }
+.sm-subtab.active { background:var(--bg); color:var(--text); box-shadow:0 1px 4px rgba(0,0,0,.18); }
+.sm-subtab-count { background:var(--bg3); color:var(--text2); font-size:9px; font-weight:800;
+  border-radius:999px; min-width:15px; height:15px; display:inline-flex; align-items:center; justify-content:center; padding:0 3px; }
+.sm-subtab.active .sm-subtab-count { background:rgba(0,0,0,.12); }
+
 /* ── live alert notifications ── */
 .sm-alert-stack { position:fixed; top:70px; right:16px; z-index:300; display:flex; flex-direction:column; gap:8px; max-width:420px; pointer-events:none; }
 .sm-alert-toast { pointer-events:all; background:var(--bg); border-radius:10px; box-shadow:0 4px 24px rgba(0,0,0,.5); overflow:hidden; animation:smSlideIn .25s ease; }
@@ -561,6 +580,9 @@ export default function StoreMonitorPage() {
   const [alertForm, setAlertForm]       = useState(blankRule())
   const [alertSaving, setAlertSaving]   = useState(false)
   const [testResult, setTestResult]     = useState({})
+
+  const [ropSubTab, setRopSubTab] = useState('all')
+  const [ropSearch, setRopSearch] = useState('')
 
   const setTab = useCallback((id) => {
     setTabRaw(id)
@@ -745,6 +767,74 @@ export default function StoreMonitorPage() {
       return { ...g, health: pct(g.online, g.total), avgPing: g.pingCount ? g.avgPingMs / g.pingCount : null }
     })
   }, [stores])
+
+  /* ── ROP-oriented store slices ── */
+  const ropAllStores = useMemo(
+    () => stores.filter((s) => (s.systemGroups || [s.systemGroup]).includes('RP Group')),
+    [stores]
+  )
+  const ropSdwanStores = useMemo(
+    () => ropAllStores.filter((s) => (s.systemGroups || [s.systemGroup]).includes('SD-WAN Group')),
+    [ropAllStores]
+  )
+  const ropOnlyStores = useMemo(
+    () => ropAllStores.filter((s) => !(s.systemGroups || [s.systemGroup]).includes('SD-WAN Group')),
+    [ropAllStores]
+  )
+  const ropActiveStores = useMemo(() => {
+    if (ropSubTab === 'sdwan')    return ropSdwanStores
+    if (ropSubTab === 'no_sdwan') return ropOnlyStores
+    return ropAllStores
+  }, [ropSubTab, ropAllStores, ropSdwanStores, ropOnlyStores])
+  const ropFilteredStores = useMemo(() => {
+    const q = ropSearch.trim().toLowerCase()
+    if (!q) return ropActiveStores
+    return ropActiveStores.filter((s) =>
+      [s.hostname, s.serial, s.gatewayIp, s.storeTag].some((v) => String(v || '').toLowerCase().includes(q))
+    )
+  }, [ropActiveStores, ropSearch])
+  function ropKpi(list) {
+    const total   = list.length
+    const online  = list.filter((s) => s.online).length
+    const issues  = list.filter((s) => s.issueCount > 0).length
+    const pings   = list.map((s) => primaryPing(s)?.avgMs).filter((v) => v != null && Number.isFinite(v))
+    const avgPing = pings.length ? pings.reduce((a, b) => a + b, 0) / pings.length : null
+    return { total, online, offline: total - online, issues, avgPing }
+  }
+
+  /* ── ROP charts (recompute whenever the active sub-list changes) ── */
+  const ropConnBreakdown = useMemo(() => {
+    const counts = {}
+    for (const s of ropActiveStores) {
+      const k = s.connState || 'unknown'
+      counts[k] = (counts[k] || 0) + 1
+    }
+    return counts
+  }, [ropActiveStores])
+
+  const ropConnChart = useMemo(() => {
+    const entries = Object.entries(ropConnBreakdown)
+    if (!entries.length) return null
+    const bgColors = entries.map(([k]) => CONN_COLORS[k] || '#64748b')
+    return {
+      data: {
+        labels: entries.map(([k]) => CONN_LABELS[k] || k),
+        datasets: [{
+          data: entries.map(([, v]) => v),
+          backgroundColor: bgColors,
+          borderColor: 'transparent',
+          hoverBorderWidth: 2, hoverBorderColor: '#fff',
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'right', labels: { color: tc.text2, boxWidth: 10, font: { size: 10 } } },
+          tooltip: { callbacks: { label: (ctx) => ` ${ctx.label}: ${ctx.raw} devices` } },
+        },
+      },
+    }
+  }, [ropConnBreakdown, tc])
 
   const summary = overview?.summary
 
@@ -2269,6 +2359,213 @@ export default function StoreMonitorPage() {
           }
         </>
       )}
+
+      {/* ══════════ ROP GROUPS ══════════ */}
+      {tab==='rop' && (() => {
+        const kpi = ropKpi(ropActiveStores)
+        return (
+          <>
+            {/* sub-tab bar */}
+            <div className="sm-subtabs">
+              {ROP_SUBTABS.map((st) => {
+                const count = st.id === 'all' ? ropAllStores.length
+                  : st.id === 'sdwan' ? ropSdwanStores.length
+                  : ropOnlyStores.length
+                return (
+                  <button key={st.id} type="button"
+                    className={`sm-subtab${ropSubTab === st.id ? ' active' : ''}`}
+                    onClick={() => { setRopSubTab(st.id); setRopSearch('') }}>
+                    {st.icon} {st.label}
+                    <span className="sm-subtab-count">{count}</span>
+                  </button>
+                )
+              })}
+            </div>
+
+            {/* KPI strip */}
+            <div className="sm-g4 sm-section-mb">
+              {[
+                { label: 'Total Devices', val: kpi.total,   color: 'var(--text)' },
+                { label: 'Online',        val: kpi.online,  color: 'var(--green)', sub: kpi.total ? `${pct(kpi.online, kpi.total).toFixed(1)}% uptime` : undefined },
+                { label: 'Offline',       val: kpi.offline, color: 'var(--red)',   sub: kpi.total ? `${pct(kpi.offline, kpi.total).toFixed(1)}% down` : undefined },
+                { label: 'With Issues',   val: kpi.issues,  color: kpi.issues > 0 ? 'var(--amber)' : 'var(--text)' },
+                { label: 'Avg Ping',      val: kpi.avgPing != null ? `${kpi.avgPing.toFixed(0)} ms` : '—', color: 'var(--text)' },
+              ].map((k) => (
+                <div key={k.label} className="sm-kpi">
+                  <div className="sm-kpi-label">{k.label}</div>
+                  <div className="sm-kpi-val" style={{ color: k.color }}>{k.val}</div>
+                  {k.sub && <div className="sm-kpi-sub">{k.sub}</div>}
+                </div>
+              ))}
+            </div>
+
+            {/* widgets row: uptime health + connectivity breakdown */}
+            <div className="sm-g2 sm-section-mb">
+
+              {/* ── Uptime / Health widget ── */}
+              <div className="sm-tr">
+                <div className="sm-tr-hd">
+                  <span className="sm-tr-title">Uptime &amp; Health</span>
+                  <span style={{ fontSize:10, color:'var(--text3)', fontFamily:'var(--mono)' }}>
+                    {ropSubTab === 'sdwan' ? 'ROP + SD-WAN' : ropSubTab === 'no_sdwan' ? 'ROP without SD-WAN' : 'All ROP'} · {kpi.total} devices
+                  </span>
+                </div>
+                <div className="sm-tr-body" style={{ display:'flex', flexDirection:'column', gap:14 }}>
+                  {/* big health % */}
+                  {(() => {
+                    const healthPct = kpi.total ? pct(kpi.online, kpi.total) : 0
+                    const col = healthPct >= 90 ? '#22c55e' : healthPct >= 70 ? '#eab308' : '#ef4444'
+                    return (
+                      <>
+                        <div style={{ display:'flex', alignItems:'flex-end', gap:12, flexWrap:'wrap' }}>
+                          <div>
+                            <div style={{ fontSize:9.5, fontFamily:'var(--mono)', color:'var(--text3)', textTransform:'uppercase', letterSpacing:'.07em', marginBottom:2 }}>Health Score</div>
+                            <div style={{ fontSize:38, fontWeight:800, lineHeight:1, color: col, letterSpacing:'-.02em' }}>
+                              {healthPct.toFixed(1)}<span style={{ fontSize:18, fontWeight:600 }}>%</span>
+                            </div>
+                          </div>
+                          <div style={{ flex:1, minWidth:100 }}>
+                            <div style={{ display:'flex', justifyContent:'space-between', fontSize:10, fontFamily:'var(--mono)', color:'var(--text3)', marginBottom:4 }}>
+                              <span>0%</span><span>100%</span>
+                            </div>
+                            <div style={{ height:10, background:'var(--bg3)', borderRadius:6, overflow:'hidden' }}>
+                              <div style={{ height:'100%', width:`${healthPct}%`, background: col, borderRadius:6, transition:'width .5s ease' }}/>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* online / offline / issues row */}
+                        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8 }}>
+                          {[
+                            { label:'Online',     val: kpi.online,  color:'#22c55e' },
+                            { label:'Offline',    val: kpi.offline, color:'#ef4444' },
+                            { label:'Issues',     val: kpi.issues,  color:'#eab308' },
+                          ].map((s) => (
+                            <div key={s.label} style={{ background:'var(--bg3)', borderRadius:7, padding:'7px 10px', textAlign:'center' }}>
+                              <div style={{ fontSize:18, fontWeight:700, color: s.color, lineHeight:1.1 }}>{s.val}</div>
+                              <div style={{ fontSize:9, fontFamily:'var(--mono)', color:'var(--text3)', textTransform:'uppercase', letterSpacing:'.05em', marginTop:2 }}>{s.label}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )
+                  })()}
+                </div>
+              </div>
+
+              {/* ── Connectivity Breakdown widget ── */}
+              <div className="sm-tr">
+                <div className="sm-tr-hd">
+                  <span className="sm-tr-title">Connectivity Breakdown</span>
+                  <span style={{ fontSize:10, color:'var(--text3)', fontFamily:'var(--mono)' }}>
+                    {Object.keys(ropConnBreakdown).length} states · {kpi.total} devices
+                  </span>
+                </div>
+                <div className="sm-tr-body sm-chart">
+                  {ropConnChart
+                    ? <Doughnut data={ropConnChart.data} options={ropConnChart.options} />
+                    : <div className="sm-empty">No connectivity data</div>}
+                </div>
+                {/* legend row under chart */}
+                {Object.keys(ropConnBreakdown).length > 0 && (
+                  <div style={{ padding:'0 14px 12px', display:'flex', flexWrap:'wrap', gap:'6px 14px' }}>
+                    {Object.entries(ropConnBreakdown).map(([k, v]) => (
+                      <div key={k} style={{ display:'flex', alignItems:'center', gap:5, fontSize:10, fontFamily:'var(--mono)', color:'var(--text2)' }}>
+                        <span style={{ width:8, height:8, borderRadius:2, background: CONN_COLORS[k] || '#64748b', flexShrink:0 }}/>
+                        <span>{CONN_LABELS[k] || k}</span>
+                        <span style={{ color: CONN_COLORS[k] || 'var(--text3)', fontWeight:700 }}>{v}</span>
+                        <span style={{ color:'var(--text3)' }}>({kpi.total ? pct(v, kpi.total).toFixed(0) : 0}%)</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+            </div>
+
+            {/* search bar */}
+            <div style={{ display:'flex', gap:8, marginBottom:10, alignItems:'center',
+              padding:'7px 12px', background:'var(--bg2)', border:'1px solid var(--border)', borderRadius:'var(--sm-r-lg)' }}>
+              <input className="sm-input" placeholder="Search hostname, serial, IP…"
+                value={ropSearch} onChange={(e) => setRopSearch(e.target.value)}
+                style={{ minWidth: 200, flex: '1 1 200px' }} />
+              {ropSearch && (
+                <button className="sm-btn sm-sm danger" onClick={() => setRopSearch('')}>✕ Clear</button>
+              )}
+              <span style={{ marginLeft:'auto', fontSize:10.5, color:'var(--text3)', fontFamily:'var(--mono)', whiteSpace:'nowrap' }}>
+                {ropFilteredStores.length}/{ropActiveStores.length} devices
+              </span>
+            </div>
+
+            {/* store table */}
+            <div className="sm-tbl-wrap">
+              <table className="sm-tbl">
+                <thead>
+                  <tr>
+                    <th>Status</th><th>Hostname</th><th>Groups</th><th>Serial</th>
+                    <th>Interface</th><th>Connectivity</th><th>Gateway IP</th><th>Vendor</th>
+                    <th>Ping</th><th>Loss</th><th>CPU</th><th>RAM</th>
+                    <th>↓ Speed</th><th>↑ Speed</th><th>Last seen</th><th>Issues</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ropFilteredStores.map((s) => {
+                    const ping = primaryPing(s)
+                    const grps = s.systemGroups || [s.systemGroup]
+                    return (
+                      <tr key={s.storeTag} className="clickable"
+                        onClick={() => { setSelectedTag(s.storeTag); setTab('detail') }}>
+                        <td><OnlineBadge online={s.online} /></td>
+                        <td style={{ fontWeight: 600 }}>{s.hostname}</td>
+                        <td>
+                          <div style={{ display:'flex', flexWrap:'wrap', gap:3 }}>
+                            {grps.map((g) => <GroupBadge key={g} group={g} />)}
+                          </div>
+                        </td>
+                        <td style={{ fontFamily:'var(--mono)', fontSize:11, color:'var(--text3)' }}>{s.serial}</td>
+                        <td>
+                          {s.activeInterface
+                            ? <span className="sm-pill" style={{
+                                background: String(s.activeInterface).toLowerCase().includes('wi') ? 'rgba(6,182,212,.15)' : 'rgba(34,197,94,.15)',
+                                color:      String(s.activeInterface).toLowerCase().includes('wi') ? '#06b6d4' : '#22c55e',
+                              }}>
+                                {String(s.activeInterface).toLowerCase().includes('wi') ? '📶' : '🔌'} {s.activeInterface}
+                              </span>
+                            : <span style={{ color:'var(--text3)' }}>—</span>}
+                        </td>
+                        <td><ConnPill state={s.connState} /></td>
+                        <td style={{ fontFamily:'var(--mono)', fontSize:11 }}>{s.gatewayIp || '—'}</td>
+                        <td>{fmtVendor(s.gatewayVendor)}</td>
+                        <td style={{ fontFamily:'var(--mono)' }}>{fmtMs(ping?.avgMs)}</td>
+                        <td style={{ color: ping?.packetLossPct > 10 ? 'var(--red)' : ping?.packetLossPct > 0 ? 'var(--amber)' : 'var(--green)' }}>
+                          {ping?.packetLossPct != null ? fmtPct(ping.packetLossPct) : '—'}
+                        </td>
+                        <td style={{ color: s.cpuPct > 90 ? 'var(--red)' : s.cpuPct > 70 ? 'var(--amber)' : 'var(--text)' }}>{fmtPct(s.cpuPct)}</td>
+                        <td style={{ color: s.memPct > 90 ? 'var(--red)' : s.memPct > 70 ? 'var(--amber)' : 'var(--text)' }}>{fmtPct(s.memPct)}</td>
+                        <td>{fmtMbps(s.downloadMbps)}</td>
+                        <td>{fmtMbps(s.uploadMbps)}</td>
+                        <td style={{ fontFamily:'var(--mono)', fontSize:11, color:'var(--text3)' }}>{relAge(s.lastSeen)}</td>
+                        <td>
+                          {s.issueCount > 0
+                            ? <span style={{ color:SEV_COLORS[s.severity] || 'var(--amber)', fontWeight:700, fontFamily:'var(--mono)' }}>{s.issueCount}</span>
+                            : <span style={{ color:'var(--green)', fontSize:11 }}>✓</span>}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                  {!ropFilteredStores.length && (
+                    <tr><td colSpan={16} className="sm-empty">
+                      {ropActiveStores.length === 0
+                        ? `No ${ropSubTab === 'sdwan' ? 'ROP + SD-WAN' : ropSubTab === 'no_sdwan' ? 'ROP-only' : 'ROP'} devices found`
+                        : 'No devices match search'}
+                    </td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )
+      })()}
 
       {/* ══════════ ALERT MODAL ══════════ */}
       {alertModal !== null && (
