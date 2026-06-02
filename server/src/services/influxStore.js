@@ -787,14 +787,44 @@ export function buildOverviewSummary(stores) {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   CRASH EVENTS  (app_crash measurement)
+   CRASH EVENTS — all crash-type measurements:
+     app_crash, app_wer_report, app_hang, dotnet_crash,
+     app_critical, service_crash, unexpected_shutdown,
+     bsod_kernel_power, app_crash_wer
    Tags:   store_tag, hostname, serial, app_name, app_version
    Fields: count, event_id, message
    ═══════════════════════════════════════════════════════════ */
 
+export const CRASH_MEASUREMENTS = [
+  'app_crash', 'app_wer_report', 'app_hang', 'dotnet_crash',
+  'app_critical', 'service_crash', 'unexpected_shutdown',
+  'bsod_kernel_power', 'app_crash_wer',
+]
+
+/** Derive display severity from measurement name */
+export function crashSeverity(meas) {
+  return ['app_critical', 'bsod_kernel_power'].includes(meas) ? 'critical' : 'error'
+}
+
+/** Human-readable crash type label */
+export function crashTypeLabel(meas) {
+  const MAP = {
+    app_crash:            'App Crash (1000)',
+    app_wer_report:       'WER Report (1001)',
+    app_hang:             'App Hang (1002)',
+    dotnet_crash:         '.NET Crash (1026)',
+    app_critical:         'App Critical',
+    service_crash:        'Service Crash (7031/7034)',
+    unexpected_shutdown:  'Unexpected Shutdown (6008)',
+    bsod_kernel_power:    'BSOD / Kernel Power (41)',
+    app_crash_wer:        'WER Folder Crash',
+  }
+  return MAP[meas] || meas
+}
+
 /**
  * Fetch raw crash event rows within a time range.
- * Returns all fields grouped by store + app.
+ * Returns all fields grouped by store + app + crash type.
  */
 export async function fetchCrashEvents(rangeParam = '-24h', fromSec, toSec) {
   const bucket = fluxEscape(cfg().bucket)
@@ -809,11 +839,12 @@ export async function fetchCrashEvents(rangeParam = '-24h', fromSec, toSec) {
     rangeClause = `start: ${rangeParam}`
   }
 
+  const measureFilter = CRASH_MEASUREMENTS.map(m => `r._measurement == "${m}"`).join(' or ')
   const flux = `
 from(bucket: "${bucket}")
   |> range(${rangeClause})
-  |> filter(fn: (r) => r._measurement == "app_crash")
-  |> group(columns: ["store_tag", "hostname", "serial", "app_name", "app_version", "_field"])
+  |> filter(fn: (r) => ${measureFilter})
+  |> group(columns: ["_measurement", "store_tag", "hostname", "serial", "app_name", "app_version", "_field"])
   |> sort(columns: ["_time"], desc: true)
 `
   try {
@@ -834,14 +865,17 @@ export async function fetchCrashSummary(rangeParam = '-24h', fromSec, toSec) {
   const map  = new Map()
 
   for (const row of rows) {
-    const key = `${row.store_tag||row.hostname}||${row.app_name||''}||${row.app_version||''}`
+    const crashType = row._measurement || 'app_crash'
+    const key = `${row.store_tag||row.hostname}||${row.app_name||''}||${row.app_version||''}||${crashType}`
     if (!map.has(key)) {
       map.set(key, {
-        storeTag:    row.store_tag || '',
-        hostname:    row.hostname  || '',
-        serial:      row.serial    || '',
-        appName:     row.app_name  || 'unknown',
-        appVersion:  row.app_version || '',
+        storeTag:     row.store_tag || '',
+        hostname:     row.hostname  || '',
+        serial:       row.serial    || '',
+        appName:      row.app_name  || null,
+        appVersion:   row.app_version || '',
+        crashType,
+        crashSeverity: crashSeverity(crashType),
         totalCrashes: 0,
         lastEventId:  null,
         lastMessage:  null,

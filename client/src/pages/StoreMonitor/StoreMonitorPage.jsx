@@ -156,6 +156,19 @@ const fmtPct  = (v) => v == null || !Number.isFinite(v) ? '—' : `${Number(v).t
 const fmtMbps = (v) => v == null || !Number.isFinite(v) ? '—' : `${Number(v).toFixed(1)} Mbps`
 const VENDOR_FALLBACKS = new Set(['unknown', 'unidentified', 'n/a', 'none', ''])
 const fmtVendor = (v) => (!v || VENDOR_FALLBACKS.has(String(v).toLowerCase().trim())) ? '—' : v
+
+const CRASH_TYPE_META = {
+  app_crash:           { label: 'App Crash',          sev: 'error',    color: '#f97316', icon: '💥', evtId: '1000',         src: 'Application Log' },
+  app_wer_report:      { label: 'WER Report',         sev: 'error',    color: '#f59e0b', icon: '📋', evtId: '1001',         src: 'Application Log' },
+  app_hang:            { label: 'App Hang',            sev: 'error',    color: '#eab308', icon: '⏸',  evtId: '1002',         src: 'Application Log' },
+  dotnet_crash:        { label: '.NET Crash',         sev: 'error',    color: '#8b5cf6', icon: '🔷', evtId: '1026',         src: 'Application Log' },
+  app_critical:        { label: 'App Critical',       sev: 'critical', color: '#ef4444', icon: '🔴', evtId: 'Any',          src: 'Application Log' },
+  service_crash:       { label: 'Service Crash',      sev: 'error',    color: '#f97316', icon: '⚙',  evtId: '7031 / 7034',  src: 'System Log' },
+  unexpected_shutdown: { label: 'Unexpected Shutdown',sev: 'error',    color: '#f59e0b', icon: '⚡', evtId: '6008',         src: 'System Log' },
+  bsod_kernel_power:   { label: 'BSOD / Kernel',      sev: 'critical', color: '#dc2626', icon: '💀', evtId: '41',           src: 'System Log' },
+  app_crash_wer:       { label: 'WER Folder Crash',   sev: 'error',    color: '#06b6d4', icon: '📁', evtId: '—',            src: 'WER Folder' },
+}
+function crashMeta(type) { return CRASH_TYPE_META[type] || { label: type||'Unknown', sev:'error', color:'#64748b', icon:'❓', evtId:'—', src:'—' } }
 const pct     = (n, d) => (!d ? 0 : Math.round((n / d) * 1000) / 10)
 const primaryPing = (s) => s?.ping?.['8.8.8.8'] || s?.ping?.['google.com'] || Object.values(s?.ping || {})[0]
 
@@ -599,6 +612,7 @@ export default function StoreMonitorPage() {
   const [crashLoading, setCrashLoading] = useState(false)
   const [crashSearch, setCrashSearch] = useState('')
   const [crashAppFilter, setCrashAppFilter] = useState('')
+  const [crashTypeFilter, setCrashTypeFilter] = useState('')
   const [crashModal, setCrashModal] = useState(null)   // selected crash summary row
   const [crashRawRows, setCrashRawRows] = useState([]) // raw event rows for modal
   const [crashRawLoading, setCrashRawLoading] = useState(false)
@@ -2251,20 +2265,29 @@ export default function StoreMonitorPage() {
       {tab==='crashes' && (
         <>
           {/* toolbar */}
-          <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:10,alignItems:'center'}}>
-            <input className="sm-input" placeholder="🔍 Search hostname, serial, app…"
-              value={crashSearch} onChange={(e)=>setCrashSearch(e.target.value)} style={{minWidth:200}}/>
+          <div style={{display:'flex',flexWrap:'wrap',gap:6,marginBottom:10,alignItems:'center',padding:'8px 12px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:'var(--sm-r-lg)'}}>
+            <input className="sm-input" placeholder="🔍 Hostname, serial, app…"
+              value={crashSearch} onChange={(e)=>setCrashSearch(e.target.value)} style={{minWidth:180,flex:'1 1 180px'}}/>
+            <select className="sm-select" value={crashTypeFilter} onChange={(e)=>setCrashTypeFilter(e.target.value)}>
+              <option value="">All crash types</option>
+              {Object.entries(CRASH_TYPE_META).map(([k,m])=>(
+                <option key={k} value={k}>{m.icon} {m.label}</option>
+              ))}
+            </select>
             <select className="sm-select" value={crashAppFilter} onChange={(e)=>setCrashAppFilter(e.target.value)}>
               <option value="">All apps</option>
               {(crashData?.byApp||[]).filter(a=>a.appName).map(a=>(
                 <option key={a.appName} value={a.appName}>{a.appName}</option>
               ))}
             </select>
+            {(crashSearch||crashTypeFilter||crashAppFilter) && (
+              <button className="sm-btn sm-sm danger" onClick={()=>{setCrashSearch('');setCrashTypeFilter('');setCrashAppFilter('')}}>✕ Clear</button>
+            )}
             <button className="sm-btn sm-sm primary" onClick={loadCrashes} disabled={crashLoading}>
               {crashLoading?'⏳':'↻'} Refresh
             </button>
             {crashData?.fetchedAt && (
-              <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',marginLeft:'auto'}}>
+              <span style={{marginLeft:'auto',fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
                 Updated {relAge(crashData.fetchedAt)} ago
               </span>
             )}
@@ -2274,36 +2297,70 @@ export default function StoreMonitorPage() {
           {crashData && (
             <div className="sm-g4 sm-section-mb">
               {[
-                { label:'Total Crashes',    val: crashData.totalEvents||0,    color:'var(--red)' },
-                { label:'Affected Stores',  val: crashData.affectedStores||0, color:'var(--amber)' },
-                { label:'Unique Apps',      val: (crashData.byApp||[]).length, color:'var(--text)' },
+                { label:'Total Events',     val: crashData.totalEvents||0,     color:'var(--amber)' },
+                { label:'Critical Events',  val: crashData.criticalEvents||0,  color:'var(--red)', sub:'BSOD + App Critical' },
+                { label:'Affected Stores',  val: crashData.affectedStores||0,  color:'var(--text)' },
+                { label:'Crash Types',      val: (crashData.byType||[]).length, color:'var(--text)' },
+                { label:'Unique Apps',      val: (crashData.byApp||[]).length,  color:'var(--text)' },
               ].map(k=>(
                 <div key={k.label} className="sm-kpi">
                   <div className="sm-kpi-label">{k.label}</div>
                   <div className="sm-kpi-val" style={{color:k.color}}>{k.val}</div>
+                  {k.sub && <div className="sm-kpi-sub">{k.sub}</div>}
                 </div>
               ))}
             </div>
           )}
 
-          {/* App-wise summary */}
-          {(crashData?.byApp||[]).length > 0 && (
-            <div className="sm-tr sm-section-mb">
-              <div className="sm-tr-hd"><span className="sm-tr-title">💥 Crashes by Application</span></div>
-              <div className="sm-tr-body sm-tbl-wrap">
-                <table className="sm-tbl">
-                  <thead><tr><th>App Name</th><th>Total Crashes</th><th>Affected Stores</th></tr></thead>
-                  <tbody>
-                    {crashData.byApp.map(a=>(
-                      <tr key={a.appName} className="clickable" onClick={()=>setCrashAppFilter(a.appName===crashAppFilter?'':a.appName)}>
-                        <td style={{fontWeight:600}}>{a.appName}</td>
-                        <td style={{color:'var(--red)',fontWeight:700,fontFamily:'var(--mono)'}}>{a.totalCrashes}</td>
-                        <td>{a.affectedStores}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+          {/* Crash type breakdown */}
+          {(crashData?.byType||[]).length > 0 && (
+            <div className="sm-g2 sm-section-mb">
+              <div className="sm-tr">
+                <div className="sm-tr-hd"><span className="sm-tr-title">Crashes by Type</span></div>
+                <div className="sm-tr-body sm-tbl-wrap">
+                  <table className="sm-tbl">
+                    <thead><tr><th>Type</th><th>Source</th><th>Event ID</th><th>Severity</th><th>Count</th><th>Stores</th></tr></thead>
+                    <tbody>
+                      {crashData.byType.map(t=>{
+                        const m = crashMeta(t.crashType)
+                        return (
+                          <tr key={t.crashType} className="clickable"
+                            onClick={()=>setCrashTypeFilter(t.crashType===crashTypeFilter?'':t.crashType)}>
+                            <td><span style={{display:'inline-flex',alignItems:'center',gap:5,fontWeight:600}}>
+                              <span>{m.icon}</span>
+                              <span style={{color:m.color}}>{m.label}</span>
+                            </span></td>
+                            <td style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>{m.src}</td>
+                            <td style={{fontFamily:'var(--mono)',fontSize:11}}>{m.evtId}</td>
+                            <td><span className="sm-badge" style={{background:`${m.sev==='critical'?'#ef4444':'#f97316'}18`,color:m.sev==='critical'?'#ef4444':'#f97316'}}>{m.sev}</span></td>
+                            <td style={{fontWeight:700,color:m.sev==='critical'?'var(--red)':'var(--amber)',fontFamily:'var(--mono)'}}>{t.totalCrashes}</td>
+                            <td>{t.affectedStores}</td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
+              {(crashData?.byApp||[]).length > 0 && (
+                <div className="sm-tr">
+                  <div className="sm-tr-hd"><span className="sm-tr-title">Crashes by Application</span></div>
+                  <div className="sm-tr-body sm-tbl-wrap">
+                    <table className="sm-tbl">
+                      <thead><tr><th>App Name</th><th>Total Crashes</th><th>Affected Stores</th></tr></thead>
+                      <tbody>
+                        {crashData.byApp.map(a=>(
+                          <tr key={a.appName} className="clickable" onClick={()=>setCrashAppFilter(a.appName===crashAppFilter?'':a.appName)}>
+                            <td style={{fontWeight:600,color:'var(--amber)'}}>{a.appName}</td>
+                            <td style={{color:'var(--red)',fontWeight:700,fontFamily:'var(--mono)'}}>{a.totalCrashes}</td>
+                            <td>{a.affectedStores}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -2317,31 +2374,40 @@ export default function StoreMonitorPage() {
             </div>
             <div className="sm-tr-body sm-tbl-wrap">
               <table className="sm-tbl">
-                <thead>
+                  <thead>
                   <tr>
                     <th>Hostname</th><th>Serial</th><th>Group</th>
-                    <th>App Name</th><th>Version</th>
-                    <th>Crash Count</th><th>Last Event ID</th><th>Last Message</th><th>Last Seen</th>
+                    <th>Crash Type</th><th>App Name</th><th>Version</th>
+                    <th>Count</th><th>Last Event ID</th><th>Last Message</th><th>Last Seen</th>
                   </tr>
                 </thead>
                 <tbody>
                   {crashLoading ? (
-                    <tr><td colSpan={9} className="sm-empty">Loading crash data…</td></tr>
+                    <tr><td colSpan={10} className="sm-empty">Loading crash data…</td></tr>
                   ) : (() => {
                     const q = crashSearch.trim().toLowerCase()
                     const filtered = (crashData?.summary||[]).filter(s=>{
-                      if (crashAppFilter && s.appName !== crashAppFilter) return false
-                      if (q && !`${s.hostname} ${s.serial} ${s.appName}`.toLowerCase().includes(q)) return false
+                      if (crashAppFilter  && s.appName   !== crashAppFilter)  return false
+                      if (crashTypeFilter && s.crashType !== crashTypeFilter) return false
+                      if (q && !`${s.hostname} ${s.serial} ${s.appName||''} ${s.crashType||''}`.toLowerCase().includes(q)) return false
                       return true
                     })
-                    if (!filtered.length) return <tr><td colSpan={9} className="sm-empty">No crash events found</td></tr>
+                    if (!filtered.length) return <tr><td colSpan={10} className="sm-empty">No crash events found</td></tr>
                     return filtered.map((s,i)=>{
                       const groups = deriveGroups(s.hostname, '', false)
+                      const cm = crashMeta(s.crashType)
                       return (
                         <tr key={i} className="clickable" onClick={()=>openCrashModal(s)}>
                           <td style={{fontWeight:600}}>{s.hostname}</td>
                           <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--text3)'}}>{s.serial}</td>
                           <td><div style={{display:'flex',gap:3,flexWrap:'wrap'}}>{groups.map(g=><GroupBadge key={g} group={g}/>)}</div></td>
+                          <td>
+                            <span style={{display:'inline-flex',alignItems:'center',gap:4,fontSize:10,fontFamily:'var(--mono)',
+                              padding:'1px 6px',borderRadius:5,
+                              background:`${cm.color}18`,color:cm.color,fontWeight:600,whiteSpace:'nowrap'}}>
+                              {cm.icon} {cm.label}
+                            </span>
+                          </td>
                           <td style={{fontWeight:600,color:s.appName?'var(--amber)':'var(--text3)'}}>{s.appName||'—'}</td>
                           <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--text3)'}}>{s.appVersion||'—'}</td>
                           <td style={{color:'var(--red)',fontWeight:700,fontFamily:'var(--mono)'}}>{s.totalCrashes}</td>
@@ -3301,19 +3367,26 @@ export default function StoreMonitorPage() {
           <div className="sm-crash-modal">
             {/* header */}
             <div className="sm-crash-modal-hd">
-              <div style={{display:'flex',alignItems:'center',gap:10}}>
-                <span style={{fontSize:22}}>💥</span>
-                <div>
-                  <div style={{fontWeight:700,fontSize:15}}>
-                    {crashModal.hostname}
-                    <span style={{fontWeight:400,fontSize:12,color:'var(--text3)',marginLeft:8}}>({crashModal.serial})</span>
-                  </div>
-                  <div style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--amber)',marginTop:1}}>
-                    {crashModal.appName||'App name not reported'}
-                    {crashModal.appVersion ? ` · v${crashModal.appVersion}` : ''}
+                {(() => { const cm = crashMeta(crashModal.crashType); return (
+                <div style={{display:'flex',alignItems:'center',gap:10}}>
+                  <span style={{fontSize:24}}>{cm.icon}</span>
+                  <div>
+                    <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                      <span style={{fontWeight:700,fontSize:15}}>{crashModal.hostname}</span>
+                      <span style={{fontWeight:400,fontSize:12,color:'var(--text3)'}}>({crashModal.serial})</span>
+                      <span style={{padding:'2px 8px',borderRadius:5,fontSize:10,fontFamily:'var(--mono)',fontWeight:700,
+                        background:`${cm.color}18`,color:cm.color}}>{cm.label}</span>
+                      <span className="sm-badge" style={{background:`${cm.sev==='critical'?'#ef4444':'#f97316'}15`,
+                        color:cm.sev==='critical'?'#ef4444':'#f97316',fontSize:9}}>{cm.sev.toUpperCase()}</span>
+                    </div>
+                    <div style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--text3)',marginTop:3}}>
+                      {crashModal.appName||'App name not reported'}
+                      {crashModal.appVersion ? ` · v${crashModal.appVersion}` : ''}
+                      {' · '}{cm.src}{' · '}Event ID {cm.evtId}
+                    </div>
                   </div>
                 </div>
-              </div>
+                )})()}
               <button className="sm-modal-x" onClick={()=>setCrashModal(null)}>✕</button>
             </div>
 
@@ -3324,6 +3397,9 @@ export default function StoreMonitorPage() {
                   ['Hostname',    crashModal.hostname],
                   ['Serial',      crashModal.serial],
                   ['Store Tag',   crashModal.storeTag||crashModal.hostname],
+                  ['Crash Type',  crashMeta(crashModal.crashType).label],
+                  ['Source',      crashMeta(crashModal.crashType).src],
+                  ['Event ID',    crashMeta(crashModal.crashType).evtId],
                   ['App Name',    crashModal.appName||'—'],
                   ['App Version', crashModal.appVersion||'—'],
                   ['Crash Count', crashModal.totalCrashes],

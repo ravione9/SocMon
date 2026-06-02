@@ -13,6 +13,8 @@ import {
   parseFluxCsv,
   fetchCrashSummary,
   fetchCrashEvents,
+  crashTypeLabel,
+  crashSeverity,
 } from '../services/influxStore.js'
 import {
   buildStoreInventoryReport,
@@ -259,21 +261,30 @@ router.get('/crashes', async (req, res, next) => {
     const summary = await fetchCrashSummary(metricRange, fromSec, toSec)
 
     // Group by app for overview
+    // By app
     const byApp = {}
     for (const s of summary) {
-      // Only count rows that have a meaningful app name
       if (!s.appName) continue
-      const key = s.appName
-      if (!byApp[key]) byApp[key] = { appName: key, totalCrashes: 0, affectedStores: 0 }
-      byApp[key].totalCrashes   += s.totalCrashes
-      byApp[key].affectedStores += 1
+      if (!byApp[s.appName]) byApp[s.appName] = { appName: s.appName, totalCrashes: 0, affectedStores: 0 }
+      byApp[s.appName].totalCrashes   += s.totalCrashes
+      byApp[s.appName].affectedStores += 1
+    }
+    // By crash type
+    const byType = {}
+    for (const s of summary) {
+      const t = s.crashType || 'app_crash'
+      if (!byType[t]) byType[t] = { crashType: t, label: crashTypeLabel(t), severity: crashSeverity(t), totalCrashes: 0, affectedStores: 0 }
+      byType[t].totalCrashes   += s.totalCrashes
+      byType[t].affectedStores += 1
     }
     res.json({
       summary,
-      byApp: Object.values(byApp).sort((a, b) => b.totalCrashes - a.totalCrashes),
-      totalEvents: summary.reduce((acc, s) => acc + s.totalCrashes, 0),
-      affectedStores: summary.length,
-      range: metricRange,
+      byApp:  Object.values(byApp).sort((a, b) => b.totalCrashes - a.totalCrashes),
+      byType: Object.values(byType).sort((a, b) => b.totalCrashes - a.totalCrashes),
+      totalEvents:    summary.reduce((acc, s) => acc + s.totalCrashes, 0),
+      criticalEvents: summary.filter(s => s.crashSeverity === 'critical').reduce((acc, s) => acc + s.totalCrashes, 0),
+      affectedStores: new Set(summary.map(s => s.storeTag || s.hostname)).size,
+      range:     metricRange,
       fetchedAt: new Date().toISOString(),
     })
   } catch (e) { next(e) }
