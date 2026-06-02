@@ -855,8 +855,15 @@ export async function fetchCrashSummary(rangeParam = '-24h', fromSec, toSec) {
     if (row._time && (!s.lastSeen || row._time > s.lastSeen)) s.lastSeen = row._time
   }
 
-  const list = [...map.values()].sort((a, b) => b.totalCrashes - a.totalCrashes)
-  return list
+  const BLANK_APP = new Set(['none', 'null', 'n/a', '', 'undefined', 'unknown'])
+  const normalizeApp = (v) => (!v || BLANK_APP.has(String(v).toLowerCase().trim())) ? null : v
+
+  const normalized = [...map.values()].map((s) => ({
+    ...s,
+    appName: normalizeApp(s.appName),
+  }))
+  normalized.sort((a, b) => b.totalCrashes - a.totalCrashes)
+  return normalized
 }
 
 /**

@@ -261,10 +261,12 @@ router.get('/crashes', async (req, res, next) => {
     // Group by app for overview
     const byApp = {}
     for (const s of summary) {
-      const key = s.appName || 'unknown'
+      // Only count rows that have a meaningful app name
+      if (!s.appName) continue
+      const key = s.appName
       if (!byApp[key]) byApp[key] = { appName: key, totalCrashes: 0, affectedStores: 0 }
-      byApp[key].totalCrashes    += s.totalCrashes
-      byApp[key].affectedStores  += 1
+      byApp[key].totalCrashes   += s.totalCrashes
+      byApp[key].affectedStores += 1
     }
     res.json({
       summary,

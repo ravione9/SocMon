@@ -2223,7 +2223,7 @@ export default function StoreMonitorPage() {
               value={crashSearch} onChange={(e)=>setCrashSearch(e.target.value)} style={{minWidth:200}}/>
             <select className="sm-select" value={crashAppFilter} onChange={(e)=>setCrashAppFilter(e.target.value)}>
               <option value="">All apps</option>
-              {(crashData?.byApp||[]).map(a=>(
+              {(crashData?.byApp||[]).filter(a=>a.appName).map(a=>(
                 <option key={a.appName} value={a.appName}>{a.appName}</option>
               ))}
             </select>
@@ -2312,7 +2312,7 @@ export default function StoreMonitorPage() {
                           <td style={{fontWeight:600}}>{s.hostname}</td>
                           <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--text3)'}}>{s.serial}</td>
                           <td><div style={{display:'flex',gap:3,flexWrap:'wrap'}}>{groups.map(g=><GroupBadge key={g} group={g}/>)}</div></td>
-                          <td style={{fontWeight:600,color:'var(--amber)'}}>{s.appName}</td>
+                          <td style={{fontWeight:600,color:s.appName?'var(--amber)':'var(--text3)'}}>{s.appName||'—'}</td>
                           <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--text3)'}}>{s.appVersion||'—'}</td>
                           <td style={{color:'var(--red)',fontWeight:700,fontFamily:'var(--mono)'}}>{s.totalCrashes}</td>
                           <td style={{fontFamily:'var(--mono)',fontSize:10,color:'var(--text3)',maxWidth:120,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{s.lastEventId||'—'}</td>
