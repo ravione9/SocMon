@@ -520,6 +520,18 @@ const CSS = `
   border-radius:999px; min-width:15px; height:15px; display:inline-flex; align-items:center; justify-content:center; padding:0 3px; }
 .sm-subtab.active .sm-subtab-count { background:rgba(0,0,0,.12); }
 
+/* ── crash event modal ── */
+.sm-crash-modal { background:var(--bg); border:1px solid var(--border2); border-radius:var(--sm-r-lg);
+  padding:0; width:min(760px,97vw); max-height:90vh; overflow-y:auto;
+  display:flex; flex-direction:column; box-shadow:0 8px 40px rgba(0,0,0,.55); }
+.sm-crash-modal-hd { display:flex; align-items:center; justify-content:space-between; padding:14px 18px;
+  border-bottom:1px solid var(--border); background:var(--bg3); border-radius:var(--sm-r-lg) var(--sm-r-lg) 0 0; }
+.sm-crash-modal-body { padding:16px 18px; display:flex; flex-direction:column; gap:14px; }
+.sm-crash-meta-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:6px; }
+.sm-crash-meta-item { background:var(--bg3); border:1px solid var(--border); border-radius:7px;
+  padding:7px 11px; display:flex; flex-direction:column; gap:2px; }
+.sm-crash-meta-label { font-size:9.5px; font-family:var(--mono); color:var(--text3); text-transform:uppercase; letter-spacing:.06em; }
+.sm-crash-meta-val { font-size:12.5px; font-weight:700; font-family:var(--mono); word-break:break-all; }
 /* ── alert feed ── */
 .sm-alert-feed { display:flex; flex-direction:column; gap:6px; }
 .sm-alert-card { background:var(--bg2); border:1px solid var(--border); border-radius:var(--sm-r); overflow:hidden; }
@@ -587,6 +599,9 @@ export default function StoreMonitorPage() {
   const [crashLoading, setCrashLoading] = useState(false)
   const [crashSearch, setCrashSearch] = useState('')
   const [crashAppFilter, setCrashAppFilter] = useState('')
+  const [crashModal, setCrashModal] = useState(null)   // selected crash summary row
+  const [crashRawRows, setCrashRawRows] = useState([]) // raw event rows for modal
+  const [crashRawLoading, setCrashRawLoading] = useState(false)
 
   /* reports */
   const [downloading, setDownloading] = useState('')
@@ -783,6 +798,24 @@ export default function StoreMonitorPage() {
     if (tab === 'probHist') loadProbHist(1)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, probHistRange, probHistSeverity, probHistStatus])
+
+  const openCrashModal = useCallback(async (row) => {
+    setCrashModal(row)
+    setCrashRawRows([])
+    setCrashRawLoading(true)
+    try {
+      const params = {
+        storeTag: row.storeTag || row.hostname,
+        ...(row.appName ? { appName: row.appName } : {}),
+        ...(globalCustom.enabled && globalCustom.from
+          ? { from: fromLocalInput(globalCustom.from), to: fromLocalInput(globalCustom.to) || Math.floor(Date.now()/1000) }
+          : { range }),
+      }
+      const { data } = await api.get('/api/store-monitor/crashes/raw', { params })
+      setCrashRawRows(data.rows || [])
+    } catch { setCrashRawRows([]) }
+    finally { setCrashRawLoading(false) }
+  }, [range, globalCustom])
 
   const loadCrashes = useCallback(async () => {
     setCrashLoading(true)
@@ -2305,10 +2338,7 @@ export default function StoreMonitorPage() {
                     return filtered.map((s,i)=>{
                       const groups = deriveGroups(s.hostname, '', false)
                       return (
-                        <tr key={i} className="clickable" onClick={()=>{
-                          const st = stores.find(st=>st.hostname===s.hostname)
-                          if (st) { setSelectedTag(st.storeTag); setTab('detail') }
-                        }}>
+                        <tr key={i} className="clickable" onClick={()=>openCrashModal(s)}>
                           <td style={{fontWeight:600}}>{s.hostname}</td>
                           <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--text3)'}}>{s.serial}</td>
                           <td><div style={{display:'flex',gap:3,flexWrap:'wrap'}}>{groups.map(g=><GroupBadge key={g} group={g}/>)}</div></td>
@@ -3264,6 +3294,122 @@ export default function StoreMonitorPage() {
           </>
         )
       })()}
+
+      {/* ══════════ CRASH EVENT MODAL ══════════ */}
+      {crashModal && (
+        <div className="sm-modal-bg" onClick={(e)=>e.target===e.currentTarget&&setCrashModal(null)}>
+          <div className="sm-crash-modal">
+            {/* header */}
+            <div className="sm-crash-modal-hd">
+              <div style={{display:'flex',alignItems:'center',gap:10}}>
+                <span style={{fontSize:22}}>💥</span>
+                <div>
+                  <div style={{fontWeight:700,fontSize:15}}>
+                    {crashModal.hostname}
+                    <span style={{fontWeight:400,fontSize:12,color:'var(--text3)',marginLeft:8}}>({crashModal.serial})</span>
+                  </div>
+                  <div style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--amber)',marginTop:1}}>
+                    {crashModal.appName||'App name not reported'}
+                    {crashModal.appVersion ? ` · v${crashModal.appVersion}` : ''}
+                  </div>
+                </div>
+              </div>
+              <button className="sm-modal-x" onClick={()=>setCrashModal(null)}>✕</button>
+            </div>
+
+            <div className="sm-crash-modal-body">
+              {/* summary meta */}
+              <div className="sm-crash-meta-grid">
+                {[
+                  ['Hostname',    crashModal.hostname],
+                  ['Serial',      crashModal.serial],
+                  ['Store Tag',   crashModal.storeTag||crashModal.hostname],
+                  ['App Name',    crashModal.appName||'—'],
+                  ['App Version', crashModal.appVersion||'—'],
+                  ['Crash Count', crashModal.totalCrashes],
+                  ['Last Event',  crashModal.lastEventId||'—'],
+                  ['Last Seen',   crashModal.lastSeen ? new Date(crashModal.lastSeen).toLocaleString() : '—'],
+                ].map(([label,val])=>(
+                  <div key={label} className="sm-crash-meta-item">
+                    <div className="sm-crash-meta-label">{label}</div>
+                    <div className="sm-crash-meta-val" style={{color:'var(--text)'}}>{val}</div>
+                  </div>
+                ))}
+                {crashModal.lastMessage && (
+                  <div className="sm-crash-meta-item" style={{gridColumn:'1/-1',background:'rgba(239,68,68,.06)',borderColor:'rgba(239,68,68,.2)'}}>
+                    <div className="sm-crash-meta-label" style={{color:'var(--red)'}}>Last Message</div>
+                    <div style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--text2)',marginTop:3,lineHeight:1.5,wordBreak:'break-all'}}>
+                      {crashModal.lastMessage}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* groups */}
+              <div style={{display:'flex',alignItems:'center',gap:6}}>
+                <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>GROUPS:</span>
+                {deriveGroups(crashModal.hostname,'',false).map(g=><GroupBadge key={g} group={g}/>)}
+              </div>
+
+              {/* raw event log */}
+              <div className="sm-tr">
+                <div className="sm-tr-hd">
+                  <span className="sm-tr-title">Raw Event Log</span>
+                  {crashRawLoading && <span style={{fontSize:10,color:'var(--accent)',fontFamily:'var(--mono)'}}>Loading…</span>}
+                  {!crashRawLoading && <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>{crashRawRows.length} rows</span>}
+                </div>
+                <div className="sm-tr-body sm-tbl-wrap" style={{maxHeight:320,overflowY:'auto'}}>
+                  {crashRawLoading ? (
+                    <div className="sm-empty" style={{padding:24}}>Fetching events…</div>
+                  ) : crashRawRows.length === 0 ? (
+                    <div className="sm-empty" style={{padding:24}}>No raw events found in the selected time range.</div>
+                  ) : (
+                    <table className="sm-tbl">
+                      <thead>
+                        <tr>
+                          <th>Time</th>
+                          <th>Field</th>
+                          <th>Value</th>
+                          <th>App</th>
+                          <th>Version</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {crashRawRows.map((r,i)=>(
+                          <tr key={i}>
+                            <td style={{fontFamily:'var(--mono)',fontSize:10,whiteSpace:'nowrap',color:'var(--text3)'}}>
+                              {r._time ? new Date(r._time).toLocaleString() : '—'}
+                            </td>
+                            <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--accent)'}}>{r._field}</td>
+                            <td style={{maxWidth:300,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontSize:11,
+                              color: r._field==='count' ? 'var(--red)' : r._field==='message' ? 'var(--text2)' : 'var(--text3)'}}>
+                              {r._value}
+                            </td>
+                            <td style={{fontFamily:'var(--mono)',fontSize:10,color:'var(--text3)'}}>{r.app_name||'—'}</td>
+                            <td style={{fontFamily:'var(--mono)',fontSize:10,color:'var(--text3)'}}>{r.app_version||'—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+
+              {/* navigate to store */}
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end',paddingTop:4,borderTop:'1px solid var(--border)'}}>
+                <button className="sm-btn" onClick={()=>setCrashModal(null)}>Close</button>
+                <button className="sm-btn primary" onClick={()=>{
+                  const st = stores.find(st=>st.hostname===crashModal.hostname)
+                  if (st) { setSelectedTag(st.storeTag); setTab('detail') }
+                  setCrashModal(null)
+                }}>
+                  🔍 Open Store Detail
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ══════════ ALERT MODAL ══════════ */}
       {alertModal !== null && (
