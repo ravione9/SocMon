@@ -32,8 +32,22 @@ export function evaluateCondition(cond, store) {
   if (metric === 'dns_fail')    return Object.values(store.dns  || {}).some((d) => d.success === false)
   if (metric === 'http_fail')   return Object.values(store.http || {}).some((h) => h.success === false)
   if (metric === 'crash_count') {
-    // crashCounts is set on the store object by the eval loop before calling evaluateCondition
-    value = store._crashCount ?? 0
+    // _crashCounts is a Map<key,count> attached to store by the eval loop
+    // key = "appName||crashType" — filter by appName and/or crashType from condition
+    const appName   = (cond.appName   || '').trim().toLowerCase()
+    const crashType = (cond.crashType || '').trim().toLowerCase()
+    if (store._crashCounts) {
+      let total = 0
+      for (const [key, cnt] of store._crashCounts.entries()) {
+        const [kApp, kType] = key.split('||')
+        if (appName   && kApp.toLowerCase()  !== appName)   continue
+        if (crashType && kType.toLowerCase() !== crashType) continue
+        total += cnt
+      }
+      value = total
+    } else {
+      value = store._crashCount ?? 0
+    }
   }
   if (metric === 'cpu')           value = store.cpuPct
   if (metric === 'memory')        value = store.memPct
@@ -89,9 +103,11 @@ export async function runStoreAlertEval() {
     fetchStoreSnapshot(10, '-15m'),
     fetchCrashCountsPerStore('-15m').catch(() => new Map()),
   ])
-  // Attach crash counts to store objects so evaluateCondition can read them
+  // Attach crash counts map to each store so evaluateCondition can filter by app/type
   for (const s of stores) {
-    s._crashCount = crashCounts.get(s.storeTag) || crashCounts.get(s.hostname) || 0
+    const subMap = crashCounts.get(s.storeTag) || crashCounts.get(s.hostname)
+    s._crashCounts = subMap || new Map()
+    s._crashCount  = subMap ? [...subMap.values()].reduce((a, b) => a + b, 0) : 0
   }
   const results = []
   let fired = 0, skipped = 0

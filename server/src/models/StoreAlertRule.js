@@ -12,10 +12,14 @@ const storeAlertRuleSchema = new mongoose.Schema({
   enabled:     { type: Boolean, default: true },
   group:       { type: String, enum: ['SD-WAN Group', 'RP Group', 'POS System Group', 'General Group', 'all'], default: 'all' },
   condition: {
-    metric:    { type: String, enum: ['offline', 'packet_loss', 'latency', 'cpu', 'memory', 'download_mbps', 'upload_mbps', 'isp_down', 'hotspot', 'dns_fail', 'http_fail'], required: true },
+    metric:    { type: String, enum: ['offline', 'packet_loss', 'latency', 'cpu', 'memory', 'download_mbps', 'upload_mbps', 'isp_down', 'hotspot', 'dns_fail', 'http_fail', 'crash_count'], required: true },
     operator:  { type: String, enum: ['gt', 'lt', 'eq', 'gte', 'lte'], default: 'gt' },
     threshold: { type: Number, default: 0 },
     target:    { type: String, default: '' },
+    /** For crash_count: filter by specific app/process name (e.g. "TestApp.exe"). Empty = all apps. */
+    appName:   { type: String, default: '' },
+    /** For crash_count: filter by crash type (e.g. "bsod_kernel_power"). Empty = all types. */
+    crashType: { type: String, default: '' },
   },
   severity:  { type: String, enum: ['critical', 'high', 'warning'], default: 'high' },
   // evaluationRange removed — alerts always evaluate against real-time data (last 15 min)

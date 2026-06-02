@@ -1218,7 +1218,7 @@ export default function StoreMonitorPage() {
     return { name:'', description:'', enabled:true, group:'all', severity:'high',
       cooldownMinutes:30,
       schedule:{ enabled:false, fromHour:9, toHour:18, weekdays:[1,2,3,4,5] },
-      condition:{ metric:'offline', operator:'gt', threshold:0, target:'' }, channels:[] }
+      condition:{ metric:'offline', operator:'gt', threshold:0, target:'', appName:'', crashType:'' }, channels:[] }
   }
   function openAlertModal(rule) {
     setAlertForm(rule ? JSON.parse(JSON.stringify(rule)) : blankRule())
@@ -2685,7 +2685,16 @@ export default function StoreMonitorPage() {
                   </div>
                 </div>
                 <div className="sm-tr-body" style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(180px,1fr))',gap:'6px 20px',fontSize:12}}>
-                  <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>CONDITION </span><br/>{rule.condition.metric} {BOOLEAN_METRICS.has(rule.condition.metric)?'=true':`${rule.condition.operator||'>'} ${rule.condition.threshold}`}</div>
+                  <div>
+                    <span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>CONDITION </span><br/>
+                    {rule.condition.metric} {BOOLEAN_METRICS.has(rule.condition.metric)?'=true':`${rule.condition.operator||'>'} ${rule.condition.threshold}`}
+                    {rule.condition.metric==='crash_count' && rule.condition.appName && (
+                      <span style={{color:'var(--amber)',fontSize:10}}> · app: {rule.condition.appName}</span>
+                    )}
+                    {rule.condition.metric==='crash_count' && rule.condition.crashType && (
+                      <span style={{color:'var(--red)',fontSize:10}}> · type: {CRASH_TYPE_META[rule.condition.crashType]?.label||rule.condition.crashType}</span>
+                    )}
+                  </div>
                   <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>GROUP </span><br/>{rule.group}</div>
                   <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>MODE </span><br/><span style={{color:'var(--green)',fontSize:11}}>Real-time</span></div>
                   <div><span style={{color:'var(--text3)',fontSize:10,fontFamily:'var(--mono)'}}>COOLDOWN </span><br/>{rule.cooldownMinutes} min</div>
@@ -3558,6 +3567,36 @@ export default function StoreMonitorPage() {
                 {(alertForm.condition.metric==='latency'||alertForm.condition.metric==='packet_loss') && (
                   <input className="sm-input" placeholder="Ping target (default: 8.8.8.8)" style={{marginTop:6}} value={alertForm.condition.target}
                     onChange={(e)=>setAlertForm((f)=>({...f,condition:{...f.condition,target:e.target.value}}))}/>
+                )}
+
+                {/* Crash-specific filters */}
+                {alertForm.condition.metric==='crash_count' && (
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:8,padding:'10px 12px',background:'var(--bg3)',border:'1px solid rgba(239,68,68,.2)',borderRadius:'var(--sm-r)'}}>
+                    <div className="sm-form-field">
+                      <label className="sm-form-label">App / Process Name</label>
+                      <input className="sm-input"
+                        placeholder="e.g. TestApp.exe (empty = all apps)"
+                        value={alertForm.condition.appName||''}
+                        onChange={(e)=>setAlertForm((f)=>({...f,condition:{...f.condition,appName:e.target.value}}))}/>
+                      <span style={{fontSize:10,color:'var(--text3)',marginTop:3,fontFamily:'var(--mono)'}}>
+                        Leave empty to alert on any application crash
+                      </span>
+                    </div>
+                    <div className="sm-form-field">
+                      <label className="sm-form-label">Crash Type (optional)</label>
+                      <select className="sm-select"
+                        value={alertForm.condition.crashType||''}
+                        onChange={(e)=>setAlertForm((f)=>({...f,condition:{...f.condition,crashType:e.target.value}}))}>
+                        <option value="">All crash types</option>
+                        {Object.entries(CRASH_TYPE_META).map(([k,m])=>(
+                          <option key={k} value={k}>{m.icon} {m.label}</option>
+                        ))}
+                      </select>
+                      <span style={{fontSize:10,color:'var(--text3)',marginTop:3,fontFamily:'var(--mono)'}}>
+                        e.g. alert only on BSOD/Kernel
+                      </span>
+                    </div>
+                  </div>
                 )}
               </div>
 

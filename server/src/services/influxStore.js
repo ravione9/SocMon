@@ -909,15 +909,22 @@ export async function fetchCrashSummary(rangeParam = '-24h', fromSec, toSec) {
 }
 
 /**
- * Per-store crash count in the last N minutes — used by the alert engine.
+ * Per-store crash counts in the last N minutes — used by the alert engine.
+ * Returns Map< storeKey, Map<"appName||crashType", count> >
  */
 export async function fetchCrashCountsPerStore(rangeParam = '-15m') {
   const rows = await fetchCrashEvents(rangeParam)
-  const counts = new Map()
+  // storeMap: storeKey → Map<"appName||crashType", count>
+  const storeMap = new Map()
   for (const row of rows) {
     if (row._field !== 'count') continue
-    const key = row.store_tag || row.hostname
-    counts.set(key, (counts.get(key) || 0) + (num(row._value) || 1))
+    const storeKey  = row.store_tag || row.hostname
+    const appName   = (row.app_name   || '').toLowerCase()
+    const crashType = (row._measurement || 'app_crash').toLowerCase()
+    const subKey    = `${appName}||${crashType}`
+    if (!storeMap.has(storeKey)) storeMap.set(storeKey, new Map())
+    const sub = storeMap.get(storeKey)
+    sub.set(subKey, (sub.get(subKey) || 0) + (num(row._value) || 1))
   }
-  return counts
+  return storeMap
 }
