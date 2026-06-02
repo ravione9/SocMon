@@ -844,6 +844,9 @@ export async function fetchCrashEvents(rangeParam = '-24h', fromSec, toSec) {
 from(bucket: "${bucket}")
   |> range(${rangeClause})
   |> filter(fn: (r) => ${measureFilter})
+  |> filter(fn: (r) =>
+      not exists r.crash_type or
+      (r.crash_type != "none" and r.crash_type != "" and r.crash_type != "null" and r.crash_type != "unknown"))
   |> group(columns: ["_measurement", "store_tag", "hostname", "serial", "app_name", "app_version", "_field"])
   |> sort(columns: ["_time"], desc: true)
 `
@@ -864,7 +867,12 @@ export async function fetchCrashSummary(rangeParam = '-24h', fromSec, toSec) {
   const rows = await fetchCrashEvents(rangeParam, fromSec, toSec)
   const map  = new Map()
 
+  const BLANK_CRASH_TYPE = new Set(['none', 'null', 'n/a', '', 'undefined', 'unknown'])
   for (const row of rows) {
+    // Also skip if a crash_type tag is explicitly set to a blank value
+    const rowCrashTypeTag = String(row.crash_type || '').toLowerCase().trim()
+    if (rowCrashTypeTag && BLANK_CRASH_TYPE.has(rowCrashTypeTag)) continue
+
     const crashType = row._measurement || 'app_crash'
     const key = `${row.store_tag||row.hostname}||${row.app_name||''}||${row.app_version||''}||${crashType}`
     if (!map.has(key)) {
