@@ -4,22 +4,187 @@
 import nodemailer from 'nodemailer'
 import http from 'http'
 import https from 'https'
+import { crashTypeLabel } from './influxStore.js'
 
 const SEV_EMOJI = { critical: '🔴', high: '🟠', warning: '🟡' }
 
-function buildMessage(rule, stores) {
-  const emoji = SEV_EMOJI[rule.severity] || '⚠️'
-  const storeList = stores.slice(0, 10).map((s) => `• ${s.hostname} (${s.serial})`).join('\n')
-  const more = stores.length > 10 ? `\n…and ${stores.length - 10} more` : ''
-  return {
-    title: `${emoji} [${rule.severity.toUpperCase()}] ${rule.name}`,
-    body: [
-      rule.description ? rule.description : `Alert: ${rule.condition.metric} threshold triggered`,
-      `Group: ${rule.group}`,
-      `Affected stores (${stores.length}):`,
-      storeList + more,
-    ].join('\n'),
+const METRIC_LABELS = {
+  offline:        'Store Offline',
+  packet_loss:    'Packet Loss',
+  latency:        'Latency (ms)',
+  cpu:            'CPU Usage',
+  memory:         'Memory Usage',
+  download_mbps:  'Download Speed',
+  upload_mbps:    'Upload Speed',
+  isp_down:       'ISP Down',
+  hotspot:        'Hotspot Active',
+  dns_fail:       'DNS Failure',
+  http_fail:      'HTTP Failure',
+  crash_count:    'Crash Count',
+}
+
+const OP_LABELS = { gt: '>', gte: '≥', lt: '<', lte: '≤', eq: '=' }
+
+function getConditionValue(cond, store) {
+  const { metric, target } = cond
+  if (metric === 'offline')   return store.online ? 0 : 1
+  if (metric === 'isp_down')    return store.connState === 'isp_down' ? 1 : 0
+  if (metric === 'hotspot')     return (store.isHotspot || store.connState === 'hotspot') ? 1 : 0
+  if (metric === 'dns_fail')    return Object.values(store.dns  || {}).some((d) => d.success === false) ? 1 : 0
+  if (metric === 'http_fail')   return Object.values(store.http || {}).some((h) => h.success === false) ? 1 : 0
+  if (metric === 'crash_count') {
+    const appName   = (cond.appName   || '').trim().toLowerCase()
+    const crashType = (cond.crashType || '').trim().toLowerCase()
+    if (store._crashCounts) {
+      let total = 0
+      for (const [key, cnt] of store._crashCounts.entries()) {
+        const [kApp, kType] = key.split('||')
+        if (appName   && kApp.toLowerCase()  !== appName)   continue
+        if (crashType && kType.toLowerCase() !== crashType) continue
+        total += cnt
+      }
+      return total
+    }
+    return store._crashCount ?? 0
   }
+  if (metric === 'cpu')           return store.cpuPct
+  if (metric === 'memory')        return store.memPct
+  if (metric === 'download_mbps') return store.downloadMbps
+  if (metric === 'upload_mbps')   return store.uploadMbps
+  if (metric === 'packet_loss') {
+    const key = target || '8.8.8.8'
+    const p = store.ping?.[key] || Object.values(store.ping || {})[0]
+    return p?.packetLossPct
+  }
+  if (metric === 'latency') {
+    const key = target || '8.8.8.8'
+    const p = store.ping?.[key] || Object.values(store.ping || {})[0]
+    return p?.avgMs
+  }
+  return null
+}
+
+function formatValue(metric, value) {
+  if (value == null) return '—'
+  if (metric === 'offline' || metric === 'isp_down' || metric === 'hotspot' || metric === 'dns_fail' || metric === 'http_fail') {
+    return value ? 'Yes' : 'No'
+  }
+  if (metric === 'cpu' || metric === 'memory' || metric === 'packet_loss') return `${value}%`
+  if (metric === 'latency') return `${value} ms`
+  if (metric === 'download_mbps' || metric === 'upload_mbps') return `${value} Mbps`
+  return String(value)
+}
+
+function formatConditionLine(rule) {
+  const c = rule.condition || {}
+  const metric = c.metric || 'unknown'
+  const label  = METRIC_LABELS[metric] || metric
+  const op     = OP_LABELS[c.operator || 'gt'] || '>'
+  const thr    = c.threshold ?? 0
+
+  if (metric === 'offline' || metric === 'isp_down' || metric === 'hotspot' || metric === 'dns_fail' || metric === 'http_fail') {
+    return `${label} detected`
+  }
+
+  let line = `${label} ${op} ${thr}`
+  if ((metric === 'packet_loss' || metric === 'latency') && c.target) {
+    line += ` (target ${c.target})`
+  }
+  if (metric === 'crash_count') {
+    line += ' in last 15 min'
+    if (c.appName)   line += ` · app: ${c.appName}`
+    if (c.crashType) line += ` · type: ${crashTypeLabel(c.crashType) || c.crashType}`
+  }
+  if (metric === 'cpu' || metric === 'memory' || metric === 'packet_loss') line += '%'
+  if (metric === 'download_mbps' || metric === 'upload_mbps') line += ' Mbps'
+  if (metric === 'latency') line += ' ms'
+  return line
+}
+
+function formatCrashBreakdown(store, cond) {
+  const appName   = (cond.appName   || '').trim().toLowerCase()
+  const crashType = (cond.crashType || '').trim().toLowerCase()
+  const lines = []
+
+  if (!store._crashCounts?.size) return lines
+
+  for (const [key, cnt] of store._crashCounts.entries()) {
+    if (!cnt) continue
+    const [kApp, kType] = key.split('||')
+    if (appName   && kApp.toLowerCase()  !== appName)   continue
+    if (crashType && kType.toLowerCase() !== crashType) continue
+    const app  = kApp || '(app not reported)'
+    const type = crashTypeLabel(kType) || kType || 'app_crash'
+    lines.push(`↳ ${app} · ${type}: *${cnt}*`)
+  }
+  return lines
+}
+
+function formatStoreLine(store, rule) {
+  const cond   = rule.condition || {}
+  const metric = cond.metric
+  const value  = getConditionValue(cond, store)
+  const lines  = [`• *${store.hostname}* (${store.serial || '—'})`]
+
+  const statusParts = []
+  statusParts.push(store.online ? '🟢 Online' : '🔴 Offline')
+  if (store.connState) statusParts.push(`Conn: ${store.connState}`)
+  if (store.gatewayVendor && store.gatewayVendor !== 'unknown') statusParts.push(`Vendor: ${store.gatewayVendor}`)
+  if (store.gatewayIp) statusParts.push(`GW: ${store.gatewayIp}`)
+  lines.push(`  ${statusParts.join(' · ')}`)
+
+  if (metric === 'crash_count') {
+    lines.push(`  *Crashes: ${value ?? 0}* (threshold ${OP_LABELS[cond.operator || 'gt'] || '>'} ${cond.threshold ?? 0})`)
+    for (const b of formatCrashBreakdown(store, cond)) lines.push(`  ${b}`)
+  } else if (metric === 'offline') {
+    if (store.lastSeen) lines.push(`  Last heartbeat: ${store.lastSeen}`)
+  } else if (metric === 'packet_loss' || metric === 'latency') {
+    const target = cond.target || '8.8.8.8'
+    lines.push(`  *${METRIC_LABELS[metric]}:* ${formatValue(metric, value)} (target ${target})`)
+  } else if (['cpu', 'memory', 'download_mbps', 'upload_mbps'].includes(metric)) {
+    lines.push(`  *${METRIC_LABELS[metric]}:* ${formatValue(metric, value)} (threshold ${OP_LABELS[cond.operator || 'gt'] || '>'} ${cond.threshold})`)
+  } else {
+    lines.push(`  *Triggered:* ${formatValue(metric, value)}`)
+  }
+
+  return lines.join('\n')
+}
+
+function buildMessage(rule, stores) {
+  const emoji  = SEV_EMOJI[rule.severity] || '⚠️'
+  const title  = `${emoji} [${rule.severity.toUpperCase()}] ${rule.name}`
+  const cond   = rule.condition || {}
+  const metric = cond.metric
+
+  const summary = [
+    rule.description || `Store monitor alert: *${METRIC_LABELS[metric] || metric}*`,
+    `*Condition:* ${formatConditionLine(rule)}`,
+  ].join('\n')
+
+  const fields = [
+    { label: 'Severity', value: rule.severity.toUpperCase() },
+    { label: 'Group', value: rule.group || 'all' },
+    { label: 'Affected', value: `${stores.length} store(s)` },
+  ]
+
+  if (metric === 'crash_count') {
+    const totalCrashes = stores.reduce((sum, s) => sum + (getConditionValue(cond, s) || 0), 0)
+    fields.push({ label: 'Total Crashes', value: String(totalCrashes) })
+    fields.push({ label: 'Window', value: 'Last 15 minutes' })
+    if (cond.appName)   fields.push({ label: 'App Filter', value: cond.appName })
+    if (cond.crashType) fields.push({ label: 'Crash Type', value: crashTypeLabel(cond.crashType) || cond.crashType })
+  } else {
+    fields.push({ label: 'Threshold', value: `${OP_LABELS[cond.operator || 'gt'] || '>'} ${cond.threshold ?? 0}` })
+  }
+
+  const storeLines = stores.slice(0, 10).map((s) => formatStoreLine(s, rule))
+  const more = stores.length > 10 ? `\n_…and ${stores.length - 10} more store(s)_` : ''
+  const storeSection = ['*Affected Stores:*', ...storeLines].join('\n\n') + more
+  const footer = `Netpulse Store Monitor · ${new Date().toISOString()}`
+
+  const body = [summary, '', storeSection, '', footer].join('\n')
+
+  return { title, body, summary, fields, storeSection, footer }
 }
 
 async function postWebhook(url, payload) {
@@ -47,13 +212,34 @@ async function postWebhook(url, payload) {
 }
 
 async function sendSlack(webhookUrl, msg) {
-  return postWebhook(webhookUrl, {
-    text: `*${msg.title}*`,
-    blocks: [
-      { type: 'header', text: { type: 'plain_text', text: msg.title, emoji: true } },
-      { type: 'section', text: { type: 'mrkdwn', text: '```' + msg.body + '```' } },
-    ],
-  })
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: msg.title, emoji: true } },
+    { type: 'section', text: { type: 'mrkdwn', text: msg.summary || msg.body } },
+  ]
+
+  if (msg.fields?.length) {
+    blocks.push({
+      type: 'section',
+      fields: msg.fields.slice(0, 10).map((f) => ({
+        type: 'mrkdwn',
+        text: `*${f.label}*\n${f.value}`,
+      })),
+    })
+  }
+
+  if (msg.storeSection) {
+    blocks.push({ type: 'divider' })
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: msg.storeSection } })
+  }
+
+  if (msg.footer) {
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: msg.footer }],
+    })
+  }
+
+  return postWebhook(webhookUrl, { text: msg.title, blocks })
 }
 
 async function sendGoogleChat(webhookUrl, msg) {

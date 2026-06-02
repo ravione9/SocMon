@@ -7,7 +7,12 @@ const storeAlertEventSchema = new mongoose.Schema({
   group:         { type: String, default: 'all' },
   condition:     { type: Object },
   affectedCount: { type: Number, default: 0 },
-  stores:        [{ hostname: String, serial: String, storeTag: String, connState: String, gatewayIp: String, lastSeen: String }],
+  stores:        [{
+    hostname: String, serial: String, storeTag: String,
+    connState: String, gatewayIp: String, gatewayVendor: String,
+    online: Boolean, lastSeen: String, triggeredValue: Number,
+    crashBreakdown: [{ app: String, crashType: String, count: Number }],
+  }],
   hasMore:       { type: Boolean, default: false },
   dispatch:      [{ channel: String, ok: Boolean, error: String }],
   firedAt:       { type: Date, default: Date.now, index: true },

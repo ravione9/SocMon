@@ -146,14 +146,34 @@ export async function runStoreAlertEval() {
       const dispatch = await dispatchAlertNotifications(rule, affected)
       await StoreAlertRule.findByIdAndUpdate(rule._id, { lastFiredAt: new Date() })
 
-      const topStores = affected.slice(0, 10).map((s) => ({
-        hostname:  s.hostname,
-        serial:    s.serial,
-        storeTag:  s.storeTag,
-        connState: s.connState,
-        gatewayIp: s.gatewayIp,
-        lastSeen:  s.lastSeen,
-      }))
+      const topStores = affected.slice(0, 10).map((s) => {
+        const crashBreakdown = []
+        if (s._crashCounts?.size) {
+          const appFilter   = (rule.condition?.appName   || '').trim().toLowerCase()
+          const typeFilter  = (rule.condition?.crashType || '').trim().toLowerCase()
+          for (const [key, cnt] of s._crashCounts.entries()) {
+            if (!cnt) continue
+            const [app, type] = key.split('||')
+            if (appFilter  && app.toLowerCase()  !== appFilter)  continue
+            if (typeFilter && type.toLowerCase() !== typeFilter) continue
+            crashBreakdown.push({ app: app || null, crashType: type || null, count: cnt })
+          }
+        }
+        return {
+          hostname:       s.hostname,
+          serial:         s.serial,
+          storeTag:       s.storeTag,
+          connState:      s.connState,
+          gatewayIp:      s.gatewayIp,
+          gatewayVendor:  s.gatewayVendor,
+          online:         s.online,
+          lastSeen:       s.lastSeen,
+          triggeredValue: rule.condition?.metric === 'crash_count'
+            ? (crashBreakdown.reduce((a, b) => a + b.count, 0) || s._crashCount || 0)
+            : undefined,
+          crashBreakdown: crashBreakdown.length ? crashBreakdown : undefined,
+        }
+      })
 
       // Persist to DB
       const savedEvent = await StoreAlertEvent.create({
