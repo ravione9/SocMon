@@ -36,6 +36,7 @@ const TABS = [
   { id: 'detail',     label: 'Store Detail',    icon: '🔍' },
   { id: 'rop',        label: 'ROP Groups',      icon: '📡' },
   { id: 'probHist',   label: 'Problem History', icon: '🕓' },
+  { id: 'crashes',    label: 'Crash Events',    icon: '💥' },
   { id: 'reports',    label: 'Reports',         icon: '📊' },
   { id: 'alerts',     label: 'Alert Rules',     icon: '🔔' },
 ]
@@ -107,6 +108,7 @@ const METRIC_OPTS = [
   { value: 'upload_mbps',   label: 'Upload Speed (Mbps)' },
   { value: 'dns_fail',      label: 'DNS Failure' },
   { value: 'http_fail',     label: 'HTTP Failure' },
+  { value: 'crash_count',   label: '💥 App Crash Count' },
 ]
 const BOOLEAN_METRICS = new Set(['offline', 'isp_down', 'hotspot', 'dns_fail', 'http_fail'])
 
@@ -580,6 +582,12 @@ export default function StoreMonitorPage() {
   const [storePickerOpen, setStorePickerOpen] = useState(false)
   const storePickerRef = useRef(null)
 
+  /* crash events */
+  const [crashData, setCrashData] = useState(null)
+  const [crashLoading, setCrashLoading] = useState(false)
+  const [crashSearch, setCrashSearch] = useState('')
+  const [crashAppFilter, setCrashAppFilter] = useState('')
+
   /* reports */
   const [downloading, setDownloading] = useState('')
   const [reportGroup, setReportGroup] = useState('all')
@@ -775,6 +783,21 @@ export default function StoreMonitorPage() {
     if (tab === 'probHist') loadProbHist(1)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, probHistRange, probHistSeverity, probHistStatus])
+
+  const loadCrashes = useCallback(async () => {
+    setCrashLoading(true)
+    try {
+      const params = globalCustom.enabled && globalCustom.from
+        ? { from: fromLocalInput(globalCustom.from), to: fromLocalInput(globalCustom.to) || Math.floor(Date.now()/1000) }
+        : { range }
+      const { data } = await api.get('/api/store-monitor/crashes', { params })
+      setCrashData(data)
+    } catch { setCrashData(null) }
+    finally { setCrashLoading(false) }
+  }, [range, globalCustom])
+
+  useEffect(() => { if (tab === 'crashes') loadCrashes() }, [tab, loadCrashes])
+
   useEffect(() => {
     if (tab === 'alerts') {
       loadAlerts()
@@ -1354,6 +1377,7 @@ export default function StoreMonitorPage() {
             {t.icon} {t.label}
             {t.id==='problems' && problems.length>0 && <span className={tab===t.id?'sm-badge-count':'sm-badge-count-red'}>{problems.length}</span>}
             {t.id==='stores'   && stores.length>0   && <span className="sm-badge-count">{stores.length}</span>}
+            {t.id==='crashes'  && (crashData?.totalEvents||0)>0 && <span className={tab===t.id?'sm-badge-count':'sm-badge-count-red'}>{crashData.totalEvents}</span>}
           </button>
         ))}
       </div>
@@ -2190,6 +2214,121 @@ export default function StoreMonitorPage() {
       )}
 
       {/* ══════════ REPORTS ══════════ */}
+      {/* ══════════ CRASH EVENTS ══════════ */}
+      {tab==='crashes' && (
+        <>
+          {/* toolbar */}
+          <div style={{display:'flex',flexWrap:'wrap',gap:8,marginBottom:10,alignItems:'center'}}>
+            <input className="sm-input" placeholder="🔍 Search hostname, serial, app…"
+              value={crashSearch} onChange={(e)=>setCrashSearch(e.target.value)} style={{minWidth:200}}/>
+            <select className="sm-select" value={crashAppFilter} onChange={(e)=>setCrashAppFilter(e.target.value)}>
+              <option value="">All apps</option>
+              {(crashData?.byApp||[]).map(a=>(
+                <option key={a.appName} value={a.appName}>{a.appName}</option>
+              ))}
+            </select>
+            <button className="sm-btn sm-sm primary" onClick={loadCrashes} disabled={crashLoading}>
+              {crashLoading?'⏳':'↻'} Refresh
+            </button>
+            {crashData?.fetchedAt && (
+              <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',marginLeft:'auto'}}>
+                Updated {relAge(crashData.fetchedAt)} ago
+              </span>
+            )}
+          </div>
+
+          {/* KPI cards */}
+          {crashData && (
+            <div className="sm-g4 sm-section-mb">
+              {[
+                { label:'Total Crashes',    val: crashData.totalEvents||0,    color:'var(--red)' },
+                { label:'Affected Stores',  val: crashData.affectedStores||0, color:'var(--amber)' },
+                { label:'Unique Apps',      val: (crashData.byApp||[]).length, color:'var(--text)' },
+              ].map(k=>(
+                <div key={k.label} className="sm-kpi">
+                  <div className="sm-kpi-label">{k.label}</div>
+                  <div className="sm-kpi-val" style={{color:k.color}}>{k.val}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* App-wise summary */}
+          {(crashData?.byApp||[]).length > 0 && (
+            <div className="sm-tr sm-section-mb">
+              <div className="sm-tr-hd"><span className="sm-tr-title">💥 Crashes by Application</span></div>
+              <div className="sm-tr-body sm-tbl-wrap">
+                <table className="sm-tbl">
+                  <thead><tr><th>App Name</th><th>Total Crashes</th><th>Affected Stores</th></tr></thead>
+                  <tbody>
+                    {crashData.byApp.map(a=>(
+                      <tr key={a.appName} className="clickable" onClick={()=>setCrashAppFilter(a.appName===crashAppFilter?'':a.appName)}>
+                        <td style={{fontWeight:600}}>{a.appName}</td>
+                        <td style={{color:'var(--red)',fontWeight:700,fontFamily:'var(--mono)'}}>{a.totalCrashes}</td>
+                        <td>{a.affectedStores}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Per-store crash table */}
+          <div className="sm-tr">
+            <div className="sm-tr-hd">
+              <span className="sm-tr-title">Store-wise Crash Details</span>
+              <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                {(crashData?.summary||[]).length} records
+              </span>
+            </div>
+            <div className="sm-tr-body sm-tbl-wrap">
+              <table className="sm-tbl">
+                <thead>
+                  <tr>
+                    <th>Hostname</th><th>Serial</th><th>Group</th>
+                    <th>App Name</th><th>Version</th>
+                    <th>Crash Count</th><th>Last Event ID</th><th>Last Message</th><th>Last Seen</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {crashLoading ? (
+                    <tr><td colSpan={9} className="sm-empty">Loading crash data…</td></tr>
+                  ) : (() => {
+                    const q = crashSearch.trim().toLowerCase()
+                    const filtered = (crashData?.summary||[]).filter(s=>{
+                      if (crashAppFilter && s.appName !== crashAppFilter) return false
+                      if (q && !`${s.hostname} ${s.serial} ${s.appName}`.toLowerCase().includes(q)) return false
+                      return true
+                    })
+                    if (!filtered.length) return <tr><td colSpan={9} className="sm-empty">No crash events found</td></tr>
+                    return filtered.map((s,i)=>{
+                      const groups = deriveGroups(s.hostname, '', false)
+                      return (
+                        <tr key={i} className="clickable" onClick={()=>{
+                          const st = stores.find(st=>st.hostname===s.hostname)
+                          if (st) { setSelectedTag(st.storeTag); setTab('detail') }
+                        }}>
+                          <td style={{fontWeight:600}}>{s.hostname}</td>
+                          <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--text3)'}}>{s.serial}</td>
+                          <td><div style={{display:'flex',gap:3,flexWrap:'wrap'}}>{groups.map(g=><GroupBadge key={g} group={g}/>)}</div></td>
+                          <td style={{fontWeight:600,color:'var(--amber)'}}>{s.appName}</td>
+                          <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--text3)'}}>{s.appVersion||'—'}</td>
+                          <td style={{color:'var(--red)',fontWeight:700,fontFamily:'var(--mono)'}}>{s.totalCrashes}</td>
+                          <td style={{fontFamily:'var(--mono)',fontSize:10,color:'var(--text3)',maxWidth:120,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{s.lastEventId||'—'}</td>
+                          <td style={{maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontSize:11}}>{s.lastMessage||'—'}</td>
+                          <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--text3)'}}>{relAge(s.lastSeen)}</td>
+                        </tr>
+                      )
+                    })
+                  })()}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+
       {tab==='reports' && (
         <>
           {/* ── Reports header + filters ── */}

@@ -8,7 +8,7 @@
 import StoreAlertRule from '../models/StoreAlertRule.js'
 import StoreAlertEvent from '../models/StoreAlertEvent.js'
 import { dispatchAlertNotifications } from './storeAlertNotify.js'
-import { fetchStoreSnapshot, isInfluxStoreConfigured } from './influxStore.js'
+import { fetchStoreSnapshot, fetchCrashCountsPerStore, isInfluxStoreConfigured } from './influxStore.js'
 
 const EVAL_INTERVAL_MS = parseInt(process.env.STORE_ALERT_INTERVAL_MS || '120000', 10) // 2 min default
 
@@ -29,8 +29,12 @@ export function evaluateCondition(cond, store) {
   if (metric === 'offline')   return !store.online
   if (metric === 'isp_down')  return store.connState === 'isp_down'
   if (metric === 'hotspot')   return store.isHotspot || store.connState === 'hotspot'
-  if (metric === 'dns_fail')  return Object.values(store.dns  || {}).some((d) => d.success === false)
-  if (metric === 'http_fail') return Object.values(store.http || {}).some((h) => h.success === false)
+  if (metric === 'dns_fail')    return Object.values(store.dns  || {}).some((d) => d.success === false)
+  if (metric === 'http_fail')   return Object.values(store.http || {}).some((h) => h.success === false)
+  if (metric === 'crash_count') {
+    // crashCounts is set on the store object by the eval loop before calling evaluateCondition
+    value = store._crashCount ?? 0
+  }
   if (metric === 'cpu')           value = store.cpuPct
   if (metric === 'memory')        value = store.memPct
   if (metric === 'download_mbps') value = store.downloadMbps
@@ -81,7 +85,14 @@ export async function runStoreAlertEval() {
   const rules = await StoreAlertRule.find({ enabled: true }).lean()
   if (!rules.length) return { fired: 0, skipped: 0, results: [] }
 
-  const stores = await fetchStoreSnapshot(10, '-15m')
+  const [stores, crashCounts] = await Promise.all([
+    fetchStoreSnapshot(10, '-15m'),
+    fetchCrashCountsPerStore('-15m').catch(() => new Map()),
+  ])
+  // Attach crash counts to store objects so evaluateCondition can read them
+  for (const s of stores) {
+    s._crashCount = crashCounts.get(s.storeTag) || crashCounts.get(s.hostname) || 0
+  }
   const results = []
   let fired = 0, skipped = 0
 

@@ -785,3 +785,90 @@ export function buildOverviewSummary(stores) {
     avgDownloadMbps: dlCount ? Math.round((avgDownload / dlCount) * 10) / 10 : null,
   }
 }
+
+/* ═══════════════════════════════════════════════════════════
+   CRASH EVENTS  (app_crash measurement)
+   Tags:   store_tag, hostname, serial, app_name, app_version
+   Fields: count, event_id, message
+   ═══════════════════════════════════════════════════════════ */
+
+/**
+ * Fetch raw crash event rows within a time range.
+ * Returns all fields grouped by store + app.
+ */
+export async function fetchCrashEvents(rangeParam = '-24h', fromSec, toSec) {
+  const bucket = fluxEscape(cfg().bucket)
+  let rangeClause
+  if (fromSec && Number.isFinite(Number(fromSec))) {
+    const startISO = new Date(Number(fromSec) * 1000).toISOString()
+    const stopISO  = toSec && Number.isFinite(Number(toSec))
+      ? new Date(Number(toSec) * 1000).toISOString()
+      : new Date().toISOString()
+    rangeClause = `start: ${startISO}, stop: ${stopISO}`
+  } else {
+    rangeClause = `start: ${rangeParam}`
+  }
+
+  const flux = `
+from(bucket: "${bucket}")
+  |> range(${rangeClause})
+  |> filter(fn: (r) => r._measurement == "app_crash")
+  |> group(columns: ["store_tag", "hostname", "serial", "app_name", "app_version", "_field"])
+  |> sort(columns: ["_time"], desc: true)
+`
+  try {
+    return await queryFlux(flux)
+  } catch (e) {
+    console.warn('[influxStore] fetchCrashEvents failed:', e.message)
+    return []
+  }
+}
+
+/**
+ * Aggregate crash events into a summary per store + app.
+ * Returns: [ { hostname, serial, storeTag, appName, appVersion,
+ *              totalCrashes, lastEventId, lastMessage, lastSeen } ]
+ */
+export async function fetchCrashSummary(rangeParam = '-24h', fromSec, toSec) {
+  const rows = await fetchCrashEvents(rangeParam, fromSec, toSec)
+  const map  = new Map()
+
+  for (const row of rows) {
+    const key = `${row.store_tag||row.hostname}||${row.app_name||''}||${row.app_version||''}`
+    if (!map.has(key)) {
+      map.set(key, {
+        storeTag:    row.store_tag || '',
+        hostname:    row.hostname  || '',
+        serial:      row.serial    || '',
+        appName:     row.app_name  || 'unknown',
+        appVersion:  row.app_version || '',
+        totalCrashes: 0,
+        lastEventId:  null,
+        lastMessage:  null,
+        lastSeen:     null,
+      })
+    }
+    const s = map.get(key)
+    if (row._field === 'count')    s.totalCrashes += num(row._value) || 1
+    if (row._field === 'event_id') s.lastEventId  = row._value
+    if (row._field === 'message')  s.lastMessage  = row._value
+    if (row._time && (!s.lastSeen || row._time > s.lastSeen)) s.lastSeen = row._time
+  }
+
+  const list = [...map.values()].sort((a, b) => b.totalCrashes - a.totalCrashes)
+  return list
+}
+
+/**
+ * Per-store crash count in the last N minutes — used by the alert engine.
+ */
+export async function fetchCrashCountsPerStore(rangeParam = '-15m') {
+  const rows = await fetchCrashEvents(rangeParam)
+  const counts = new Map()
+  for (const row of rows) {
+    if (row._field !== 'count') continue
+    const key = row.store_tag || row.hostname
+    counts.set(key, (counts.get(key) || 0) + (num(row._value) || 1))
+  }
+  return counts
+}

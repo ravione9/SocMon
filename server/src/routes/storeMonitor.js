@@ -11,6 +11,8 @@ import {
   queryFlux,
   queryFluxRaw,
   parseFluxCsv,
+  fetchCrashSummary,
+  fetchCrashEvents,
 } from '../services/influxStore.js'
 import {
   buildStoreInventoryReport,
@@ -244,6 +246,51 @@ schema.measurements(bucket: "${bucket}")
   } catch (e) {
     next(e)
   }
+})
+
+/* ── Crash Events ──────────────────────────────────────────── */
+router.get('/crashes', async (req, res, next) => {
+  try {
+    if (!isInfluxStoreConfigured()) return res.status(503).json({ error: 'InfluxDB not configured' })
+    const rawRange = String(req.query.range || '-24h')
+    const metricRange = VALID_RANGES.has(rawRange) ? rawRange : '-24h'
+    const fromSec = req.query.from ? parseInt(String(req.query.from), 10) : undefined
+    const toSec   = req.query.to   ? parseInt(String(req.query.to),   10) : undefined
+    const summary = await fetchCrashSummary(metricRange, fromSec, toSec)
+
+    // Group by app for overview
+    const byApp = {}
+    for (const s of summary) {
+      const key = s.appName || 'unknown'
+      if (!byApp[key]) byApp[key] = { appName: key, totalCrashes: 0, affectedStores: 0 }
+      byApp[key].totalCrashes    += s.totalCrashes
+      byApp[key].affectedStores  += 1
+    }
+    res.json({
+      summary,
+      byApp: Object.values(byApp).sort((a, b) => b.totalCrashes - a.totalCrashes),
+      totalEvents: summary.reduce((acc, s) => acc + s.totalCrashes, 0),
+      affectedStores: summary.length,
+      range: metricRange,
+      fetchedAt: new Date().toISOString(),
+    })
+  } catch (e) { next(e) }
+})
+
+router.get('/crashes/raw', async (req, res, next) => {
+  try {
+    if (!isInfluxStoreConfigured()) return res.status(503).json({ error: 'InfluxDB not configured' })
+    const rawRange = String(req.query.range || '-24h')
+    const metricRange = VALID_RANGES.has(rawRange) ? rawRange : '-24h'
+    const fromSec = req.query.from ? parseInt(String(req.query.from), 10) : undefined
+    const toSec   = req.query.to   ? parseInt(String(req.query.to),   10) : undefined
+    const storeTag = req.query.storeTag ? String(req.query.storeTag) : null
+    const appName  = req.query.appName  ? String(req.query.appName)  : null
+    let rows = await fetchCrashEvents(metricRange, fromSec, toSec)
+    if (storeTag) rows = rows.filter(r => (r.store_tag || r.hostname) === storeTag)
+    if (appName)  rows = rows.filter(r => r.app_name === appName)
+    res.json({ rows: rows.slice(0, 1000), total: rows.length, fetchedAt: new Date().toISOString() })
+  } catch (e) { next(e) }
 })
 
 /* ── Excel Reports ─────────────────────────────────────────── */
