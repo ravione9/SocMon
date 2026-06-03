@@ -235,7 +235,7 @@ function formatRcaReport(evidence, rangeLabel, fetchedAt, { llmNarrative = null 
   }
 
   lines.push('')
-  lines.push('(RCA from correlated live NetPulse data — evidence-backed; verify before change windows.)')
+  lines.push('(RCA from correlated live SocMon data — evidence-backed; verify before change windows.)')
 
   return lines.join('\n')
 }
@@ -254,7 +254,7 @@ async function maybeSynthesizeWithLlm(question, evidence, rangeLabel) {
       hypotheses: evidence.hypotheses.slice(0, 4).map(h => ({ title: h.title, confidence: h.confidence, reasoning: h.reasoning })),
       timelineSample: evidence.timeline.slice(0, 12).map(e => ({ ts: e.ts, source: e.source, summary: e.summary })),
     }
-    const system = `You are a NetPulse NOC/SOC analyst. Given JSON evidence from live monitoring systems, write 3-5 sentences of root cause narrative.
+    const system = `You are a SocMon NOC/SOC analyst. Given JSON evidence from live monitoring systems, write 3-5 sentences of root cause narrative.
 Rules: Use ONLY the provided evidence. Do not invent hostnames, counts, or events. If evidence is weak, say so. Be actionable.`
     const raw = await Promise.race([
       complete(JSON.stringify(summary), { system, maxTokens: 400 }),

@@ -1,5 +1,5 @@
 /**
- * NetPulse AI Agent — tool definitions and executors.
+ * SocMon AI Agent — tool definitions and executors.
  * Each tool wraps an existing direct-answer handler (live portal data).
  */
 import { tryDirectZabbixAnswer } from './zabbixDirectAnswer.js'

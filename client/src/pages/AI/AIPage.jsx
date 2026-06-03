@@ -388,7 +388,7 @@ function ContextMetaPanel({ meta = [], fastPath, preview, metrics, queryContext 
               ? 'Instant hostname report from live store data'
               : metrics?.mode === 'direct-xdr'
               ? 'Instant XDR answer from live SentinelOne PowerQuery'
-              : 'Instant answer from live NetPulse data')
+              : 'Instant answer from live SocMon data')
           : metrics?.mode === 'agent'
             ? 'Agent — LLM called live portal tools'
             : 'Data sources for this reply'}
@@ -1221,7 +1221,7 @@ function ChatTab({
                   send()
                 }
               }}
-              placeholder={loading ? 'Another question can be sent while a request runs — Stop cancels all in flight' : 'Ask NetPulse AI… (Enter to send, Shift+Enter for newline)'}
+              placeholder={loading ? 'Another question can be sent while a request runs — Stop cancels all in flight' : 'Ask SocMon AI… (Enter to send, Shift+Enter for newline)'}
               rows={2}
               style={{
                 flex: 1,
@@ -1668,7 +1668,7 @@ export default function AIPage() {
   return (
     <div style={{ ...PAGE_ROOT, color: C.text, fontFamily: 'var(--sans)' }}>
       <div style={{ flexShrink: 0, marginBottom: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-        <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0, letterSpacing: '-0.02em' }}>AI Assistant</h1>
+        <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0, letterSpacing: '-0.02em' }}>SocMon AI</h1>
         <TabBar tab={tab} setTab={setTab} compact />
       </div>
 

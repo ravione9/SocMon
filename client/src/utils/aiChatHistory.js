@@ -5,7 +5,7 @@ const MAX_MESSAGES_PER_SESSION = 120
 export const AI_WELCOME_MESSAGE = {
   role: 'assistant',
   content:
-    'NetPulse AI — four chat modes:\n\n' +
+    'SocMon AI — four chat modes:\n\n' +
     '• Monitor — tries instant live handlers first; if your wording is new, it auto-runs Agent tools (still live data, no guessing).\n' +
     '• Agent — best for free-form questions: LLM picks tools (Zabbix, XDR, firewall, stores…) then explains with recommendations.\n' +
     '• Details — full per-hostname reports across Store Monitor, Sentinel, SOC, NOC.\n' +

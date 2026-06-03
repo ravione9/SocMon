@@ -16,7 +16,7 @@ const nav = [
   { pageKey:'nexs',     to:'/nexs',    label:'Nexs',   icon:'🔐' },
   { pageKey:'emailSim', to:'/email-sim', label:'Mail', icon:'📧' },
   { pageKey:'tickets',  to:'/tickets', label:'Tickets', icon:'🎫' },
-  { pageKey:'ai',       to:'/ai',      label:'AI',      icon:'🤖' },
+  { pageKey:'ai',       to:'/ai',      label:'SocMon AI', icon:'🤖' },
   { pageKey:'reports',  to:'/reports', label:'Reports', icon:'📊' },
   { pageKey:'admin',    to:'/admin',   label:'Admin',   icon:'⚙️' },
 ]

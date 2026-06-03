@@ -62,7 +62,7 @@ export function getAIProvider() {
   return provider
 }
 
-/** Diagnostics for Admin / AI Assistant UI. */
+/** Diagnostics for Admin / SocMon AI UI. */
 export function getAIProviderConfigStatus() {
   const configured = trimEnv('AI_PROVIDER') || 'claude'
   const active = resolveProviderName()

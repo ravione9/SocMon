@@ -15,7 +15,7 @@ const titles = {
   '/nexs': 'Nexs User Management',
   '/email-sim': 'Email simulation',
   '/tickets': 'Ticket Management',
-  '/ai': 'AI Assistant',
+  '/ai': 'SocMon AI',
   '/reports': 'Reports & Analytics',
   '/admin': 'Administration',
 }

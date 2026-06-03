@@ -1,10 +1,10 @@
 /**
- * NetPulse AI Agent — LLM orchestrates live portal tools, then synthesizes the answer.
+ * SocMon AI Agent — LLM orchestrates live portal tools, then synthesizes the answer.
  */
 import { chatWithTools, getAIProvider } from './aiRouter.js'
 import { getAgentToolDefinitions, executeAgentTool } from './agentTools.js'
 
-const AGENT_SYSTEM = `You are NetPulse AI Agent for Lenskart network and security operations.
+const AGENT_SYSTEM = `You are SocMon AI Agent for Lenskart network and security operations.
 
 RULES:
 1. For ANY factual question about hosts, disk, bandwidth, stores, threats, firewall, or hostnames — you MUST call the appropriate tool first.

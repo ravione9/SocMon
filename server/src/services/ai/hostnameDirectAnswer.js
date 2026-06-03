@@ -170,7 +170,7 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
       '  InfluxDB not configured or no storeMonitor access.',
       ...formatEnvironmentSections(env, rangeLabel, fmtTs, envOpts),
       '',
-      '(Direct answer from NetPulse live data — no LLM wait.)',
+      '(Direct answer from SocMon live data — no LLM wait.)',
     ]
     return buildHostnameResponse(lines, hostname, range, fetchedAt, env, ctx, {
       storeFound: false,
@@ -198,7 +198,7 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
       `  No store agent data in Influx for "${hostname}" in ${rangeLabel}.`,
       ...formatEnvironmentSections(env, rangeLabel, fmtTs, envOpts),
       '',
-      '(Direct answer from NetPulse live data — no LLM wait.)',
+      '(Direct answer from SocMon live data — no LLM wait.)',
     ]
     return buildHostnameResponse(lines, hostname, range, fetchedAt, env, ctx, {
       storeFound: false,
@@ -311,7 +311,7 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
   }
 
   lines.push(...formatEnvironmentSections(env, rangeLabel, fmtTs, envOpts))
-  lines.push('', '(Direct answer from NetPulse live data (all environments) — no LLM wait.)')
+  lines.push('', '(Direct answer from SocMon live data (all environments) — no LLM wait.)')
 
   return buildHostnameResponse(lines, hostname, range, fetchedAt, env, ctx, {
     storeFound: true,

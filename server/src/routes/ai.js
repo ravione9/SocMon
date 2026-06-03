@@ -37,7 +37,7 @@ const router = Router()
 
 const VALID_PROVIDERS = ['claude', 'openai', 'gemini', 'ollama']
 
-const CHAT_SYSTEM_BASE = `You are NetPulse AI, an assistant for network and security operations at Lenskart.
+const CHAT_SYSTEM_BASE = `You are SocMon AI, an assistant for network and security operations at Lenskart.
 Help analysts with firewall logs, store connectivity, SentinelOne, Zabbix, and SOC/NOC workflows.
 Be concise, structured, and actionable. Use bullet points and tables when listing hostnames or stores.
 For advanced monitoring questions: correlate store offline status with firewall denies, Sentinel threats, USB events, and NOC interface logs when context provides them.
@@ -45,7 +45,7 @@ For Zabbix bandwidth/utilization questions: analyze zabbixInfra.hosts[].ports â€
 For RCA-style questions without a direct answer: state hypotheses ranked by evidence, cite counts from context, and list recommended verification steps â€” never guess hostnames or event counts.
 CRITICAL: NEVER invent hostnames, store tags, IP addresses, event counts, or SentinelOne XDR rows.
 When portal context or a direct query result is provided below, use ONLY that data.
-If live data is missing, say clearly that you cannot access it and tell the user which NetPulse module to open.`
+If live data is missing, say clearly that you cannot access it and tell the user which SocMon module to open.`
 
 router.get('/modules', authenticate, requireAppPage('ai'), async (req, res) => {
   try {
@@ -526,7 +526,7 @@ router.post('/chat', async (req, res) => {
     const contextBlock = formatContextForPrompt(portalContext)
     const system = contextBlock
       ? `${CHAT_SYSTEM_BASE}\n\n${contextBlock}`
-      : `${CHAT_SYSTEM_BASE}\n\nNo portal modules were loaded for this message. Do not claim to have live store or firewall data. Tell the user which NetPulse page to open, or ask them to enable data sources in the AI Assistant panel.`
+      : `${CHAT_SYSTEM_BASE}\n\nNo portal modules were loaded for this message. Do not claim to have live store or firewall data. Tell the user which SocMon page to open, or ask them to enable data sources in the SocMon AI panel.`
 
     const detail = inferContextDetail(lastUser)
     const maxTokens = detail === 'summary' ? 512 : detail === 'standard' ? 1024 : 1536

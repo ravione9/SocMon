@@ -22,7 +22,7 @@ export const API_DOC_GROUPS = [
   { id: 'intro', label: 'Getting started', intro: true },
   { id: 'auth', label: 'Authentication & tokens' },
   { id: 'agent', label: 'External agent API' },
-  { id: 'ai', label: 'AI Assistant', pageKey: 'ai' },
+  { id: 'ai', label: 'SocMon AI', pageKey: 'ai' },
   { id: 'store', label: 'Store monitor (live)', pageKey: 'storeMonitor' },
   { id: 'store-alerts', label: 'Store alerts', pageKey: 'storeMonitor' },
   { id: 'soc', label: 'SOC — firewall & logs', pageKey: 'soc' },

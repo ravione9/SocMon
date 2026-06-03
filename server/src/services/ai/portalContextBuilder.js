@@ -594,7 +594,7 @@ export async function tryDirectCrashAnswer(question, allowedPages, ctx = null) {
     }
   }
 
-  lines.push('', '(Direct answer from NetPulse live Influx crash data — no LLM wait.)')
+  lines.push('', '(Direct answer from SocMon live Influx crash data — no LLM wait.)')
 
   const contextPreview = {
     crashes: {
@@ -700,7 +700,7 @@ export function tryDirectStoreAnswer(question, portalContext, ctx = null) {
     )
   }
 
-  lines.push('', '(Direct answer from NetPulse live data — no LLM wait.)')
+  lines.push('', '(Direct answer from SocMon live data — no LLM wait.)')
   return lines.join('\n')
 }
 

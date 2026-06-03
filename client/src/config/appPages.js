@@ -22,6 +22,6 @@ export const APP_PAGES = [
   { key: 'tickets',  label: 'Tickets',         path: '/tickets' },
   { key: 'reports',  label: 'Reports',         path: '/reports' },
   { key: 'emailSim', label: 'Email simulation', path: '/email-sim' },
-  { key: 'ai',       label: 'AI assistant',    path: '/ai' },
+  { key: 'ai',       label: 'SocMon AI',       path: '/ai' },
   { key: 'admin',    label: 'Admin',           path: '/admin' },
 ]

@@ -5,7 +5,7 @@ const IPV4_RE = /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[
 const NO_LLM_FOOTERS = [
   '(Direct answer from live Zabbix API — no LLM wait.)',
   '(Direct answer from live Elasticsearch firewall-* — no LLM wait.)',
-  '(Direct answer from NetPulse live data — no LLM wait.)',
+  '(Direct answer from SocMon live data — no LLM wait.)',
 ]
 
 /** User wants narrative analysis, not just raw direct-handler output. */
@@ -71,7 +71,7 @@ export async function appendLlmAnalysis(question, directPayload, chatMode = 'mon
   if (!activeReady) return { payload: directPayload, llmMs: 0 }
 
   const system = [
-    'You are NetPulse AI for Lenskart network and security operations.',
+    'You are SocMon AI for Lenskart network and security operations.',
     'The user asked for analysis. LIVE portal data is provided below.',
     'CRITICAL: Use ONLY the live data — never invent hostnames, IPs, event counts, or metrics.',
     'If data is missing or a host is down, say so explicitly.',
