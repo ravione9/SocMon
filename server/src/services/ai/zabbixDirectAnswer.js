@@ -24,11 +24,13 @@ export function isInfraMonitorQuery(question) {
   return /\b(infra mon\w+|infra summar\w+)\b/i.test(String(question || ''))
 }
 
-/** fortigate | cisco | checkpoint | network */
+/** fortigate | cisco | checkpoint | network | switch (cisco + snmp network) */
 export function detectDeviceTypeFilter(question) {
   const q = String(question || '')
   if (/\b(fortinet|fortigate|fgt)\b/i.test(q)) return 'fortigate'
-  if (/\b(cisco|catalyst|nexus|meraki|switch|router)\b/i.test(q)) return 'cisco'
+  if (/\b(switches?|all switches)\b/i.test(q)) return 'switch'
+  if (/\b(cisco|catalyst|nexus|meraki)\b/i.test(q)) return 'cisco'
+  if (/\b(routers?)\b/i.test(q)) return 'cisco'
   if (/\b(checkpoint|check point)\b/i.test(q)) return 'checkpoint'
   if (/\b(juniper)\b/i.test(q)) return 'juniper'
   return null
@@ -42,7 +44,7 @@ export function isInfraDeviceStatusQuery(question) {
   if (/\b(store monitor|offline stores?|influx)\b/i.test(q)) return false
   if (deviceType && /\b(status|health|up|down|available|summary|summ\w*|monitor|problem|issue|give me|show|list|all)\b/i.test(q)) return true
   if (/\b(fortinet|fortigate)\s+firewall\b/i.test(q)) return true
-  if (/\b(cisco|network device|network devices|switch|router|firewall device)\b/i.test(q) && /\b(status|health|summary|summ\w*|monitor)\b/i.test(q)) return true
+  if (/\b(cisco|network devices?|switches?|routers?|firewall device)\b/i.test(q) && /\b(status|health|summary|summ\w*|monitor|all)\b/i.test(q)) return true
   return false
 }
 
@@ -106,6 +108,8 @@ function classifyHost(h) {
   return 'other'
 }
 
+const SWITCH_DEVICE_TYPES = new Set(['cisco', 'network', 'juniper'])
+
 async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '' } = {}) {
   const { isZabbixConfigured, zabbixRpc, getUrl } = client
   if (!isZabbixConfigured()) return { configured: false }
@@ -132,9 +136,11 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
     ])
 
     const rows = hosts || []
-    const filtered = deviceTypeFilter
-      ? rows.filter(h => classifyHost(h) === deviceTypeFilter)
-      : rows
+    const filtered = deviceTypeFilter === 'switch'
+      ? rows.filter(h => SWITCH_DEVICE_TYPES.has(classifyHost(h)))
+      : deviceTypeFilter
+        ? rows.filter(h => classifyHost(h) === deviceTypeFilter)
+        : rows
     const availability = { total: filtered.length, available: 0, unavailable: 0, unknown: 0 }
 
     // Device type breakdown
@@ -196,7 +202,7 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
           if (pa === -1 && pb !== -1) return 1
           return (a.name || a.host).localeCompare(b.name || b.host)
         })
-        return sorted.slice(0, 25).map(h => ({
+        return sorted.slice(0, deviceTypeFilter === 'switch' ? 50 : 25).map(h => ({
           name: h.name || h.host,
           host: h.host,
           status: availLabel(h.available),
@@ -263,7 +269,19 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     }
   }
 
-  const TYPE_LABEL = { cisco: 'Cisco devices', fortigate: 'FortiGate firewalls', checkpoint: 'CheckPoint FW', juniper: 'Juniper', network: 'Network devices', vm: 'Virtual machines', server: 'Servers', database: 'Databases', isp: 'ISP monitors', other: 'Other' }
+  const TYPE_LABEL = {
+    cisco: 'Cisco devices',
+    switch: 'Network switches',
+    fortigate: 'FortiGate firewalls',
+    checkpoint: 'CheckPoint FW',
+    juniper: 'Juniper',
+    network: 'Network devices',
+    vm: 'Virtual machines',
+    server: 'Servers',
+    database: 'Databases',
+    isp: 'ISP monitors',
+    other: 'Other',
+  }
   const filterLabel = deviceTypeFilter ? TYPE_LABEL[deviceTypeFilter] || deviceTypeFilter : null
 
   const lines = [
@@ -310,12 +328,13 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     }
     if (data.hosts.length) {
       const hostTitle = filterLabel ? `${filterLabel}:` : 'Sample hosts (network devices first):'
+      const hostLimit = deviceTypeFilter === 'switch' ? 50 : 15
       lines.push(`  ${hostTitle}`)
-      for (const h of data.hosts.slice(0, 15)) {
+      for (const h of data.hosts.slice(0, hostLimit)) {
         const typeTag = h.type && h.type !== 'other' ? ` [${h.type}]` : ''
         lines.push(`    • ${h.name}${typeTag} — ${h.status}`)
       }
-      if (a.total > 15) lines.push(`    … and ${a.total - 15} more (open Infra Monitoring → Hosts)`)
+      if (a.total > hostLimit) lines.push(`    … and ${a.total - hostLimit} more (open Infra Monitoring → Hosts)`)
     }
     if (data.problems.length) {
       lines.push('  Top problems:')
