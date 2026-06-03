@@ -21,6 +21,7 @@ import {
   suggestContextModules,
   tryDirectStoreAnswer,
   tryDirectCrashAnswer,
+  extractStoreGroupFilter,
 } from '../services/ai/portalContextBuilder.js'
 import { tryDirectZabbixAnswer } from '../services/ai/zabbixDirectAnswer.js'
 import { tryDirectSOCAnswer, isSocReportQuery } from '../services/ai/socDirectAnswer.js'
@@ -515,23 +516,31 @@ router.post('/chat', async (req, res) => {
 
     const direct = tryDirectStoreAnswer(lastUser, portalContext, ctx)
     if (direct) {
-      return res.json({
+      const storePayload = {
         content: direct,
-        provider: getAIProvider().name,
         contextMeta: portalContext.meta,
-        contextPreview,
+        contextPreview: buildContextPreview(portalContext),
         queryContext: {
           topic: ctx.topic || 'store',
           appName: ctx.appName,
           isFollowUp: ctx.isFollowUp,
+          storeGroup: extractStoreGroupFilter(lastUser) || undefined,
         },
+      }
+      const { payload, llmMs: storeLlmMs } = await appendLlmAnalysis(lastUser, storePayload, chatMode, sanitized, ctx)
+      return res.json({
+        content: payload.content,
+        provider: getAIProvider().name,
+        contextMeta: payload.contextMeta,
+        contextPreview: payload.contextPreview,
+        queryContext: payload.queryContext,
         modulesUsed: moduleIds,
-        fastPath: true,
+        fastPath: !payload.llmSynthesized,
         metrics: {
           totalMs: Date.now() - requestStart,
           contextMs,
-          llmMs: 0,
-          mode: 'direct',
+          llmMs: storeLlmMs,
+          mode: payload.llmSynthesized ? 'direct-store-llm' : 'direct-store',
         },
       })
     }

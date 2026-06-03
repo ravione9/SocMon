@@ -177,6 +177,55 @@ function severityRank(s) {
   return 4
 }
 
+/** Match Store Monitor UI group rules (RP/LK prefix + Fortinet SD-WAN). */
+export function deriveStoreGroups(hostname, gatewayVendor, isFortinet = false) {
+  const h = String(hostname || '').toUpperCase()
+  const v = String(gatewayVendor || '').toLowerCase()
+  const groups = []
+  if (h.startsWith('RP')) groups.push('RP Group')
+  else if (h.startsWith('LK')) groups.push('POS System Group')
+  if (isFortinet || v.includes('fortinet') || v.includes('fortigate')) groups.push('SD-WAN Group')
+  if (groups.length === 0) groups.push('General Group')
+  return groups
+}
+
+/** e.g. "Status of RoP group in store mon" → RP Group */
+export function extractStoreGroupFilter(question) {
+  const q = String(question || '').toLowerCase()
+  if (/\b(rop|rp)\s*group\b/.test(q) || (/\bro\s*p\b/.test(q) && /\bgroup\b/.test(q))) return 'RP Group'
+  if (/\bpos\s*(system\s*)?group\b/.test(q)) return 'POS System Group'
+  if (/\bsd-?wan\s*group\b/.test(q)) return 'SD-WAN Group'
+  if (/\bgeneral\s*group\b/.test(q)) return 'General Group'
+  return null
+}
+
+function buildGroupSummaries(stores) {
+  const names = ['RP Group', 'POS System Group', 'SD-WAN Group', 'General Group']
+  const out = {}
+  for (const name of names) {
+    const list = stores.filter(s => deriveStoreGroups(s.hostname, s.gatewayVendor, s.isFortinet).includes(name))
+    if (list.length) out[name] = buildOverviewSummary(list)
+  }
+  return out
+}
+
+function buildGroupOfflineHostnames(stores, limit = 25) {
+  const names = ['RP Group', 'POS System Group', 'SD-WAN Group', 'General Group']
+  const out = {}
+  for (const name of names) {
+    out[name] = stores
+      .filter(s => !s.online && deriveStoreGroups(s.hostname, s.gatewayVendor, s.isFortinet).includes(name))
+      .slice(0, limit)
+      .map(s => ({
+        hostname: s.hostname,
+        storeTag: s.storeTag,
+        lastSeen: s.lastSeen,
+        connState: s.connState,
+      }))
+  }
+  return out
+}
+
 /** @returns {'summary' | 'standard' | 'full'} */
 export function inferContextDetail(message) {
   const q = String(message || '').toLowerCase()
@@ -214,6 +263,8 @@ async function buildStoreMonitorContext(staleMinutes = 10, detail = 'standard') 
     source: 'InfluxDB (PowerShell store agents)',
     note: `Online = heartbeat within last ${staleMinutes} min. Queried live when you sent the message.`,
     summary,
+    groupSummaries: buildGroupSummaries(stores),
+    groupOfflineHostnames: buildGroupOfflineHostnames(stores),
     offlineCount: offline.length,
   }
 
@@ -658,49 +709,67 @@ export function tryDirectStoreAnswer(question, portalContext, ctx = null) {
   if (/\b(sentinel|xdr|sentinelone|powerquery)\b/.test(q)) return null
   if (extractIpv4(q) || isZabbixQuestion(q) || isNetworkInfraQuery(q) || isInfraMonitorQuery(q)) return null
   const storeIntent =
-    /\b(stores?|offline|online|down|store monitor|monitor status|how many stores)\b/.test(q)
-    || (/\bstatus\b/.test(q) && /\b(store|stores)\b/.test(q))
+    /\b(stores?|offline|online|down|store monitor|store mon|monitor status|how many stores)\b/.test(q)
+    || (/\bstatus\b/.test(q) && /\b(store|stores|store mon)\b/.test(q))
     || (/\b(how many|count)\b/.test(q) && /\b(store|stores)\b/.test(q))
+    || (/\bgroup\b/.test(q) && /\b(store|stores|store mon|rop|rp)\b/.test(q))
   if (!storeIntent) return null
 
-  const s = sm.summary
+  const groupFilter = extractStoreGroupFilter(question)
+  const s = groupFilter && sm.groupSummaries?.[groupFilter]
+    ? sm.groupSummaries[groupFilter]
+    : sm.summary
   const fetched = sm.fetchedAt ? formatPortalTimestamp(sm.fetchedAt) : 'just now'
+  const title = groupFilter ? `Store Monitor — ${groupFilter}` : 'Store Monitor'
   const lines = [
-    `Store Monitor (LIVE — fetched ${fetched})`,
+    `${title} (LIVE — fetched ${fetched})`,
     '',
+  ]
+  if (groupFilter) {
+    lines.push(`Filter: ${groupFilter} (stores in this group — same rules as Store Monitor → ROP Groups tab)`)
+    lines.push('')
+  }
+  lines.push(
     `Total stores: ${s.total}`,
     `Online: ${s.online}`,
     `Offline / down: ${s.offline}`,
     `With issues: ${s.withIssues}`,
-  ]
+  )
 
   if (s.avgPingMs != null) lines.push(`Average ping: ${s.avgPingMs} ms`)
   if (s.avgDownloadMbps != null) lines.push(`Average download: ${s.avgDownloadMbps} Mbps`)
 
   const wantsList = /\b(hostname|hostnames|list|name|which|show)\b/.test(q)
-  if (wantsList && sm.offlineHostnames?.length) {
-    lines.push('', 'Offline stores (hostname):')
-    for (const h of sm.offlineHostnames) {
+  const offlineList = groupFilter
+    ? (sm.groupOfflineHostnames?.[groupFilter] || [])
+    : (sm.offlineHostnames || [])
+  const offlineTotal = groupFilter ? s.offline : (sm.offlineCount ?? s.offline)
+
+  if (wantsList && offlineList.length) {
+    lines.push('', `Offline stores${groupFilter ? ` in ${groupFilter}` : ''} (hostname):`)
+    for (const h of offlineList) {
       lines.push(`  • ${h.hostname || h.storeTag} [${h.storeTag}] — ${h.connState}, last seen ${h.lastSeen || 'unknown'}`)
     }
-    if (sm.offlineCount > sm.offlineHostnames.length) {
-      lines.push(`  … and ${sm.offlineCount - sm.offlineHostnames.length} more offline (open Store Monitor for full list)`)
+    if (offlineTotal > offlineList.length) {
+      lines.push(`  … and ${offlineTotal - offlineList.length} more offline (open Store Monitor for full list)`)
     }
   } else if (s.offline === 0) {
-    lines.push('', 'No stores are offline in the current live snapshot.')
+    lines.push('', groupFilter ? `No stores offline in ${groupFilter} in the current snapshot.` : 'No stores are offline in the current live snapshot.')
   } else if (!wantsList) {
-    lines.push('', `Tip: ask "list offline store hostnames" for the full offline list.`)
+    lines.push('', groupFilter
+      ? `Tip: ask "list offline ${groupFilter} hostnames" for stores in this group.`
+      : 'Tip: ask "list offline store hostnames" for the full offline list.')
   }
 
   const sp = portalContext.modules?.storeProblems
-  if (sp?.activeProblemCount != null) {
+  if (sp?.activeProblemCount != null && !groupFilter) {
     lines.push(
       '',
       `Problem tracker (PERIODIC — ~${sp.snapshotIntervalMinutes || 2} min job): ${sp.activeProblemCount} active tracked problems`,
     )
   }
 
-  lines.push('', '(Direct answer from SocMon live data — no LLM wait.)')
+  lines.push('', '(Live Store Monitor data — SocMon InfluxDB snapshot.)')
   return lines.join('\n')
 }
 
@@ -780,6 +849,16 @@ export function buildContextPreview(context) {
         connState: h.connState,
         lastSeen: h.lastSeen,
       })),
+    }
+    if (sm.groupSummaries) {
+      preview.storeGroups = Object.fromEntries(
+        Object.entries(sm.groupSummaries).map(([name, g]) => [name, {
+          total: g.total,
+          online: g.online,
+          offline: g.offline,
+          withIssues: g.withIssues,
+        }]),
+      )
     }
   }
   const sp = context?.modules?.storeProblems

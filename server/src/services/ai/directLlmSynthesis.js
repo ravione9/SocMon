@@ -6,6 +6,7 @@ const NO_LLM_FOOTERS = [
   '(Direct answer from live Zabbix API — no LLM wait.)',
   '(Direct answer from live Elasticsearch firewall-* — no LLM wait.)',
   '(Direct answer from SocMon live data — no LLM wait.)',
+  '(Live Store Monitor data — SocMon InfluxDB snapshot.)',
 ]
 
 const WELCOME_RE = /^SocMon AI — four chat modes/i
@@ -46,13 +47,17 @@ function trimMessageContent(content, maxLen = 4500) {
   return `${text.slice(0, maxLen)}\n… [truncated for context window]`
 }
 
-function buildLlmMessages(conversationHistory, question) {
+function buildLlmMessages(conversationHistory, question, ctx = null) {
+  const q = String(question || '').trim()
+  if (!ctx?.isFollowUp) {
+    return [{ role: 'user', content: q }]
+  }
+
   const history = (conversationHistory || [])
     .filter(m => m?.role === 'user' || m?.role === 'assistant')
     .filter(m => !(m.role === 'assistant' && WELCOME_RE.test(m.content)))
     .map(m => ({ role: m.role, content: trimMessageContent(m.content) }))
 
-  const q = String(question || '').trim()
   if (!history.length) return [{ role: 'user', content: q }]
 
   const last = history[history.length - 1]
@@ -77,7 +82,8 @@ export async function appendLlmAnalysis(question, directPayload, chatMode = 'mon
     'You are SocMon AI, an intelligent assistant for network and security operations at Lenskart.',
     'LIVE portal data fetched for this turn is provided below.',
     'Your job: directly answer the user\'s question using ONLY the data below.',
-    'Use the conversation history to resolve follow-ups ("same device", "that host", "resource utilization of it", etc.).',
+    'Use conversation history only when the user is clearly continuing the same device or topic (e.g. "same device", "that host").',
+    'If the user asks about a new hostname or IP, answer only from LIVE DATA for this turn — ignore unrelated prior messages.',
     '',
     'STRICT RULES:',
     '- Facts (counts, hostnames, IPs, metrics, problem names) must come ONLY from the LIVE DATA block — never invent.',
@@ -93,7 +99,7 @@ export async function appendLlmAnalysis(question, directPayload, chatMode = 'mon
   ].join('\n')
 
   const liveData = stripNoLlmFooters(directPayload.content)
-  const llmMessages = buildLlmMessages(conversationHistory, question)
+  const llmMessages = buildLlmMessages(conversationHistory, question, ctx)
   const llmStart = Date.now()
   try {
     const analysis = await chat(
