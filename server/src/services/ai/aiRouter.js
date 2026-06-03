@@ -220,6 +220,78 @@ export async function chat(messages, options = {}) {
   }
 }
 
+/** JSON planner fallback when provider has no native tool API. */
+async function chatWithToolsJsonFallback(messages, options = {}) {
+  const toolList = (options.tools || []).map(t =>
+    `- ${t.name}: ${t.description} params=${JSON.stringify(t.parameters?.properties || {})}`,
+  ).join('\n')
+
+  const plannerSystem = `${options.system || ''}
+
+Available tools:
+${toolList}
+
+Respond with ONLY valid JSON — no markdown:
+{"action":"tool","tool":"TOOL_NAME","args":{...}}
+or {"action":"answer","text":"your final answer"}
+
+Use action=tool when live data is needed. Use action=answer only after you have tool results in the conversation.`
+
+  const transcript = messages.map(m => {
+    if (m.role === 'tool') return `[tool:${m.name}] ${m.content}`
+    return `${m.role}: ${m.content}`
+  }).join('\n\n')
+
+  const raw = await chat(
+    [{ role: 'user', content: transcript }],
+    { system: plannerSystem, maxTokens: options.maxTokens || 1536 },
+  )
+
+  let parsed
+  try {
+    const jsonStr = String(raw).replace(/^```json?\s*|\s*```$/g, '').trim()
+    parsed = JSON.parse(jsonStr)
+  } catch {
+    return { text: raw, toolCalls: [], stopReason: 'end' }
+  }
+
+  if (parsed.action === 'tool' && parsed.tool) {
+    return {
+      text: '',
+      toolCalls: [{
+        id: `json-${Date.now()}`,
+        name: parsed.tool,
+        args: parsed.args || {},
+      }],
+      stopReason: 'tool_calls',
+    }
+  }
+
+  return {
+    text: parsed.text || raw,
+    toolCalls: [],
+    stopReason: 'end',
+  }
+}
+
+export async function chatWithTools(messages, options = {}) {
+  const primary = resolveProviderName()
+  const provider = providers[primary]
+
+  if (typeof provider.chatWithTools === 'function') {
+    try {
+      return await provider.chatWithTools(messages, options)
+    } catch (err) {
+      if (primary !== 'ollama' && hasOllamaHost() && isLlmAuthError(err)) {
+        return chatWithToolsJsonFallback(messages, options)
+      }
+      throw err
+    }
+  }
+
+  return chatWithToolsJsonFallback(messages, options)
+}
+
 export async function complete(prompt, options = {}) {
   return chat([{ role: 'user', content: prompt }], options)
 }

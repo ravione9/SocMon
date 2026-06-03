@@ -8,6 +8,12 @@ import {
 import { buildPowerQueryText, DEFAULT_TABLE_COLUMNS } from '../../utils/xdrPowerQuery.js'
 import { parseQuestionTimeRange } from './queryContext.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
+import {
+  buildGeoConnectionPowerQuery,
+  extractCountryFromQuestion,
+  fetchFirewallCountryConnections,
+  isGeoConnectionQuery,
+} from './geoConnectionQuery.js'
 
 const IPV4_RE = /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/
 
@@ -105,6 +111,11 @@ export function buildXdrQueryFromQuestion(question) {
     return "event.type = 'IP Connect'"
   }
 
+  const countryFilter = extractCountryFromQuestion(q)
+  if (countryFilter && /\b(connection|connect|connected|traffic|ip connect)\b/.test(q)) {
+    return buildGeoConnectionPowerQuery(countryFilter.name)
+  }
+
   return null
 }
 
@@ -112,6 +123,7 @@ export function isXdrQuestion(question) {
   const q = String(question || '')
   if (XDR_KEYWORDS.test(q)) return true
   if (LOGIN_FAIL_KEYWORDS.test(q)) return true
+  if (XDR_KEYWORDS.test(q) && isGeoConnectionQuery(q)) return true
   return false
 }
 
@@ -153,9 +165,59 @@ function formatSampleRows(rows, limit = 8) {
     const ep = rowVal(row, 'endpoint.name', 'host.name')
     const user = rowVal(row, 'user.name', 'src.process.user')
     const ip = rowVal(row, 'src.ip', 'src.ip.address')
+    const dstIp = rowVal(row, 'tgt.ip', 'tgt.ip.address', 'dst.ip.address')
     const msg = String(rowVal(row, 'message', 'event.action') || '').slice(0, 120)
-    return { timestamp: ts, endpoint: ep, user, srcIp: ip, message: msg }
+    return { timestamp: ts, endpoint: ep, user, srcIp: ip, dstIp, message: msg }
   })
+}
+
+function aggregateDstIps(rows) {
+  const byDstIp = new Map()
+  for (const row of rows) {
+    const ip = rowVal(row, 'tgt.ip', 'tgt.ip.address', 'dst.ip.address')
+    if (!ip) continue
+    byDstIp.set(ip, (byDstIp.get(ip) || 0) + 1)
+  }
+  return [...byDstIp.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([key, count]) => ({ key, count }))
+}
+
+async function appendFirewallCountrySection(lines, { range, countryFilter, allowedPages }) {
+  if (!allowedPages.includes('soc')) {
+    lines.push('── FortiGate country-tagged sessions ──')
+    lines.push('  SOC / firewall access not enabled for your account — cannot count country-tagged sessions.')
+    lines.push('')
+    return
+  }
+
+  try {
+    const fw = await fetchFirewallCountryConnections(range, countryFilter)
+    const dirLabel = countryFilter.direction === 'src' ? 'source country' : 'destination country'
+    lines.push(`── FortiGate sessions (${dirLabel}: ${countryFilter.name}) ──`)
+    lines.push(`  Total firewall log events: ${fw.total.toLocaleString()}`)
+    lines.push(`  Allowed: ${fw.allows.toLocaleString()} · Denied: ${fw.denies.toLocaleString()}`)
+    if (fw.byDevice.length) {
+      lines.push('  Top FortiGate devices:')
+      for (const d of fw.byDevice.slice(0, 6)) {
+        lines.push(`    • ${d.name}: ${d.count.toLocaleString()}`)
+      }
+    }
+    const topIps = countryFilter.direction === 'src' ? fw.topSrcIp : fw.topDstIp
+    if (topIps.length) {
+      lines.push(`  Top ${countryFilter.direction === 'src' ? 'source' : 'destination'} IPs:`)
+      for (const ip of topIps.slice(0, 6)) {
+        lines.push(`    • ${ip.ip}: ${ip.count.toLocaleString()}`)
+      }
+    }
+    lines.push('')
+    lines.push('  Note: SentinelOne IP Connect events do not include country by default; FortiGate logs use GeoIP on session start.')
+    lines.push('')
+    return fw
+  } catch (err) {
+    lines.push('── FortiGate country-tagged sessions ──')
+    lines.push(`  Unavailable: ${err.message || String(err)}`)
+    lines.push('')
+    return null
+  }
 }
 
 async function tryThreatListAnswer(question, ctx, fetchedAt) {
@@ -314,79 +376,97 @@ export async function tryDirectXdrAnswer(question, allowedPages, ctx = null) {
     }
   }
 
-  if (!rawQuery) {
-    return {
-      content: [
-        'I can run live SentinelOne XDR PowerQuery for known patterns (failed login, process creation, DNS, network, indicators).',
-        '',
-        'Try:',
-        '  • today new threat found in xdr',
-        '  • failed login on server machines last 1 hour',
-        '  • sentinel xdr failed login last 24 hours',
-        '',
-        'Or use the Sentinel → XDR query tab for custom PowerQuery.',
-      ].join('\n'),
-      contextMeta: [{
-        id: 'sentinelXdr',
-        label: 'SentinelOne XDR',
-        freshness: 'live',
-        fetchedAt,
-        configured: true,
-        note: 'Could not map question to a safe PowerQuery template',
-      }],
-      contextPreview: {},
-    }
-  }
+  // No safe template — return null so Monitor can fall back to Agent + live tools (or plain LLM).
+  if (!rawQuery) return null
 
   const range = ctx?.range
     ? pqRangeFromQuestion(ctx.range)
     : pqRangeFromQuestion(effectiveQuestion)
   const { start, end } = parsePqTimeRange(range)
-  const columns = [
-    'timestamp',
-    'event.type',
-    'event.action',
-    'event.id',
-    'endpoint.name',
-    'user.name',
-    'src.ip',
-    'src.process.user',
-    'message',
-  ]
+  const countryFilter = extractCountryFromQuestion(effectiveQuestion)
+  const isGeoQuery = Boolean(countryFilter && rawQuery?.includes('IP Connect'))
+  const columns = isGeoQuery
+    ? [
+      'timestamp',
+      'event.type',
+      'endpoint.name',
+      'src.ip',
+      'tgt.ip',
+      'tgt.port',
+      'src.process.name',
+      'message',
+    ]
+    : [
+      'timestamp',
+      'event.type',
+      'event.action',
+      'event.id',
+      'endpoint.name',
+      'user.name',
+      'src.ip',
+      'src.process.user',
+      'message',
+    ]
+
   const effectiveQuery = buildPowerQueryText(rawQuery, columns, 500)
-  const result = await runSentinelOnePowerQuery({
-    query: effectiveQuery,
-    start,
-    end,
-    limit: 500,
-  })
+  let result = { rows: [], matchingEvents: 0 }
+  let xdrError = null
+  try {
+    result = await runSentinelOnePowerQuery({
+      query: effectiveQuery,
+      start,
+      end,
+      limit: 500,
+    })
+  } catch (err) {
+    xdrError = err.message || String(err)
+    if (!isGeoQuery) throw err
+  }
 
   const rows = result.rows || []
   const total = result.matchingEvents ?? rows.length
   const agg = aggregateRows(rows)
+  const dstAgg = isGeoQuery ? aggregateDstIps(rows) : []
   const samples = formatSampleRows(rows)
 
   const lines = [
     `SentinelOne XDR (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
     `Window: ${formatRangeLabel(range)}`,
     `XDR host: ${resolveSentinelOneXdrBase() || 'configured'}`,
-    '',
-    `Matching events: ${total}`,
-    rows.length < total ? `(showing ${rows.length} rows in this response)` : '',
-    '',
-    'PowerQuery used:',
-    effectiveQuery,
-    '',
-  ].filter(Boolean)
+  ]
+  if (countryFilter) {
+    const dirLabel = countryFilter.direction === 'src' ? 'from' : 'to'
+    lines.push(`Country filter: connections ${dirLabel} ${countryFilter.name}`)
+  }
+  lines.push('')
+
+  if (xdrError) {
+    lines.push(`XDR PowerQuery error: ${xdrError}`)
+    lines.push('(Geo fields may not exist in your tenant — see FortiGate section below for country-tagged sessions.)')
+    lines.push('')
+  } else {
+    lines.push(`Matching XDR events: ${total}`)
+    if (rows.length < total) lines.push(`(showing ${rows.length} rows in this response)`)
+    lines.push('')
+    lines.push('PowerQuery used:')
+    lines.push(effectiveQuery)
+    lines.push('')
+  }
 
   const wantsEndpointList =
     ctx?.followUpKind === 'affected_stores'
     || ctx?.followUpKind === 'list'
     || /\b(which|list|show|endpoint|endpoints|hostname|machine|machines)\b/i.test(question)
 
-  if (total === 0) {
-    lines.push('No events matched in this time window.')
-  } else {
+  if (!xdrError && total === 0) {
+    if (isGeoQuery) {
+      lines.push('No XDR IP Connect events matched the country geo filter in this window.')
+      lines.push('SentinelOne IP Connect logs usually do not include country unless geo enrichment is enabled.')
+      lines.push('')
+    } else {
+      lines.push('No events matched in this time window.')
+    }
+  } else if (!xdrError && total > 0) {
     if (agg.byEndpoint.length) {
       lines.push(wantsEndpointList ? 'Endpoints:' : 'Top endpoints:')
       const endpointLimit = wantsEndpointList ? 25 : 15
@@ -405,6 +485,13 @@ export async function tryDirectXdrAnswer(question, allowedPages, ctx = null) {
       }
       lines.push('')
     }
+    if (dstAgg.length) {
+      lines.push('Top destination IPs:')
+      for (const { key, count } of dstAgg) {
+        lines.push(`  • ${key}: ${count}`)
+      }
+      lines.push('')
+    }
     if (agg.byUser.length) {
       lines.push('Top users:')
       for (const { key, count } of agg.byUser) {
@@ -415,9 +502,15 @@ export async function tryDirectXdrAnswer(question, allowedPages, ctx = null) {
     if (samples.length) {
       lines.push('Sample events:')
       for (const s of samples) {
-        lines.push(`  • ${s.endpoint || '—'} | ${s.user || '—'} | ${s.srcIp || '—'} | ${s.message || '—'}`)
+        const dst = s.dstIp ? ` → ${s.dstIp}` : ''
+        lines.push(`  • ${s.endpoint || '—'} | ${s.srcIp || '—'}${dst} | ${s.message || '—'}`)
       }
     }
+  }
+
+  let fwStats = null
+  if (isGeoQuery && countryFilter) {
+    fwStats = await appendFirewallCountrySection(lines, { range, countryFilter, allowedPages })
   }
 
   lines.push('', '(Direct answer from live SentinelOne XDR PowerQuery — no LLM wait.)')
@@ -438,8 +531,11 @@ export async function tryDirectXdrAnswer(question, allowedPages, ctx = null) {
         totalEvents: total,
         rowCount: rows.length,
         query: rawQuery,
+        country: countryFilter?.name || null,
+        firewallCountryEvents: fwStats?.total ?? null,
         topEndpoints: agg.byEndpoint.slice(0, 5),
         topSourceIps: agg.bySrcIp.slice(0, 5),
+        topDestIps: dstAgg.slice(0, 5),
       },
     },
     effectiveQuery,

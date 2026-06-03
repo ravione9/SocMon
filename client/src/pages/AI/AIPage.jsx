@@ -36,8 +36,10 @@ const PAGE_ROOT = {
 const STARTER_PROMPTS = {
   monitor: [
     'Give me a store monitor summary — online, offline, and stores with issues.',
-    'Show me all USB disconnection within 5 min with timestamp',
     'How many firewall denies in the last hour?',
+    'Sentinel xdr failed login on server machines last 1 hour',
+    'Sentinel xdr connections to china last 12 hours',
+    'Disk usage report for lenskart-database group',
   ],
   details: [
     'Give me complete details of RP4531-E521BCXS last 6 hours',
@@ -49,10 +51,19 @@ const STARTER_PROMPTS = {
     'Investigate connectivity issues on RP4430 — correlate all signals',
     'What caused USB disconnections on RP4139? RCA last 1 hour',
   ],
+  agent: [
+    'Disk usage report for lenskart-database group — which servers need attention first?',
+    'How many stores are offline and list their hostnames',
+    'Switch status and ping summary — highlight any unreachable devices',
+    'Sentinel xdr suspicious powershell process creation last 6 hours',
+    'Connections from India in last 24 hours — summarize by FortiGate device',
+    'Complete environment report for RP4531-E521BCXS with recommendations',
+  ],
 }
 
 const CHAT_MODES = [
   { id: 'monitor', label: 'Monitor', hint: 'Fast live counts, summaries, and alerts' },
+  { id: 'agent', label: 'Agent', hint: 'LLM + live tools — natural language with recommendations' },
   { id: 'details', label: 'Details', hint: 'Deep hostname / store reports with all environments' },
   { id: 'rca', label: 'RCA', hint: 'Root cause analysis with correlated timeline' },
 ]
@@ -365,8 +376,15 @@ function ContextMetaPanel({ meta = [], fastPath, preview, metrics, queryContext 
               : metrics?.mode === 'direct-xdr'
               ? 'Instant XDR answer from live SentinelOne PowerQuery'
               : 'Instant answer from live NetPulse data')
-          : 'Data sources for this reply'}
+          : metrics?.mode === 'agent'
+            ? 'Agent — LLM called live portal tools'
+            : 'Data sources for this reply'}
       </div>
+      {queryContext?.toolsUsed?.length > 0 && (
+        <div style={{ marginBottom: 6 }}>
+          Tools: {queryContext.toolsUsed.map(t => `${t.name}${t.ok ? '' : ' (failed)'}`).join(' · ')}
+        </div>
+      )}
       {metrics && (
         <div style={{ marginBottom: 6 }}>
           mode={metrics.mode || 'llm'} · total={metrics.totalMs}ms · context={metrics.contextMs}ms · llm={metrics.llmMs}ms
@@ -638,11 +656,12 @@ function ChatTab({
     {
       role: 'assistant',
       content:
-        'NetPulse AI — three chat modes:\n\n' +
-        '• Monitor — fast live summaries (stores, firewall, USB, XDR counts).\n' +
+        'NetPulse AI — four chat modes:\n\n' +
+        '• Monitor — tries instant live handlers first; if your wording is new, it auto-runs Agent tools (still live data, no guessing).\n' +
+        '• Agent — best for free-form questions: LLM picks tools (Zabbix, XDR, firewall, stores…) then explains with recommendations.\n' +
         '• Details — full per-hostname reports across Store Monitor, Sentinel, SOC, NOC.\n' +
         '• RCA — root cause analysis with correlated timeline, ranked hypotheses, and recommended actions.\n\n' +
-        'Enable data sources above, pick a mode, then ask your question.',
+        'Users can ask in many ways — you do not need exact phrasing. Enable data sources above, pick a mode, then ask.',
     },
   ])
   const [input, setInput] = useState('')
@@ -752,7 +771,9 @@ function ChatTab({
     }
   }, [input, messages, enabledModules, autoModules, chatMode])
 
-  const loadingLabel = chatMode === 'rca'
+  const loadingLabel = chatMode === 'agent'
+    ? 'Agent selecting tools and fetching live data…'
+    : chatMode === 'rca'
     ? 'Correlating signals across Store Monitor, Sentinel, SOC, NOC…'
     : chatMode === 'details'
       ? 'Fetching full hostname environment data…'

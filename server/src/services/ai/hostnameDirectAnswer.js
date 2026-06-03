@@ -149,19 +149,26 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
   const rangeLabel = formatRangeLabelFromInflux(range)
   const fetchedAt = new Date().toISOString()
   const fmtTs = (v) => formatPortalTimestamp(v)
+  const envOpts = { showEmptyModules: true, maxUsbSamples: 15 }
+  const fetchEnv = (storeTag = '') => (wantsChart
+    ? Promise.resolve({})
+    : fetchHostnameEnvironments(hostname, range, allowedPages, {
+      storeTag,
+      extendSentinelWindow: true,
+      usbSampleSize: 20,
+    }))
 
-  const envPromise = wantsChart ? Promise.resolve({}) : fetchHostnameEnvironments(hostname, range, allowedPages)
   const influxOk = isInfluxStoreConfigured() && allowedPages.includes('storeMonitor')
 
   if (!influxOk) {
-    const env = await envPromise
+    const env = await fetchEnv()
     const lines = [
       `Hostname report — ${hostname} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
       `Window: ${rangeLabel}`,
       '',
       '── Store Monitor ──',
       '  InfluxDB not configured or no storeMonitor access.',
-      ...formatEnvironmentSections(env, rangeLabel, fmtTs),
+      ...formatEnvironmentSections(env, rangeLabel, fmtTs, envOpts),
       '',
       '(Direct answer from NetPulse live data — no LLM wait.)',
     ]
@@ -173,14 +180,15 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
     })
   }
 
-  const [stores, crashRows, tracker, env] = await Promise.all([
+  const [stores, crashRows, tracker] = await Promise.all([
     fetchStoreSnapshot(10, range),
     wantsChart ? Promise.resolve([]) : fetchCrashSummary(range),
     wantsChart ? Promise.resolve({}) : getProblemSnapshotStatus(),
-    envPromise,
   ])
 
   const store = stores.find(s => hostnameMatchesStore(s, hostname))
+  const env = await fetchEnv(store?.storeTag || '')
+
   if (!store) {
     const lines = [
       `Hostname report — ${hostname} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
@@ -188,7 +196,7 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
       '',
       '── Store Monitor (LIVE) ──',
       `  No store agent data in Influx for "${hostname}" in ${rangeLabel}.`,
-      ...formatEnvironmentSections(env, rangeLabel, fmtTs),
+      ...formatEnvironmentSections(env, rangeLabel, fmtTs, envOpts),
       '',
       '(Direct answer from NetPulse live data — no LLM wait.)',
     ]
@@ -212,7 +220,7 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
         ],
       })
         .sort({ lastSeenAt: -1 })
-        .limit(15)
+        .limit(100)
         .lean(),
   ])
 
@@ -297,13 +305,12 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
   if (!problems.length) {
     lines.push(`  No tracked problems for this hostname (snapshot every ~${intervalMin} min).`)
   } else {
-    for (const p of problems.slice(0, 8)) {
+    for (const p of problems) {
       lines.push(`  • [${p.status}] ${p.code}: ${p.message} (last ${p.lastSeenAt ? formatPortalTimestamp(p.lastSeenAt) : '—'})`)
     }
-    if (problems.length > 8) lines.push(`  … and ${problems.length - 8} more problem records`)
   }
 
-  lines.push(...formatEnvironmentSections(env, rangeLabel, fmtTs))
+  lines.push(...formatEnvironmentSections(env, rangeLabel, fmtTs, envOpts))
   lines.push('', '(Direct answer from NetPulse live data (all environments) — no LLM wait.)')
 
   return buildHostnameResponse(lines, hostname, range, fetchedAt, env, ctx, {

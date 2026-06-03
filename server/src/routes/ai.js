@@ -29,6 +29,8 @@ import { tryDirectRcaAnswer } from '../services/ai/rcaAnalysis.js'
 import { tryDirectHostnameAnswer } from '../services/ai/hostnameDirectAnswer.js'
 import { tryDirectXdrAnswer } from '../services/ai/xdrDirectAnswer.js'
 import { resolveQueryContext, isHostnameDataRequest, extractStoreHostname } from '../services/ai/queryContext.js'
+import { runAgentChat } from '../services/ai/agentChat.js'
+import { needsLiveAgentFallback } from '../services/ai/queryLiveDataFallback.js'
 
 const router = Router()
 
@@ -103,6 +105,55 @@ router.post('/chat', async (req, res) => {
     const lastUser = [...sanitized].reverse().find(m => m.role === 'user')?.content || ''
     const { allowedPages } = await computeUserPageAccess(req.user)
     const ctx = resolveQueryContext(sanitized, { chatMode })
+
+    // Agent mode — LLM picks tools, fetches live data, then synthesizes answer.
+    if (chatMode === 'agent') {
+      const agentStart = Date.now()
+      const providerName = getAIProvider().name
+      const defaultTimeoutMs = providerName === 'ollama' ? 300000 : 180000
+      const agentTimeoutMs = Number.parseInt(process.env.AI_AGENT_TIMEOUT_MS || String(defaultTimeoutMs), 10)
+
+      try {
+        const agentResult = await withTimeout(
+          runAgentChat(sanitized, { user: req.user, allowedPages, ctx }),
+          agentTimeoutMs,
+          `Agent timeout after ${Math.round(agentTimeoutMs / 1000)}s`,
+        )
+        return res.json({
+          content: agentResult.content,
+          provider: agentResult.provider || providerName,
+          contextMeta: agentResult.contextMeta || [],
+          contextPreview: agentResult.contextPreview || {},
+          queryContext: {
+            topic: 'agent',
+            chatMode: 'agent',
+            toolsUsed: agentResult.toolsUsed,
+            isFollowUp: ctx.isFollowUp,
+          },
+          modulesUsed: agentResult.modulesUsed || [],
+          fastPath: false,
+          metrics: {
+            totalMs: Date.now() - requestStart,
+            contextMs: agentResult.toolMs || 0,
+            llmMs: agentResult.llmMs || 0,
+            mode: 'agent',
+          },
+        })
+      } catch (err) {
+        const hint = formatLlmErrorForClient(err)
+        return res.status(err.message?.includes('timeout') ? 504 : 502).json({
+          error: hint.error || err.message,
+          errorTable: hint.errorTable,
+          queryContext: { topic: 'agent', chatMode: 'agent' },
+          metrics: {
+            totalMs: Date.now() - requestStart,
+            contextMs: Date.now() - agentStart,
+            llmMs: 0,
+            mode: 'agent-error',
+          },
+        })
+      }
+    }
 
     const xdrStart = Date.now()
     const xdrDirect = await tryDirectXdrAnswer(lastUser, allowedPages, ctx)
@@ -320,6 +371,46 @@ router.post('/chat', async (req, res) => {
             mode: 'direct-rca',
           },
         })
+      }
+    }
+
+    // Monitor: no direct handler matched — Agent + live tools (users can phrase questions many ways).
+    if (needsLiveAgentFallback(lastUser, chatMode)) {
+      const providerStatus = getAIProviderConfigStatus()
+      const activeReady = providerStatus.rows?.find(r => r.key === 'active')?.ok
+      if (activeReady) {
+        const providerName = getAIProvider().name
+        const defaultTimeoutMs = providerName === 'ollama' ? 300000 : 180000
+        const agentTimeoutMs = Number.parseInt(process.env.AI_AGENT_TIMEOUT_MS || String(defaultTimeoutMs), 10)
+        try {
+          const agentResult = await withTimeout(
+            runAgentChat(sanitized, { user: req.user, allowedPages, ctx }),
+            agentTimeoutMs,
+            `Agent timeout after ${Math.round(agentTimeoutMs / 1000)}s`,
+          )
+          return res.json({
+            content: agentResult.content,
+            provider: agentResult.provider || providerName,
+            contextMeta: agentResult.contextMeta || [],
+            contextPreview: agentResult.contextPreview || {},
+            queryContext: {
+              topic: 'monitor-agent',
+              chatMode: 'monitor',
+              toolsUsed: agentResult.toolsUsed,
+              isFollowUp: ctx.isFollowUp,
+            },
+            modulesUsed: agentResult.modulesUsed || [],
+            fastPath: false,
+            metrics: {
+              totalMs: Date.now() - requestStart,
+              contextMs: agentResult.toolMs || 0,
+              llmMs: agentResult.llmMs || 0,
+              mode: 'monitor-agent',
+            },
+          })
+        } catch {
+          /* fall through to portal context + LLM */
+        }
       }
     }
 

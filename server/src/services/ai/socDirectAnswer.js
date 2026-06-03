@@ -4,6 +4,7 @@ import { fortigateVpnFilterBool } from '../../utils/fortigateVpnQuery.js'
 import { fortigateUserLoginFailedBool } from '../../utils/loginFailureQuery.js'
 
 import { isInfraDeviceStatusQuery } from './zabbixDirectAnswer.js'
+import { extractCountryFromQuestion, fetchFirewallCountryConnections } from './geoConnectionQuery.js'
 
 function parseRange(q) {
   const text = String(q || '').toLowerCase()
@@ -118,8 +119,71 @@ export async function tryDirectSOCAnswer(question, allowedPages, ctx = null) {
   if (!allowedPages.includes('soc')) return null
 
   const fetchedAt = new Date().toISOString()
+  const countryFilter = extractCountryFromQuestion(question)
   const wantsConnections = /\b(connections?|sessions?|how many conn|active conn|traffic)\b/i.test(question)
   const range = ctx?.range || parseRange(question)
+
+  if (countryFilter && wantsConnections) {
+    try {
+      const fw = await fetchFirewallCountryConnections(range, countryFilter)
+      const window = rangeLabel(range)
+      const dirLabel = countryFilter.direction === 'src' ? 'source country' : 'destination country'
+      const lines = [
+        `FortiGate / SOC — connections by country (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
+        `Window: ${window}`,
+        `Filter: ${dirLabel} = ${countryFilter.name}`,
+        '',
+        `Total firewall log events: ${fw.total.toLocaleString()}`,
+        `Allowed sessions: ${fw.allows.toLocaleString()}`,
+        `Denied sessions: ${fw.denies.toLocaleString()}`,
+        '',
+      ]
+      if (fw.byDevice.length) {
+        lines.push('Top FortiGate devices:')
+        for (const d of fw.byDevice.slice(0, 8)) {
+          lines.push(`  • ${d.name}: ${d.count.toLocaleString()}`)
+        }
+        lines.push('')
+      }
+      const topIps = countryFilter.direction === 'src' ? fw.topSrcIp : fw.topDstIp
+      if (topIps.length) {
+        lines.push(`Top ${countryFilter.direction === 'src' ? 'source' : 'destination'} IPs:`)
+        for (const ip of topIps.slice(0, 8)) {
+          lines.push(`  • ${ip.ip}: ${ip.count.toLocaleString()}`)
+        }
+        lines.push('')
+      }
+      lines.push('(Direct answer from live Elasticsearch firewall-* — no LLM wait.)')
+      return {
+        content: lines.join('\n'),
+        contextMeta: [{
+          id: 'soc',
+          label: 'SOC / FortiGate',
+          freshness: 'live',
+          fetchedAt,
+          configured: true,
+          note: `${countryFilter.name} · ${fw.total.toLocaleString()} events`,
+        }],
+        contextPreview: {
+          soc: {
+            window,
+            totalEvents: fw.total,
+            denies: fw.denies,
+            allows: fw.allows,
+            country: countryFilter.name,
+          },
+        },
+        queryContext: { topic: 'soc', isFollowUp: ctx?.isFollowUp },
+      }
+    } catch (e) {
+      return {
+        content: `FortiGate country connection lookup failed.\nError: ${e.message}`,
+        contextMeta: [{ id: 'soc', label: 'SOC / Firewall', freshness: 'live', fetchedAt, configured: false, error: e.message }],
+        contextPreview: {},
+        queryContext: { topic: 'soc', isFollowUp: ctx?.isFollowUp },
+      }
+    }
+  }
 
   let stats
   try {

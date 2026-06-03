@@ -22,15 +22,68 @@ export function isInfraMonitorQuery(question) {
 const SWITCH_WORD = /\b(switch(?:es)?|all switches)\b/i
 const ROUTER_WORD = /\b(router(?:s)?)\b/i
 
+/** Pull host group name from prior chat text (assistant or user). */
+export function extractHostGroupFromThread(text) {
+  const t = String(text || '')
+  const patterns = [
+    /\bHost group:\s*([\w.-]+)/i,
+    /\bhost group[:\s]+([\w.-]+)/i,
+    /\b(?:of|for|from)\s+([\w.-]+)\s+group\b/i,
+    /\b([\w][\w.-]*)\s+group\b/i,
+    /\b(lenskart-[\w-]+)\b/i,
+  ]
+  for (const re of patterns) {
+    const m = t.match(re)
+    const name = m?.[1]
+    if (name && !/^(this|that|the|host|a|an|in|only|given)$/i.test(name)) return name
+  }
+  return null
+}
+
+const GROUP_NAME_STOP = /^(this|that|the|why|only|given|with|in|a|an|how|many|server|servers|host|hosts)$/i
+
 /** Zabbix host group name from natural language, e.g. lenskart-database. */
-export function extractHostGroupFilter(question) {
+export function extractHostGroupFilter(question, ctx = null) {
   const q = String(question || '')
-  let m = q.match(/\b(?:belong(?:s|ing)?\s+to|belonging\s+to|member\s+of|in)\s+(?:the\s+)?(?:host\s*group\s+|group\s+)?([A-Za-z0-9][\w.-]*)\b/i)
-  if (m) return m[1]
+
+  // Follow-up first: "this group", "in this group", "why only 3 in this group"
+  if (ctx?.isFollowUp && (/\b(this|that)\s+group\b/i.test(q) || /\bin\s+this\s+group\b/i.test(q) || (/\bgroup\b/i.test(q) && /\b(why|only|\d+)\b/i.test(q)))) {
+    const fromThread = extractHostGroupFromThread(ctx?.threadText)
+      || extractHostGroupFromThread(ctx?.priorAssistant)
+      || extractHostGroupFromThread(ctx?.priorUser)
+    if (fromThread) return fromThread
+    if (ctx?.hostGroup) return ctx.hostGroup
+  }
+
+  // "report of lenskart-database group", "disk usage for lenskart-database group"
+  let m = q.match(/\b(?:of|for|from)\s+(["']?)([\w.-]+)\1\s+group\b/i)
+  if (m && !GROUP_NAME_STOP.test(m[2])) return m[2]
+
+  // "lenskart-database group" (name before the word group)
+  m = q.match(/\b([\w][\w.-]*)\s+group\b/i)
+  if (m && !GROUP_NAME_STOP.test(m[1])) return m[1]
+
+  m = q.match(/\b(?:belong(?:s|ing)?\s+to|belonging\s+to|member\s+of)\s+(?:the\s+)?(?:host\s*group\s+|group\s+)?([A-Za-z0-9][\w.-]*)\b/i)
+  if (m && !GROUP_NAME_STOP.test(m[1])) return m[1]
+
+  // "in lenskart-database" / "in group lenskart-database" — not bare "in this"
+  m = q.match(/\bin\s+(?:the\s+)?(?:host\s*group\s+|group\s+)?([A-Za-z0-9][\w.-]+)\b/i)
+  if (m && !GROUP_NAME_STOP.test(m[1])) return m[1]
+
   m = q.match(/\b(?:host\s*group|hostgroup|group)\s+(["']?)([\w.-]+)\1\b/i)
-  if (m) return m[2]
+  if (m && !GROUP_NAME_STOP.test(m[2])) return m[2]
+
   m = q.match(/\b(?:servers?|hosts?)\s+(?:in|from|of)\s+(["']?)([\w.-]+)\1\b/i)
-  if (m) return m[2]
+  if (m && !GROUP_NAME_STOP.test(m[2])) return m[2]
+
+  if (/\b(this|that)\s+group\b/i.test(q) || /\bin\s+this\s+group\b/i.test(q)) {
+    const fromThread = extractHostGroupFromThread(ctx?.threadText)
+      || extractHostGroupFromThread(ctx?.priorAssistant)
+      || extractHostGroupFromThread(ctx?.priorUser)
+    if (fromThread) return fromThread
+  }
+
+  if (ctx?.hostGroup) return ctx.hostGroup
   return null
 }
 
@@ -46,17 +99,19 @@ export function wantsHostGroupCheck(question) {
 }
 
 /** fortigate | cisco | checkpoint | network | switch | server | vm | database */
-export function detectDeviceTypeFilter(question) {
+export function detectDeviceTypeFilter(question, ctx = null) {
   const q = String(question || '')
   // Host group names like lenskart-database are not device-type filters.
-  if (extractHostGroupFilter(q)) return null
+  if (extractHostGroupFilter(q, ctx)) return null
   if (/\b(fortinet|fortigate|fgt)\b/i.test(q)) return 'fortigate'
   if (SWITCH_WORD.test(q)) return 'switch'
   if (/\b(cisco|catalyst|nexus|meraki)\b/i.test(q)) return 'cisco'
   if (ROUTER_WORD.test(q)) return 'cisco'
   if (/\b(servers?|all servers?|server health|server availability)\b/i.test(q)) return 'server'
   if (/\b(virtual machines?|vms?)\b/i.test(q)) return 'vm'
-  if (/\b(databases?|db servers?|mssql servers?)\b/i.test(q)) return 'database'
+  // "lenskart-database" is a group name — not device type database
+  if (/\b(?:db servers?|mssql servers?)\b/i.test(q)) return 'database'
+  if (/\bdatabases?\b/i.test(q) && !/[\w-]-database\b/i.test(q)) return 'database'
   if (/\b(checkpoint|check point)\b/i.test(q)) return 'checkpoint'
   if (/\b(juniper)\b/i.test(q)) return 'juniper'
   return null
@@ -84,11 +139,12 @@ export function isIpInfraQuery(question) {
   return true
 }
 
-export function isZabbixQuestion(question) {
+export function isZabbixQuestion(question, ctx = null) {
   const q = String(question || '')
-  if (wantsDiskUsage(q) && (extractHostGroupFilter(q) || /\b(server|servers|zabbix|infra|host)\b/i.test(q))) return true
+  if (wantsDiskUsage(q) && (extractHostGroupFilter(q, ctx) || /\b(server|servers|zabbix|infra|host|group)\b/i.test(q))) return true
   if (wantsHostGroupCheck(q) && extractIpv4(q)) return true
-  if (extractHostGroupFilter(q) && /\b(server|servers|host|status|report|disk|usage)\b/i.test(q)) return true
+  if (extractHostGroupFilter(q, ctx) && /\b(server|servers|host|status|report|disk|usage)\b/i.test(q)) return true
+  if (ctx?.isFollowUp && ctx?.priorTopic === 'zabbix' && /\b(group|why|only|server|host|disk|this|that|\d+)\b/i.test(q)) return true
   return ZABBIX_MARKERS.test(q)
     || isIpInfraQuery(q)
     || isInfraDeviceStatusQuery(q)
@@ -383,9 +439,12 @@ export function prefersLlmSynthesis(question, ctx = null) {
   if (/\b(all port|every port|each port|all interface|every interface)\b/i.test(q)) return false
 
   // Only send to LLM for open-ended analytical questions with no live data equivalent
-  if (/\b(explain|why|help me understand|interpret|recommend|compare|analyse|analyze|summarize|summarise)\b/i.test(q)) {
+  if (/\b(explain|help me understand|interpret|recommend|compare|analyse|analyze|summarize|summarise)\b/i.test(q)) {
     return true
   }
+  // "why only 3" follow-ups on Zabbix host groups — re-fetch via direct path, not LLM
+  if (c.isFollowUp && c.priorTopic === 'zabbix' && extractHostGroupFilter(q, c)) return false
+  if (/\bwhy\b/i.test(q) && extractHostGroupFilter(q, c)) return false
   return false
 }
 
@@ -814,7 +873,7 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
           if (pa === -1 && pb !== -1) return 1
           return (a.name || a.host).localeCompare(b.name || b.host)
         })
-        return sorted.slice(0, deviceTypeFilter === 'switch' ? 50 : 25).map(h => ({
+        return sorted.slice(0, groupName ? 50 : (deviceTypeFilter === 'switch' ? 50 : 25)).map(h => ({
           hostid: String(h.hostid),
           name: h.name || h.host,
           host: h.host,
@@ -857,18 +916,20 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
  * @param {object} [ctx]
  */
 export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) {
-  if (!isZabbixQuestion(question)) return null
+  if (!isZabbixQuestion(question, ctx)) return null
   if (prefersLlmSynthesis(question, ctx)) return null
 
   const fetchedAt = new Date().toISOString()
   const ip = extractIpv4(question)
   const hostname = extractStoreHostname(question) || ctx?.hostname
-  const hostGroupFilter = extractHostGroupFilter(question)
+  const hostGroupFilter = extractHostGroupFilter(question, ctx) || ctx?.hostGroup
   const isMembershipCheck = wantsHostGroupCheck(question) && ip && hostGroupFilter
-  const includeDisk = wantsDiskUsage(question) || isMembershipCheck
-  const deviceTypeFilter = isMembershipCheck ? null : detectDeviceTypeFilter(question)
+  const scopedHostGroup = hostGroupFilter && !ip && !(hostname && /\b(for|of|about|status)\b/i.test(question)) ? hostGroupFilter : ''
+  const isGroupFollowUp = Boolean(ctx?.isFollowUp && scopedHostGroup && ctx?.priorTopic === 'zabbix')
+  const includeDisk = wantsDiskUsage(question) || isMembershipCheck || isGroupFollowUp
+    || Boolean(scopedHostGroup && (wantsDiskUsage(question) || /\b(disk|usage|report)\b/i.test(question)))
+  const deviceTypeFilter = (scopedHostGroup || isMembershipCheck) ? null : detectDeviceTypeFilter(question, ctx)
   const hostFilter = ip || (hostname && /\b(for|of|about|status)\b/i.test(question) ? hostname : '')
-  const scopedHostGroup = hostGroupFilter && !hostFilter ? hostGroupFilter : ''
   const wantsIsp = /\bisp\b/i.test(question)
   const includePing = wantsPingStatus(question)
   const includeBandwidth = wantsBandwidthUtil(question)
@@ -957,7 +1018,7 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     other: 'Other',
   }
   const filterLabel = deviceTypeFilter ? TYPE_LABEL[deviceTypeFilter] || deviceTypeFilter : null
-  const diskReport = wantsDiskUsage(question) && scopedHostGroup
+  const diskReport = Boolean(scopedHostGroup && includeDisk)
 
   const lines = [
     diskReport
@@ -972,6 +1033,11 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
           : 'All monitored hosts (network devices & servers)',
     '',
   ]
+
+  if (isGroupFollowUp && /\bwhy|only|\d+\s+server/i.test(question)) {
+    lines.push('  (Follow-up — re-fetched full host group membership from Zabbix, not device-type filter.)')
+    lines.push('')
+  }
 
   for (const { label, data } of results) {
     lines.push(`── ${label} ──`)
@@ -1022,8 +1088,12 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
       typeEntries.forEach(e => lines.push(e))
     }
     if (data.hosts.length) {
-      const hostTitle = filterLabel ? `${filterLabel}:` : 'Sample hosts (network devices first):'
-      const hostLimit = deviceTypeFilter === 'switch' ? 50 : 15
+      const hostTitle = scopedHostGroup
+        ? `All hosts in group (${a.total}):`
+        : filterLabel
+          ? `${filterLabel}:`
+          : 'Sample hosts (network devices first):'
+      const hostLimit = scopedHostGroup ? 50 : (deviceTypeFilter === 'switch' ? 50 : 15)
       lines.push(`  ${hostTitle}`)
       for (const h of data.hosts.slice(0, hostLimit)) {
         const typeTag = h.type && h.type !== 'other' ? ` [${h.type}]` : ''
@@ -1108,6 +1178,18 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
         lines.push(formatDiskLine(hostName, row))
       }
       if (diskRows.length > diskLimit) lines.push(`    … ${diskRows.length - diskLimit} more hosts with disk items`)
+      if (scopedHostGroup && data.matchedHosts?.length) {
+        const diskHostIds = new Set(diskRows.map(r => String(r.hostid)))
+        const noDisk = data.matchedHosts.filter(h => !diskHostIds.has(String(h.hostid)))
+        if (noDisk.length) {
+          lines.push(`    Hosts without disk items: ${noDisk.length}`)
+          for (const h of noDisk.slice(0, 20)) {
+            const typeTag = h.type && h.type !== 'other' ? ` [${h.type}]` : ''
+            lines.push(`      • ${h.name}${typeTag} — no vfs.fs.size data`)
+          }
+          if (noDisk.length > 20) lines.push(`      … ${noDisk.length - 20} more without disk metrics`)
+        }
+      }
     } else if (includeDisk) {
       lines.push('  No disk/filesystem usage items (vfs.fs.size) found on matched hosts.')
     }

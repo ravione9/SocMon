@@ -24,23 +24,57 @@ export function influxRangeToEsPreset(range) {
   return `${m[1]}${m[2].toLowerCase()}`
 }
 
-function esTimeRange(range) {
-  return { gte: `now-${influxRangeToEsPreset(range)}` }
+/** USB/threat search needs a wider window when the user asks for last 10m. */
+export function sentinelLookbackPreset(range) {
+  const m = /^-(\d+)([smhd])$/i.exec(String(range || ''))
+  if (!m) return '24h'
+  const n = Number.parseInt(m[1], 10)
+  const u = m[2].toLowerCase()
+  if (u === 's' || u === 'm') return '24h'
+  if (u === 'h' && n <= 1) return '24h'
+  return `${n}${u}`
 }
 
-function endpointMustClause(hostname) {
-  const fields = [
+function esTimeRange(preset) {
+  return { gte: `now-${preset}` }
+}
+
+function endpointMustClause(hostname, storeTag = '') {
+  const h = String(hostname || '').trim()
+  const tag = String(storeTag || '').trim()
+  const esc = h.replace(/[\\*?]/g, '')
+  const should = []
+
+  const exactFields = [
     'agentRealtimeInfo.agentComputerName.keyword',
+    'agent_realtime_info.agentComputerName.keyword',
+    'agentDetectionInfo.agentComputerName.keyword',
     'host.name.keyword',
     'host.hostname.keyword',
     'computer_name.keyword',
+    'data.computerName.keyword',
+    'data.computer_name.keyword',
   ]
-  return {
-    bool: {
-      should: fields.map(f => ({ term: { [f]: hostname } })),
-      minimum_should_match: 1,
-    },
+
+  for (const f of exactFields) {
+    should.push({ term: { [f]: h } })
+    if (tag && tag !== h) should.push({ term: { [f]: tag } })
   }
+
+  if (esc) {
+    for (const f of [
+      'agentRealtimeInfo.agentComputerName.keyword',
+      'agent_realtime_info.agentComputerName.keyword',
+      'agentDetectionInfo.agentComputerName.keyword',
+    ]) {
+      should.push({ wildcard: { [f]: `${esc}*` } })
+      should.push({ wildcard: { [f]: `*${esc}*` } })
+    }
+    should.push({ wildcard: { 'host.name.keyword': `*${esc}*` } })
+    should.push({ wildcard: { 'computer_name.keyword': `*${esc}*` } })
+  }
+
+  return { bool: { should, minimum_should_match: 1 } }
 }
 
 function firewallHostMustClause(hostname) {
@@ -111,15 +145,54 @@ function pickAction(src) {
   return src.event?.action || src['event.action'] || src['fgt.action'] || src.cisco_mnemonic || '—'
 }
 
+function pickUsbDevice(src) {
+  const s1d = src['sentinel_one.activity.data'] || src.sentinel_one?.activity?.data || {}
+  return src.device?.name
+    || src['sentinel_one.activity.data.deviceName']
+    || s1d.deviceName
+    || src.data?.deviceName
+    || src.data?.productName
+    || s1d.productName
+    || s1d.externalDeviceType
+    || ''
+}
+
+function pickUsbMessage(src) {
+  const device = pickUsbDevice(src)
+  const eventType = src.data?.eventType || src['sentinel_one.activity.data']?.eventType
+  if (eventType && device) return `${device} — ${eventType}`
+  if (eventType) return String(eventType)
+  for (const v of [src.message, src.event?.original, src.data?.ruleName, pickAction(src)]) {
+    const s = String(v || '').trim()
+    if (s && s !== '—') return s.slice(0, 140)
+  }
+  if (device) return device
+  return 'USB peripheral event'
+}
+
+function mapUsbSample(s) {
+  const action = pickAction(s)
+  const actLow = String(action).toLowerCase()
+  const isDisconnect = actLow.includes('disconnect') || actLow.includes('removed')
+  return {
+    ts: s['@timestamp'],
+    action: isDisconnect ? 'disconnected' : (actLow.includes('connect') ? 'connected' : action),
+    message: pickUsbMessage(s),
+    device: pickUsbDevice(s),
+  }
+}
+
 /**
  * Fetch Sentinel + SOC + NOC data scoped to a store hostname.
  * @param {string} hostname
  * @param {string} range Influx-style e.g. "-6h"
  * @param {string[]} allowedPages
  */
-export async function fetchHostnameEnvironments(hostname, range, allowedPages = []) {
-  const tr = esTimeRange(range)
-  const rangePreset = influxRangeToEsPreset(range)
+export async function fetchHostnameEnvironments(hostname, range, allowedPages = [], opts = {}) {
+  const storeTag = String(opts.storeTag || '').trim()
+  const userPreset = influxRangeToEsPreset(range)
+  const sentinelPreset = opts.extendSentinelWindow ? sentinelLookbackPreset(range) : userPreset
+  const userTr = esTimeRange(userPreset)
   const out = {}
 
   if (allowedPages.includes('sentinel')) {
@@ -127,7 +200,8 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
       out.sentinel = { configured: false, error: 'Elasticsearch not configured' }
     } else {
       const index = getSentinelIndex()
-      const endpoint = endpointMustClause(hostname)
+      const endpoint = endpointMustClause(hostname, storeTag)
+      const tr = esTimeRange(sentinelPreset)
       const baseMust = [{ range: { '@timestamp': tr } }, endpoint]
 
       const usbBase = [...baseMust, USB_PERIPHERAL_EVENT_BOOL]
@@ -135,6 +209,32 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
       const usbDisconnectedMust = [...usbBase, USB_PERIPHERAL_DISCONNECT_FILTER]
       const threatMust = [...baseMust, THREAT_DETECTED_BOOL, { bool: { must_not: [USB_PERIPHERAL_EVENT_BOOL] } }]
       const activeThreatMust = [...baseMust, ACTIVE_THREAT_BOOL, { bool: { must_not: [USB_PERIPHERAL_EVENT_BOOL] } }]
+      const usbSampleSize = opts.usbSampleSize || 20
+
+      const usbFields = [
+        '@timestamp', 'message', 'event.action', 'event.original',
+        'device.name', 'sentinel_one.activity.data.deviceName',
+        'sentinel_one.activity.data', 'data.eventType', 'data.deviceName', 'data.productName', 'data.ruleName',
+        'agentRealtimeInfo.agentComputerName',
+      ]
+
+      const userWindowFetch = (opts.extendSentinelWindow && sentinelPreset !== userPreset)
+        ? (async () => {
+          const userBase = [{ range: { '@timestamp': userTr } }, endpoint]
+          const userUsbBase = [...userBase, USB_PERIPHERAL_EVENT_BOOL]
+          const [uc, ud, us] = await Promise.all([
+            esCount(index, [...userUsbBase, { bool: { must_not: [USB_PERIPHERAL_DISCONNECT_FILTER] } }]),
+            esCount(index, [...userUsbBase, USB_PERIPHERAL_DISCONNECT_FILTER]),
+            esSearch(index, userUsbBase, 10, usbFields),
+          ])
+          return {
+            window: userPreset,
+            usbConnected: uc.count,
+            usbDisconnected: ud.count,
+            usbSamples: us.map(mapUsbSample),
+          }
+        })()
+        : Promise.resolve(null)
 
       const [
         usbConnected,
@@ -145,6 +245,7 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
         agentConnected,
         usbSamples,
         threatSamples,
+        usbInUserWindow,
       ] = await Promise.all([
         esCount(index, usbConnectedMust),
         esCount(index, usbDisconnectedMust),
@@ -152,16 +253,17 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
         esCount(index, activeThreatMust),
         esCount(index, [...baseMust, AGENT_DISCONNECTED_BOOL]),
         esCount(index, [...baseMust, AGENT_CONNECTED_BOOL]),
-        esSearch(index, usbBase, 6, ['@timestamp', 'message', 'event.action', 'device.name', 'sentinel_one.activity.data.deviceName']),
-        esSearch(index, threatMust, 6, ['@timestamp', 'message', 'threatInfo.threatName', 'threatInfo.filePath', 'event.action']),
+        esSearch(index, usbBase, usbSampleSize, usbFields),
+        esSearch(index, threatMust, 8, ['@timestamp', 'message', 'threatInfo.threatName', 'threatInfo.filePath', 'event.action']),
+        userWindowFetch,
       ])
 
       let s1Threats = { configured: false }
       if (isSentinelOneConfigured()) {
         try {
           const list = await fetchThreatsList({
-            range: rangePreset,
-            q: hostname,
+            range: sentinelPreset,
+            q: storeTag || hostname,
             limit: '8',
             mitigation: 'all',
             incidents: 'all',
@@ -182,18 +284,16 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
 
       out.sentinel = {
         configured: true,
+        searchWindow: sentinelPreset,
+        userSearchWindow: userPreset,
+        usbInUserWindow,
         usbConnected: usbConnected.count,
         usbDisconnected: usbDisconnected.count,
         threatsDetected: threatsDetected.count,
         activeThreats: activeThreats.count,
         agentDisconnected: agentDisconnected.count,
         agentConnected: agentConnected.count,
-        usbSamples: usbSamples.map(s => ({
-          ts: s['@timestamp'],
-          action: pickAction(s),
-          message: pickMessage(s).slice(0, 140),
-          device: s.device?.name || s['sentinel_one.activity.data.deviceName'] || '',
-        })),
+        usbSamples: usbSamples.map(mapUsbSample),
         threatSamples: threatSamples.map(s => ({
           ts: s['@timestamp'],
           name: s.threatInfo?.threatName || pickMessage(s).slice(0, 100),
@@ -210,7 +310,7 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
       out.soc = { configured: false, error: 'Elasticsearch not configured' }
     } else {
       const hostFilter = firewallHostMustClause(hostname)
-      const baseMust = [{ range: { '@timestamp': tr } }, hostFilter]
+      const baseMust = [{ range: { '@timestamp': userTr } }, hostFilter]
       const [total, denies, ips, utm, samples] = await Promise.all([
         esCount('firewall-*', baseMust),
         esCount('firewall-*', [...baseMust, { term: { 'fgt.action.keyword': 'deny' } }]),
@@ -242,7 +342,7 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
       out.noc = { configured: false, error: 'Elasticsearch not configured' }
     } else {
       const hostFilter = ciscoHostMustClause(hostname)
-      const baseMust = [{ range: { '@timestamp': tr } }, hostFilter]
+      const baseMust = [{ range: { '@timestamp': userTr } }, hostFilter]
       const [total, updown, macflap, vlanMismatch, samples] = await Promise.all([
         esCount('cisco-*', baseMust),
         esCount('cisco-*', [...baseMust, { term: { 'cisco_mnemonic.keyword': 'UPDOWN' } }]),
@@ -271,9 +371,11 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
   return out
 }
 
-export function formatEnvironmentSections(env, rangeLabel, formatTs) {
+export function formatEnvironmentSections(env, rangeLabel, formatTs, opts = {}) {
   const lines = []
   const fmt = formatTs || ((v) => String(v || '—'))
+  const showEmpty = opts.showEmptyModules === true
+  const maxUsbSamples = opts.maxUsbSamples || 5
   const pushHeader = (title) => {
     if (lines.length) lines.push('')
     lines.push(title)
@@ -297,34 +399,53 @@ export function formatEnvironmentSections(env, rangeLabel, formatTs) {
         || (s.s1Threats?.threats?.length || 0) > 0
         || Boolean(s.s1Threats?.error)
         || (s.errors?.length || 0) > 0
-      if (!hasSentinelData) {
-        // Hide section when there is no matching data for this hostname/window.
-      } else {
-        pushHeader('── Sentinel (LIVE — Elasticsearch) ──')
-      lines.push(`  USB connected: ${s.usbConnected} · disconnected: ${s.usbDisconnected}`)
-      lines.push(`  Threats detected: ${s.threatsDetected} · active: ${s.activeThreats}`)
-      lines.push(`  Agent connected events: ${s.agentConnected} · disconnected: ${s.agentDisconnected}`)
-      if (s.usbSamples?.length) {
-        lines.push('  Recent USB events:')
-        for (const e of s.usbSamples.slice(0, 5)) {
-          const dev = e.device ? ` · ${e.device}` : ''
-          lines.push(`    • ${fmt(e.ts)} · ${e.action}${dev} · ${e.message}`)
+      if (hasSentinelData || showEmpty) {
+        const extendedWindow = s.searchWindow && s.searchWindow !== s.userSearchWindow
+        pushHeader(`── Sentinel / USB (LIVE — Elasticsearch) ──`)
+        if (extendedWindow && s.usbInUserWindow) {
+          lines.push(`  USB in query window (last ${s.userSearchWindow}): connected ${s.usbInUserWindow.usbConnected} · disconnected ${s.usbInUserWindow.usbDisconnected}`)
+          lines.push(`  USB in extended window (last ${s.searchWindow}): connected ${s.usbConnected} · disconnected ${s.usbDisconnected}`)
+          if (s.usbInUserWindow.usbConnected === 0 && s.usbInUserWindow.usbDisconnected === 0 && (s.usbConnected > 0 || s.usbDisconnected > 0)) {
+            lines.push('  Note: No USB activity in the query window — recent USB events below are from the extended search.')
+          }
+        } else if (!hasSentinelData) {
+          lines.push(`  No USB, threat, or agent events matched this hostname in the search window.`)
+        } else {
+          lines.push(`  USB connected: ${s.usbConnected} · disconnected: ${s.usbDisconnected}`)
         }
-      }
-      if (s.threatSamples?.length) {
-        lines.push('  Recent threat events (ES):')
-        for (const e of s.threatSamples.slice(0, 4)) {
-          lines.push(`    • ${fmt(e.ts)} · ${e.name}`)
+        if (hasSentinelData) {
+          lines.push(`  Threats detected: ${s.threatsDetected} · active: ${s.activeThreats}`)
+          lines.push(`  Agent connected events: ${s.agentConnected} · disconnected: ${s.agentDisconnected}`)
+          const usbList = (s.usbInUserWindow?.usbSamples?.length && s.usbInUserWindow.usbConnected + s.usbInUserWindow.usbDisconnected > 0)
+            ? s.usbInUserWindow.usbSamples
+            : s.usbSamples
+          if (usbList?.length) {
+            lines.push('  Recent USB events:')
+            for (const e of usbList.slice(0, maxUsbSamples)) {
+              const dev = e.device && !String(e.message).includes(e.device) ? ` · ${e.device}` : ''
+              lines.push(`    • ${fmt(e.ts)} · ${e.action}${dev} · ${e.message}`)
+            }
+            if (usbList.length > maxUsbSamples) {
+              lines.push(`    … and ${usbList.length - maxUsbSamples} more USB events`)
+            }
+          } else if (Number(s.usbConnected || 0) === 0 && Number(s.usbDisconnected || 0) === 0) {
+            lines.push('  No USB peripheral events in search window.')
+          }
+          if (s.threatSamples?.length) {
+            lines.push('  Recent threat events (ES):')
+            for (const e of s.threatSamples.slice(0, 4)) {
+              lines.push(`    • ${fmt(e.ts)} · ${e.name}`)
+            }
+          }
+          if (s.s1Threats?.configured && s.s1Threats.threats?.length) {
+            lines.push('  SentinelOne API threats:')
+            for (const t of s.s1Threats.threats) {
+              lines.push(`    • ${t.name} · ${t.status} · ${t.agent}`)
+            }
+          } else if (s.s1Threats?.error) {
+            lines.push(`  SentinelOne API: ${s.s1Threats.error}`)
+          }
         }
-      }
-      if (s.s1Threats?.configured && s.s1Threats.threats?.length) {
-        lines.push('  SentinelOne API threats:')
-        for (const t of s.s1Threats.threats) {
-          lines.push(`    • ${t.name} · ${t.status} · ${t.agent}`)
-        }
-      } else if (s.s1Threats?.error) {
-        lines.push(`  SentinelOne API: ${s.s1Threats.error}`)
-      }
       }
     }
   }

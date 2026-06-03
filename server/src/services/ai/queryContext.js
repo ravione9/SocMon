@@ -1,5 +1,5 @@
 import { isXdrQuestion } from './xdrDirectAnswer.js'
-import { isNetworkInfraQuery, isZabbixQuestion, isInfraDeviceStatusQuery } from './zabbixDirectAnswer.js'
+import { isNetworkInfraQuery, isZabbixQuestion, isInfraDeviceStatusQuery, extractHostGroupFilter, extractHostGroupFromThread } from './zabbixDirectAnswer.js'
 import { isFirewallQuestion } from './socDirectAnswer.js'
 import { isDisconnectionLogQuery } from './nocDirectAnswer.js'
 import { isRcaQuery } from './rcaAnalysis.js'
@@ -63,7 +63,7 @@ const STOPWORDS = new Set([
  * @param {{ role: string, content: string }[]} messages
  */
 export function resolveQueryContext(messages, opts = {}) {
-  const chatMode = ['monitor', 'details', 'rca'].includes(opts.chatMode) ? opts.chatMode : 'monitor'
+  const chatMode = ['monitor', 'details', 'rca', 'agent'].includes(opts.chatMode) ? opts.chatMode : 'monitor'
   const thread = (messages || [])
     .filter(m => m && typeof m.content === 'string' && ['user', 'assistant'].includes(m.role))
     .map(m => ({ role: m.role, content: m.content.trim() }))
@@ -72,11 +72,16 @@ export function resolveQueryContext(messages, opts = {}) {
   const userMessages = thread.filter(m => m.role === 'user')
   const currentQuestion = userMessages[userMessages.length - 1]?.content || ''
   const priorAssistant = [...thread].reverse().find(m => m.role === 'assistant')?.content || ''
+  const priorUser = userMessages.length > 1 ? userMessages[userMessages.length - 2]?.content || '' : ''
   const priorTopic = inferTopicFromAssistant(priorAssistant)
   const threadText = thread.map(m => m.content).join('\n')
 
   const isFollowUp = userMessages.length > 1 && currentQuestion.split(/\s+/).length <= 12
   const followUpKind = detectFollowUpKind(currentQuestion)
+
+  const ctxLite = { isFollowUp, priorTopic, threadText, priorAssistant, priorUser }
+  const hostGroup = extractHostGroupFilter(currentQuestion, ctxLite)
+    || (isFollowUp && priorTopic === 'zabbix' ? extractHostGroupFromThread(threadText) : null)
 
   const hostname = extractStoreHostname(currentQuestion)
     || (!isZabbixQuestion(currentQuestion) && !isNetworkInfraQuery(currentQuestion) && isFollowUp && priorTopic === 'hostname'
@@ -131,8 +136,11 @@ export function resolveQueryContext(messages, opts = {}) {
     currentQuestion,
     topic,
     priorTopic,
+    priorAssistant,
+    priorUser,
     appName,
     hostname,
+    hostGroup,
     range,
     isFollowUp,
     followUpKind,
@@ -147,7 +155,7 @@ export function resolveQueryContext(messages, opts = {}) {
 /** @returns {QueryTopic|null} */
 function inferTopicFromAssistant(text) {
   const t = String(text || '')
-  if (/Zabbix network|Infra Zabbix|Store Zabbix/i.test(t)) return 'zabbix'
+  if (/Disk usage report|Zabbix network|Infra Zabbix|Store Zabbix|Host group:/i.test(t)) return 'zabbix'
   if (/Store hostname report|Hostname report|Metrics chart/i.test(t)) return 'hostname'
   if (/App Crashes|Influx crash|crash events/i.test(t)) return 'crash'
   if (/SentinelOne XDR|PowerQuery used/i.test(t)) return 'xdr'
