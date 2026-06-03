@@ -2,6 +2,8 @@ import { createZabbixClient } from '../../services/zabbix.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 import { isInfluxStoreConfigured, fetchStoreSnapshot, buildOverviewSummary } from '../influxStore.js'
 import { extractStoreHostname } from './queryContext.js'
+import { isSocReportQuery } from './socDirectAnswer.js'
+import { wantsDeepInfraFetch } from './directLlmSynthesis.js'
 
 const IPV4_RE = /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/
 
@@ -141,10 +143,13 @@ export function isIpInfraQuery(question) {
 
 export function isZabbixQuestion(question, ctx = null) {
   const q = String(question || '')
+  if (isSocReportQuery(q)) return false
   if (wantsDiskUsage(q) && (extractHostGroupFilter(q, ctx) || /\b(server|servers|zabbix|infra|host|group)\b/i.test(q))) return true
   if (wantsHostGroupCheck(q) && extractIpv4(q)) return true
-  if (extractHostGroupFilter(q, ctx) && /\b(server|servers|host|status|report|disk|usage)\b/i.test(q)) return true
-  if (ctx?.isFollowUp && ctx?.priorTopic === 'zabbix' && /\b(group|why|only|server|host|disk|this|that|\d+)\b/i.test(q)) return true
+  if (wantsBandwidthUtil(q, ctx) && extractHostGroupFilter(q, ctx)) return true
+  if (extractHostGroupFilter(q, ctx) && wantsDiskUsage(q)) return true
+  if (extractHostGroupFilter(q, ctx) && /\b(server|servers|host)\b/i.test(q) && !/\b(bandwidth|soc|firewall)\b/i.test(q)) return true
+  if (ctx?.isFollowUp && ctx?.priorTopic === 'zabbix' && !isSocReportQuery(q) && /\b(group|why|only|server|host|disk|this|that|\d+|bandwidth)\b/i.test(q)) return true
   return ZABBIX_MARKERS.test(q)
     || isIpInfraQuery(q)
     || isInfraDeviceStatusQuery(q)
@@ -419,9 +424,14 @@ export function wantsPingStatus(question) {
   return /\b(ping|icmp|latency|packet\s*loss|response\s*time|sensor\s*data|reachable|unreachable)\b/i.test(String(question || ''))
 }
 
-export function wantsBandwidthUtil(question) {
-  return /\b(bandwidth|utilization|utilisation|traffic|throughput|bits\s*received|bits\s*sent|interface\s+usage)\b/i.test(String(question || ''))
-    && (extractIpv4(question) || /\b(interfaces?|ports?)\b/i.test(String(question || '')))
+export function wantsBandwidthUtil(question, ctx = null) {
+  const q = String(question || '')
+  if (!/\b(bandwidth|utilization|utilisation|traffic|throughput|bits\s*received|bits\s*sent|interface\s+usage)\b/i.test(q)) {
+    return false
+  }
+  return Boolean(extractIpv4(q))
+    || /\b(interfaces?|ports?)\b/i.test(q)
+    || Boolean(extractHostGroupFilter(q, ctx))
 }
 
 /** Analytical infra queries — load live Zabbix into LLM context instead of a rigid template. */
@@ -739,7 +749,7 @@ function classifyHost(h) {
 
 const SWITCH_DEVICE_TYPES = new Set(['cisco', 'network', 'juniper'])
 
-async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '', hostGroupFilter = '', includePing = false, includeBandwidth = false, includeDisk = false } = {}) {
+async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '', hostGroupFilter = '', includePing = false, includeBandwidth = false, includeDisk = false, problemLimit = 12 } = {}) {
   const { isZabbixConfigured, zabbixRpc, getUrl } = client
   if (!isZabbixConfigured()) return { configured: false }
 
@@ -845,7 +855,7 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
         hostids,
         sortfield: ['eventid'],
         sortorder: 'DESC',
-        limit: 12,
+        limit: Math.max(1, Math.min(Number(problemLimit) || 12, 50)),
         output: ['eventid', 'name', 'severity', 'clock', 'acknowledged'],
         selectHosts: ['hostid', 'host', 'name'],
       })
@@ -925,14 +935,20 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
   const hostGroupFilter = extractHostGroupFilter(question, ctx) || ctx?.hostGroup
   const isMembershipCheck = wantsHostGroupCheck(question) && ip && hostGroupFilter
   const scopedHostGroup = hostGroupFilter && !ip && !(hostname && /\b(for|of|about|status)\b/i.test(question)) ? hostGroupFilter : ''
-  const isGroupFollowUp = Boolean(ctx?.isFollowUp && scopedHostGroup && ctx?.priorTopic === 'zabbix')
-  const includeDisk = wantsDiskUsage(question) || isMembershipCheck || isGroupFollowUp
-    || Boolean(scopedHostGroup && (wantsDiskUsage(question) || /\b(disk|usage|report)\b/i.test(question)))
+  const bandwidthQuery = wantsBandwidthUtil(question, ctx)
+  const isGroupFollowUp = Boolean(
+    ctx?.isFollowUp && scopedHostGroup && ctx?.priorTopic === 'zabbix' && !bandwidthQuery && !isSocReportQuery(question),
+  )
+  const includeDisk = wantsDiskUsage(question) || isMembershipCheck
+    || (isGroupFollowUp && wantsDiskUsage(question))
+    || (scopedHostGroup && wantsDiskUsage(question))
   const deviceTypeFilter = (scopedHostGroup || isMembershipCheck) ? null : detectDeviceTypeFilter(question, ctx)
   const hostFilter = ip || (hostname && /\b(for|of|about|status)\b/i.test(question) ? hostname : '')
   const wantsIsp = /\bisp\b/i.test(question)
-  const includePing = wantsPingStatus(question)
-  const includeBandwidth = wantsBandwidthUtil(question)
+  const deepAnalysis = wantsDeepInfraFetch(question, ctx?.chatMode) && Boolean(ip || hostFilter)
+  const includePing = wantsPingStatus(question) || deepAnalysis
+  const includeBandwidth = bandwidthQuery || deepAnalysis
+  const problemLimit = deepAnalysis ? 50 : 12
 
   const targets = []
   if (allowedPages.includes('infra')) {
@@ -951,6 +967,7 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
         hostGroupFilter: scopedHostGroup,
         includePing,
         includeBandwidth,
+        problemLimit,
         includeDisk,
       }),
     }))),
@@ -1018,12 +1035,17 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     other: 'Other',
   }
   const filterLabel = deviceTypeFilter ? TYPE_LABEL[deviceTypeFilter] || deviceTypeFilter : null
-  const diskReport = Boolean(scopedHostGroup && includeDisk)
+  const diskReport = Boolean(scopedHostGroup && includeDisk && wantsDiskUsage(question))
+  const bandwidthReport = Boolean(scopedHostGroup && includeBandwidth)
 
   const lines = [
     diskReport
       ? `Disk usage report — host group: ${scopedHostGroup} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
-      : `Infra Zabbix summary (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
+      : bandwidthReport
+        ? `Bandwidth / interface traffic — host group: ${scopedHostGroup} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
+        : deepAnalysis && hostFilter
+          ? `Infra Zabbix device analysis — ${hostFilter} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
+          : `Infra Zabbix summary (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
     filterLabel
       ? `Filter: ${filterLabel}`
       : scopedHostGroup
@@ -1102,6 +1124,16 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
       if (a.total > hostLimit) lines.push(`    … and ${a.total - hostLimit} more (open Infra Monitoring → Hosts)`)
     }
 
+    if (deepAnalysis && data.matchedHosts?.length) {
+      lines.push('  Host details:')
+      for (const h of data.matchedHosts) {
+        const typeTag = h.type && h.type !== 'other' ? ` [${h.type}]` : ''
+        lines.push(`    • ${h.name}${typeTag} — ${h.status}`)
+        if (h.groups?.length) lines.push(`      Zabbix groups: ${h.groups.join(', ')}`)
+        if (h.interfaceIps?.length) lines.push(`      Interface IPs: ${[...new Set(h.interfaceIps)].join(', ')}`)
+      }
+    }
+
     if (includePing && data.pingMetrics) {
       const pm = data.pingMetrics
       const s = pm.summary
@@ -1136,6 +1168,9 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
       const ifm = data.interfaceMetrics.byHost
       const nameMap = data.interfaceMetrics.indexToNameByHost || {}
       lines.push('  Interface traffic (net.if.in / net.if.out):')
+      if (!Object.keys(ifm).length && data.hosts.every(h => h.status === 'unavailable' || h.status === 'down')) {
+        lines.push('    Host(s) unavailable — no SNMP/interface data while device is down.')
+      }
       for (const h of data.hosts) {
         const hid = String(h.hostid || '')
         const ifaces = ifm[hid]
@@ -1195,9 +1230,14 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     }
 
     if (data.problems.length) {
-      lines.push('  Top problems:')
-      for (const p of data.problems.slice(0, 8)) {
-        lines.push(`    • [${p.severity}] ${p.name}${p.hosts ? ` · ${p.hosts}` : ''}`)
+      const problemCap = deepAnalysis ? data.problems.length : 8
+      lines.push(deepAnalysis ? '  Active problems (all matched):' : '  Top problems:')
+      for (const p of data.problems.slice(0, problemCap)) {
+        const when = p.clock ? ` · since ${p.clock}` : ''
+        lines.push(`    • [${p.severity}] ${p.name}${p.hosts ? ` · ${p.hosts}` : ''}${when}`)
+      }
+      if (!deepAnalysis && data.problems.length > problemCap) {
+        lines.push(`    … ${data.problems.length - problemCap} more (open Infra Monitoring → Problems)`)
       }
     }
     lines.push('')

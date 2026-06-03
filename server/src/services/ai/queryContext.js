@@ -1,6 +1,6 @@
 import { isXdrQuestion } from './xdrDirectAnswer.js'
 import { isNetworkInfraQuery, isZabbixQuestion, isInfraDeviceStatusQuery, extractHostGroupFilter, extractHostGroupFromThread } from './zabbixDirectAnswer.js'
-import { isFirewallQuestion } from './socDirectAnswer.js'
+import { isFirewallQuestion, isSocReportQuery } from './socDirectAnswer.js'
 import { isDisconnectionLogQuery } from './nocDirectAnswer.js'
 import { isRcaQuery } from './rcaAnalysis.js'
 
@@ -162,13 +162,14 @@ function inferTopicFromAssistant(text) {
   if (/Store Monitor \(LIVE/i.test(t)) return 'store'
   if (/Root Cause Analysis|Ranked hypotheses/i.test(t)) return 'rca'
   if (/Disconnection logs|USB disconnections|Cisco interface disconnections/i.test(t)) return 'noc'
-  if (/SOC \/ firewall|denies:/i.test(t)) return 'soc'
+  if (/FortiGate \/ SOC|SOC \/ firewall|complete report/i.test(t)) return 'soc'
   return null
 }
 
 function detectTopicFromQuestion(q, appName, ctx = {}) {
   const text = String(q || '')
   if (isRcaQuery(text, ctx)) return 'rca'
+  if (isSocReportQuery(text)) return 'soc'
   if (isZabbixQuestion(text)) return 'zabbix'
   if (isInfraDeviceStatusQuery(text)) return 'zabbix'
   if (isDisconnectionLogQuery(text)) return 'noc'
@@ -211,8 +212,8 @@ function pickDirectHandler({ currentQuestion, topic, priorTopic, isFollowUp, fol
   if ((isRcaQuery(q, ctxLite) || topic === 'rca') && chatMode !== 'details') return 'rca'
   if (chatMode === 'details' && hostname && !isRcaQuery(q, ctxLite)) return 'hostname'
 
-  if (isZabbixQuestion(q)) return 'zabbix'
-  if (isFirewallQuestion(q)) return 'soc'
+  if (isSocReportQuery(q) || (isFirewallQuestion(q) && !isZabbixQuestion(q, ctxLite))) return 'soc'
+  if (isZabbixQuestion(q, ctxLite)) return 'zabbix'
   if (isDisconnectionLogQuery(q, { isFollowUp, priorTopic })) return 'noc'
   if (isFollowUp && priorTopic === 'noc' && /\b(usb|hostname|rp group|timestamp|disconn|show|list|required|only)\b/i.test(q)) return 'noc'
 

@@ -21,8 +21,18 @@ function parseRange(q) {
 const FW_MARKERS = /\b(fortinet|fortigate|firewall|fgt|soc\b|fw status|firewall status|fw rules?|firewall rules?|firewall device|all firewall|firewall summ\w*|firewall activ\w*)\b/i
 const CONN_MARKERS = /\b(connections?|sessions?|inbound connections?|outbound connections?|active sessions?|traffic sessions?|how many connections?|how many sessions?|total connections?|active connections?)\b/i
 
+/** FortiGate / SOC report — must win over Zabbix host-group "report" follow-ups. */
+export function isSocReportQuery(question) {
+  const q = String(question || '')
+  if (/\b(zabbix|disk usage|vfs\.fs|host group)\b/i.test(q) && !/\b(soc|firewall|fortigate)\b/i.test(q)) return false
+  return /\b(complete|full|comprehensive)\s+(soc|firewall|fortigate)\b/i.test(q)
+    || /\b(soc|firewall|fortigate)\s+(report|summary|overview|analysis|status)\b/i.test(q)
+    || (/\bsoc\b/i.test(q) && /\b(report|summary|complete|full|analysis|overview)\b/i.test(q))
+}
+
 export function isFirewallQuestion(question) {
   const q = String(question || '')
+  if (isSocReportQuery(q)) return true
   if (isInfraDeviceStatusQuery(q)) return false
   if (/\b(zabbix|infra monitor\w*|store monitor|influx|hostname|xdr|sentinel|store|stores|offline|isp|ping|speedtest)\b/i.test(q)) return false
   if (FW_MARKERS.test(q)) return true
@@ -42,6 +52,11 @@ function rangeLabel(range) {
   if (!m) return 'last 1 hour'
   const unit = { h: 'hour', d: 'day', m: 'minute' }[m[2]] || m[2]
   return `last ${m[1]} ${unit}${Number(m[1]) !== 1 ? 's' : ''}`
+}
+
+function hasExplicitTimeRange(q) {
+  return /\blast\s+\d+\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\b/i.test(String(q || ''))
+    || /\b(last hour|last 24|24h|last day|last week|7d|today)\b/i.test(String(q || '').toLowerCase())
 }
 
 async function fetchFirewallStats(range) {
@@ -119,18 +134,21 @@ export async function tryDirectSOCAnswer(question, allowedPages, ctx = null) {
   if (!allowedPages.includes('soc')) return null
 
   const fetchedAt = new Date().toISOString()
+  const fullReport = isSocReportQuery(question)
   const countryFilter = extractCountryFromQuestion(question)
   const wantsConnections = /\b(connections?|sessions?|how many conn|active conn|traffic)\b/i.test(question)
-  const range = ctx?.range || parseRange(question)
+  const range = fullReport && !hasExplicitTimeRange(question)
+    ? '-24h'
+    : (ctx?.range || parseRange(question))
 
   if (countryFilter && wantsConnections) {
     try {
       const fw = await fetchFirewallCountryConnections(range, countryFilter)
-      const window = rangeLabel(range)
+      const countryWindow = rangeLabel(range)
       const dirLabel = countryFilter.direction === 'src' ? 'source country' : 'destination country'
       const lines = [
         `FortiGate / SOC — connections by country (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
-        `Window: ${window}`,
+        `Window: ${countryWindow}`,
         `Filter: ${dirLabel} = ${countryFilter.name}`,
         '',
         `Total firewall log events: ${fw.total.toLocaleString()}`,
@@ -166,7 +184,7 @@ export async function tryDirectSOCAnswer(question, allowedPages, ctx = null) {
         }],
         contextPreview: {
           soc: {
-            window,
+            window: countryWindow,
             totalEvents: fw.total,
             denies: fw.denies,
             allows: fw.allows,
@@ -198,13 +216,16 @@ export async function tryDirectSOCAnswer(question, allowedPages, ctx = null) {
   }
 
   const window = rangeLabel(range)
+  const title = fullReport
+    ? `FortiGate / SOC — complete report (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
+    : `FortiGate / SOC firewall status (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
   const lines = [
-    `FortiGate / SOC firewall status (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
+    title,
     `Window: ${window}`,
     '',
   ]
 
-  if (wantsConnections) {
+  if (wantsConnections && !fullReport) {
     lines.push('── Connection / session summary ──')
     lines.push(`  Total firewall events    : ${stats.total.toLocaleString()}`)
     lines.push(`  Allowed (accepted) sessions : ${stats.allows.toLocaleString()}`)

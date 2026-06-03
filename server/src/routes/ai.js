@@ -23,7 +23,7 @@ import {
   tryDirectCrashAnswer,
 } from '../services/ai/portalContextBuilder.js'
 import { tryDirectZabbixAnswer } from '../services/ai/zabbixDirectAnswer.js'
-import { tryDirectSOCAnswer } from '../services/ai/socDirectAnswer.js'
+import { tryDirectSOCAnswer, isSocReportQuery } from '../services/ai/socDirectAnswer.js'
 import { tryDirectNocAnswer } from '../services/ai/nocDirectAnswer.js'
 import { tryDirectRcaAnswer } from '../services/ai/rcaAnalysis.js'
 import { tryDirectHostnameAnswer } from '../services/ai/hostnameDirectAnswer.js'
@@ -31,6 +31,7 @@ import { tryDirectXdrAnswer } from '../services/ai/xdrDirectAnswer.js'
 import { resolveQueryContext, isHostnameDataRequest, extractStoreHostname } from '../services/ai/queryContext.js'
 import { runAgentChat } from '../services/ai/agentChat.js'
 import { needsLiveAgentFallback } from '../services/ai/queryLiveDataFallback.js'
+import { appendLlmAnalysis } from '../services/ai/directLlmSynthesis.js'
 
 const router = Router()
 
@@ -171,26 +172,50 @@ router.post('/chat', async (req, res) => {
     }
 
     const zabbixStart = Date.now()
+    if (isSocReportQuery(lastUser)) {
+      const socEarly = await tryDirectSOCAnswer(lastUser, allowedPages, ctx)
+      if (socEarly) {
+        const synthStart = Date.now()
+        const { payload, llmMs } = await appendLlmAnalysis(lastUser, socEarly, chatMode)
+        return res.json({
+          content: payload.content,
+          provider: getAIProvider().name,
+          contextMeta: payload.contextMeta,
+          contextPreview: payload.contextPreview,
+          queryContext: payload.queryContext || { topic: 'soc', isFollowUp: ctx.isFollowUp },
+          modulesUsed: ['soc'],
+          fastPath: !payload.llmSynthesized,
+          metrics: {
+            totalMs: Date.now() - requestStart,
+            contextMs: Date.now() - zabbixStart,
+            llmMs,
+            mode: payload.llmSynthesized ? 'direct-soc-llm' : 'direct-soc',
+          },
+        })
+      }
+    }
+
     const zabbixDirect = await tryDirectZabbixAnswer(lastUser, allowedPages, ctx)
     if (zabbixDirect) {
+      const { payload, llmMs } = await appendLlmAnalysis(lastUser, zabbixDirect, chatMode)
       return res.json({
-        content: zabbixDirect.content,
+        content: payload.content,
         provider: getAIProvider().name,
-        contextMeta: zabbixDirect.contextMeta,
-        contextPreview: zabbixDirect.contextPreview,
-        queryContext: zabbixDirect.queryContext || {
+        contextMeta: payload.contextMeta,
+        contextPreview: payload.contextPreview,
+        queryContext: payload.queryContext || {
           topic: 'zabbix',
           isFollowUp: ctx.isFollowUp,
         },
         modulesUsed: ['zabbix', 'storeZabbix'].filter(id =>
           id === 'zabbix' ? allowedPages.includes('infra') : allowedPages.includes('storeZabbix'),
         ),
-        fastPath: true,
+        fastPath: !payload.llmSynthesized,
         metrics: {
           totalMs: Date.now() - requestStart,
           contextMs: Date.now() - zabbixStart,
-          llmMs: 0,
-          mode: 'direct-zabbix',
+          llmMs,
+          mode: payload.llmSynthesized ? 'direct-zabbix-llm' : 'direct-zabbix',
         },
       })
     }
@@ -198,15 +223,21 @@ router.post('/chat', async (req, res) => {
     const socStart = Date.now()
     const socDirect = await tryDirectSOCAnswer(lastUser, allowedPages, ctx)
     if (socDirect) {
+      const { payload, llmMs } = await appendLlmAnalysis(lastUser, socDirect, chatMode)
       return res.json({
-        content: socDirect.content,
+        content: payload.content,
         provider: getAIProvider().name,
-        contextMeta: socDirect.contextMeta,
-        contextPreview: socDirect.contextPreview,
-        queryContext: socDirect.queryContext || { topic: 'soc', isFollowUp: ctx.isFollowUp },
+        contextMeta: payload.contextMeta,
+        contextPreview: payload.contextPreview,
+        queryContext: payload.queryContext || { topic: 'soc', isFollowUp: ctx.isFollowUp },
         modulesUsed: ['soc'],
-        fastPath: true,
-        metrics: { totalMs: Date.now() - requestStart, contextMs: Date.now() - socStart, llmMs: 0, mode: 'direct-soc' },
+        fastPath: !payload.llmSynthesized,
+        metrics: {
+          totalMs: Date.now() - requestStart,
+          contextMs: Date.now() - socStart,
+          llmMs,
+          mode: payload.llmSynthesized ? 'direct-soc-llm' : 'direct-soc',
+        },
       })
     }
 
