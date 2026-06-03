@@ -22,7 +22,7 @@ import { tryDirectNocAnswer } from '../services/ai/nocDirectAnswer.js'
 import { tryDirectRcaAnswer } from '../services/ai/rcaAnalysis.js'
 import { tryDirectHostnameAnswer } from '../services/ai/hostnameDirectAnswer.js'
 import { tryDirectXdrAnswer } from '../services/ai/xdrDirectAnswer.js'
-import { resolveQueryContext } from '../services/ai/queryContext.js'
+import { resolveQueryContext, isHostnameDataRequest, extractStoreHostname } from '../services/ai/queryContext.js'
 
 const router = Router()
 
@@ -318,6 +318,39 @@ router.post('/chat', async (req, res) => {
       moduleIds = [...new Set([...moduleIds, ...suggested])]
     }
 
+    // Hostname status/details — never wait on LLM (avoids Claude/OpenAI auth errors in prod).
+    if (isHostnameDataRequest(lastUser) && extractStoreHostname(lastUser)) {
+      const hostnamePreLlm = await tryDirectHostnameAnswer(lastUser, allowedPages, ctx)
+      if (hostnamePreLlm) {
+        return res.json({
+          content: hostnamePreLlm.content,
+          provider: getAIProvider().name,
+          contextMeta: hostnamePreLlm.contextMeta,
+          contextPreview: hostnamePreLlm.contextPreview,
+          chartSeries: hostnamePreLlm.chartSeries,
+          queryContext: hostnamePreLlm.queryContext || {
+            topic: 'hostname',
+            hostname: ctx.hostname || extractStoreHostname(lastUser),
+            isFollowUp: ctx.isFollowUp,
+          },
+          modulesUsed: ['storeMonitor', 'storeProblems', 'storeCrashes', 'sentinelXdr', 'soc', 'noc'].filter(id => {
+            if (id === 'storeMonitor' || id === 'storeProblems' || id === 'storeCrashes') return true
+            if (id === 'sentinelXdr') return allowedPages.includes('sentinel')
+            if (id === 'soc') return allowedPages.includes('soc')
+            if (id === 'noc') return allowedPages.includes('noc')
+            return false
+          }),
+          fastPath: true,
+          metrics: {
+            totalMs: Date.now() - requestStart,
+            contextMs: 0,
+            llmMs: 0,
+            mode: 'direct-hostname',
+          },
+        })
+      }
+    }
+
     const storeOnly = ctx.directHandler === 'store'
       || (/\b(store|stores|offline|online|down|monitor|hostname)\b/i.test(lastUser)
         && !/\b(firewall|fortigate|deny|soc|crash|crashed|crashes)\b/i.test(lastUser)
@@ -477,7 +510,13 @@ router.post('/chat', async (req, res) => {
       },
     })
   } catch (err) {
-    res.status(502).json({ error: err.message || 'AI request failed' })
+    const msg = String(err.message || 'AI request failed')
+    const authFailed = /authentication_error|invalid x-api-key|invalid api key|401/i.test(msg)
+    const status = authFailed ? 503 : 502
+    const hint = authFailed
+      ? ' LLM provider auth failed — set a valid ANTHROPIC_API_KEY / OPENAI_API_KEY, or use AI_PROVIDER=ollama. Hostname and store queries should use the direct (no-LLM) path; redeploy if you still see this for status-of-hostname questions.'
+      : ''
+    res.status(status).json({ error: `${msg}${hint}` })
   }
 })
 

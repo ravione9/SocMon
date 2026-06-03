@@ -1,14 +1,9 @@
 import { createZabbixClient } from '../../services/zabbix.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 import { isInfluxStoreConfigured, fetchStoreSnapshot, buildOverviewSummary } from '../influxStore.js'
+import { extractStoreHostname } from './queryContext.js'
 
-const STORE_HOSTNAME_RE = /\b([A-Z]{2,5}\d+-[A-Z0-9]{4,})\b/i
 const IPV4_RE = /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/
-
-function extractStoreHostname(text) {
-  const m = String(text || '').match(STORE_HOSTNAME_RE)
-  return m ? m[1].toUpperCase() : null
-}
 
 export function extractIpv4(text) {
   const m = String(text || '').match(IPV4_RE)
@@ -45,6 +40,7 @@ export function isInfraDeviceStatusQuery(question) {
   if (deviceType && /\b(status|health|up|down|available|summary|summ\w*|monitor|problem|issue|give me|show|list|all)\b/i.test(q)) return true
   if (/\b(fortinet|fortigate)\s+firewall\b/i.test(q)) return true
   if (/\b(cisco|network devices?|switches?|routers?|firewall device)\b/i.test(q) && /\b(status|health|summary|summ\w*|monitor|all)\b/i.test(q)) return true
+  if (/\b(ping|icmp|latency|packet\s*loss|response\s*time|sensor)\b/i.test(q) && (deviceType || /\b(switches?|routers?|network devices?)\b/i.test(q))) return true
   return false
 }
 
@@ -73,11 +69,269 @@ function wantsStoreZabbix(question) {
   return /\b(store zabbix|store hosts?|store server|pos server|retail server)\b/i.test(String(question || ''))
 }
 
-function availLabel(code) {
-  const c = String(code ?? '')
-  if (c === '1') return 'available'
-  if (c === '2') return 'unavailable'
+export function wantsPingStatus(question) {
+  return /\b(ping|icmp|latency|packet\s*loss|response\s*time|sensor\s*data|reachable|unreachable)\b/i.test(String(question || ''))
+}
+
+const PING_STALE_SEC = Number.parseInt(process.env.ZABBIX_PING_STALE_SEC || '900', 10)
+
+function deriveHostAvail(h) {
+  const active = String(h.active_available ?? '')
+  // Zabbix 7+ active_available: only trust explicit up/down; '0' falls through to interfaces.
+  if (active === '1' || active === '2') return active
+  const ifaces = h.interfaces
+  if (Array.isArray(ifaces) && ifaces.length > 0) {
+    let any1 = false
+    let any2 = false
+    let any0 = false
+    for (const iface of ifaces) {
+      const a = String(iface.available ?? '')
+      if (a === '1') any1 = true
+      else if (a === '2') any2 = true
+      else any0 = true
+    }
+    if (any1 && !any2) return '1'
+    if (any2 && !any1) return '2'
+    if (any1 && any2) return '2'
+    if (any0 && !any1 && !any2) return '0'
+  }
+  const legacy = String(h.available ?? '')
+  if (legacy === '1' || legacy === '2' || legacy === '0') return legacy
+  return '0'
+}
+
+function availLabelFromHost(h) {
+  const a = deriveHostAvail(h)
+  if (a === '1') return 'available'
+  if (a === '2') return 'unavailable'
   return 'unknown'
+}
+
+async function fetchItemsChunked(zabbixRpc, hostids, searchKey) {
+  const out = []
+  for (let i = 0; i < hostids.length; i += 400) {
+    const chunk = hostids.slice(i, i + 400)
+    const batch = await zabbixRpc('item.get', {
+      hostids: chunk,
+      output: ['itemid', 'hostid', 'key_', 'lastvalue', 'lastclock'],
+      search: { key_: `${searchKey}*` },
+      searchWildcardsEnabled: true,
+      limit: 500,
+    })
+    out.push(...(batch || []))
+  }
+  return out
+}
+
+function buildHostMetricMap(items, hostids) {
+  const picked = {}
+  for (const it of items || []) {
+    const hid = String(it.hostid)
+    const v = parseFloat(it.lastvalue)
+    if (!Number.isFinite(v)) continue
+    const key = String(it.key_ || '')
+    const clock = Number(it.lastclock) || 0
+    const prevKey = picked[hid]?.key ?? ''
+    const isExact = /\[8\.8\.8\.8\]/.test(key)
+    const prevIsExact = /\[8\.8\.8\.8\]/.test(prevKey)
+    const prevClock = picked[hid]?.clock ?? -1
+    const take = picked[hid] == null
+      || (isExact && !prevIsExact)
+      || (isExact === prevIsExact && clock >= prevClock)
+    if (take) picked[hid] = { value: v, key, clock }
+  }
+  const valueByHost = {}
+  const clockByHost = {}
+  for (const hid of hostids) {
+    valueByHost[hid] = picked[hid]?.value ?? null
+    clockByHost[hid] = picked[hid]?.clock > 0 ? picked[hid].clock : null
+  }
+  return { valueByHost, clockByHost }
+}
+
+function classifyFreshMetrics(valueByHost, clockByHost, hostids, nowSec = Math.floor(Date.now() / 1000)) {
+  const fresh = {}
+  const staleFlags = {}
+  for (const hid of hostids) {
+    const v = valueByHost[hid]
+    const clock = clockByHost[hid]
+    if (v == null) {
+      fresh[hid] = null
+      staleFlags[hid] = false
+    } else if (clock == null || (nowSec - clock) > PING_STALE_SEC) {
+      fresh[hid] = null
+      staleFlags[hid] = true
+    } else {
+      fresh[hid] = v
+      staleFlags[hid] = false
+    }
+  }
+  return { fresh, staleFlags }
+}
+
+function reachFromPingValue(v) {
+  if (v == null) return null
+  if (v === 1) return 'reachable'
+  if (v === 0) return 'unreachable'
+  return null
+}
+
+function reachFromMerakiStatus(v) {
+  if (v == null) return null
+  if (v === 1) return 'reachable'
+  if (v === 0) return 'unreachable'
+  return 'degraded'
+}
+
+function pickFreshMetric(cls, hid) {
+  if (cls.staleFlags[hid]) return { value: null, stale: true }
+  return { value: cls.fresh[hid], stale: false }
+}
+
+function filterExactItemKey(items, exactKey) {
+  return (items || []).filter(it => String(it.key_ || '').split('[')[0] === exactKey)
+}
+
+async function fetchPingMetrics(zabbixRpc, hostids) {
+  if (!hostids.length) {
+    return {
+      summary: { reachable: 0, unreachable: 0, degraded: 0, noData: 0, stale: 0, avgMs: null, maxMs: null },
+      byHost: {},
+    }
+  }
+  const [
+    agentPingItems,
+    pingLossItems,
+    pingMsItems,
+    icmpPingItems,
+    icmpLossItems,
+    icmpSecItems,
+    merakiStatusItems,
+  ] = await Promise.all([
+    fetchItemsChunked(zabbixRpc, hostids, 'agent.ping'),
+    fetchItemsChunked(zabbixRpc, hostids, 'custom.ping.loss'),
+    fetchItemsChunked(zabbixRpc, hostids, 'custom.ping.ms'),
+    fetchItemsChunked(zabbixRpc, hostids, 'icmpping'),
+    fetchItemsChunked(zabbixRpc, hostids, 'icmppingloss'),
+    fetchItemsChunked(zabbixRpc, hostids, 'icmppingsec'),
+    fetchItemsChunked(zabbixRpc, hostids, 'meraki.device.status'),
+  ])
+  const nowSec = Math.floor(Date.now() / 1000)
+  const agentMap = buildHostMetricMap(agentPingItems, hostids)
+  const lossMap = buildHostMetricMap(pingLossItems, hostids)
+  const msMap = buildHostMetricMap(pingMsItems, hostids)
+  const icmpMap = buildHostMetricMap(filterExactItemKey(icmpPingItems, 'icmpping'), hostids)
+  const icmpLossMap = buildHostMetricMap(filterExactItemKey(icmpLossItems, 'icmppingloss'), hostids)
+  const icmpSecMap = buildHostMetricMap(filterExactItemKey(icmpSecItems, 'icmppingsec'), hostids)
+  const merakiMap = buildHostMetricMap(filterExactItemKey(merakiStatusItems, 'meraki.device.status'), hostids)
+
+  const agentCls = classifyFreshMetrics(agentMap.valueByHost, agentMap.clockByHost, hostids, nowSec)
+  const lossCls = classifyFreshMetrics(lossMap.valueByHost, lossMap.clockByHost, hostids, nowSec)
+  const msCls = classifyFreshMetrics(msMap.valueByHost, msMap.clockByHost, hostids, nowSec)
+  const icmpCls = classifyFreshMetrics(icmpMap.valueByHost, icmpMap.clockByHost, hostids, nowSec)
+  const icmpLossCls = classifyFreshMetrics(icmpLossMap.valueByHost, icmpLossMap.clockByHost, hostids, nowSec)
+  const icmpSecCls = classifyFreshMetrics(icmpSecMap.valueByHost, icmpSecMap.clockByHost, hostids, nowSec)
+  const merakiCls = classifyFreshMetrics(merakiMap.valueByHost, merakiMap.clockByHost, hostids, nowSec)
+
+  const summary = { reachable: 0, unreachable: 0, degraded: 0, noData: 0, stale: 0, avgMs: null, maxMs: null }
+  const byHost = {}
+  const msVals = []
+
+  for (const hid of hostids) {
+    const agent = pickFreshMetric(agentCls, hid)
+    const icmp = pickFreshMetric(icmpCls, hid)
+    const meraki = pickFreshMetric(merakiCls, hid)
+
+    let reach = 'no data'
+    let source = null
+    let pollClock = null
+
+    if (agent.stale || icmp.stale || meraki.stale) {
+      reach = 'stale'
+      source = agent.stale ? 'agent.ping' : icmp.stale ? 'icmpping' : 'meraki.device.status'
+      pollClock = agent.stale ? agentMap.clockByHost[hid]
+        : icmp.stale ? icmpMap.clockByHost[hid]
+          : merakiMap.clockByHost[hid]
+      summary.stale += 1
+    } else if (agent.value != null) {
+      reach = reachFromPingValue(agent.value) || 'degraded'
+      source = 'agent.ping'
+      pollClock = agentMap.clockByHost[hid]
+    } else if (icmp.value != null) {
+      reach = reachFromPingValue(icmp.value) || 'degraded'
+      source = 'icmpping'
+      pollClock = icmpMap.clockByHost[hid]
+    } else if (meraki.value != null) {
+      reach = reachFromMerakiStatus(meraki.value)
+      source = 'meraki.device.status'
+      pollClock = merakiMap.clockByHost[hid]
+    } else {
+      summary.noData += 1
+    }
+
+    if (reach === 'reachable') summary.reachable += 1
+    else if (reach === 'unreachable') summary.unreachable += 1
+    else if (reach === 'degraded') summary.degraded += 1
+
+    const customMs = pickFreshMetric(msCls, hid)
+    const icmpSec = pickFreshMetric(icmpSecCls, hid)
+    const customLoss = pickFreshMetric(lossCls, hid)
+    const icmpLoss = pickFreshMetric(icmpLossCls, hid)
+
+    let ms = null
+    let loss = null
+    if (!customMs.stale && customMs.value != null && customMs.value >= 0) {
+      ms = customMs.value
+    } else if (!icmpSec.stale && icmpSec.value != null && icmpSec.value >= 0) {
+      ms = Math.round(icmpSec.value * 1000 * 10) / 10
+    }
+    if (!customLoss.stale && customLoss.value != null) loss = customLoss.value
+    else if (!icmpLoss.stale && icmpLoss.value != null) loss = icmpLoss.value
+
+    if (ms != null && ms >= 0) msVals.push(ms)
+
+    byHost[hid] = {
+      reach,
+      ms,
+      loss,
+      source,
+      msPoll: msMap.clockByHost[hid] || icmpSecMap.clockByHost[hid] || null,
+      lossPoll: lossMap.clockByHost[hid] || icmpLossMap.clockByHost[hid] || null,
+      agentPoll: pollClock,
+    }
+  }
+
+  if (msVals.length) {
+    msVals.sort((a, b) => a - b)
+    summary.avgMs = Math.round(msVals.reduce((a, b) => a + b, 0) / msVals.length * 10) / 10
+    summary.maxMs = msVals[msVals.length - 1]
+  }
+
+  return { summary, byHost }
+}
+
+function formatPingLine(name, ping) {
+  const parts = []
+  if (ping.reach === 'reachable') parts.push('ping OK')
+  else if (ping.reach === 'unreachable') parts.push('ping FAIL')
+  else if (ping.reach === 'degraded') parts.push('ping degraded')
+  else if (ping.reach === 'stale') parts.push('ping stale')
+  else parts.push('ping —')
+  if (ping.source) parts.push(`via ${ping.source}`)
+  if (ping.ms != null) parts.push(`${ping.ms} ms`)
+  if (ping.loss != null) parts.push(`loss ${ping.loss}%`)
+  if (ping.agentPoll) parts.push(`@ ${formatPortalTimestamp(ping.agentPoll * 1000)}`)
+  return `    • ${name} · ${parts.join(' · ')}`
+}
+
+function isWirelessApHost(h) {
+  const name = String(h.name || h.host || '')
+  return /^\[wireless\]/i.test(name) || /\bAP[-\s\d]/i.test(name) || /[-_]AP[-\d]/i.test(name)
+}
+
+function isPhysicalSwitchHost(h) {
+  if (!SWITCH_DEVICE_TYPES.has(classifyHost(h))) return false
+  return !isWirelessApHost(h)
 }
 
 async function problemGet(zabbixRpc, params) {
@@ -110,7 +364,7 @@ function classifyHost(h) {
 
 const SWITCH_DEVICE_TYPES = new Set(['cisco', 'network', 'juniper'])
 
-async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '' } = {}) {
+async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '', includePing = false } = {}) {
   const { isZabbixConfigured, zabbixRpc, getUrl } = client
   if (!isZabbixConfigured()) return { configured: false }
 
@@ -118,6 +372,7 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
   const hostParams = {
     monitored_hosts: true,
     output: ['hostid', 'host', 'name', 'status', 'available', 'active_available'],
+    selectInterfaces: ['interfaceid', 'available', 'type', 'main', 'ip'],
     selectParentTemplates: ['templateid', 'name'],
     selectGroups: ['groupid', 'name'],
     sortfield: 'name',
@@ -137,7 +392,7 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
 
     const rows = hosts || []
     const filtered = deviceTypeFilter === 'switch'
-      ? rows.filter(h => SWITCH_DEVICE_TYPES.has(classifyHost(h)))
+      ? rows.filter(h => isPhysicalSwitchHost(h))
       : deviceTypeFilter
         ? rows.filter(h => classifyHost(h) === deviceTypeFilter)
         : rows
@@ -147,7 +402,7 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
     const deviceTypes = {}
     const deviceTypeDown = {}
     for (const h of filtered) {
-      const a = availLabel(h.available)
+      const a = availLabelFromHost(h)
       if (a === 'available') availability.available += 1
       else if (a === 'unavailable') availability.unavailable += 1
       else availability.unknown += 1
@@ -158,6 +413,10 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
     }
 
     const hostids = filtered.map(h => String(h.hostid)).filter(Boolean)
+    let pingMetrics = null
+    if (includePing && hostids.length) {
+      pingMetrics = await fetchPingMetrics(zabbixRpc, hostids)
+    }
     let problemCount = 0
     let problems = []
     if (hostids.length) {
@@ -203,12 +462,14 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
           return (a.name || a.host).localeCompare(b.name || b.host)
         })
         return sorted.slice(0, deviceTypeFilter === 'switch' ? 50 : 25).map(h => ({
+          hostid: String(h.hostid),
           name: h.name || h.host,
           host: h.host,
-          status: availLabel(h.available),
+          status: availLabelFromHost(h),
           type: classifyHost(h),
         }))
       })(),
+      pingMetrics,
       hostFilter: search || null,
       deviceTypeFilter: deviceTypeFilter || null,
     }
@@ -238,6 +499,7 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
   const deviceTypeFilter = detectDeviceTypeFilter(question)
   const hostFilter = ip || (hostname && /\b(for|of|about|status)\b/i.test(question) ? hostname : '')
   const wantsIsp = /\bisp\b/i.test(question)
+  const includePing = wantsPingStatus(question)
 
   const targets = []
   if (allowedPages.includes('infra')) {
@@ -249,7 +511,10 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
 
   // Fetch Zabbix + optionally ISP data in parallel
   const [results, ispData] = await Promise.all([
-    Promise.all(targets.map(async t => ({ ...t, data: await fetchZabbixSnapshot(t.client, { hostFilter, deviceTypeFilter }) }))),
+    Promise.all(targets.map(async t => ({
+      ...t,
+      data: await fetchZabbixSnapshot(t.client, { hostFilter, deviceTypeFilter, includePing }),
+    }))),
     wantsIsp && allowedPages.includes('storeMonitor') && isInfluxStoreConfigured()
       ? fetchStoreSnapshot(10, '-1h').then(stores => buildOverviewSummary(stores)).catch(() => null)
       : Promise.resolve(null),
@@ -335,6 +600,36 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
         lines.push(`    • ${h.name}${typeTag} — ${h.status}`)
       }
       if (a.total > hostLimit) lines.push(`    … and ${a.total - hostLimit} more (open Infra Monitoring → Hosts)`)
+    }
+
+    if (includePing && data.pingMetrics) {
+      const pm = data.pingMetrics
+      const s = pm.summary
+      lines.push('  Ping / ICMP sensors (agent.ping · icmpping · meraki.device.status):')
+      lines.push(`    Reachable: ${s.reachable} · Unreachable: ${s.unreachable} · Degraded: ${s.degraded || 0} · No data: ${s.noData} · Stale: ${s.stale}`)
+      if (s.avgMs != null) lines.push(`    Latency avg: ${s.avgMs} ms · max: ${s.maxMs} ms (fresh polls, last ${PING_STALE_SEC / 60} min)`)
+
+      const ranked = data.hosts
+        .map(h => ({ ...h, ping: pm.byHost[h.hostid] }))
+        .filter(h => h.ping)
+        .sort((a, b) => {
+          const rank = { unreachable: 0, degraded: 1, stale: 2, 'no data': 3, reachable: 4 }
+          const ra = rank[a.ping.reach] ?? 4
+          const rb = rank[b.ping.reach] ?? 4
+          if (ra !== rb) return ra - rb
+          return (b.ping.ms ?? -1) - (a.ping.ms ?? -1)
+        })
+
+      if (ranked.length) {
+        lines.push('  Ping status by host:')
+        const pingLimit = deviceTypeFilter === 'switch' ? 50 : 25
+        for (const h of ranked.slice(0, pingLimit)) {
+          lines.push(formatPingLine(h.name, h.ping))
+        }
+        if (ranked.length > pingLimit) lines.push(`    … ${ranked.length - pingLimit} more hosts with ping items`)
+      } else {
+        lines.push('  No ping/ICMP/Meraki status items found on these hosts.')
+      }
     }
     if (data.problems.length) {
       lines.push('  Top problems:')

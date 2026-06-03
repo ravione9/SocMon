@@ -31,8 +31,8 @@ const FOLLOWUP_AFFECTED = /\b(which stores|what stores|stores are affected|affec
 const APP_ONLY = /\b(only for|just for|only about|asking about only)\b/i
 const HOSTNAME_DETAIL = /\b(complete details|full details|all environ|all enviro|all data|full data|give me all|give me.*details|details of|everything about|store details|this hostname|usb|threat)\b/i
 
-/** Store agent hostname, e.g. RP1537-E519BNZT */
-export const STORE_HOSTNAME_RE = /\b([A-Z]{2,5}\d+-[A-Z0-9]{4,})\b/i
+/** Store agent hostname — RP1537-E519BNZT or WGGN-4CE225BH1H (prefix may omit store digits). */
+export const STORE_HOSTNAME_RE = /\b([A-Z]{2,5}(?:\d+)?-(?=[A-Z0-9]*[A-Z])[A-Z0-9]{4,})\b/i
 
 /** Question asks for a hostname-scoped data dump (instant path, no LLM). */
 export function isHostnameDataRequest(q) {
