@@ -1,0 +1,14 @@
+/* SocMon AI page — 20% smaller than default UI scale */
+.ai-page-root {
+  zoom: 0.8;
+}
+
+@supports not (zoom: 0.8) {
+  .ai-page-root {
+    zoom: unset;
+    transform: scale(0.8);
+    transform-origin: top left;
+    width: 125% !important;
+    height: calc((var(--app-vh, 100vh) - 52px - 16px) / 0.8) !important;
+  }
+}

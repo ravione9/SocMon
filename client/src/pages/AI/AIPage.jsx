@@ -15,6 +15,7 @@ import {
   saveChatSessions,
 } from '../../utils/aiChatHistory.js'
 import AiMessageContent from '../../components/ai/AiMessageContent.jsx'
+import './AIPage.css'
 
 const TABS = [
   { id: 'chat', label: 'Chat' },
@@ -1671,7 +1672,7 @@ export default function AIPage() {
   }
 
   return (
-    <div style={{ ...PAGE_ROOT, color: C.text, fontFamily: 'var(--sans)' }}>
+    <div className="ai-page-root" style={{ ...PAGE_ROOT, color: C.text, fontFamily: 'var(--sans)' }}>
       <div style={{ flexShrink: 0, marginBottom: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
         <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0, letterSpacing: '-0.02em' }}>SocMon AI</h1>
         <TabBar tab={tab} setTab={setTab} compact />

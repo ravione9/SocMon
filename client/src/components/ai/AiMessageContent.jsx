@@ -783,32 +783,21 @@ function RichTextFallback({ content }) {
   const lines = String(content || '').split('\n')
 
   if (isWelcome) {
+    const modes = [
+      { mode: 'Monitor', icon: '⚡', color: '#4f7ef5' },
+      { mode: 'Agent', icon: '🧠', color: '#a78bfa' },
+      { mode: 'Details', icon: '🔍', color: '#22d3a0' },
+      { mode: 'RCA', icon: '🎯', color: '#f97316' },
+    ]
     return (
-      <div className="ai-msg-header" style={{ margin: 0 }}>
-        <div style={{ position: 'relative', zIndex: 1 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-            <span style={{ fontSize: 28 }}>🤖</span>
-            <div>
-              <div style={{ fontSize: 16, fontWeight: 800, color: C.text }}>SocMon AI</div>
-              <div style={{ fontSize: 11, color: C.text3 }}>Network & security operations assistant</div>
-            </div>
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8 }}>
-            {[
-              { mode: 'Monitor', icon: '⚡', desc: 'Fast live data + auto Agent fallback', color: '#4f7ef5' },
-              { mode: 'Agent', icon: '🧠', desc: 'LLM picks tools & recommends actions', color: '#a78bfa' },
-              { mode: 'Details', icon: '🔍', desc: 'Full hostname environment reports', color: '#22d3a0' },
-              { mode: 'RCA', icon: '🎯', desc: 'Root cause with correlated timeline', color: '#f97316' },
-            ].map(m => (
-              <div key={m.mode} style={{ padding: '10px 12px', borderRadius: 10, background: 'rgba(0,0,0,.12)', border: `1px solid ${m.color}33`, borderLeft: `3px solid ${m.color}` }}>
-                <div style={{ fontSize: 12, fontWeight: 800, color: m.color, marginBottom: 4 }}>{m.icon} {m.mode}</div>
-                <div style={{ fontSize: 10, color: C.text3, lineHeight: 1.4 }}>{m.desc}</div>
-              </div>
-            ))}
-          </div>
-          <div style={{ marginTop: 12, fontSize: 11, color: C.text2, lineHeight: 1.5 }}>
-            Enable data sources above, pick a mode, then ask in natural language.
-          </div>
+      <div className="ai-welcome-compact">
+        <div className="ai-welcome-compact-title">🤖 SocMon AI — pick a mode above, then ask.</div>
+        <div className="ai-welcome-modes">
+          {modes.map(m => (
+            <span key={m.mode} className="ai-welcome-mode" style={{ color: m.color, borderColor: `${m.color}44` }}>
+              {m.icon} {m.mode}
+            </span>
+          ))}
         </div>
       </div>
     )

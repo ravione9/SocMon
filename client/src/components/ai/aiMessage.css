@@ -248,6 +248,42 @@
   border-bottom: 1px solid var(--border);
 }
 
+.ai-welcome-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 0;
+  font-size: 11px;
+  color: var(--text3);
+  line-height: 1.4;
+}
+
+.ai-welcome-compact-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text2);
+}
+
+.ai-welcome-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.ai-welcome-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--mono);
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.12);
+  white-space: nowrap;
+}
+
 .ai-footer-note {
   text-align: center;
   font-size: 10px;
