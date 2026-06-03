@@ -152,23 +152,25 @@ export default function ApiTokensPanel() {
             </a>
           </div>
           {!apiEnabled ? (
-            <p style={{ fontSize: 12, color: 'var(--text2)', lineHeight: 1.5, margin: '0 0 10px' }}>
-              API access is not enabled for your account. An administrator can turn on{' '}
-              <strong style={{ color: 'var(--text)' }}>Allow API access</strong> under Admin → Users.
-            </p>
-            <a
-              href={apiDocsHref}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{
-                fontSize: 11,
-                color: 'var(--accent)',
-                fontFamily: 'var(--mono)',
-                textDecoration: 'none',
-              }}
-            >
-              View API documentation →
-            </a>
+            <>
+              <p style={{ fontSize: 12, color: 'var(--text2)', lineHeight: 1.5, margin: '0 0 10px' }}>
+                API access is not enabled for your account. An administrator can turn on{' '}
+                <strong style={{ color: 'var(--text)' }}>Allow API access</strong> under Admin → Users.
+              </p>
+              <a
+                href={apiDocsHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  fontSize: 11,
+                  color: 'var(--accent)',
+                  fontFamily: 'var(--mono)',
+                  textDecoration: 'none',
+                }}
+              >
+                View API documentation →
+              </a>
+            </>
           ) : (
             <>
               <p style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', lineHeight: 1.5, margin: '0 0 12px' }}>
