@@ -22,9 +22,34 @@ export function isInfraMonitorQuery(question) {
 const SWITCH_WORD = /\b(switch(?:es)?|all switches)\b/i
 const ROUTER_WORD = /\b(router(?:s)?)\b/i
 
+/** Zabbix host group name from natural language, e.g. lenskart-database. */
+export function extractHostGroupFilter(question) {
+  const q = String(question || '')
+  let m = q.match(/\b(?:belong(?:s|ing)?\s+to|belonging\s+to|member\s+of|in)\s+(?:the\s+)?(?:host\s*group\s+|group\s+)?([A-Za-z0-9][\w.-]*)\b/i)
+  if (m) return m[1]
+  m = q.match(/\b(?:host\s*group|hostgroup|group)\s+(["']?)([\w.-]+)\1\b/i)
+  if (m) return m[2]
+  m = q.match(/\b(?:servers?|hosts?)\s+(?:in|from|of)\s+(["']?)([\w.-]+)\1\b/i)
+  if (m) return m[2]
+  return null
+}
+
+export function wantsDiskUsage(question) {
+  const q = String(question || '')
+  return /\b(disk|filesystem|fs|storage|space)\b/i.test(q)
+    && /\b(usage|utilization|utilisation|util|report|used|free|capacity|full)\b/i.test(q)
+}
+
+export function wantsHostGroupCheck(question) {
+  return /\b(belong(?:s|ing)?\s+to|belonging\s+to|member\s+of|in\s+(?:the\s+)?group|host\s*group)\b/i.test(String(question || ''))
+    || (extractHostGroupFilter(question) != null && extractIpv4(question) != null)
+}
+
 /** fortigate | cisco | checkpoint | network | switch | server | vm | database */
 export function detectDeviceTypeFilter(question) {
   const q = String(question || '')
+  // Host group names like lenskart-database are not device-type filters.
+  if (extractHostGroupFilter(q)) return null
   if (/\b(fortinet|fortigate|fgt)\b/i.test(q)) return 'fortigate'
   if (SWITCH_WORD.test(q)) return 'switch'
   if (/\b(cisco|catalyst|nexus|meraki)\b/i.test(q)) return 'cisco'
@@ -43,7 +68,8 @@ export function isInfraDeviceStatusQuery(question) {
   const deviceType = detectDeviceTypeFilter(q)
   if (/\b(deny|denied|denies|connections?|sessions?|traffic|blocked|login fail|ips event|utm event|soc log)\b/i.test(q)) return false
   if (/\b(store monitor|offline stores?|influx)\b/i.test(q)) return false
-  if (deviceType && /\b(status|health|up|down|available|summary|summ\w*|monitor|problem|issue|give me|show|list|all)\b/i.test(q)) return true
+  if (deviceType && /\b(status|health|up|down|available|summary|summ\w*|monitor|problem|issue|give me|show|list|all|report)\b/i.test(q)) return true
+  if (wantsDiskUsage(q)) return true
   if (/\b(fortinet|fortigate)\s+firewall\b/i.test(q)) return true
   if (/\b(cisco|network devices?|switch(?:es)?|router(?:s)?|firewall device)\b/i.test(q) && /\b(status|health|summary|summ\w*|monitor|all)\b/i.test(q)) return true
   if (/\b(ping|icmp|latency|packet\s*loss|response\s*time|sensor)\b/i.test(q) && (deviceType || SWITCH_WORD.test(q) || ROUTER_WORD.test(q) || /\b(network devices?)\b/i.test(q))) return true
@@ -60,6 +86,9 @@ export function isIpInfraQuery(question) {
 
 export function isZabbixQuestion(question) {
   const q = String(question || '')
+  if (wantsDiskUsage(q) && (extractHostGroupFilter(q) || /\b(server|servers|zabbix|infra|host)\b/i.test(q))) return true
+  if (wantsHostGroupCheck(q) && extractIpv4(q)) return true
+  if (extractHostGroupFilter(q) && /\b(server|servers|host|status|report|disk|usage)\b/i.test(q)) return true
   return ZABBIX_MARKERS.test(q)
     || isIpInfraQuery(q)
     || isInfraDeviceStatusQuery(q)
@@ -184,6 +213,152 @@ function formatBytesPerSec(v) {
   return `${Math.round(v)} bps`
 }
 
+function formatBytes(v) {
+  if (v == null || !Number.isFinite(v)) return '—'
+  if (v >= 1024 ** 4) return `${(v / 1024 ** 4).toFixed(2)} TB`
+  if (v >= 1024 ** 3) return `${(v / 1024 ** 3).toFixed(2)} GB`
+  if (v >= 1024 ** 2) return `${(v / 1024 ** 2).toFixed(2)} MB`
+  if (v >= 1024) return `${(v / 1024).toFixed(2)} KB`
+  return `${Math.round(v)} B`
+}
+
+function formatDiskLine(hostName, disk) {
+  const sizePart = disk.usedBytes != null && disk.totalBytes != null
+    ? ` (${formatBytes(disk.usedBytes)} / ${formatBytes(disk.totalBytes)})`
+    : ''
+  return `    • ${hostName} — ${disk.mount || '—'} — ${disk.percent}% used${sizePart}`
+}
+
+const DISK_KEY_RES = [
+  /^vfs\.fs\.size\[.*pused/i,
+  /^vfs\.fs\.dependent\.size\[.*pused/i,
+  /^vfs\.fs\.size\[.*pfree/i,
+  /^vfs\.fs\.dependent\.size\[.*pfree/i,
+]
+const DISK_INVERT_KEY_RE = /pfree/i
+
+function extractMountFromKey(key) {
+  const m = String(key || '').match(/\[\s*([^,\]]+)/)
+  return m ? m[1].replace(/^"|"$/g, '') : ''
+}
+
+function extractFsModeFromKey(key) {
+  const m = String(key || '').match(/\[[^,]*,\s*([^\]]+)\]/)
+  return m ? m[1].trim().replace(/^"|"$/g, '').toLowerCase() : ''
+}
+
+function readDiskPercent(it) {
+  const v = parseFloat(it.lastvalue)
+  if (!Number.isFinite(v)) return null
+  const clamped = Math.max(0, Math.min(100, v))
+  return Math.round(clamped * 10) / 10
+}
+
+function readDiskBytes(it) {
+  const v = parseFloat(it.lastvalue)
+  if (!Number.isFinite(v) || v < 0) return null
+  const u = String(it.units || '').trim().toUpperCase()
+  const mul = ({ B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4, PB: 1024 ** 5 })[u]
+  return mul ? v * mul : v
+}
+
+async function fetchUtilizationItems(zabbixRpc, hostids) {
+  const out = []
+  for (let i = 0; i < hostids.length; i += 400) {
+    const batch = await zabbixRpc('item.get', {
+      hostids: hostids.slice(i, i + 400),
+      monitored: true,
+      filter: { status: 0, value_type: [0, 3] },
+      output: ['itemid', 'hostid', 'name', 'key_', 'value_type', 'units', 'lastvalue', 'lastclock'],
+      limit: 5000,
+    })
+    out.push(...(batch || []))
+  }
+  return out
+}
+
+async function fetchDiskMetrics(zabbixRpc, hostids) {
+  if (!hostids.length) return { byHost: {}, rows: [] }
+  const itemRows = await fetchUtilizationItems(zabbixRpc, hostids)
+  const fsByteIndex = {}
+  for (const it of itemRows) {
+    const key = String(it.key_ || '')
+    if (!/^vfs\.fs(?:\.dependent)?\.size\[/i.test(key)) continue
+    const mode = extractFsModeFromKey(key)
+    if (!['used', 'total', 'free'].includes(mode)) continue
+    const u = String(it.units || '').trim().toUpperCase()
+    if (u && !['B', 'KB', 'MB', 'GB', 'TB', 'PB'].includes(u)) continue
+    const hostid = String(it.hostid)
+    const mount = extractMountFromKey(key)
+    if (!hostid || !mount) continue
+    const k = `${hostid}|${mount}|${mode}`
+    if (!fsByteIndex[k] || (it.lastvalue !== '' && it.lastvalue != null)) fsByteIndex[k] = it
+  }
+
+  const lookupFsBytes = (hostid, mount, mode) => {
+    const it = fsByteIndex[`${hostid}|${mount}|${mode}`]
+    return it ? readDiskBytes(it) : null
+  }
+
+  const byHost = {}
+  for (const it of itemRows) {
+    const key = String(it.key_ || '')
+    if (!DISK_KEY_RES.some(re => re.test(key))) continue
+    const u = String(it.units || '').trim()
+    if (u !== '%' && !/%/.test(u)) continue
+    const hostid = String(it.hostid)
+    const pct = readDiskPercent(it)
+    if (pct == null) continue
+    const inverted = DISK_INVERT_KEY_RE.test(key)
+    const valuePct = inverted ? Math.max(0, Math.round((100 - pct) * 10) / 10) : pct
+    const mount = extractMountFromKey(key)
+    const cur = byHost[hostid]
+    if (!cur || valuePct > cur.percent) {
+      let usedBytes = lookupFsBytes(hostid, mount, 'used')
+      let totalBytes = lookupFsBytes(hostid, mount, 'total')
+      const freeBytes = lookupFsBytes(hostid, mount, 'free')
+      if (usedBytes == null && totalBytes != null && freeBytes != null) usedBytes = Math.max(0, totalBytes - freeBytes)
+      if (totalBytes == null && usedBytes != null && freeBytes != null) totalBytes = usedBytes + freeBytes
+      if (usedBytes == null && totalBytes != null) usedBytes = totalBytes * (valuePct / 100)
+      if (totalBytes == null && usedBytes != null && valuePct > 0) totalBytes = usedBytes / (valuePct / 100)
+      byHost[hostid] = {
+        mount,
+        percent: valuePct,
+        usedBytes: usedBytes != null ? Math.round(usedBytes) : null,
+        totalBytes: totalBytes != null ? Math.round(totalBytes) : null,
+        freeBytes: freeBytes != null ? Math.round(freeBytes) : null,
+        itemName: it.name || key,
+      }
+    }
+  }
+
+  const rows = Object.entries(byHost)
+    .map(([hostid, d]) => ({ hostid, ...d }))
+    .sort((a, b) => b.percent - a.percent)
+  return { byHost, rows }
+}
+
+async function fetchHostsInGroup(zabbixRpc, groupName, baseParams) {
+  const name = String(groupName || '').trim()
+  if (!name) return []
+  let groups = await zabbixRpc('hostgroup.get', {
+    output: ['groupid', 'name'],
+    filter: { name },
+  }).catch(() => [])
+  if (!groups?.length) {
+    groups = await zabbixRpc('hostgroup.get', {
+      output: ['groupid', 'name'],
+      search: { name },
+      searchWildcardsEnabled: true,
+    }).catch(() => [])
+    groups = (groups || []).filter(g => String(g.name || '').toLowerCase() === name.toLowerCase())
+  }
+  if (!groups?.length) return { hosts: [], groupFound: false, groupName: name }
+  const groupids = groups.map(g => g.groupid)
+  const hosts = await zabbixRpc('host.get', { ...baseParams, groupids, limit: 500 })
+  return { hosts: hosts || [], groupFound: true, groupName: groups[0].name || name }
+}
+
 export function wantsPingStatus(question) {
   return /\b(ping|icmp|latency|packet\s*loss|response\s*time|sensor\s*data|reachable|unreachable)\b/i.test(String(question || ''))
 }
@@ -202,6 +377,8 @@ export function prefersLlmSynthesis(question, ctx = null) {
   // Bandwidth / interface / IP queries are now handled by the direct path
   // (buildZabbixInfraContext returns named per-port Mbps data). No LLM needed.
   if (wantsBandwidthUtil(q)) return false
+  if (wantsDiskUsage(q)) return false
+  if (extractHostGroupFilter(q)) return false
   if (extractIpv4(q)) return false
   if (/\b(all port|every port|each port|all interface|every interface)\b/i.test(q)) return false
 
@@ -503,24 +680,30 @@ function classifyHost(h) {
 
 const SWITCH_DEVICE_TYPES = new Set(['cisco', 'network', 'juniper'])
 
-async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '', includePing = false, includeBandwidth = false } = {}) {
+async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '', hostGroupFilter = '', includePing = false, includeBandwidth = false, includeDisk = false } = {}) {
   const { isZabbixConfigured, zabbixRpc, getUrl } = client
   if (!isZabbixConfigured()) return { configured: false }
 
   const search = String(hostFilter || '').trim()
+  const groupName = String(hostGroupFilter || '').trim()
   const isExactIp = search ? (IPV4_RE.test(search) && search.match(IPV4_RE)[0] === search) : false
 
   try {
-    const [version, hosts] = await Promise.all([
+    const baseParams = {
+      monitored_hosts: true,
+      output: ['hostid', 'host', 'name', 'status', 'available', 'active_available'],
+      selectInterfaces: ['interfaceid', 'available', 'type', 'main', 'ip'],
+      selectParentTemplates: ['templateid', 'name'],
+      selectGroups: ['groupid', 'name'],
+      sortfield: 'name',
+    }
+
+    const [version, hosts, groupMeta] = await Promise.all([
       zabbixRpc('apiinfo.version', {}).catch(() => ''),
       (async () => {
-        const baseParams = {
-          monitored_hosts: true,
-          output: ['hostid', 'host', 'name', 'status', 'available', 'active_available'],
-          selectInterfaces: ['interfaceid', 'available', 'type', 'main', 'ip'],
-          selectParentTemplates: ['templateid', 'name'],
-          selectGroups: ['groupid', 'name'],
-          sortfield: 'name',
+        if (groupName && !search) {
+          const grp = await fetchHostsInGroup(zabbixRpc, groupName, baseParams)
+          return grp.hosts
         }
 
         if (!search) {
@@ -528,7 +711,6 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
         }
 
         if (isExactIp) {
-          // Look up hosts whose monitored interface has this IP.
           const ifaces = await zabbixRpc('hostinterface.get', {
             output: ['hostid'],
             filter: { ip: search },
@@ -546,6 +728,9 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
           limit: 200,
         })
       })(),
+      groupName && !search
+        ? fetchHostsInGroup(zabbixRpc, groupName, baseParams).then(g => ({ groupFound: g.groupFound, groupName: g.groupName }))
+        : Promise.resolve(null),
     ])
 
     const rows = isExactIp
@@ -580,6 +765,10 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
     let interfaceMetrics = null
     if (includeBandwidth && hostids.length) {
       interfaceMetrics = await fetchInterfaceMetrics(zabbixRpc, hostids)
+    }
+    let diskMetrics = null
+    if (includeDisk && hostids.length) {
+      diskMetrics = await fetchDiskMetrics(zabbixRpc, hostids)
     }
     let problemCount = 0
     let problems = []
@@ -635,6 +824,9 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
       })(),
       pingMetrics,
       interfaceMetrics,
+      diskMetrics,
+      hostGroupFilter: groupName || null,
+      hostGroupFound: groupMeta?.groupFound ?? (groupName ? null : undefined),
       matchedHosts: filtered.map(h => ({
         hostid: String(h.hostid),
         name: h.name || h.host,
@@ -671,8 +863,12 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
   const fetchedAt = new Date().toISOString()
   const ip = extractIpv4(question)
   const hostname = extractStoreHostname(question) || ctx?.hostname
-  const deviceTypeFilter = detectDeviceTypeFilter(question)
+  const hostGroupFilter = extractHostGroupFilter(question)
+  const isMembershipCheck = wantsHostGroupCheck(question) && ip && hostGroupFilter
+  const includeDisk = wantsDiskUsage(question) || isMembershipCheck
+  const deviceTypeFilter = isMembershipCheck ? null : detectDeviceTypeFilter(question)
   const hostFilter = ip || (hostname && /\b(for|of|about|status)\b/i.test(question) ? hostname : '')
+  const scopedHostGroup = hostGroupFilter && !hostFilter ? hostGroupFilter : ''
   const wantsIsp = /\bisp\b/i.test(question)
   const includePing = wantsPingStatus(question)
   const includeBandwidth = wantsBandwidthUtil(question)
@@ -685,16 +881,53 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     targets.push({ key: 'storeZabbix', label: 'Store Zabbix', client: createZabbixClient('STORE_ZABBIX') })
   }
 
-  // Fetch Zabbix + optionally ISP data in parallel
   const [results, ispData] = await Promise.all([
     Promise.all(targets.map(async t => ({
       ...t,
-      data: await fetchZabbixSnapshot(t.client, { hostFilter, deviceTypeFilter, includePing, includeBandwidth }),
+      data: await fetchZabbixSnapshot(t.client, {
+        hostFilter,
+        deviceTypeFilter,
+        hostGroupFilter: scopedHostGroup,
+        includePing,
+        includeBandwidth,
+        includeDisk,
+      }),
     }))),
     wantsIsp && allowedPages.includes('storeMonitor') && isInfluxStoreConfigured()
       ? fetchStoreSnapshot(10, '-1h').then(stores => buildOverviewSummary(stores)).catch(() => null)
       : Promise.resolve(null),
   ])
+
+  if (isMembershipCheck && results.length) {
+    const { label, data } = results[0]
+    if (data?.configured && !data.error) {
+      const matched = data.matchedHosts?.[0]
+      const lines = [`Host group membership (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`, '']
+      lines.push(`── ${label} ──`)
+      if (!matched) {
+        lines.push(`  No monitored host with interface IP ${ip} in Zabbix.`)
+        lines.push('  Open Infra Monitoring → Hosts to verify the device is monitored.')
+      } else {
+        const belongs = (matched.groups || []).some(g => String(g).toLowerCase() === hostGroupFilter.toLowerCase())
+        lines.push(`  IP ${ip} → ${matched.name} [${matched.type}] — ${matched.status}`)
+        lines.push(`  Host groups: ${(matched.groups || []).join(', ') || '—'}`)
+        lines.push(`  Belongs to "${hostGroupFilter}": ${belongs ? 'YES' : 'NO'}`)
+        const disk = data.diskMetrics?.byHost?.[matched.hostid]
+        if (disk) {
+          lines.push('')
+          lines.push('  Disk usage (highest filesystem):')
+          lines.push(formatDiskLine(matched.name, disk))
+        }
+      }
+      lines.push('', '(Direct answer from live Zabbix API — no LLM wait.)')
+      return {
+        content: lines.join('\n'),
+        contextMeta: [{ id: 'zabbix', label: label, freshness: 'live', fetchedAt, configured: true }],
+        contextPreview: {},
+        queryContext: { topic: 'zabbix', hostname: ip, isFollowUp: ctx?.isFollowUp },
+      }
+    }
+  }
 
   if (!targets.length) {
     return {
@@ -724,10 +957,19 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     other: 'Other',
   }
   const filterLabel = deviceTypeFilter ? TYPE_LABEL[deviceTypeFilter] || deviceTypeFilter : null
+  const diskReport = wantsDiskUsage(question) && scopedHostGroup
 
   const lines = [
-    `Infra Zabbix summary (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
-    filterLabel ? `Filter: ${filterLabel}` : hostFilter ? `Host filter: ${hostFilter}` : 'All monitored hosts (network devices & servers)',
+    diskReport
+      ? `Disk usage report — host group: ${scopedHostGroup} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
+      : `Infra Zabbix summary (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
+    filterLabel
+      ? `Filter: ${filterLabel}`
+      : scopedHostGroup
+        ? `Host group: ${scopedHostGroup}`
+        : hostFilter
+          ? `Host filter: ${hostFilter}`
+          : 'All monitored hosts (network devices & servers)',
     '',
   ]
 
@@ -753,6 +995,13 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
 
     const TYPE_LABEL = { cisco: 'Cisco devices', fortigate: 'FortiGate firewalls', checkpoint: 'CheckPoint FW', juniper: 'Juniper', network: 'Network devices', vm: 'Virtual machines', server: 'Servers', database: 'Databases', isp: 'ISP monitors', other: 'Other' }
     const TYPE_ORDER = ['cisco', 'fortigate', 'checkpoint', 'juniper', 'network', 'server', 'vm', 'database', 'isp', 'other']
+
+    if (data.hostGroupFound === false) {
+      lines.push(`  Host group "${data.hostGroupFilter}" not found in Zabbix.`)
+      lines.push('  Open Infra Monitoring → Hosts and verify the exact group name.')
+      lines.push('')
+      continue
+    }
 
     if (a.total === 0 && hostFilter) {
       lines.push(`  No monitored host matched "${hostFilter}" (searched name, host, and SNMP interface IP).`)
@@ -844,6 +1093,23 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
       if (!Object.keys(ifm).length) {
         lines.push('    No net.if.in/out items found for matched hosts.')
       }
+    }
+
+    if (includeDisk && data.diskMetrics?.rows?.length) {
+      const diskRows = data.diskMetrics.rows
+      const critical = diskRows.filter(r => r.percent >= 90).length
+      const high = diskRows.filter(r => r.percent >= 75 && r.percent < 90).length
+      lines.push(`  Disk usage (vfs.fs.size — highest filesystem per host):`)
+      lines.push(`    Hosts with data: ${diskRows.length} · Critical (≥90%): ${critical} · High (75–90%): ${high}`)
+      const hostById = Object.fromEntries((data.matchedHosts || []).map(h => [h.hostid, h.name]))
+      const diskLimit = scopedHostGroup ? 50 : 25
+      for (const row of diskRows.slice(0, diskLimit)) {
+        const hostName = hostById[row.hostid] || row.hostid
+        lines.push(formatDiskLine(hostName, row))
+      }
+      if (diskRows.length > diskLimit) lines.push(`    … ${diskRows.length - diskLimit} more hosts with disk items`)
+    } else if (includeDisk) {
+      lines.push('  No disk/filesystem usage items (vfs.fs.size) found on matched hosts.')
     }
 
     if (data.problems.length) {

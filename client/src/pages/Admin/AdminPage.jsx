@@ -907,7 +907,7 @@ export default function AdminPage() {
             <div className="card-header" style={{ background:'var(--bg3)' }}><span className="card-title">AI provider</span><span className="badge badge-purple">Config</span></div>
             <div style={{ padding:18 }}>
               <div style={{ fontSize:12, color:'var(--text3)', fontFamily:'var(--mono)', marginBottom:14, lineHeight:1.5 }}>Switch model backend without restarting the server.</div>
-              {['claude','openai','ollama'].map(p => (
+              {['claude','openai','gemini','ollama'].map(p => (
                 <button
                   key={p}
                   type="button"
@@ -921,12 +921,13 @@ export default function AdminPage() {
                   onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg4)'; e.currentTarget.style.borderColor = 'var(--accent)' }}
                   onMouseLeave={e => { e.currentTarget.style.background = 'var(--bg3)'; e.currentTarget.style.borderColor = 'var(--border)' }}
                 >
-                  <div style={{ width:10, height:10, borderRadius:'50%', flexShrink:0, background: p==='claude'?'var(--accent2)':p==='openai'?'var(--green)':'var(--amber)' }} />
+                  <div style={{ width:10, height:10, borderRadius:'50%', flexShrink:0, background: p==='claude'?'var(--accent2)':p==='openai'?'var(--green)':p==='gemini'?'var(--cyan)':'var(--amber)' }} />
                   <div style={{ flex:1, minWidth:0 }}>
                     <div style={{ fontSize:13, color:'var(--text)', fontFamily:'var(--mono)', fontWeight:700 }}>{p}</div>
                     <div style={{ fontSize:11, color:'var(--text3)', fontFamily:'var(--mono)', marginTop:4 }}>
                       {p==='claude' && 'Anthropic Claude — strong for analysis'}
                       {p==='openai' && 'OpenAI GPT — fast, capable'}
+                      {p==='gemini' && 'Google Gemini — multimodal, cost-effective'}
                       {p==='ollama' && 'Local Ollama — private, no API cost'}
                     </div>
                   </div>

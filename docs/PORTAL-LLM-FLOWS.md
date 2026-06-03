@@ -280,13 +280,14 @@ Client: `client/src/api/ai.js` — supports `chat(messages, { modules, autoModul
 
 ### 4.3 Providers
 
-`server/src/services/ai/aiRouter.js` → `claude` | `openai` | `ollama` via `AI_PROVIDER`.
+`server/src/services/ai/aiRouter.js` → `claude` | `openai` | `gemini` | `ollama` via `AI_PROVIDER`.
 
 | Env | Purpose |
 |-----|---------|
 | `AI_PROVIDER` | Provider selection |
 | `ANTHROPIC_API_KEY`, `CLAUDE_MODEL` | Claude |
 | `OPENAI_API_KEY`, `OPENAI_MODEL` | OpenAI |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | Google Gemini |
 | `OLLAMA_HOST`, `OLLAMA_MODEL` | Ollama |
 | `AI_LLM_TIMEOUT_MS` | Chat LLM race timeout (default `120000`) |
 
@@ -344,7 +345,7 @@ flowchart TD
 | Field | Meaning |
 |-------|---------|
 | `content` | Assistant text (markdown-friendly) |
-| `provider` | `claude` / `openai` / `ollama` |
+| `provider` | `claude` / `openai` / `gemini` / `ollama` |
 | `contextMeta` | Per-source freshness, `fetchedAt`, errors |
 | `contextPreview` | Small UI summary object |
 | `queryContext` | `{ topic, appName, hostname, isFollowUp, ... }` |

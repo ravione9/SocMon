@@ -647,34 +647,41 @@ function ChatTab({
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [pendingCount, setPendingCount] = useState(0)
   const [sourcesOpen, setSourcesOpen] = useState(false)
   const bottomRef = useRef(null)
-  const abortRef = useRef(null)
+  const abortControllersRef = useRef(new Map())
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, loading])
+  }, [messages, loading, pendingCount])
 
-  useEffect(() => () => abortRef.current?.abort(), [])
+  useEffect(() => () => {
+    for (const controller of abortControllersRef.current.values()) controller.abort()
+    abortControllersRef.current.clear()
+  }, [])
 
   const stop = useCallback(() => {
-    abortRef.current?.abort()
-    abortRef.current = null
+    for (const controller of abortControllersRef.current.values()) controller.abort()
+    abortControllersRef.current.clear()
+    setPendingCount(0)
     setLoading(false)
   }, [])
 
   const send = useCallback(async (text) => {
     const content = String(text || input).trim()
-    if (!content || loading) return
+    if (!content) return
 
-    const userMsg = { role: 'user', content }
+    const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const userMsg = { role: 'user', content, reqId }
     const next = [...messages, userMsg]
     setMessages(next)
     setInput('')
     setLoading(true)
+    setPendingCount(c => c + 1)
 
     const controller = new AbortController()
-    abortRef.current = controller
+    abortControllersRef.current.set(reqId, controller)
 
     try {
       const history = next.filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({
@@ -687,42 +694,63 @@ function ChatTab({
         mode: chatMode,
         signal: controller.signal,
       })
-      setMessages([
-        ...next,
-        {
-          role: 'assistant',
-          content: data.content,
-          contextMeta: data.contextMeta,
-          contextPreview: data.contextPreview,
-          queryContext: data.queryContext,
-          chartSeries: data.chartSeries,
-          metrics: data.metrics,
-          fastPath: data.fastPath,
-        },
-      ])
+      const assistantMsg = {
+        role: 'assistant',
+        content: data.content,
+        contextMeta: data.contextMeta,
+        contextPreview: data.contextPreview,
+        queryContext: data.queryContext,
+        chartSeries: data.chartSeries,
+        metrics: data.metrics,
+        fastPath: data.fastPath,
+        reqId,
+      }
+      setMessages(prev => {
+        const idx = prev.findIndex(m => m.reqId === reqId && m.role === 'user')
+        if (idx === -1) return [...prev, assistantMsg]
+        const out = [...prev]
+        out.splice(idx + 1, 0, assistantMsg)
+        return out
+      })
     } catch (err) {
       const cancelled = err.code === 'ERR_CANCELED' || err.name === 'CanceledError'
       if (cancelled) {
-        setMessages([...next, { role: 'assistant', content: 'Stopped — request cancelled.' }])
+        setMessages(prev => {
+          const idx = prev.findIndex(m => m.reqId === reqId && m.role === 'user')
+          const stopMsg = { role: 'assistant', content: 'Stopped — request cancelled.', reqId }
+          if (idx === -1) return [...prev, stopMsg]
+          const out = [...prev]
+          out.splice(idx + 1, 0, stopMsg)
+          return out
+        })
         return
       }
       const data = err.response?.data
       const errorDetail = data?.errorTable ? data : null
       const msg = data?.error || err.message || 'Chat failed'
       toast.error(msg)
-      setMessages([
-        ...next,
-        {
-          role: 'assistant',
-          content: errorDetail ? '' : `Error: ${msg}`,
-          errorDetail,
-        },
-      ])
+      const errMsg = {
+        role: 'assistant',
+        content: errorDetail ? '' : `Error: ${msg}`,
+        errorDetail,
+        reqId,
+      }
+      setMessages(prev => {
+        const idx = prev.findIndex(m => m.reqId === reqId && m.role === 'user')
+        if (idx === -1) return [...prev, errMsg]
+        const out = [...prev]
+        out.splice(idx + 1, 0, errMsg)
+        return out
+      })
     } finally {
-      if (abortRef.current === controller) abortRef.current = null
-      setLoading(false)
+      abortControllersRef.current.delete(reqId)
+      setPendingCount(c => {
+        const nextCount = Math.max(0, c - 1)
+        if (nextCount === 0) setLoading(false)
+        return nextCount
+      })
     }
-  }, [input, loading, messages, enabledModules, autoModules, chatMode])
+  }, [input, messages, enabledModules, autoModules, chatMode])
 
   const loadingLabel = chatMode === 'rca'
     ? 'Correlating signals across Store Monitor, Sentinel, SOC, NOC…'
@@ -805,7 +833,9 @@ function ChatTab({
           ))}
           {loading && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '4px 2px', flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 12, color: C.text3, fontFamily: 'var(--mono)' }}>{loadingLabel}</span>
+              <span style={{ fontSize: 12, color: C.text3, fontFamily: 'var(--mono)' }}>
+                {pendingCount > 1 ? `${pendingCount} requests in flight — ` : ''}{loadingLabel}
+              </span>
               <button
                 type="button"
                 onClick={stop}
@@ -843,7 +873,6 @@ function ChatTab({
                   key={p}
                   type="button"
                   onClick={() => send(p)}
-                  disabled={loading}
                   style={{
                     padding: '6px 10px',
                     borderRadius: 8,
@@ -876,9 +905,8 @@ function ChatTab({
                   send()
                 }
               }}
-              placeholder={loading ? 'Thinking… click Stop to cancel' : 'Ask NetPulse AI… (Enter to send, Shift+Enter for newline)'}
+              placeholder={loading ? 'Another question can be sent while a request runs — Stop cancels all in flight' : 'Ask NetPulse AI… (Enter to send, Shift+Enter for newline)'}
               rows={2}
-              disabled={loading}
               style={{
                 flex: 1,
                 resize: 'none',

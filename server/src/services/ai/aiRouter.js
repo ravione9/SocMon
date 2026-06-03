@@ -1,8 +1,14 @@
 import { claudeProvider } from './providers/claude.js'
 import { openaiProvider } from './providers/openai.js'
+import { geminiProvider } from './providers/gemini.js'
 import { ollamaProvider } from './providers/ollama.js'
 
-const providers = { claude: claudeProvider, openai: openaiProvider, ollama: ollamaProvider }
+const providers = {
+  claude: claudeProvider,
+  openai: openaiProvider,
+  gemini: geminiProvider,
+  ollama: ollamaProvider,
+}
 
 function trimEnv(name) {
   return String(process.env[name] || '').trim()
@@ -18,6 +24,11 @@ function hasOpenAiKey() {
   return k.length > 10 && !/^(your_|changeme|xxx)/i.test(k)
 }
 
+function hasGeminiKey() {
+  const k = trimEnv('GEMINI_API_KEY')
+  return k.length > 10 && !/^(your_|changeme|xxx)/i.test(k)
+}
+
 function hasOllamaHost() {
   return !!trimEnv('OLLAMA_HOST')
 }
@@ -30,6 +41,11 @@ export function resolveProviderName() {
     if (hasOpenAiKey()) return 'openai'
     if (hasOllamaHost()) return 'ollama'
     return 'openai'
+  }
+  if (configured === 'gemini') {
+    if (hasGeminiKey()) return 'gemini'
+    if (hasOllamaHost()) return 'ollama'
+    return 'gemini'
   }
   if (configured === 'claude') {
     if (hasAnthropicKey()) return 'claude'
@@ -51,12 +67,18 @@ export function getAIProviderConfigStatus() {
   const configured = trimEnv('AI_PROVIDER') || 'claude'
   const active = resolveProviderName()
   const ollamaHost = trimEnv('OLLAMA_HOST')
+  const providerReady = {
+    ollama: hasOllamaHost,
+    claude: hasAnthropicKey,
+    openai: hasOpenAiKey,
+    gemini: hasGeminiKey,
+  }
   const rows = [
     {
       key: 'active',
       label: 'Active provider (in use now)',
       value: active,
-      ok: active === 'ollama' ? hasOllamaHost() : active === 'claude' ? hasAnthropicKey() : hasOpenAiKey(),
+      ok: (providerReady[active] || (() => false))(),
     },
     {
       key: 'configured',
@@ -77,6 +99,12 @@ export function getAIProviderConfigStatus() {
       ok: hasOpenAiKey(),
     },
     {
+      key: 'gemini',
+      label: 'Google Gemini (GEMINI_API_KEY)',
+      value: hasGeminiKey() ? 'set' : 'missing or placeholder',
+      ok: hasGeminiKey(),
+    },
+    {
       key: 'ollama',
       label: 'Ollama (OLLAMA_HOST)',
       value: ollamaHost || 'not set',
@@ -88,6 +116,12 @@ export function getAIProviderConfigStatus() {
       value: trimEnv('OLLAMA_MODEL') || 'llama3 (default)',
       ok: hasOllamaHost(),
     },
+    {
+      key: 'gemini_model',
+      label: 'Gemini model (GEMINI_MODEL)',
+      value: trimEnv('GEMINI_MODEL') || 'gemini-2.0-flash (default)',
+      ok: hasGeminiKey(),
+    },
   ]
 
   let hint = null
@@ -97,6 +131,10 @@ export function getAIProviderConfigStatus() {
     hint = hasOllamaHost()
       ? 'Claude key is missing but OLLAMA_HOST is set — server should auto-use Ollama after restart. If you still see Claude errors, switch provider in Admin → System.'
       : 'Set ANTHROPIC_API_KEY or configure Ollama (OLLAMA_HOST + AI_PROVIDER=ollama).'
+  } else if (active === 'gemini' && !hasGeminiKey()) {
+    hint = hasOllamaHost()
+      ? 'Gemini key is missing but OLLAMA_HOST is set — server should auto-use Ollama after restart. If you still see Gemini errors, switch provider in Admin → System.'
+      : 'Set GEMINI_API_KEY from Google AI Studio, or configure Ollama (OLLAMA_HOST + AI_PROVIDER=ollama).'
   } else if (active === 'ollama' && !hasOllamaHost()) {
     hint = 'Set OLLAMA_HOST (e.g. http://127.0.0.1:11434) and restart the server.'
   }
@@ -106,7 +144,7 @@ export function getAIProviderConfigStatus() {
 
 export function isLlmAuthError(err) {
   const msg = String(err?.message || err || '')
-  return /authentication_error|invalid x-api-key|invalid api key|incorrect api key|401/i.test(msg)
+  return /authentication_error|invalid x-api-key|invalid api key|incorrect api key|api key not valid|api_key_invalid|401|403/i.test(msg)
 }
 
 export function formatLlmErrorForClient(err) {
@@ -133,7 +171,9 @@ export function formatLlmErrorForClient(err) {
         ? 'Cannot reach Ollama or model is missing — check OLLAMA_HOST and run ollama pull on the model tag.'
         : active === 'openai'
           ? 'OpenAI API key is invalid or missing.'
-          : 'Anthropic (Claude) API key is invalid or missing.'
+          : active === 'gemini'
+            ? 'Google Gemini API key is invalid or missing.'
+            : 'Anthropic (Claude) API key is invalid or missing.'
   }
 
   const errorTable = [
@@ -144,7 +184,7 @@ export function formatLlmErrorForClient(err) {
       what: 'Fix',
       detail: hasOllamaHost()
         ? '1) Admin → System → click **ollama**, or set AI_PROVIDER=ollama in .env and restart.\n2) Ensure OLLAMA_HOST is reachable from the server (curl /api/tags).\n3) For store/hostname questions, use **Details** mode — answers come from live data without LLM.'
-        : 'Set a valid ANTHROPIC_API_KEY, or install Ollama and set OLLAMA_HOST + AI_PROVIDER=ollama in .env, then restart the server.',
+        : 'Set a valid API key for your provider (ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY), or install Ollama and set OLLAMA_HOST + AI_PROVIDER=ollama in .env, then restart the server.',
     },
   ]
 
@@ -160,6 +200,7 @@ export function formatLlmErrorForClient(err) {
 function providerModelName(name = resolveProviderName()) {
   if (name === 'ollama') return trimEnv('OLLAMA_MODEL') || 'llama3'
   if (name === 'openai') return trimEnv('OPENAI_MODEL') || 'gpt-4o'
+  if (name === 'gemini') return trimEnv('GEMINI_MODEL') || 'gemini-2.0-flash'
   return trimEnv('CLAUDE_MODEL') || 'claude-sonnet-4-20250514'
 }
 
@@ -168,7 +209,7 @@ export async function chat(messages, options = {}) {
   try {
     return await providers[primary].chat(messages, options)
   } catch (err) {
-    if (primary !== 'ollama' && hasOllamaHost() && (isLlmAuthError(err) || primary === 'claude' || primary === 'openai')) {
+    if (primary !== 'ollama' && hasOllamaHost() && (isLlmAuthError(err) || primary === 'claude' || primary === 'openai' || primary === 'gemini')) {
       try {
         return await ollamaProvider.chat(messages, options)
       } catch (ollamaErr) {

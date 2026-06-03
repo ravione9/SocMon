@@ -12,7 +12,7 @@ import {
 import { getProblemSnapshotStatus } from '../storeProblemSnapshotter.js'
 import { computeUserPageAccess } from '../../utils/computeUserPageAccess.js'
 import { isXdrQuestion } from './xdrDirectAnswer.js'
-import { isNetworkInfraQuery, isZabbixQuestion, extractIpv4, isInfraMonitorQuery } from './zabbixDirectAnswer.js'
+import { isNetworkInfraQuery, isZabbixQuestion, extractIpv4, isInfraMonitorQuery, isIpInfraQuery, prefersLlmSynthesis, buildZabbixInfraContext, wantsDiskUsage, extractHostGroupFilter } from './zabbixDirectAnswer.js'
 import {
   appNameMatches,
   crashRecordMatches,
@@ -56,6 +56,13 @@ export const AI_CONTEXT_MODULES = [
     freshness: 'live',
     description: 'Singularity Data Lake PowerQuery at send time',
   },
+  {
+    id: 'zabbixInfra',
+    label: 'Infra Zabbix',
+    pageKey: 'infra',
+    freshness: 'live',
+    description: 'Zabbix host availability, ping, and interface traffic at send time',
+  },
 ]
 
 const MODULE_BY_ID = Object.fromEntries(AI_CONTEXT_MODULES.map(m => [m.id, m]))
@@ -94,8 +101,11 @@ export function suggestContextModules(message, allowedPages, ctx = null) {
   }
 
   if (pages.has('storeMonitor') && (STORE_KEYWORDS.test(text) || OVERVIEW_KEYWORDS.test(text))) {
-    modules.add('storeMonitor')
-    if (!CRASH_KEYWORDS.test(text)) modules.add('storeProblems')
+    const infraDiskQuery = wantsDiskUsage(text) && (extractHostGroupFilter(text) || isZabbixQuestion(text))
+    if (!infraDiskQuery) {
+      modules.add('storeMonitor')
+      if (!CRASH_KEYWORDS.test(text)) modules.add('storeProblems')
+    }
   }
   if (pages.has('soc') && SOC_KEYWORDS.test(text)) {
     modules.add('soc')
@@ -103,6 +113,15 @@ export function suggestContextModules(message, allowedPages, ctx = null) {
   if (pages.has('sentinel') && isXdrQuestion(text)) {
     modules.add('sentinelXdr')
     return [...modules]
+  }
+  if (pages.has('infra') && (
+    prefersLlmSynthesis(text, ctx)
+    || isZabbixQuestion(text)
+    || isNetworkInfraQuery(text)
+    || isIpInfraQuery(text)
+    || (extractIpv4(text) && /\b(network|device|server|zabbix|infra|monitor)\b/i.test(text))
+  )) {
+    modules.add('zabbixInfra')
   }
   if (pages.has('noc') && NOC_KEYWORDS.test(text)) {
     modules.add('soc')
@@ -340,6 +359,7 @@ const BUILDERS = {
   storeMonitor: (detail) => buildStoreMonitorContext(10, detail),
   storeProblems: buildStoreProblemsContext,
   soc: buildSocContext,
+  zabbixInfra: (_, opts) => buildZabbixInfraContext(opts?.userMessage || ''),
 }
 
 /**
@@ -703,7 +723,11 @@ export async function buildPortalContext(user, moduleIds = [], opts = {}) {
       const builder = BUILDERS[id]
       if (!builder) return
       try {
-        const data = id === 'storeMonitor' ? await builder(detail) : await builder()
+        const data = id === 'storeMonitor'
+          ? await builder(detail)
+          : id === 'zabbixInfra'
+            ? await builder(detail, { userMessage: opts.userMessage || '' })
+            : await builder()
         modules[id] = data
         meta.push({
           id,
@@ -782,6 +806,17 @@ export function buildContextPreview(context) {
   if (context?.contextPreview?.xdr) {
     preview.xdr = context.contextPreview.xdr
   }
+  const zb = context?.modules?.zabbixInfra
+  if (zb?.availability) {
+    preview.zabbixInfra = {
+      total: zb.availability.total,
+      available: zb.availability.available,
+      unavailable: zb.availability.unavailable,
+      problemCount: zb.problemCount,
+      hostFilter: zb.hostFilter,
+      hostCount: (zb.hosts || []).length,
+    }
+  }
   return preview
 }
 
@@ -797,6 +832,9 @@ export function formatContextForPrompt(context) {
     '- Each module has freshness: "live" = queried when the user sent the message; "periodic" = background snapshot.',
     '- State which freshness type you used when citing store or firewall numbers.',
     '- If hostnameWise or topIssues lists are truncated, say how many stores exist in summary.total.',
+    '- For zabbixInfra: use hosts[].ports for per-interface bandwidth. inRate/outRate are formatted; inBps/outBps are raw bytes/sec.',
+    '- Rank or highlight busiest interfaces when the user asks about utilization — compute from inBps+outBps when helpful.',
+    '- If hostFilter is an IP and hosts[] is empty, say no Zabbix host matched that SNMP/management IP.',
     '',
     JSON.stringify(context),
     '=== END PORTAL CONTEXT ===',
