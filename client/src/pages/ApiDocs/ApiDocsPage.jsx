@@ -38,15 +38,19 @@ function canUseEndpoint(ep, allowedPages) {
   return true
 }
 
-function buildPath(template, params, queryHint) {
+function buildPath(template, pathParams, queryParams, queryValues) {
   let path = template
-  for (const p of params || []) {
-    const val = p.value?.trim() || p.placeholder
+  for (const p of pathParams || []) {
+    const val = (queryValues?.[p.name] ?? p.value)?.trim() || p.placeholder || ''
     path = path.replace(`{${p.name}}`, encodeURIComponent(val))
   }
-  const q = (queryHint || '').trim()
-  if (q.startsWith('?')) return path + q
-  return path
+  const qs = new URLSearchParams()
+  for (const q of queryParams || []) {
+    const v = (queryValues?.[q.name] ?? q.example ?? '').toString().trim()
+    if (v) qs.set(q.name, v)
+  }
+  const s = qs.toString()
+  return s ? `${path}?${s}` : path
 }
 
 async function executeApiRequest({ baseUrl, method, path, bearerToken, bodyText }) {
@@ -83,25 +87,32 @@ export default function ApiDocsPage() {
   const [bearerToken, setBearerToken] = useState(sessionToken || '')
   const [selectedId, setSelectedId] = useState('intro')
   const [pathParamValues, setPathParamValues] = useState({})
+  const [queryParamValues, setQueryParamValues] = useState({})
   const [bodyText, setBodyText] = useState('')
+  const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(false)
   const [response, setResponse] = useState(null)
+
+  const visibleEndpoints = useMemo(() => {
+    const base = API_DOC_ENDPOINTS.filter((ep) => canUseEndpoint(ep, allowedPages))
+    const q = search.trim().toLowerCase()
+    if (!q) return base
+    return base.filter(
+      (ep) =>
+        ep.title.toLowerCase().includes(q) ||
+        ep.path.toLowerCase().includes(q) ||
+        ep.description?.toLowerCase().includes(q) ||
+        ep.groupId.includes(q),
+    )
+  }, [allowedPages, search])
 
   const visibleGroups = useMemo(() => {
     return API_DOC_GROUPS.filter((g) => {
       if (g.intro) return true
       if (g.pageKey && !allowedPages.includes(g.pageKey)) return false
-      const hasEndpoint = API_DOC_ENDPOINTS.some(
-        (ep) => ep.groupId === g.id && canUseEndpoint(ep, allowedPages),
-      )
-      return g.intro || hasEndpoint
+      return visibleEndpoints.some((ep) => ep.groupId === g.id)
     })
-  }, [allowedPages])
-
-  const visibleEndpoints = useMemo(
-    () => API_DOC_ENDPOINTS.filter((ep) => canUseEndpoint(ep, allowedPages)),
-    [allowedPages],
-  )
+  }, [allowedPages, visibleEndpoints])
 
   const selected = useMemo(() => {
     if (selectedId === 'intro') return { intro: true }
@@ -113,13 +124,17 @@ export default function ApiDocsPage() {
     setBodyText(
       selected.sampleBody ? JSON.stringify(selected.sampleBody, null, 2) : '',
     )
-    const init = {}
+    const pathInit = {}
     for (const p of selected.pathParams || []) {
-      init[p.name] = pathParamValues[p.name] || ''
+      pathInit[p.name] = ''
     }
-    setPathParamValues(init)
+    setPathParamValues(pathInit)
+    const queryInit = {}
+    for (const q of selected.queryParams || []) {
+      queryInit[q.name] = q.example || ''
+    }
+    setQueryParamValues(queryInit)
     setResponse(null)
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset body when endpoint changes
   }, [selectedId])
 
   const runTest = useCallback(async () => {
@@ -128,13 +143,12 @@ export default function ApiDocsPage() {
       toast.error('Add a Bearer token (portal session or API JWT)')
       return
     }
+    const mergedQuery = { ...queryParamValues }
     const path = buildPath(
       selected.path,
-      (selected.pathParams || []).map((p) => ({
-        ...p,
-        value: pathParamValues[p.name],
-      })),
-      selected.queryHint,
+      selected.pathParams,
+      selected.queryParams,
+      { ...pathParamValues, ...mergedQuery },
     )
     setLoading(true)
     setResponse(null)
@@ -158,17 +172,15 @@ export default function ApiDocsPage() {
     } finally {
       setLoading(false)
     }
-  }, [selected, bearerToken, baseUrl, bodyText, pathParamValues])
+  }, [selected, bearerToken, baseUrl, bodyText, pathParamValues, queryParamValues])
 
   const copyCurl = useCallback(() => {
     if (!selected || selected.intro) return
     const path = buildPath(
       selected.path,
-      (selected.pathParams || []).map((p) => ({
-        ...p,
-        value: pathParamValues[p.name] || p.placeholder,
-      })),
-      selected.queryHint,
+      selected.pathParams,
+      selected.queryParams,
+      { ...pathParamValues, ...queryParamValues },
     )
     const url = `${baseUrl.replace(/\/$/, '')}${path}`
     let curl = `curl -s -X ${selected.method} "${url}"`
@@ -180,7 +192,7 @@ export default function ApiDocsPage() {
       () => toast.success('cURL copied'),
       () => toast.error('Copy failed'),
     )
-  }, [selected, baseUrl, bearerToken, bodyText, pathParamValues])
+  }, [selected, baseUrl, bearerToken, bodyText, pathParamValues, queryParamValues])
 
   return (
     <div
@@ -265,14 +277,27 @@ export default function ApiDocsPage() {
       <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
         <nav
           style={{
-            width: 260,
+            width: 300,
             flexShrink: 0,
             borderRight: `1px solid ${C.border}`,
             overflowY: 'auto',
             padding: '12px 0',
             background: C.bg2,
+            display: 'flex',
+            flexDirection: 'column',
           }}
         >
+          <div style={{ padding: '0 12px 10px' }}>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search endpoints…"
+              style={{ ...inputStyle(), fontSize: 11 }}
+            />
+            <div style={{ fontSize: 10, color: C.text3, marginTop: 6, fontFamily: 'var(--mono)' }}>
+              {visibleEndpoints.length} endpoints · {allowedPages.length} pages granted
+            </div>
+          </div>
           {visibleGroups.map((group) => (
             <div key={group.id} style={{ marginBottom: 12 }}>
               <div
@@ -317,9 +342,9 @@ export default function ApiDocsPage() {
           ))}
         </nav>
 
-        <main style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+        <main style={{ flex: 1, overflowY: 'auto', padding: 20, maxWidth: 960 }}>
           {selected?.intro ? (
-            <IntroPanel />
+            <IntroPanel endpointCount={visibleEndpoints.length} />
           ) : selected ? (
             <>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, flexWrap: 'wrap' }}>
@@ -339,29 +364,84 @@ export default function ApiDocsPage() {
                 )}
               </div>
               <h2 style={{ margin: '0 0 8px', fontSize: 17 }}>{selected.title}</h2>
-              <p style={{ margin: '0 0 16px', fontSize: 13, color: C.text2, lineHeight: 1.55 }}>{selected.description}</p>
+              <p style={{ margin: '0 0 16px', fontSize: 13, color: C.text2, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>
+                {selected.description}
+              </p>
 
-              {(selected.pathParams || []).map((p) => (
-                <label key={p.name} style={{ display: 'block', marginBottom: 10, fontSize: 11, color: C.text3 }}>
-                  Path: {p.name}
-                  <input
-                    value={pathParamValues[p.name] || ''}
-                    onChange={(e) =>
-                      setPathParamValues((prev) => ({ ...prev, [p.name]: e.target.value }))
-                    }
-                    placeholder={p.placeholder}
-                    style={{ ...inputStyle(), marginTop: 4 }}
-                  />
-                </label>
-              ))}
-
-              {selected.queryHint && (
-                <p style={{ fontSize: 11, color: C.text3, fontFamily: 'var(--mono)', marginBottom: 12 }}>
-                  Query example: <code style={{ color: C.cyan }}>{selected.queryHint}</code>
-                </p>
+              {selected.auth && (
+                <DetailTable
+                  title="Headers"
+                  rows={[
+                    { label: 'Authorization', value: 'Bearer <your-jwt>', required: true },
+                    { label: 'Accept', value: 'application/json' },
+                    ...(selected.method !== 'GET' && selected.method !== 'DELETE'
+                      ? [{ label: 'Content-Type', value: 'application/json' }]
+                      : []),
+                  ]}
+                />
               )}
 
-              {selected.method !== 'GET' && (
+              {(selected.pathParams?.length > 0 || selected.queryParams?.length > 0) && (
+                <DetailTable
+                  title="Parameters"
+                  rows={[
+                    ...(selected.pathParams || []).map((p) => ({
+                      label: `path:${p.name}`,
+                      value: p.description || p.placeholder,
+                      input: true,
+                      inputName: p.name,
+                      inputKind: 'path',
+                      placeholder: p.placeholder,
+                    })),
+                    ...(selected.queryParams || []).map((q) => ({
+                      label: `query:${q.name}`,
+                      value: q.description || '',
+                      input: true,
+                      inputName: q.name,
+                      inputKind: 'query',
+                      placeholder: q.placeholder || q.example,
+                    })),
+                  ]}
+                  pathParamValues={pathParamValues}
+                  queryParamValues={queryParamValues}
+                  onPathChange={(name, v) => setPathParamValues((prev) => ({ ...prev, [name]: v }))}
+                  onQueryChange={(name, v) => setQueryParamValues((prev) => ({ ...prev, [name]: v }))}
+                />
+              )}
+
+              {selected.responseExample && (
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: C.text3, marginBottom: 6, fontFamily: 'var(--mono)' }}>
+                    Example response
+                  </div>
+                  <pre
+                    style={{
+                      margin: 0,
+                      padding: 12,
+                      borderRadius: 8,
+                      border: `1px solid ${C.border}`,
+                      background: C.bg3,
+                      fontSize: 10,
+                      fontFamily: 'var(--mono)',
+                      color: C.text2,
+                      overflow: 'auto',
+                      maxHeight: 200,
+                    }}
+                  >
+                    {JSON.stringify(selected.responseExample, null, 2)}
+                  </pre>
+                </div>
+              )}
+
+              {selected.notes?.length > 0 && (
+                <ul style={{ margin: '0 0 16px', paddingLeft: 18, fontSize: 12, color: C.text3, lineHeight: 1.5 }}>
+                  {selected.notes.map((n) => (
+                    <li key={n}>{n}</li>
+                  ))}
+                </ul>
+              )}
+
+              {selected.method !== 'GET' && selected.method !== 'DELETE' && (
                 <label style={{ display: 'block', marginBottom: 12, fontSize: 11, color: C.text3 }}>
                   Request body (JSON)
                   <textarea
@@ -401,10 +481,67 @@ export default function ApiDocsPage() {
   )
 }
 
-function IntroPanel() {
+function DetailTable({
+  title,
+  rows,
+  pathParamValues,
+  queryParamValues,
+  onPathChange,
+  onQueryChange,
+}) {
   return (
-    <div style={{ maxWidth: 720 }}>
-      <h2 style={{ margin: '0 0 16px', fontSize: 20 }}>{API_DOCS_INTRO.title}</h2>
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: C.text3, marginBottom: 8, fontFamily: 'var(--mono)', textTransform: 'uppercase' }}>
+        {title}
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden' }}>
+        <thead>
+          <tr style={{ background: C.bg3 }}>
+            <th style={{ textAlign: 'left', padding: '8px 10px', color: C.text3, fontWeight: 600 }}>Name</th>
+            <th style={{ textAlign: 'left', padding: '8px 10px', color: C.text3, fontWeight: 600 }}>Description</th>
+            <th style={{ textAlign: 'left', padding: '8px 10px', color: C.text3, fontWeight: 600, width: '36%' }}>Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.label} style={{ borderTop: `1px solid ${C.border}` }}>
+              <td style={{ padding: '8px 10px', color: C.cyan, fontFamily: 'var(--mono)', verticalAlign: 'top' }}>{row.label}</td>
+              <td style={{ padding: '8px 10px', color: C.text2, verticalAlign: 'top', lineHeight: 1.4 }}>{row.value}</td>
+              <td style={{ padding: '8px 10px', verticalAlign: 'top' }}>
+                {row.input ? (
+                  <input
+                    value={
+                      row.inputKind === 'path'
+                        ? pathParamValues?.[row.inputName] ?? ''
+                        : queryParamValues?.[row.inputName] ?? ''
+                    }
+                    onChange={(e) =>
+                      row.inputKind === 'path'
+                        ? onPathChange?.(row.inputName, e.target.value)
+                        : onQueryChange?.(row.inputName, e.target.value)
+                    }
+                    placeholder={row.placeholder}
+                    style={{ ...inputStyle(), fontSize: 10 }}
+                  />
+                ) : (
+                  <span style={{ color: C.text3 }}>—</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function IntroPanel({ endpointCount }) {
+  return (
+    <div style={{ maxWidth: 900 }}>
+      <h2 style={{ margin: '0 0 8px', fontSize: 20 }}>{API_DOCS_INTRO.title}</h2>
+      <p style={{ fontSize: 12, color: C.text3, marginBottom: 16 }}>
+        {endpointCount} documented endpoints available for your account (filtered by portal page access).
+      </p>
       <table
         style={{
           width: '100%',
