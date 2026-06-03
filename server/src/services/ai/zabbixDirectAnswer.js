@@ -136,12 +136,39 @@ export function extractHostGroupFromThread(text) {
   for (const re of patterns) {
     const m = t.match(re)
     const name = m?.[1]
-    if (name && !/^(this|that|the|host|a|an|in|only|given)$/i.test(name)) return name
+    if (name && isValidHostGroupName(name)) return name
   }
   return null
 }
 
 const GROUP_NAME_STOP = /^(this|that|the|why|only|given|with|in|a|an|how|many|server|servers|host|hosts)$/i
+
+/** Product/context words — not Zabbix host group names (e.g. "alerts in zabbix"). */
+const HOST_GROUP_META_STOP = /^(zabbix|infra|monitoring|monitor|netpulse|socmon|alert|alerts|problem|problems|trigger|triggers|right|now|currently|active|the|this|that|store|sentinel|immediately|today)$/i
+
+function isValidHostGroupName(name) {
+  const n = String(name || '').trim()
+  if (!n) return false
+  if (GROUP_NAME_STOP.test(n)) return false
+  if (HOST_GROUP_META_STOP.test(n)) return false
+  return true
+}
+
+/** Current Zabbix triggers/problems — not a host-group membership query. */
+export function wantsZabbixAlertsQuery(question) {
+  const q = String(question || '')
+  if (!/\b(alert|alerts|trigger|triggers|problem|problems)\b/i.test(q)) return false
+  return ZABBIX_MARKERS.test(q)
+    || /\b(infra mon|infra monitoring|infra zabbix)\b/i.test(q)
+    || (/\b(right now|currently|active|now)\b/i.test(q) && /\bzabbix\b/i.test(q))
+}
+
+function hasExplicitHostGroupInQuestion(question) {
+  const q = String(question || '')
+  return /\b(?:host\s*group|hostgroup)\s+[\w.-]+/i.test(q)
+    || /\b[\w][\w.-]*-[\w.-]+\s+group\b/i.test(q)
+    || /\b(?:of|for|from)\s+[\w.-]+\s+group\b/i.test(q)
+}
 
 /** Zabbix host group name from natural language, e.g. lenskart-database. */
 export function extractHostGroupFilter(question, ctx = null) {
@@ -158,24 +185,24 @@ export function extractHostGroupFilter(question, ctx = null) {
 
   // "report of lenskart-database group", "disk usage for lenskart-database group"
   let m = q.match(/\b(?:of|for|from)\s+(["']?)([\w.-]+)\1\s+group\b/i)
-  if (m && !GROUP_NAME_STOP.test(m[2])) return m[2]
+  if (m && isValidHostGroupName(m[2])) return m[2]
 
   // "lenskart-database group" (name before the word group)
   m = q.match(/\b([\w][\w.-]*)\s+group\b/i)
-  if (m && !GROUP_NAME_STOP.test(m[1])) return m[1]
+  if (m && isValidHostGroupName(m[1])) return m[1]
 
   m = q.match(/\b(?:belong(?:s|ing)?\s+to|belonging\s+to|member\s+of)\s+(?:the\s+)?(?:host\s*group\s+|group\s+)?([A-Za-z0-9][\w.-]*)\b/i)
-  if (m && !GROUP_NAME_STOP.test(m[1])) return m[1]
+  if (m && isValidHostGroupName(m[1])) return m[1]
 
-  // "in lenskart-database" / "in group lenskart-database" — not bare "in this"
+  // "in lenskart-database" — skip "in zabbix" / "in infra" (product context, not a group)
   m = q.match(/\bin\s+(?:the\s+)?(?:host\s*group\s+|group\s+)?([A-Za-z0-9][\w.-]+)\b/i)
-  if (m && !GROUP_NAME_STOP.test(m[1])) return m[1]
+  if (m && isValidHostGroupName(m[1])) return m[1]
 
   m = q.match(/\b(?:host\s*group|hostgroup|group)\s+(["']?)([\w.-]+)\1\b/i)
-  if (m && !GROUP_NAME_STOP.test(m[2])) return m[2]
+  if (m && isValidHostGroupName(m[2])) return m[2]
 
   m = q.match(/\b(?:servers?|hosts?)\s+(?:in|from|of)\s+(["']?)([\w.-]+)\1\b/i)
-  if (m && !GROUP_NAME_STOP.test(m[2])) return m[2]
+  if (m && isValidHostGroupName(m[2])) return m[2]
 
   if (/\b(this|that)\s+group\b/i.test(q) || /\bin\s+this\s+group\b/i.test(q)) {
     const fromThread = extractHostGroupFromThread(ctx?.threadText)
@@ -259,6 +286,7 @@ export function isZabbixQuestion(question, ctx = null) {
   if (isStoreHostnamePortalQuery(q) && !extractIpv4(q)) return false
   if (isSocReportQuery(q)) return false
   if (isClarificationPhrase(q)) return false
+  if (wantsZabbixAlertsQuery(q)) return true
   if (wantsDiskUsage(q) && (extractHostGroupFilter(q, ctx) || /\b(server|servers|zabbix|infra|host|group)\b/i.test(q))) return true
   if (wantsHostGroupCheck(q) && extractIpv4(q)) return true
   if (wantsBandwidthUtil(q, ctx) && extractHostGroupFilter(q, ctx)) return true
@@ -1060,7 +1088,11 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     || ctx?.infraHost
     || (ctx?.isFollowUp ? extractInfraHostFromThread(ctx?.priorUser) : null)
     || (ctx?.isFollowUp ? extractInfraHostFromThread(ctx?.threadText) : null)
-  const hostGroupFilter = extractHostGroupFilter(question, ctx) || ctx?.hostGroup
+  const alertsQuery = wantsZabbixAlertsQuery(question)
+  let hostGroupFilter = extractHostGroupFilter(question, ctx) || ctx?.hostGroup
+  if (alertsQuery && !hasExplicitHostGroupInQuestion(question)) {
+    hostGroupFilter = ''
+  }
   const isMembershipCheck = wantsHostGroupCheck(question) && ip && hostGroupFilter
   const scopedHostGroup = hostGroupFilter && !ip && !(hostname && /\b(for|of|about|status)\b/i.test(question)) ? hostGroupFilter : ''
   const bandwidthQuery = wantsBandwidthUtil(question, ctx)
@@ -1080,7 +1112,7 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     && Boolean(ip || hostFilter)
   const includePing = wantsPingStatus(question) || deepAnalysis
   const includeBandwidth = bandwidthQuery || deepAnalysis
-  const problemLimit = deepAnalysis ? 50 : 12
+  const problemLimit = alertsQuery ? 25 : (deepAnalysis ? 50 : 12)
 
   const targets = []
   if (allowedPages.includes('infra')) {
@@ -1176,7 +1208,9 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
   const bandwidthReport = Boolean(scopedHostGroup && includeBandwidth)
 
   const lines = [
-    diskReport
+    alertsQuery
+      ? `Infra Zabbix — active alerts & problems (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
+      : diskReport
       ? `Disk usage report — host group: ${scopedHostGroup} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
       : bandwidthReport
         ? `Bandwidth / interface traffic — host group: ${scopedHostGroup} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
@@ -1187,9 +1221,11 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
       ? `Filter: ${filterLabel}`
       : scopedHostGroup
         ? `Host group: ${scopedHostGroup}`
-        : hostFilter
-          ? `Host filter: ${hostFilter}`
-          : 'All monitored hosts (network devices & servers)',
+        : alertsQuery
+          ? 'Scope: all Infra Zabbix hosts (current triggers/problems)'
+          : hostFilter
+            ? `Host filter: ${hostFilter}`
+            : 'All monitored hosts (network devices & servers)',
     '',
   ]
 
@@ -1240,6 +1276,20 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     lines.push(`  Version: ${data.version || '—'}`)
     lines.push(`  Total monitored: ${a.total} · available ${a.available} · down ${a.unavailable} · unknown ${a.unknown}`)
     lines.push(`  Active problems: ${data.problemCount}`)
+
+    if (data.problems.length) {
+      const problemCap = alertsQuery ? 25 : (deepAnalysis ? data.problems.length : 8)
+      lines.push(alertsQuery ? '  Current alerts/problems:' : (deepAnalysis ? '  Active problems (all matched):' : '  Top problems:'))
+      for (const p of data.problems.slice(0, problemCap)) {
+        const when = p.clock ? ` · since ${p.clock}` : ''
+        lines.push(`    • [${p.severity}] ${p.name}${p.hosts ? ` · ${p.hosts}` : ''}${when}`)
+      }
+      if (data.problems.length > problemCap) {
+        lines.push(`    … ${data.problems.length - problemCap} more (open Infra Monitoring → Problems)`)
+      }
+    } else if (alertsQuery) {
+      lines.push('  No active problems/triggers in Zabbix right now.')
+    }
 
     // Device type breakdown
     const typeEntries = TYPE_ORDER.filter(t => dt[t]).map(t => {
@@ -1370,7 +1420,7 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
       lines.push('  No disk/filesystem usage items (vfs.fs.size) found on matched hosts.')
     }
 
-    if (data.problems.length) {
+    if (data.problems.length && !alertsQuery) {
       const problemCap = deepAnalysis ? data.problems.length : 8
       lines.push(deepAnalysis ? '  Active problems (all matched):' : '  Top problems:')
       for (const p of data.problems.slice(0, problemCap)) {
