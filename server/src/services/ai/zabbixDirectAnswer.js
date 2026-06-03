@@ -72,8 +72,146 @@ function wantsStoreZabbix(question) {
   return /\b(store zabbix|store hosts?|store server|pos server|retail server)\b/i.test(String(question || ''))
 }
 
+function hostMatchesSearch(h, search) {
+  const s = String(search || '').trim()
+  if (!s) return true
+  const low = s.toLowerCase()
+  if (String(h.name || '').toLowerCase().includes(low) || String(h.host || '').toLowerCase().includes(low)) {
+    return true
+  }
+  if (IPV4_RE.test(s)) {
+    return (h.interfaces || []).some(i => String(i.ip || '') === s)
+  }
+  return false
+}
+
+function ifaceLabelFromItem(it) {
+  const name = String(it.name || '')
+  // "Interface port1(JIO): Bits received" → "port1(JIO)"
+  const m = name.match(/^Interface\s+(.+?):\s*(Bits|Inbound|Outbound|packets|errors|discards|speed|status)/i)
+  if (m) return m[1].trim()
+  // fallback: strip "Interface " prefix and anything after ":"
+  const m2 = name.match(/^Interface\s+(.+)/)
+  if (m2) return m2[1].replace(/:.*$/, '').trim().slice(0, 50)
+  // derive from key_: net.if.in[ifHCInOctets.3] → index 3 only useful with a name
+  return String(it.key_ || '').slice(0, 50)
+}
+
+/** Extract SNMP index suffix from a key like net.if.in[ifHCInOctets.3] → "3" */
+function snmpIndexFromKey(key) {
+  const m = String(key || '').match(/\[.*?\.(\d+)\]$/)
+  return m ? m[1] : String(key || '')
+}
+
+async function fetchInterfaceMetrics(zabbixRpc, hostids) {
+  if (!hostids.length) return { byHost: {}, indexToName: {} }
+  const [inItemsAll, outItemsAll, statusItems] = await Promise.all([
+    fetchItemsChunked(zabbixRpc, hostids, 'net.if.in'),
+    fetchItemsChunked(zabbixRpc, hostids, 'net.if.out'),
+    fetchItemsChunked(zabbixRpc, hostids, 'net.if.status'),
+  ])
+  // Keep only the exact traffic items (not discards/errors), identified by having a bps/octets unit or key
+  const isTrafficItem = it => {
+    const k = String(it.key_ || '')
+    const u = String(it.units || '').toLowerCase()
+    // net.if.in[ifHCInOctets.x] or net.if.in[ifInOctets.x] → traffic
+    // net.if.in.discards / net.if.in.errors / net.if.in.multicast → not traffic
+    return /^net\.if\.(in|out)\[/.test(k) || u === 'bps' || u === 'b/s'
+  }
+  const inItems = (inItemsAll || []).filter(isTrafficItem)
+  const outItems = (outItemsAll || []).filter(isTrafficItem)
+
+  // Build SNMP-index → human interface name from ALL in/out/status items (including discards, errors)
+  // Their names follow the pattern "Interface port1(JIO): Inbound packets discarded"
+  const indexToNameByHost = {}
+  const allItemsForNames = [...(inItemsAll || []), ...(outItemsAll || []), ...(statusItems || [])]
+  for (const it of allItemsForNames) {
+    const hid = String(it.hostid)
+    const idx = snmpIndexFromKey(it.key_)
+    const rawName = String(it.name || '')
+    if (!indexToNameByHost[hid]) indexToNameByHost[hid] = {}
+    if (!indexToNameByHost[hid][idx] && /^Interface\s+/i.test(rawName)) {
+      indexToNameByHost[hid][idx] = ifaceLabelFromItem(it)
+    }
+  }
+
+  const byHost = {}
+  const ensure = (hid, idx) => {
+    if (!byHost[hid]) byHost[hid] = {}
+    if (!byHost[hid][idx]) byHost[hid][idx] = { in: null, out: null, status: null, inPoll: null, outPoll: null }
+    return byHost[hid][idx]
+  }
+  for (const it of inItems || []) {
+    const hid = String(it.hostid)
+    const idx = snmpIndexFromKey(it.key_)
+    const row = ensure(hid, idx)
+    const v = parseFloat(it.lastvalue)
+    const clock = Number(it.lastclock) || 0
+    if (Number.isFinite(v) && (row.inPoll == null || clock >= row.inPoll)) {
+      row.in = v; row.inPoll = clock
+    }
+  }
+  for (const it of outItems || []) {
+    const hid = String(it.hostid)
+    const idx = snmpIndexFromKey(it.key_)
+    const row = ensure(hid, idx)
+    const v = parseFloat(it.lastvalue)
+    const clock = Number(it.lastclock) || 0
+    if (Number.isFinite(v) && (row.outPoll == null || clock >= row.outPoll)) {
+      row.out = v; row.outPoll = clock
+    }
+  }
+  for (const it of statusItems || []) {
+    const hid = String(it.hostid)
+    const idx = snmpIndexFromKey(it.key_)
+    const row = ensure(hid, idx)
+    const v = parseFloat(it.lastvalue)
+    if (Number.isFinite(v)) {
+      row.status = v === 1 ? 'up' : v === 2 ? 'down' : String(v)
+    }
+  }
+  return { byHost, indexToNameByHost }
+}
+
+function formatBytesPerSec(v) {
+  if (v == null || !Number.isFinite(v)) return '—'
+  if (v >= 1e9) return `${(v / 1e9).toFixed(2)} Gbps`
+  if (v >= 1e6) return `${(v / 1e6).toFixed(2)} Mbps`
+  if (v >= 1e3) return `${(v / 1e3).toFixed(2)} Kbps`
+  return `${Math.round(v)} bps`
+}
+
 export function wantsPingStatus(question) {
   return /\b(ping|icmp|latency|packet\s*loss|response\s*time|sensor\s*data|reachable|unreachable)\b/i.test(String(question || ''))
+}
+
+export function wantsBandwidthUtil(question) {
+  return /\b(bandwidth|utilization|utilisation|traffic|throughput|bits\s*received|bits\s*sent|interface\s+usage)\b/i.test(String(question || ''))
+    && (extractIpv4(question) || /\b(interfaces?|ports?)\b/i.test(String(question || '')))
+}
+
+/** Analytical infra queries — load live Zabbix into LLM context instead of a rigid template. */
+export function prefersLlmSynthesis(question, ctx = null) {
+  const c = ctx || {}
+  const q = String(question || '')
+  if (c.chatMode === 'rca') return false
+
+  const simpleDirect =
+    /\b(how many|count|total|status of all|ping status|list all|give me the)\b/i.test(q)
+    && !/\b(explain|why|analyze|analyse|compare|utilization|utilisation|bandwidth|throughput)\b/i.test(q)
+  if (simpleDirect && /\b(switch|router|device|host|server|zabbix|infra|firewall)\b/i.test(q)) {
+    return false
+  }
+
+  if (wantsBandwidthUtil(q)) return true
+  if (/\b(all port|every port|each port|all interface|every interface)\b/i.test(q)) return true
+  if (/\b(explain|summarize|summarise|analyze|analyse|compare|why|help me understand|interpret|recommend|what does|which port|highest|lowest|top|busiest|congested|worst|best)\b/i.test(q)) {
+    return true
+  }
+  if (extractIpv4(q) && /\b(port|interface|traffic|utilization|utilisation|bandwidth|cpu|memory|disk|health|usage)\b/i.test(q)) {
+    return true
+  }
+  return false
 }
 
 const PING_STALE_SEC = Number.parseInt(process.env.ZABBIX_PING_STALE_SEC || '900', 10)
@@ -116,7 +254,7 @@ async function fetchItemsChunked(zabbixRpc, hostids, searchKey) {
     const chunk = hostids.slice(i, i + 400)
     const batch = await zabbixRpc('item.get', {
       hostids: chunk,
-      output: ['itemid', 'hostid', 'key_', 'lastvalue', 'lastclock'],
+      output: ['itemid', 'hostid', 'key_', 'lastvalue', 'lastclock', 'name', 'units'],
       search: { key_: `${searchKey}*` },
       searchWildcardsEnabled: true,
       limit: 500,
@@ -367,33 +505,54 @@ function classifyHost(h) {
 
 const SWITCH_DEVICE_TYPES = new Set(['cisco', 'network', 'juniper'])
 
-async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '', includePing = false } = {}) {
+async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '', includePing = false, includeBandwidth = false } = {}) {
   const { isZabbixConfigured, zabbixRpc, getUrl } = client
   if (!isZabbixConfigured()) return { configured: false }
 
   const search = String(hostFilter || '').trim()
-  const hostParams = {
-    monitored_hosts: true,
-    output: ['hostid', 'host', 'name', 'status', 'available', 'active_available'],
-    selectInterfaces: ['interfaceid', 'available', 'type', 'main', 'ip'],
-    selectParentTemplates: ['templateid', 'name'],
-    selectGroups: ['groupid', 'name'],
-    sortfield: 'name',
-    limit: search ? 200 : 500,
-  }
-  if (search) {
-    hostParams.search = { name: search, host: search }
-    hostParams.searchByAny = true
-    hostParams.searchWildcardsEnabled = true
-  }
+  const isExactIp = search ? (IPV4_RE.test(search) && search.match(IPV4_RE)[0] === search) : false
 
   try {
     const [version, hosts] = await Promise.all([
       zabbixRpc('apiinfo.version', {}).catch(() => ''),
-      zabbixRpc('host.get', hostParams),
+      (async () => {
+        const baseParams = {
+          monitored_hosts: true,
+          output: ['hostid', 'host', 'name', 'status', 'available', 'active_available'],
+          selectInterfaces: ['interfaceid', 'available', 'type', 'main', 'ip'],
+          selectParentTemplates: ['templateid', 'name'],
+          selectGroups: ['groupid', 'name'],
+          sortfield: 'name',
+        }
+
+        if (!search) {
+          return zabbixRpc('host.get', { ...baseParams, limit: 500 })
+        }
+
+        if (isExactIp) {
+          // Look up hosts whose monitored interface has this IP.
+          const ifaces = await zabbixRpc('hostinterface.get', {
+            output: ['hostid'],
+            filter: { ip: search },
+          }).catch(() => [])
+          const ipHostIds = [...new Set((ifaces || []).map(i => String(i.hostid)).filter(Boolean))]
+          if (!ipHostIds.length) return []
+          return zabbixRpc('host.get', { ...baseParams, hostids: ipHostIds, limit: 50 })
+        }
+
+        return zabbixRpc('host.get', {
+          ...baseParams,
+          search: { name: search, host: search },
+          searchByAny: true,
+          searchWildcardsEnabled: true,
+          limit: 200,
+        })
+      })(),
     ])
 
-    const rows = hosts || []
+    const rows = isExactIp
+      ? (hosts || [])
+      : (hosts || []).filter(h => hostMatchesSearch(h, search))
     const filtered = deviceTypeFilter === 'switch'
       ? rows.filter(h => isPhysicalSwitchHost(h))
       : deviceTypeFilter
@@ -419,6 +578,10 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
     let pingMetrics = null
     if (includePing && hostids.length) {
       pingMetrics = await fetchPingMetrics(zabbixRpc, hostids)
+    }
+    let interfaceMetrics = null
+    if (includeBandwidth && hostids.length) {
+      interfaceMetrics = await fetchInterfaceMetrics(zabbixRpc, hostids)
     }
     let problemCount = 0
     let problems = []
@@ -473,6 +636,16 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
         }))
       })(),
       pingMetrics,
+      interfaceMetrics,
+      matchedHosts: filtered.map(h => ({
+        hostid: String(h.hostid),
+        name: h.name || h.host,
+        host: h.host,
+        status: availLabelFromHost(h),
+        type: classifyHost(h),
+        interfaceIps: (h.interfaces || []).map(i => i.ip).filter(Boolean),
+        groups: (h.groups || []).map(g => g.name).filter(Boolean),
+      })),
       hostFilter: search || null,
       deviceTypeFilter: deviceTypeFilter || null,
     }
@@ -495,6 +668,7 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
  */
 export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) {
   if (!isZabbixQuestion(question)) return null
+  if (prefersLlmSynthesis(question, ctx)) return null
 
   const fetchedAt = new Date().toISOString()
   const ip = extractIpv4(question)
@@ -503,6 +677,7 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
   const hostFilter = ip || (hostname && /\b(for|of|about|status)\b/i.test(question) ? hostname : '')
   const wantsIsp = /\bisp\b/i.test(question)
   const includePing = wantsPingStatus(question)
+  const includeBandwidth = wantsBandwidthUtil(question)
 
   const targets = []
   if (allowedPages.includes('infra')) {
@@ -516,7 +691,7 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
   const [results, ispData] = await Promise.all([
     Promise.all(targets.map(async t => ({
       ...t,
-      data: await fetchZabbixSnapshot(t.client, { hostFilter, deviceTypeFilter, includePing }),
+      data: await fetchZabbixSnapshot(t.client, { hostFilter, deviceTypeFilter, includePing, includeBandwidth }),
     }))),
     wantsIsp && allowedPages.includes('storeMonitor') && isInfluxStoreConfigured()
       ? fetchStoreSnapshot(10, '-1h').then(stores => buildOverviewSummary(stores)).catch(() => null)
@@ -581,6 +756,11 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     const TYPE_LABEL = { cisco: 'Cisco devices', fortigate: 'FortiGate firewalls', checkpoint: 'CheckPoint FW', juniper: 'Juniper', network: 'Network devices', vm: 'Virtual machines', server: 'Servers', database: 'Databases', isp: 'ISP monitors', other: 'Other' }
     const TYPE_ORDER = ['cisco', 'fortigate', 'checkpoint', 'juniper', 'network', 'server', 'vm', 'database', 'isp', 'other']
 
+    if (a.total === 0 && hostFilter) {
+      lines.push(`  No monitored host matched "${hostFilter}" (searched name, host, and SNMP interface IP).`)
+      lines.push('  Open Infra Monitoring → Hosts to verify the device is monitored in Zabbix.')
+      lines.push('')
+    }
     lines.push(`  Version: ${data.version || '—'}`)
     lines.push(`  Total monitored: ${a.total} · available ${a.available} · down ${a.unavailable} · unknown ${a.unknown}`)
     lines.push(`  Active problems: ${data.problemCount}`)
@@ -634,6 +814,31 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
         lines.push('  No ping/ICMP/Meraki status items found on these hosts.')
       }
     }
+
+    if (includeBandwidth && data.interfaceMetrics?.byHost) {
+      const ifm = data.interfaceMetrics.byHost
+      lines.push('  Interface traffic (net.if.in / net.if.out):')
+      for (const h of data.hosts) {
+        const ifaces = ifm[h.hostid]
+        if (!ifaces) continue
+        lines.push(`    ${h.name}:`)
+        const entries = Object.entries(ifaces).sort((a, b) => {
+          const rank = { down: 0, up: 1 }
+          return (rank[a[1].status] ?? 2) - (rank[b[1].status] ?? 2)
+        })
+        for (const [iface, m] of entries.slice(0, 40)) {
+          const inVal = m.in != null ? formatBytesPerSec(m.in) : '—'
+          const outVal = m.out != null ? formatBytesPerSec(m.out) : '—'
+          const st = m.status ? ` · ${m.status}` : ''
+          lines.push(`      • ${iface} · in ${inVal} · out ${outVal}${st}`)
+        }
+        if (entries.length > 40) lines.push(`      … ${entries.length - 40} more interfaces`)
+      }
+      if (!Object.keys(ifm).length) {
+        lines.push('    No net.if.in/out items found for matched hosts.')
+      }
+    }
+
     if (data.problems.length) {
       lines.push('  Top problems:')
       for (const p of data.problems.slice(0, 8)) {
@@ -700,5 +905,112 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     contextMeta,
     contextPreview: { zabbix: preview },
     queryContext: { topic: 'zabbix', hostname: hostFilter || undefined, isFollowUp: ctx?.isFollowUp },
+  }
+}
+
+function hostPortsFromSnapshot(data, host) {
+  const hid = String(host.hostid || '')
+  const ifaces = data.interfaceMetrics?.byHost?.[hid] || {}
+  const nameMap = data.interfaceMetrics?.indexToNameByHost?.[hid] || {}
+  return Object.entries(ifaces)
+    .filter(([, m]) => m.in != null || m.out != null || m.status != null)
+    .sort((a, b) => {
+      // sort: up first, then by inbps desc
+      const sa = a[1].status, sb = b[1].status
+      if (sa === 'up' && sb !== 'up') return -1
+      if (sb === 'up' && sa !== 'up') return 1
+      return (b[1].in ?? 0) - (a[1].in ?? 0)
+    })
+    .map(([idx, m]) => ({
+      interface: nameMap[idx] || idx,
+      inBps: m.in,
+      outBps: m.out,
+      inRate: formatBytesPerSec(m.in),
+      outRate: formatBytesPerSec(m.out),
+      status: m.status || null,
+    }))
+}
+
+/**
+ * Live Zabbix JSON for LLM synthesis (bandwidth, interface analysis, etc.).
+ * @param {string} userMessage
+ */
+export async function buildZabbixInfraContext(userMessage = '') {
+  const fetchedAt = new Date().toISOString()
+  const client = createZabbixClient('ZABBIX')
+  if (!client.isZabbixConfigured()) {
+    return {
+      module: 'zabbixInfra',
+      freshness: 'live',
+      fetchedAt,
+      configured: false,
+      error: 'ZABBIX_URL + ZABBIX_API_TOKEN not configured',
+    }
+  }
+
+  const ip = extractIpv4(userMessage)
+  const deviceTypeFilter = detectDeviceTypeFilter(userMessage)
+  const hostFilter = ip || ''
+  const includePing = wantsPingStatus(userMessage)
+  const includeBandwidth = wantsBandwidthUtil(userMessage)
+    || /\b(bandwidth|utilization|utilisation|interface|port|traffic|throughput)\b/i.test(String(userMessage || ''))
+
+  const data = await fetchZabbixSnapshot(client, {
+    hostFilter,
+    deviceTypeFilter,
+    includePing,
+    includeBandwidth,
+  })
+
+  if (!data.configured) {
+    return { module: 'zabbixInfra', freshness: 'live', fetchedAt, configured: false, error: 'Zabbix not configured' }
+  }
+  if (data.error) {
+    return {
+      module: 'zabbixInfra',
+      freshness: 'live',
+      fetchedAt,
+      configured: true,
+      error: data.error,
+      url: data.url || null,
+    }
+  }
+
+  const matched = data.matchedHosts || []
+  const hosts = matched.map(h => ({
+    hostid: h.hostid,
+    name: h.name,
+    host: h.host,
+    status: h.status,
+    type: h.type,
+    interfaceIps: h.interfaceIps,
+    groups: h.groups,
+    ping: includePing && data.pingMetrics?.byHost?.[h.hostid]
+      ? {
+          reach: data.pingMetrics.byHost[h.hostid].reach,
+          ms: data.pingMetrics.byHost[h.hostid].ms,
+          loss: data.pingMetrics.byHost[h.hostid].loss,
+          source: data.pingMetrics.byHost[h.hostid].source,
+        }
+      : undefined,
+    ports: includeBandwidth ? hostPortsFromSnapshot(data, h) : undefined,
+  }))
+
+  return {
+    module: 'zabbixInfra',
+    freshness: 'live',
+    fetchedAt,
+    configured: true,
+    source: 'Infra Zabbix API (host.get + item.get net.if.*)',
+    note: 'Live SNMP/interface metrics at send time. inBps/outBps are raw bytes/sec from Zabbix net.if.in/out items.',
+    version: data.version,
+    hostFilter: data.hostFilter,
+    deviceTypeFilter: data.deviceTypeFilter,
+    availability: data.availability,
+    deviceTypes: data.deviceTypes,
+    problemCount: data.problemCount,
+    problems: (data.problems || []).slice(0, 10),
+    hosts,
+    pingSummary: includePing && data.pingMetrics ? data.pingMetrics.summary : undefined,
   }
 }

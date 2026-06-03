@@ -1,14 +1,58 @@
 import {
+  isSentinelOneConfigured,
   isSentinelOneXdrConfigured,
   resolveSentinelOneXdrBase,
+  fetchThreatsList,
   runSentinelOnePowerQuery,
 } from '../../utils/sentinelOneApi.js'
 import { buildPowerQueryText, DEFAULT_TABLE_COLUMNS } from '../../utils/xdrPowerQuery.js'
 import { parseQuestionTimeRange } from './queryContext.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 
+const IPV4_RE = /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/
+
 const XDR_KEYWORDS = /\b(sentinel|sentinal|sentinelone|xdr|singularity|powerquery|power query|data lake)\b/i
 const LOGIN_FAIL_KEYWORDS = /\b(failed login|login fail|login failure|logon fail|authentication fail|auth fail|4625|bad password|invalid logon)\b/i
+const THREAT_INVENTORY_KEYWORDS = /\b(threats?|malware|incident|detections?|suspicious|infected|quarantine)\b/i
+
+function isThreatInventoryQuery(question) {
+  const q = String(question || '')
+  // Common typo: "thread" instead of "threat" when paired with XDR / new / found / today.
+  if (/\bthreads?\b/i.test(q) && /\b(new|found|today|xdr|sentinel|recent|active)\b/i.test(q)) return true
+  if (THREAT_INVENTORY_KEYWORDS.test(q) && (XDR_KEYWORDS.test(q) || /\b(new|found|today|recent|active)\b/i.test(q))) return true
+  return false
+}
+
+function threatRangeFromQuestion(question) {
+  const q = String(question || '').toLowerCase()
+  if (/\btoday\b/.test(q)) return '1d'
+  if (/\b(last hour|past hour|1 hr|1hr)\b/.test(q)) return '1h'
+  if (/\b(last 24|24 hour|24h|last day|past day)\b/.test(q)) return '24h'
+  if (/\b(last week|7 day|7d|past week)\b/.test(q)) return '7d'
+  const influxStyle = parseQuestionTimeRange(question)
+  const m = /^-(\d+)([smhd])$/i.exec(influxStyle)
+  if (m) return `${m[1]}${m[2].toLowerCase()}`
+  return '24h'
+}
+
+function wantsNewThreatsOnly(question) {
+  return /\b(new|recent|found|today|active|unresolved)\b/i.test(String(question || ''))
+}
+
+/** Follow-up after XDR that is clearly a different topic (Zabbix IP, bandwidth, store, etc.). */
+function isOffTopicXdrFollowUp(question) {
+  const q = String(question || '')
+  if (isXdrQuestion(q) || buildXdrQueryFromQuestion(q) || isThreatInventoryQuery(q)) return false
+  if (/\b(zabbix|infra mon|switch|switches|router|ping|icmp|network device|host availability)\b/i.test(q)) return true
+  const ip = String(q).match(IPV4_RE)?.[0]
+  if (ip && /\b(bandwidth|utilization|utilisation|traffic|throughput|interface|port|ping|switch|cpu|memory)\b/i.test(q)) {
+    return true
+  }
+  if (/\b(bandwidth|utilization|utilisation|store monitor|offline stores?|usb disconnect|firewall deny|fortigate deny|hostname report)\b/i.test(q)) {
+    return true
+  }
+  return false
+}
 
 function pqRangeFromQuestion(question) {
   const influxStyle = parseQuestionTimeRange(question)
@@ -114,14 +158,85 @@ function formatSampleRows(rows, limit = 8) {
   })
 }
 
+async function tryThreatListAnswer(question, ctx, fetchedAt) {
+  const range = ctx?.range
+    ? pqRangeFromQuestion(ctx.range)
+    : threatRangeFromQuestion(question)
+  const newOnly = wantsNewThreatsOnly(question)
+  const listQuery = {
+    range,
+    limit: '25',
+    mitigation: 'all',
+    ...(newOnly ? {} : { incidents: 'all' }),
+  }
+
+  if (!isSentinelOneConfigured()) {
+    return null
+  }
+
+  const { threats, pagination } = await fetchThreatsList(listQuery)
+  const total = pagination?.totalItems ?? pagination?.total ?? threats?.length ?? 0
+  const lines = [
+    `SentinelOne threats (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
+    `Window: ${formatRangeLabel(range)}${newOnly ? ' · new/unresolved focus' : ''}`,
+    '',
+    `Threats found: ${total}${threats?.length && total > threats.length ? ` (showing ${threats.length})` : ''}`,
+    '',
+  ]
+
+  if (!threats?.length) {
+    lines.push('No threats matched in this window.')
+  } else {
+    lines.push('Recent threats:')
+    for (const t of threats.slice(0, 20)) {
+      const created = t.createdAt ? formatPortalTimestamp(t.createdAt) : '—'
+      lines.push(
+        `  • ${t.threatName || '—'} · ${t.agentComputerName || '—'} · ${t.mitigationStatus || '—'} · ${t.incidentStatus || '—'} · ${created}`,
+      )
+    }
+    if (threats.length > 20) lines.push(`  … and ${threats.length - 20} more in this page`)
+  }
+
+  lines.push('', '(Direct answer from live SentinelOne Threats API — no LLM wait.)')
+
+  return {
+    content: lines.join('\n'),
+    contextMeta: [{
+      id: 'sentinelXdr',
+      label: 'SentinelOne XDR',
+      freshness: 'live',
+      fetchedAt,
+      configured: true,
+      note: `Threats API · ${formatRangeLabel(range)}`,
+    }],
+    contextPreview: {
+      xdr: {
+        range,
+        totalEvents: total,
+        rowCount: threats?.length ?? 0,
+        query: 'GET /threats',
+        topEndpoints: [...new Map(
+          (threats || []).map(t => [t.agentComputerName || 'unknown', 0]),
+        ).keys()].slice(0, 5).map(key => ({
+          key,
+          count: (threats || []).filter(t => (t.agentComputerName || 'unknown') === key).length,
+        })),
+      },
+    },
+    queryContext: ctx ? { topic: 'xdr', isFollowUp: ctx.isFollowUp, range } : undefined,
+  }
+}
+
 function buildQuestionForXdr(question, ctx) {
   if (!ctx?.isFollowUp || ctx.priorTopic !== 'xdr') return question
   const q = String(question || '')
-  if (isXdrQuestion(q) || buildXdrQueryFromQuestion(q)) return q
-  if (/\b(endpoint|endpoints|which|list|show|hostname|machine|machines|server|servers)\b/i.test(q)) {
-    return `sentinel xdr failed login on server machines ${ctx.range ? ctx.range.replace(/^-/, 'last ') : 'last 1 hour'}`
+  if (isOffTopicXdrFollowUp(q)) return q
+  if (isXdrQuestion(q) || buildXdrQueryFromQuestion(q) || isThreatInventoryQuery(q)) return q
+  if (/\b(endpoint|endpoints|which|list|show|hostname|machine|machines)\b/i.test(q)) {
+    return `sentinel xdr failed login ${ctx.range ? ctx.range.replace(/^-/, 'last ') : 'last 1 hour'}`
   }
-  return ctx.threadText || question
+  // Never merge full thread — assistant suggestion text pollutes PowerQuery templates.
+  return q
 }
 
 /**
@@ -132,6 +247,10 @@ function buildQuestionForXdr(question, ctx) {
  */
 export async function tryDirectXdrAnswer(question, allowedPages, ctx = null) {
   if (!allowedPages.includes('sentinel')) return null
+
+  if (ctx?.isFollowUp && ctx.priorTopic === 'xdr' && isOffTopicXdrFollowUp(question)) {
+    return null
+  }
 
   const shouldRun =
     isXdrQuestion(question)
@@ -168,12 +287,40 @@ export async function tryDirectXdrAnswer(question, allowedPages, ctx = null) {
   }
 
   const rawQuery = buildXdrQueryFromQuestion(effectiveQuestion)
+
+  if (isThreatInventoryQuery(effectiveQuestion)) {
+    try {
+      const threatAnswer = await tryThreatListAnswer(effectiveQuestion, ctx, fetchedAt)
+      if (threatAnswer) return threatAnswer
+    } catch (err) {
+      if (!rawQuery) {
+        return {
+          content: [
+            `SentinelOne threat lookup failed: ${err.message || String(err)}`,
+            '',
+            'Check SENTINEL_ONE_API_TOKEN (Threat Read) and console URL in .env.',
+          ].join('\n'),
+          contextMeta: [{
+            id: 'sentinelXdr',
+            label: 'SentinelOne XDR',
+            freshness: 'live',
+            fetchedAt,
+            configured: true,
+            error: err.message || String(err),
+          }],
+          contextPreview: {},
+        }
+      }
+    }
+  }
+
   if (!rawQuery) {
     return {
       content: [
-        'I can run live SentinelOne XDR PowerQuery for known patterns (failed login, process creation, DNS, network).',
+        'I can run live SentinelOne XDR PowerQuery for known patterns (failed login, process creation, DNS, network, indicators).',
         '',
         'Try:',
+        '  • today new threat found in xdr',
         '  • failed login on server machines last 1 hour',
         '  • sentinel xdr failed login last 24 hours',
         '',

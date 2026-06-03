@@ -32,12 +32,13 @@ import { resolveQueryContext, isHostnameDataRequest, extractStoreHostname } from
 
 const router = Router()
 
-const VALID_PROVIDERS = ['claude', 'openai', 'ollama']
+const VALID_PROVIDERS = ['claude', 'openai', 'gemini', 'ollama']
 
 const CHAT_SYSTEM_BASE = `You are NetPulse AI, an assistant for network and security operations at Lenskart.
 Help analysts with firewall logs, store connectivity, SentinelOne, Zabbix, and SOC/NOC workflows.
 Be concise, structured, and actionable. Use bullet points and tables when listing hostnames or stores.
 For advanced monitoring questions: correlate store offline status with firewall denies, Sentinel threats, USB events, and NOC interface logs when context provides them.
+For Zabbix bandwidth/utilization questions: analyze zabbixInfra.hosts[].ports — list all interfaces, highlight highest traffic, note down ports, and give actionable ops guidance.
 For RCA-style questions without a direct answer: state hypotheses ranked by evidence, cite counts from context, and list recommended verification steps — never guess hostnames or event counts.
 CRITICAL: NEVER invent hostnames, store tags, IP addresses, event counts, or SentinelOne XDR rows.
 When portal context or a direct query result is provided below, use ONLY that data.
@@ -408,7 +409,10 @@ router.post('/chat', async (req, res) => {
     const detail = inferContextDetail(lastUser)
     const maxTokens = detail === 'summary' ? 512 : detail === 'standard' ? 1024 : 1536
     const recentMessages = sanitized.slice(-6)
-    const llmTimeoutMs = Number.parseInt(process.env.AI_LLM_TIMEOUT_MS || '120000', 10)
+    // Default 300s for Ollama (local LLM can be slow); cloud providers stay at 120s unless overridden.
+    const providerName = getAIProvider().name
+    const defaultTimeoutMs = providerName === 'ollama' ? 300000 : 120000
+    const llmTimeoutMs = Number.parseInt(process.env.AI_LLM_TIMEOUT_MS || String(defaultTimeoutMs), 10)
 
     let content = ''
     const llmStart = Date.now()

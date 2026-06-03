@@ -26,7 +26,7 @@ const C = {
 const PAGE_ROOT = {
   width: '100%',
   boxSizing: 'border-box',
-  height: 'calc(var(--app-vh, 100vh) - 52px - 32px)',
+  height: 'calc(var(--app-vh, 100vh) - 52px - 16px)',
   display: 'flex',
   flexDirection: 'column',
   minHeight: 0,
@@ -247,11 +247,19 @@ function ProviderStatusBanner({ status, onSwitchOllama, switching }) {
   if (!status) return null
   const ollamaRow = status.rows?.find((r) => r.key === 'ollama')
   const claudeRow = status.rows?.find((r) => r.key === 'claude')
+  const geminiRow = status.rows?.find((r) => r.key === 'gemini')
+  const openaiRow = status.rows?.find((r) => r.key === 'openai')
+  const activeRow = status.rows?.find((r) => r.key === 'active')
+  const cloudKeyMissing =
+    (status.active === 'claude' && !claudeRow?.ok) ||
+    (status.active === 'openai' && !openaiRow?.ok) ||
+    (status.active === 'gemini' && !geminiRow?.ok)
   const needsAttention =
     !!status.hint ||
-    (status.active === 'claude' && !claudeRow?.ok) ||
+    !activeRow?.ok ||
+    cloudKeyMissing ||
     (status.active === 'ollama' && !ollamaRow?.ok) ||
-    (status.active !== 'ollama' && ollamaRow?.ok && !claudeRow?.ok)
+    (status.active !== 'ollama' && ollamaRow?.ok && cloudKeyMissing)
   if (!needsAttention) return null
 
   return (
@@ -296,12 +304,19 @@ function ProviderStatusBanner({ status, onSwitchOllama, switching }) {
 }
 
 function ContextMetaPanel({ meta = [], fastPath, preview, metrics, queryContext }) {
+  const [open, setOpen] = useState(false)
   if (!meta?.length && !fastPath && !preview && !metrics && !queryContext) return null
+  const summaryBits = [
+    metrics?.mode && `mode=${metrics.mode}`,
+    metrics?.totalMs != null && `${metrics.totalMs}ms`,
+    queryContext?.topic && `topic=${queryContext.topic}`,
+    meta.length && `${meta.length} source${meta.length === 1 ? '' : 's'}`,
+  ].filter(Boolean).join(' · ')
+
   return (
     <div
       style={{
         marginTop: 8,
-        padding: '8px 10px',
         borderRadius: 8,
         background: 'rgba(79,126,245,.06)',
         border: `1px solid ${C.border}`,
@@ -309,8 +324,36 @@ function ContextMetaPanel({ meta = [], fastPath, preview, metrics, queryContext 
         color: C.text3,
         fontFamily: 'var(--mono)',
         lineHeight: 1.6,
+        overflow: 'hidden',
       }}
     >
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 8,
+          padding: '6px 10px',
+          border: 'none',
+          background: 'transparent',
+          color: C.text2,
+          fontSize: 10,
+          fontFamily: 'var(--mono)',
+          cursor: 'pointer',
+          textAlign: 'left',
+        }}
+      >
+        <span style={{ fontWeight: 700 }}>
+          {fastPath ? 'Live data' : 'Sources'}
+          {summaryBits ? ` · ${summaryBits}` : ''}
+        </span>
+        <span style={{ color: C.text3 }}>{open ? '▲ hide' : '▼ details'}</span>
+      </button>
+      {!open ? null : (
+      <div style={{ padding: '0 10px 8px' }}>
       <div style={{ fontWeight: 700, color: C.text2, marginBottom: 4 }}>
         {fastPath
           ? (metrics?.mode === 'direct-rca'
@@ -425,30 +468,75 @@ function ContextMetaPanel({ meta = [], fastPath, preview, metrics, queryContext 
           </div>
         </div>
       )}
+      </div>
+      )}
     </div>
   )
 }
 
-function DataSourcesPanel({ modules, enabled, onToggle, autoModules, onAutoToggle }) {
+function DataSourcesPanel({ modules, enabled, onToggle, autoModules, onAutoToggle, collapsed, onToggleCollapsed }) {
   if (!modules.length) return null
+
+  if (collapsed) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', flexShrink: 0 }}>
+        <button
+          type="button"
+          onClick={onToggleCollapsed}
+          title="Show data source toggles"
+          style={{
+            padding: '5px 10px',
+            borderRadius: 8,
+            border: `1px solid ${C.border}`,
+            background: C.bg3,
+            color: C.text2,
+            fontSize: 11,
+            fontWeight: 600,
+            cursor: 'pointer',
+          }}
+        >
+          Sources {enabled.length}/{modules.length} ▾
+        </button>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.text3, cursor: 'pointer' }}>
+          <input type="checkbox" checked={autoModules} onChange={e => onAutoToggle(e.target.checked)} />
+          Auto-detect
+        </label>
+      </div>
+    )
+  }
+
   return (
     <div
       style={{
-        padding: '10px 12px',
+        padding: '8px 10px',
         borderRadius: 10,
         border: `1px solid ${C.border}`,
         background: C.bg2,
         flexShrink: 0,
       }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: C.text }}>Data sources</span>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+        <button
+          type="button"
+          onClick={onToggleCollapsed}
+          style={{
+            padding: 0,
+            border: 'none',
+            background: 'transparent',
+            color: C.text,
+            fontSize: 12,
+            fontWeight: 700,
+            cursor: 'pointer',
+          }}
+        >
+          Data sources ▴
+        </button>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: C.text3, cursor: 'pointer' }}>
           <input type="checkbox" checked={autoModules} onChange={e => onAutoToggle(e.target.checked)} />
           Auto-detect from question
         </label>
       </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
         {modules.map(m => {
           const on = enabled.includes(m.id)
           return (
@@ -475,24 +563,20 @@ function DataSourcesPanel({ modules, enabled, onToggle, autoModules, onAutoToggl
           )
         })}
       </div>
-      <p style={{ margin: '8px 0 0', fontSize: 10, color: C.text3, lineHeight: 1.5 }}>
-        <strong style={{ color: C.green }}>Live</strong> = queried from Influx/ES when you send.{' '}
-        <strong style={{ color: C.amber }}>Periodic</strong> = problem tracker snapshot (~2 min job).
-      </p>
     </div>
   )
 }
 
-function TabBar({ tab, setTab }) {
+function TabBar({ tab, setTab, compact = false }) {
   return (
-    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10, flexShrink: 0 }}>
+    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: compact ? 0 : 10, flexShrink: 0 }}>
       {TABS.map(t => (
         <button
           key={t.id}
           type="button"
           onClick={() => setTab(t.id)}
           style={{
-            padding: '8px 14px',
+            padding: compact ? '6px 12px' : '8px 14px',
             borderRadius: 8,
             border: `1px solid ${tab === t.id ? C.accent : C.border}`,
             background: tab === t.id ? 'rgba(79,126,245,.12)' : C.bg3,
@@ -512,8 +596,7 @@ function TabBar({ tab, setTab }) {
 
 function ChatModeBar({ mode, onModeChange }) {
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-      <span style={{ fontSize: 11, color: C.text3, fontWeight: 600 }}>Chat mode</span>
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
       {CHAT_MODES.map(m => (
         <button
           key={m.id}
@@ -521,7 +604,7 @@ function ChatModeBar({ mode, onModeChange }) {
           title={m.hint}
           onClick={() => onModeChange(m.id)}
           style={{
-            padding: '6px 12px',
+            padding: '5px 10px',
             borderRadius: 8,
             border: `1px solid ${mode === m.id ? C.accent : C.border}`,
             background: mode === m.id ? 'rgba(79,126,245,.12)' : C.bg3,
@@ -534,9 +617,6 @@ function ChatModeBar({ mode, onModeChange }) {
           {m.label}
         </button>
       ))}
-      <span style={{ fontSize: 10, color: C.text3, flex: '1 1 200px' }}>
-        {CHAT_MODES.find(m => m.id === mode)?.hint}
-      </span>
     </div>
   )
 }
@@ -567,6 +647,7 @@ function ChatTab({
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [sourcesOpen, setSourcesOpen] = useState(false)
   const bottomRef = useRef(null)
   const abortRef = useRef(null)
 
@@ -650,20 +731,24 @@ function ChatTab({
       : 'Fetching live portal data & thinking…'
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 10, minHeight: 0, overflow: 'hidden' }}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6, minHeight: 0, overflow: 'hidden' }}>
       <ProviderStatusBanner
         status={providerStatus}
         onSwitchOllama={onSwitchOllama}
         switching={switchingProvider}
       />
-      <ChatModeBar mode={chatMode} onModeChange={setChatMode} />
-      <DataSourcesPanel
-        modules={availableModules}
-        enabled={enabledModules}
-        onToggle={onToggleModule}
-        autoModules={autoModules}
-        onAutoToggle={onAutoToggle}
-      />
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+        <ChatModeBar mode={chatMode} onModeChange={setChatMode} />
+        <DataSourcesPanel
+          modules={availableModules}
+          enabled={enabledModules}
+          onToggle={onToggleModule}
+          autoModules={autoModules}
+          onAutoToggle={onAutoToggle}
+          collapsed={!sourcesOpen}
+          onToggleCollapsed={() => setSourcesOpen(v => !v)}
+        />
+      </div>
 
       <div
         style={{
@@ -681,10 +766,10 @@ function ChatTab({
           style={{
             flex: 1,
             overflowY: 'auto',
-            padding: '16px 20px',
+            padding: '12px 14px',
             display: 'flex',
             flexDirection: 'column',
-            gap: 14,
+            gap: 10,
           }}
         >
           {messages.map((m, i) => (
@@ -748,11 +833,11 @@ function ChatTab({
             flexShrink: 0,
             borderTop: `1px solid ${C.border}`,
             background: C.bg3,
-            padding: '14px 16px',
+            padding: '10px 12px',
           }}
         >
           {messages.length <= 1 && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 8, overflowX: 'auto', paddingBottom: 2 }}>
               {(STARTER_PROMPTS[chatMode] || STARTER_PROMPTS.monitor).map(p => (
                 <button
                   key={p}
@@ -760,7 +845,7 @@ function ChatTab({
                   onClick={() => send(p)}
                   disabled={loading}
                   style={{
-                    padding: '8px 12px',
+                    padding: '6px 10px',
                     borderRadius: 8,
                     border: `1px solid ${C.border}`,
                     background: C.bg2,
@@ -768,8 +853,11 @@ function ChatTab({
                     fontSize: 11,
                     cursor: 'pointer',
                     textAlign: 'left',
-                    flex: '1 1 240px',
-                    maxWidth: '100%',
+                    flex: '0 0 auto',
+                    maxWidth: 280,
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
                   }}
                 >
                   {p}
@@ -789,14 +877,14 @@ function ChatTab({
                 }
               }}
               placeholder={loading ? 'Thinking… click Stop to cancel' : 'Ask NetPulse AI… (Enter to send, Shift+Enter for newline)'}
-              rows={3}
+              rows={2}
               disabled={loading}
               style={{
                 flex: 1,
                 resize: 'none',
-                minHeight: 72,
-                maxHeight: 160,
-                padding: '12px 14px',
+                minHeight: 52,
+                maxHeight: 120,
+                padding: '10px 12px',
                 borderRadius: 10,
                 border: `1px solid ${C.border}`,
                 background: C.bg2,
@@ -847,8 +935,8 @@ function ChatTab({
             )}
           </div>
 
-          <div style={{ marginTop: 10, fontSize: 10, color: C.text3, fontFamily: 'var(--mono)', textAlign: 'center' }}>
-            Provider: {provider || '…'} {model ? `· ${model}` : ''}
+          <div style={{ marginTop: 6, fontSize: 10, color: C.text3, fontFamily: 'var(--mono)', textAlign: 'center' }}>
+            {provider ? `${provider}${model ? ` · ${model}` : ''}` : ''}
           </div>
         </div>
       </div>
@@ -1232,26 +1320,10 @@ export default function AIPage() {
 
   return (
     <div style={{ ...PAGE_ROOT, color: C.text, fontFamily: 'var(--sans)' }}>
-      <div style={{ flexShrink: 0, marginBottom: 10 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700, margin: '0 0 4px', letterSpacing: '-0.02em' }}>AI Assistant</h1>
-        <p style={{ margin: 0, fontSize: 12, color: C.text3, lineHeight: 1.5 }}>
-          Real portal data + AI reasoning —{' '}
-          <FreshnessBadge freshness="live" /> live queries and{' '}
-          <FreshnessBadge freshness="periodic" /> periodic snapshots, clearly labeled.
-          {provider ? (
-            <>
-              {' '}
-              Provider: <strong style={{ color: C.text2 }}>{provider}</strong>
-              {model ? ` / ${model}` : ''}
-              {providerStatus?.autoFallback ? ' (auto-selected)' : ''}.
-            </>
-          ) : (
-            ''
-          )}
-        </p>
+      <div style={{ flexShrink: 0, marginBottom: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0, letterSpacing: '-0.02em' }}>AI Assistant</h1>
+        <TabBar tab={tab} setTab={setTab} compact />
       </div>
-
-      <TabBar tab={tab} setTab={setTab} />
 
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         {tab === 'chat' && (
