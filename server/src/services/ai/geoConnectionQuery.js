@@ -19,8 +19,41 @@ const COUNTRY_ALIASES = [
 
 const CONNECTION_MARKERS = /\b(connections?|connect\w*|connected|ip connect|network connection|traffic sessions?|going to|devices?\b.*\b(?:to|from|china|india))\b/i
 
+const STORE_CONN_FOLLOWUP = /\b(time range|time window|select time|historical|history|same query|check again|retry|for the past|in the past)\b/i
+const STORE_CONN_TIME = /\b(last|past|previous)\s+\d+\s*(h|hr|hour|hours|m|min|minute|minutes|d|day|days)\b|\b(24\s*h|24\s*hours?|12\s*h|12\s*hours?|1\s*h|1\s*hour)\b/i
+
+function combinedStoreConnText(question, ctx = null) {
+  const parts = [question, ctx?.priorUser, ctx?.priorAssistant].filter(Boolean)
+  return parts.join(' ')
+}
+
+/** Follow-up to a Store Monitor WiFi / RP group answer — stay on store path, not RCA/LLM-only. */
+export function isStoreConnectivityFollowUp(question, ctx = null) {
+  const priorStore = ctx?.priorTopic === 'store'
+    || /Store Monitor/i.test(String(ctx?.priorAssistant || ''))
+  if (!priorStore) return false
+  const q = String(question || '').toLowerCase()
+  const thread = combinedStoreConnText(question, ctx).toLowerCase()
+  const hasWifiCtx = /\b(wifi|wi-?fi|wireless)\b/.test(thread)
+    && (/\b(rop|rp)\s*group\b/.test(thread) || /\bro\s*p\b/.test(thread))
+  if (!hasWifiCtx) return false
+  if (STORE_CONN_FOLLOWUP.test(q)) return true
+  if (STORE_CONN_TIME.test(q) && /\b(check|select|use|apply|same|again|wifi|range|time|hour)\b/.test(q)) return true
+  return false
+}
+
 /** Store Monitor connectivity (WiFi, RP/RoP group) — not XDR geo. */
-export function isStoreMonitorConnectivityQuery(question) {
+export function isStoreMonitorConnectivityQuery(question, ctx = null) {
+  if (isStoreConnectivityFollowUp(question, ctx)) return true
+
+  if (ctx?.priorAssistant && /Store Monitor/i.test(ctx.priorAssistant)) {
+    const q2 = String(question || '').toLowerCase()
+    const thread = combinedStoreConnText(question, ctx).toLowerCase()
+    if (/\b(wifi|wi-?fi|wireless)\b/.test(thread) && /\b(rop|rp)\s*group\b/.test(thread)) {
+      if (STORE_CONN_TIME.test(q2) || STORE_CONN_FOLLOWUP.test(q2)) return true
+    }
+  }
+
   const q = String(question || '').toLowerCase()
   if (/\b(sentinel|xdr|sentinelone|powerquery|fortigate|firewall|zabbix)\b/.test(q)) return false
   const ropGroup = /\b(rop|rp)\s*group\b/.test(q) || (/\bro\s*p\b/.test(q) && /\bgroup\b/.test(q))
@@ -31,7 +64,26 @@ export function isStoreMonitorConnectivityQuery(question) {
   if (/\b(how many|count)\b/.test(q) && /\b(device|devices)\b/.test(q) && (ropGroup || /\b(wifi|wi-?fi)\b/.test(q))) {
     return true
   }
+  if (STORE_CONN_TIME.test(q) && connCtx && ropGroup) return true
   return false
+}
+
+/** e.g. "top 20 devices with issue in store mon" */
+export function isStoreMonitorIssuesQuery(question) {
+  const q = String(question || '').toLowerCase()
+  if (/\b(sentinel|xdr|zabbix|fortigate|sentinelone)\b/.test(q)) return false
+  if (/\b(rca|root cause|why is|investigate)\b/.test(q) && !/\bstore mon\b/.test(q)) return false
+  const storeCtx = /\b(store mon|store monitor|stores?)\b/.test(q)
+  const issuesCtx = /\b(issue|issues|problem|problems|worst|troubled|affected)\b/.test(q)
+  const listCtx = /\b(top|list|show|which|device|devices|worst)\b/.test(q)
+  return storeCtx && issuesCtx && (listCtx || /\btop\s+\d+\b/.test(q))
+}
+
+export function extractTopLimit(question, defaultLimit = 20) {
+  const m = String(question || '').match(/\btop\s+(\d+)\b/i)
+  if (!m) return defaultLimit
+  const n = parseInt(m[1], 10)
+  return Number.isFinite(n) ? Math.min(Math.max(n, 1), 50) : defaultLimit
 }
 
 /**

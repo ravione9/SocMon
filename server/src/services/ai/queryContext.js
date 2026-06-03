@@ -1,9 +1,10 @@
 import { isXdrQuestion } from './xdrDirectAnswer.js'
-import { isGeoConnectionQuery, isStoreMonitorConnectivityQuery } from './geoConnectionQuery.js'
+import { isGeoConnectionQuery, isStoreConnectivityFollowUp, isStoreMonitorConnectivityQuery } from './geoConnectionQuery.js'
 import { isNetworkInfraQuery, isZabbixQuestion, isInfraDeviceStatusQuery, extractHostGroupFilter, extractHostGroupFromThread, extractIpv4, extractIpv4FromThread, extractZabbixHostFromThread, extractInfraHostName, extractInfraHostFromThread } from './zabbixDirectAnswer.js'
 import { isFirewallQuestion, isSocReportQuery } from './socDirectAnswer.js'
 import { isDisconnectionLogQuery } from './nocDirectAnswer.js'
 import { isRcaQuery } from './rcaAnalysis.js'
+import { isStoreMonitorIssuesQuery } from './geoConnectionQuery.js'
 
 /**
  * Parse time window from natural language, e.g. "last 1 hr" → "-1h".
@@ -20,7 +21,9 @@ export function parseQuestionTimeRange(q) {
   m = text.match(/\b(\d+)\s*(m|min|mins|minute|minutes)\b/)
   if (m) return `-${m[1]}m`
   if (/\b(last hour|past hour|1 hr|1hr|one hour)\b/.test(text)) return '-1h'
-  if (/\b(last 24|24 hour|24h|last day|past day)\b/.test(text)) return '-24h'
+  if (/\b(last 24|24 hour|24 hours|24h|last day|past day)\b/.test(text)) return '-24h'
+  if (/\b(?:time range|range|window|past|last)?\s*24\s*hours?\b/.test(text)) return '-24h'
+  if (/\b(?:time range|range|window|past|last)?\s*12\s*hours?\b/.test(text)) return '-12h'
   if (/\b(last week|7 day|7d|past week)\b/.test(text)) return '-7d'
   if (/\blast\b/.test(text)) return '-1h'
   return '-24h'
@@ -139,8 +142,13 @@ export function resolveQueryContext(messages, opts = {}) {
 
   const sameSubject = sameSubjectAsPrior(currentQuestion, priorUser, priorAssistant)
 
+  const storeConnCtxEarly = { isFollowUp: true, priorTopic, priorAssistant, priorUser, chatMode }
+  const storeConnContinuation = userMessages.length > 1
+    && isStoreMonitorConnectivityQuery(currentQuestion, storeConnCtxEarly)
+
   const isFollowUp = inheritsThread && (
     isFollowUpPhrasing(currentQuestion)
+    || storeConnContinuation
     || (
       priorTopic
       && sameSubject
@@ -195,9 +203,15 @@ export function resolveQueryContext(messages, opts = {}) {
     || (hasExplicitCrashSubject(currentQuestion) ? null : extractAppNameFromUserHistory(userMessages.slice(0, -1)))
     || (appNameFromCurrent ? null : extractAppNameFromAssistant(priorAssistant))
 
+  const storeConnCtx = { isFollowUp, priorTopic, priorAssistant, priorUser, chatMode }
   let topic = detectTopicFromQuestion(currentQuestion, appName, { chatMode, isFollowUp, priorTopic })
+  if (isStoreMonitorIssuesQuery(currentQuestion)) topic = 'store'
+  if (isStoreMonitorConnectivityQuery(currentQuestion, storeConnCtx)
+    || isStoreConnectivityFollowUp(currentQuestion, storeConnCtx)) {
+    topic = 'store'
+  }
   if (!topic && xdrIntent) topic = 'xdr'
-  if (!topic && chatMode === 'rca') topic = 'rca'
+  if (!topic && chatMode === 'rca' && !isStoreMonitorIssuesQuery(currentQuestion)) topic = 'rca'
   if (!topic && chatMode === 'details' && hostname) topic = 'hostname'
   if (!topic && hostname && isHostnameDataRequest(currentQuestion)) topic = 'hostname'
   if (!topic && isStoreHostnamePortalQuery(currentQuestion)) topic = 'hostname'
@@ -210,7 +224,12 @@ export function resolveQueryContext(messages, opts = {}) {
 
   let range = parseQuestionTimeRange(currentQuestion)
   if (isFollowUp && !hasExplicitTimeRange(currentQuestion)) {
-    range = extractRangeFromAssistant(priorAssistant) || range
+    range = parseQuestionTimeRange(priorUser)
+      || extractRangeFromAssistant(priorAssistant)
+      || range
+  }
+  if (isStoreConnectivityFollowUp(currentQuestion, storeConnCtx) && range === '-1h') {
+    range = parseQuestionTimeRange(priorUser) || '-24h'
   }
 
   const wantsStoreList =
@@ -228,6 +247,8 @@ export function resolveQueryContext(messages, opts = {}) {
     currentQuestion,
     topic,
     priorTopic,
+    priorAssistant,
+    priorUser,
     isFollowUp,
     subjectChanged,
     followUpKind,
@@ -270,7 +291,7 @@ function inferTopicFromAssistant(text) {
   if (/Store hostname report|Hostname report|Metrics chart/i.test(t)) return 'hostname'
   if (/App Crashes|Influx crash|crash events/i.test(t)) return 'crash'
   if (/SentinelOne XDR|PowerQuery used/i.test(t)) return 'xdr'
-  if (/Store Monitor \(LIVE/i.test(t)) return 'store'
+  if (/Store Monitor.*\(LIVE|Store Monitor —/i.test(t)) return 'store'
   if (/Root Cause Analysis|Ranked hypotheses/i.test(t)) return 'rca'
   if (/Disconnection logs|USB disconnections|Cisco interface disconnections/i.test(t)) return 'noc'
   if (/FortiGate \/ SOC|SOC \/ firewall|complete report/i.test(t)) return 'soc'
@@ -279,8 +300,10 @@ function inferTopicFromAssistant(text) {
 
 function detectTopicFromQuestion(q, appName, ctx = {}) {
   const text = String(q || '')
+  if (isStoreMonitorIssuesQuery(text)) return 'store'
+  if (isStoreMonitorConnectivityQuery(text, ctx)) return 'store'
+  if (isStoreConnectivityFollowUp(text, ctx)) return 'store'
   if (isRcaQuery(text, ctx)) return 'rca'
-  if (isStoreMonitorConnectivityQuery(text)) return 'store'
   if (isXdrQuestion(text) || isGeoConnectionQuery(text)) return 'xdr'
   if (isSocReportQuery(text)) return 'soc'
   if (isZabbixQuestion(text)) return 'zabbix'
@@ -316,16 +339,19 @@ export function wantsCrashEventLog(question, ctx = null) {
   return false
 }
 
-function pickDirectHandler({ currentQuestion, topic, priorTopic, isFollowUp, subjectChanged, followUpKind, appName, hostname, ip, zabbixHost, chatMode = 'monitor' }) {
+function pickDirectHandler({ currentQuestion, topic, priorTopic, priorAssistant, priorUser, isFollowUp, subjectChanged, followUpKind, appName, hostname, ip, zabbixHost, chatMode = 'monitor' }) {
   const q = String(currentQuestion || '')
   const ctxLite = { isFollowUp, subjectChanged, priorTopic, chatMode, hostname, ip, zabbixHost, directHandler: null }
   const storeMonitorIntent = /\b(offline|online|down|monitor status|store monitor|how many stores)\b/i.test(q)
   const chartRequest = /\b(graph|graphical|chart|visual|plot|timeline)\b/i.test(q)
 
-  if ((isRcaQuery(q, ctxLite) || topic === 'rca') && chatMode !== 'details') return 'rca'
-  if (chatMode === 'details' && hostname && !isRcaQuery(q, ctxLite)) return 'hostname'
+  const storeConnCtx = { isFollowUp, priorTopic, priorAssistant, priorUser, chatMode }
+  if (isStoreMonitorIssuesQuery(q) || isStoreMonitorConnectivityQuery(q, storeConnCtx) || isStoreConnectivityFollowUp(q, storeConnCtx)) {
+    return 'store'
+  }
 
-  if (isStoreMonitorConnectivityQuery(q)) return 'store'
+  if ((isRcaQuery(q, ctxLite) || topic === 'rca') && chatMode !== 'details' && !isStoreMonitorIssuesQuery(q)) return 'rca'
+  if (chatMode === 'details' && hostname && !isRcaQuery(q, ctxLite)) return 'hostname'
 
   if (isXdrQuestion(q) || isGeoConnectionQuery(q) || topic === 'xdr') return 'xdr'
   if (isSocReportQuery(q) || (isFirewallQuestion(q) && !isZabbixQuestion(q, ctxLite))) return 'soc'
@@ -411,7 +437,8 @@ export function extractStoreHostname(text) {
 
 function hasExplicitTimeRange(q) {
   return /\b(last|past)\s+\d+\s*(h|hr|hour|hours|m|min|d|day)/i.test(q)
-    || /\b(1 hr|24h|24 hour|last hour|last day|last week)\b/i.test(q)
+    || /\b(1 hr|24h|24 hour|24 hours|last hour|last day|last week)\b/i.test(q)
+    || /\b(?:time range|range|window)?\s*24\s*hours?\b/i.test(q)
 }
 
 function extractRangeFromAssistant(text) {

@@ -611,6 +611,74 @@ async function _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, 
  * @param {number}  [fromSec]  - Unix epoch seconds (custom range start)
  * @param {number}  [toSec]    - Unix epoch seconds (custom range stop)
  */
+function buildFluxRangeClause(metricRange = '-24h', fromTs, toTs) {
+  if (fromTs && Number.isFinite(Number(fromTs))) {
+    const startISO = new Date(Number(fromTs) * 1000).toISOString()
+    const stopISO = toTs && Number.isFinite(Number(toTs))
+      ? new Date(Number(toTs) * 1000).toISOString()
+      : new Date().toISOString()
+    return `start: ${startISO}, stop: ${stopISO}`
+  }
+  return `start: ${metricRange}`
+}
+
+function isWifiInterfaceTag(value) {
+  const iface = String(value || '').toLowerCase()
+  return iface === 'wi-fi' || iface === 'wifi' || iface.includes('wireless')
+}
+
+/**
+ * Unique stores that reported Wi-Fi connectivity at least once in the Flux window.
+ * @param {string} metricRange e.g. '-24h'
+ * @param {number} [fromTs]
+ * @param {number} [toTs]
+ */
+export async function fetchWifiConnectivityHistory(metricRange = '-24h', fromTs, toTs) {
+  const rangeClause = buildFluxRangeClause(metricRange, fromTs, toTs)
+  const bucket = fluxEscape(cfg().bucket)
+  const flux = `
+from(bucket: "${bucket}")
+  |> range(${rangeClause})
+  |> filter(fn: (r) => r._measurement == "connectivity")
+  |> keep(columns: ["_time", "store_tag", "hostname", "serial", "conn_state", "active_interface"])
+`
+  const rows = await queryFlux(flux).catch((e) => {
+    console.warn('[influxStore] fetchWifiConnectivityHistory failed:', e.message)
+    return []
+  })
+
+  const byStore = new Map()
+  for (const row of rows) {
+    const tag = row.store_tag || buildSyntheticStoreTag(row.hostname, row.serial)
+    if (!tag) continue
+    if (!byStore.has(tag)) {
+      byStore.set(tag, {
+        storeTag: tag,
+        hostname: row.hostname || '',
+        serial: row.serial || '',
+        wifiHealthySamples: 0,
+        wifiInterfaceSamples: 0,
+        totalSamples: 0,
+      })
+    }
+    const rec = byStore.get(tag)
+    rec.totalSamples++
+    if (String(row.conn_state || '').toLowerCase() === 'wifi_healthy') rec.wifiHealthySamples++
+    if (isWifiInterfaceTag(row.active_interface)) rec.wifiInterfaceSamples++
+    if (row.hostname) rec.hostname = row.hostname
+    if (row.serial) rec.serial = row.serial
+  }
+
+  const stores = [...byStore.values()]
+  return {
+    metricRange,
+    stores,
+    storesWithData: stores.length,
+    uniqueWifiHealthy: stores.filter(s => s.wifiHealthySamples > 0).length,
+    uniqueWifiInterface: stores.filter(s => s.wifiInterfaceSamples > 0).length,
+  }
+}
+
 export async function fetchStoreHistory(storeTag, rangeSec = 3600, fromSec, toSec) {
   const tag = fluxEscape(storeTag)
   const synthetic = parseSyntheticStoreTag(storeTag)

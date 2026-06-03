@@ -20,6 +20,8 @@ import {
   inferContextDetail,
   suggestContextModules,
   tryDirectStoreAnswer,
+  tryDirectStoreConnectivityAnswer,
+  tryDirectStoreIssuesAnswer,
   tryDirectCrashAnswer,
   extractStoreGroupFilter,
 } from '../services/ai/portalContextBuilder.js'
@@ -31,7 +33,7 @@ import { tryDirectHostnameAnswer } from '../services/ai/hostnameDirectAnswer.js'
 import { tryDirectXdrAnswer } from '../services/ai/xdrDirectAnswer.js'
 import { resolveQueryContext, isHostnameDataRequest, isStoreHostnamePortalQuery, extractStoreHostname } from '../services/ai/queryContext.js'
 import { isXdrQuestion } from '../services/ai/xdrDirectAnswer.js'
-import { isStoreMonitorConnectivityQuery } from '../services/ai/geoConnectionQuery.js'
+import { isStoreMonitorConnectivityQuery, isStoreMonitorIssuesQuery } from '../services/ai/geoConnectionQuery.js'
 import { runAgentChat } from '../services/ai/agentChat.js'
 import { needsLiveAgentFallback } from '../services/ai/queryLiveDataFallback.js'
 import { appendLlmAnalysis } from '../services/ai/directLlmSynthesis.js'
@@ -160,28 +162,45 @@ router.post('/chat', async (req, res) => {
       }
     }
 
-    if (isStoreMonitorConnectivityQuery(lastUser) && allowedPages.includes('storeMonitor')) {
-      const storeConnStart = Date.now()
-      const portalContext = await buildPortalContext(req.user, ['storeMonitor'], { userMessage: lastUser })
-      const direct = tryDirectStoreAnswer(lastUser, portalContext, ctx)
-      if (direct) {
-        const storePayload = {
-          content: direct,
-          contextMeta: portalContext.meta,
-          contextPreview: buildContextPreview(portalContext),
-          queryContext: {
-            topic: 'store',
-            isFollowUp: ctx.isFollowUp,
-            storeGroup: extractStoreGroupFilter(lastUser) || undefined,
-          },
-        }
-        const { payload, llmMs: storeLlmMs } = await appendLlmAnalysis(lastUser, storePayload, chatMode, sanitized, ctx)
+    if (isStoreMonitorIssuesQuery(lastUser) && allowedPages.includes('storeMonitor')) {
+      const storeIssuesStart = Date.now()
+      const storeIssuesDirect = await tryDirectStoreIssuesAnswer(lastUser, allowedPages, ctx)
+      if (storeIssuesDirect) {
+        const { payload, llmMs: storeLlmMs } = await appendLlmAnalysis(lastUser, storeIssuesDirect, chatMode, sanitized, ctx)
         return res.json({
           content: payload.content,
           provider: getAIProvider().name,
           contextMeta: payload.contextMeta,
           contextPreview: payload.contextPreview,
-          queryContext: payload.queryContext,
+          queryContext: payload.queryContext || { topic: 'store', isFollowUp: ctx.isFollowUp },
+          modulesUsed: ['storeMonitor', 'storeProblems'],
+          fastPath: !payload.llmSynthesized,
+          metrics: {
+            totalMs: Date.now() - requestStart,
+            contextMs: Date.now() - storeIssuesStart,
+            llmMs: storeLlmMs,
+            mode: payload.llmSynthesized ? 'direct-store-issues-llm' : 'direct-store-issues',
+          },
+        })
+      }
+    }
+
+    if (isStoreMonitorConnectivityQuery(lastUser, ctx) && allowedPages.includes('storeMonitor')) {
+      const storeConnStart = Date.now()
+      const storeConnDirect = await tryDirectStoreConnectivityAnswer(lastUser, allowedPages, ctx)
+      if (storeConnDirect) {
+        const { payload, llmMs: storeLlmMs } = await appendLlmAnalysis(lastUser, storeConnDirect, chatMode, sanitized, ctx)
+        return res.json({
+          content: payload.content,
+          provider: getAIProvider().name,
+          contextMeta: payload.contextMeta,
+          contextPreview: payload.contextPreview,
+          queryContext: payload.queryContext || {
+            topic: 'store',
+            isFollowUp: ctx.isFollowUp,
+            storeGroup: extractStoreGroupFilter(lastUser, [ctx.priorUser, ctx.priorAssistant].filter(Boolean).join(' ')) || undefined,
+            range: ctx.range,
+          },
           modulesUsed: ['storeMonitor'],
           fastPath: !payload.llmSynthesized,
           metrics: {
@@ -441,7 +460,11 @@ router.post('/chat', async (req, res) => {
     }
 
     // RCA follow-ups — never wait on slow generic LLM.
-    if (ctx.directHandler === 'rca' || (ctx.isFollowUp && ctx.priorTopic === 'rca') || ctx.chatMode === 'rca') {
+    if (
+      (ctx.directHandler === 'rca' || (ctx.isFollowUp && ctx.priorTopic === 'rca') || ctx.chatMode === 'rca')
+      && !isStoreMonitorIssuesQuery(lastUser)
+      && !isStoreMonitorConnectivityQuery(lastUser, ctx)
+    ) {
       const rcaRetry = await tryDirectRcaAnswer(lastUser, allowedPages, ctx)
       if (rcaRetry) {
         return res.json({
@@ -533,7 +556,8 @@ router.post('/chat', async (req, res) => {
     }
 
     const storeOnly = ctx.directHandler === 'store'
-      || isStoreMonitorConnectivityQuery(lastUser)
+      || isStoreMonitorIssuesQuery(lastUser)
+      || isStoreMonitorConnectivityQuery(lastUser, ctx)
       || (/\b(store|stores|offline|online|down|monitor|hostname)\b/i.test(lastUser)
         && !/\b(firewall|fortigate|deny|soc|crash|crashed|crashes)\b/i.test(lastUser)
         && ctx.priorTopic !== 'crash'

@@ -3,6 +3,7 @@ import StoreProblemHistory from '../../models/StoreProblemHistory.js'
 import {
   isInfluxStoreConfigured,
   fetchStoreSnapshot,
+  fetchWifiConnectivityHistory,
   buildOverviewSummary,
   fetchCrashSummary,
   fetchCrashEventList,
@@ -12,7 +13,7 @@ import {
 import { getProblemSnapshotStatus } from '../storeProblemSnapshotter.js'
 import { computeUserPageAccess } from '../../utils/computeUserPageAccess.js'
 import { isXdrQuestion } from './xdrDirectAnswer.js'
-import { isStoreMonitorConnectivityQuery } from './geoConnectionQuery.js'
+import { isStoreMonitorConnectivityQuery, isStoreMonitorIssuesQuery, extractTopLimit } from './geoConnectionQuery.js'
 import { isNetworkInfraQuery, isZabbixQuestion, extractIpv4, isInfraMonitorQuery, isIpInfraQuery, prefersLlmSynthesis, buildZabbixInfraContext, wantsDiskUsage, extractHostGroupFilter } from './zabbixDirectAnswer.js'
 import {
   appNameMatches,
@@ -25,6 +26,7 @@ import {
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 
 export { parseQuestionTimeRange } from './queryContext.js'
+export { isStoreMonitorIssuesQuery, extractTopLimit } from './geoConnectionQuery.js'
 
 /** @typedef {'live' | 'periodic'} DataFreshness */
 
@@ -86,7 +88,7 @@ export function suggestContextModules(message, allowedPages, ctx = null) {
   if (ctx?.topic === 'crash' || (ctx?.isFollowUp && ctx?.priorTopic === 'crash')) {
     return []
   }
-  if (isStoreMonitorConnectivityQuery(text) || ctx?.directHandler === 'store') {
+  if (isStoreMonitorIssuesQuery(text) || isStoreMonitorConnectivityQuery(text, ctx) || ctx?.directHandler === 'store') {
     if (pages.has('storeMonitor')) modules.add('storeMonitor')
     return [...modules]
   }
@@ -108,7 +110,8 @@ export function suggestContextModules(message, allowedPages, ctx = null) {
   if (pages.has('storeMonitor') && (
     STORE_KEYWORDS.test(text)
     || OVERVIEW_KEYWORDS.test(text)
-    || isStoreMonitorConnectivityQuery(text)
+    || isStoreMonitorIssuesQuery(text)
+    || isStoreMonitorConnectivityQuery(text, ctx)
   )) {
     const infraDiskQuery = wantsDiskUsage(text) && (extractHostGroupFilter(text) || isZabbixQuestion(text))
     if (!infraDiskQuery) {
@@ -199,8 +202,8 @@ export function deriveStoreGroups(hostname, gatewayVendor, isFortinet = false) {
 }
 
 /** e.g. "Status of RoP group in store mon" → RP Group */
-export function extractStoreGroupFilter(question) {
-  const q = String(question || '').toLowerCase()
+export function extractStoreGroupFilter(question, contextText = '') {
+  const q = `${String(question || '')} ${String(contextText || '')}`.toLowerCase()
   if (/\b(rop|rp)\s*group\b/.test(q) || (/\bro\s*p\b/.test(q) && /\bgroup\b/.test(q))) return 'RP Group'
   if (/\bpos\s*(system\s*)?group\b/.test(q)) return 'POS System Group'
   if (/\bsd-?wan\s*group\b/.test(q)) return 'SD-WAN Group'
@@ -282,10 +285,22 @@ export function inferContextDetail(message) {
   if (/\b(hostname|hostnames|hostname.wise|hostname-wise|list all|every store|each store)\b/.test(q)) {
     return 'full'
   }
+  if (/\btop\s+\d+\b/.test(q) && /\b(issue|issues|problem|problems|device|devices|store|stores)\b/.test(q)) {
+    return 'standard'
+  }
   if (/\b(how many|count|number|total|status|summary|overview|down|offline|online|stores are)\b/.test(q)) {
     return 'summary'
   }
   return 'standard'
+}
+
+function problemSeverityRank(severity, online = false) {
+  if (!online) return 0
+  const s = String(severity || '').toLowerCase()
+  if (s === 'critical') return 1
+  if (s === 'high') return 2
+  if (s === 'warning') return 3
+  return 4
 }
 
 async function buildStoreMonitorContext(staleMinutes = 10, detail = 'standard') {
@@ -738,6 +753,222 @@ export async function tryDirectCrashAnswer(question, allowedPages, ctx = null) {
 }
 
 /**
+ * Top N stores/devices with issues — live Influx snapshot (+ problem tracker fallback).
+ * @param {string} question
+ * @param {string[]} allowedPages
+ * @param {ReturnType<import('./queryContext.js').resolveQueryContext>} [ctx]
+ */
+export async function tryDirectStoreIssuesAnswer(question, allowedPages, ctx = null) {
+  if (!allowedPages.includes('storeMonitor')) return null
+  if (!isStoreMonitorIssuesQuery(question)) return null
+
+  const limit = extractTopLimit(question)
+  const groupFilter = extractStoreGroupFilter(question)
+  const fetchedAt = new Date().toISOString()
+
+  if (!isInfluxStoreConfigured()) {
+    return {
+      content: 'Store Monitor InfluxDB is not configured — cannot list stores with issues.',
+      contextMeta: [{ id: 'storeMonitor', label: 'Store Monitor', freshness: 'live', configured: false, fetchedAt }],
+      contextPreview: {},
+      queryContext: { topic: 'store', isFollowUp: ctx?.isFollowUp },
+    }
+  }
+
+  const stores = await fetchStoreSnapshot(10, '-24h')
+  let scoped = groupFilter
+    ? stores.filter(s => deriveStoreGroups(s.hostname, s.gatewayVendor, s.isFortinet).includes(groupFilter))
+    : stores
+
+  const summary = buildOverviewSummary(scoped)
+  const lines = [
+    `Store Monitor — top ${limit} devices with issues (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
+    groupFilter ? `Filter: ${groupFilter}` : '',
+    '',
+    `Total stores: ${summary.total} · Online: ${summary.online} · Offline: ${summary.offline} · With issues: ${summary.withIssues}`,
+    '',
+  ].filter(Boolean)
+
+  const fromInflux = scoped
+    .filter(s => s.issueCount > 0 || !s.online)
+    .map(summarizeStore)
+    .sort((a, b) => severityRank(a) - severityRank(b))
+
+  if (fromInflux.length) {
+    lines.push(`Top ${Math.min(limit, fromInflux.length)} (live Influx snapshot, worst first):`)
+    for (const s of fromInflux.slice(0, limit)) {
+      const issues = s.issueSummary || (s.online ? 'online with issues' : 'offline')
+      lines.push(`  • ${s.hostname || s.storeTag} [${s.storeTag}] — ${s.connState} · ${issues}`)
+    }
+    if (fromInflux.length > limit) {
+      lines.push(`  … ${fromInflux.length - limit} more with issues (open Store Monitor for full list)`)
+    }
+  } else if (summary.total === 0) {
+    const active = await StoreProblemHistory.find({ status: 'active' })
+      .sort({ severity: 1, lastSeenAt: -1 })
+      .limit(limit * 3)
+      .lean()
+    const byStore = new Map()
+    for (const p of active) {
+      const key = p.storeTag || p.hostname
+      if (!key) continue
+      if (groupFilter) {
+        const h = String(p.hostname || '').toUpperCase()
+        if (groupFilter === 'RP Group' && !h.startsWith('RP')) continue
+        if (groupFilter === 'POS System Group' && !h.startsWith('LK')) continue
+      }
+      const rank = problemSeverityRank(p.severity, p.online)
+      const prev = byStore.get(key)
+      if (!prev || rank < prev.rank) {
+        byStore.set(key, { ...p, rank })
+      }
+    }
+    const ranked = [...byStore.values()].sort((a, b) => a.rank - b.rank)
+    if (ranked.length) {
+      lines.push(`Influx snapshot empty — using problem tracker (${ranked.length} stores with active problems):`)
+      for (const p of ranked.slice(0, limit)) {
+        lines.push(`  • ${p.hostname || p.storeTag} [${p.storeTag}] — ${p.severity}: ${p.message || p.code} (since ${formatPortalTimestamp(p.firstSeenAt)})`)
+      }
+    } else {
+      lines.push('No stores with issues in the live snapshot or problem tracker.')
+    }
+  } else {
+    lines.push('No stores with active issues in the current live snapshot.')
+  }
+
+  const tracker = getProblemSnapshotStatus()
+  lines.push('', `(Live Store Monitor — InfluxDB. Problem tracker refreshes ~${Math.round((tracker.intervalMs || 120000) / 60000)} min.)`)
+
+  return {
+    content: lines.join('\n'),
+    contextMeta: [{
+      id: 'storeMonitor',
+      label: 'Store Monitor',
+      freshness: 'live',
+      fetchedAt,
+      configured: true,
+      note: `Top ${limit} by issue severity`,
+    }],
+    contextPreview: {
+      storeMonitor: {
+        total: summary.total,
+        withIssues: summary.withIssues,
+        topIssuesCount: Math.min(limit, fromInflux.length),
+      },
+    },
+    queryContext: {
+      topic: 'store',
+      isFollowUp: ctx?.isFollowUp,
+      storeGroup: groupFilter || undefined,
+    },
+  }
+}
+
+/**
+ * Store Monitor WiFi / RP group with Influx history window (e.g. last 24h).
+ * @param {string} question
+ * @param {string[]} allowedPages
+ * @param {ReturnType<import('./queryContext.js').resolveQueryContext>} [ctx]
+ */
+export async function tryDirectStoreConnectivityAnswer(question, allowedPages, ctx = null) {
+  if (!allowedPages.includes('storeMonitor')) return null
+  if (!isStoreMonitorConnectivityQuery(question, ctx)) return null
+  if (!isInfluxStoreConfigured()) {
+    return {
+      content: 'Store Monitor InfluxDB is not configured — cannot query Wi-Fi history.',
+      contextMeta: [{ id: 'storeMonitor', label: 'Store Monitor', freshness: 'live', configured: false }],
+      contextPreview: {},
+      queryContext: { topic: 'store', isFollowUp: ctx?.isFollowUp },
+    }
+  }
+
+  const threadText = [ctx?.priorUser, question, ctx?.priorAssistant].filter(Boolean).join(' ')
+  const groupFilter = extractStoreGroupFilter(question, threadText) || 'RP Group'
+  const range = ctx?.range || parseQuestionTimeRange(question) || parseQuestionTimeRange(ctx?.priorUser) || '-24h'
+  const rangeLabel = formatRangeLabelFromInflux(range)
+  const wantsWifi = /\b(wifi|wi-?fi|wireless)\b/i.test(threadText)
+  if (!wantsWifi) return null
+
+  const fetchedAt = new Date().toISOString()
+  const [stores, wifiHistory] = await Promise.all([
+    fetchStoreSnapshot(10, range),
+    fetchWifiConnectivityHistory(range),
+  ])
+
+  const groupStores = stores.filter(s =>
+    deriveStoreGroups(s.hostname, s.gatewayVendor, s.isFortinet).includes(groupFilter),
+  )
+  const groupTags = new Set(groupStores.map(s => s.storeTag))
+  const histInGroup = wifiHistory.stores.filter(s => {
+    const h = String(s.hostname || '').toUpperCase()
+    if (groupFilter === 'RP Group') return h.startsWith('RP')
+    if (groupFilter === 'POS System Group') return h.startsWith('LK')
+    return groupTags.has(s.storeTag)
+  })
+
+  const uniqueWifiHealthy = histInGroup.filter(s => s.wifiHealthySamples > 0).length
+  const uniqueWifiInterface = histInGroup.filter(s => s.wifiInterfaceSamples > 0).length
+  const withDataInWindow = histInGroup.length
+  const snapStats = buildGroupConnectivityStats(groupStores)[groupFilter] || {
+    total: groupStores.length,
+    wifiConnected: groupStores.filter(isStoreOnWifi).length,
+    wifiHealthy: groupStores.filter(s => s.connState === 'wifi_healthy').length,
+    lanHealthy: groupStores.filter(s => s.connState === 'lan_healthy').length,
+  }
+
+  const summary = buildOverviewSummary(groupStores)
+  const lines = [
+    `Store Monitor — ${groupFilter} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
+    `Window: ${rangeLabel} (InfluxDB connectivity history + latest snapshot in window)`,
+    '',
+    `Filter: ${groupFilter} (same rules as Store Monitor → ROP Groups tab)`,
+    '',
+    `── ${rangeLabel} — Wi-Fi history (unique devices) ──`,
+    `Devices with Wi-Fi Healthy at least once: ${uniqueWifiHealthy} of ${withDataInWindow} stores reporting in window`,
+    `Devices with active Wi-Fi interface at least once: ${uniqueWifiInterface}`,
+    `Stores with connectivity data in window: ${withDataInWindow} (group total ${groupStores.length})`,
+    '',
+    '── Latest snapshot in window ──',
+    `Total stores: ${summary.total}`,
+    `Online: ${summary.online}`,
+    `Offline / down: ${summary.offline}`,
+    `Currently Wi-Fi connected: ${snapStats.wifiConnected} (Wi-Fi Healthy: ${snapStats.wifiHealthy}, LAN Healthy: ${snapStats.lanHealthy})`,
+  ]
+  if (summary.avgPingMs != null) lines.push(`Average ping: ${summary.avgPingMs} ms`)
+  if (summary.avgDownloadMbps != null) lines.push(`Average download: ${summary.avgDownloadMbps} Mbps`)
+  lines.push('', '(Live Store Monitor + InfluxDB history — SocMon.)')
+
+  return {
+    content: lines.join('\n'),
+    contextMeta: [{
+      id: 'storeMonitor',
+      label: 'Store Monitor',
+      freshness: 'live',
+      fetchedAt,
+      configured: true,
+      note: `Wi-Fi unique counts from connectivity points in ${rangeLabel}`,
+    }],
+    contextPreview: {
+      storeGroupConnectivity: {
+        [groupFilter]: {
+          window: rangeLabel,
+          uniqueWifiHealthy,
+          uniqueWifiInterface,
+          currentlyWifi: snapStats.wifiConnected,
+          total: groupStores.length,
+        },
+      },
+    },
+    queryContext: {
+      topic: 'store',
+      isFollowUp: ctx?.isFollowUp,
+      storeGroup: groupFilter,
+      range,
+    },
+  }
+}
+
+/**
  * Instant answer for simple store count/status — skips slow LLM call.
  * @param {string} question
  * @param {object} portalContext
@@ -760,7 +991,8 @@ export function tryDirectStoreAnswer(question, portalContext, ctx = null) {
   if (/\b(sentinel|xdr|sentinelone|powerquery)\b/.test(q)) return null
   if (extractIpv4(q) || isZabbixQuestion(q) || isNetworkInfraQuery(q) || isInfraMonitorQuery(q)) return null
   const storeIntent =
-    isStoreMonitorConnectivityQuery(question)
+    isStoreMonitorIssuesQuery(question)
+    || isStoreMonitorConnectivityQuery(question)
     || /\b(stores?|offline|online|down|store monitor|store mon|monitor status|how many stores)\b/.test(q)
     || (/\bstatus\b/.test(q) && /\b(store|stores|store mon)\b/.test(q))
     || (/\b(how many|count)\b/.test(q) && /\b(store|stores|device|devices)\b/.test(q))
@@ -821,7 +1053,19 @@ export function tryDirectStoreAnswer(question, portalContext, ctx = null) {
   if (s.avgPingMs != null) lines.push(`Average ping: ${s.avgPingMs} ms`)
   if (s.avgDownloadMbps != null) lines.push(`Average download: ${s.avgDownloadMbps} Mbps`)
 
-  const wantsList = /\b(hostname|hostnames|list|name|which|show)\b/.test(q)
+  const wantsList = /\b(hostname|hostnames|list|name|which|show|top)\b/.test(q)
+  const wantsTopIssues = isStoreMonitorIssuesQuery(question)
+  const topLimit = extractTopLimit(question)
+  const topIssues = (sm.topIssues || [])
+    .filter(s => !groupFilter || deriveStoreGroups(s.hostname, s.gatewayVendor).includes(groupFilter))
+
+  if (wantsTopIssues && topIssues.length) {
+    lines.push('', `Top ${Math.min(topLimit, topIssues.length)} devices with issues:`)
+    for (const s of topIssues.slice(0, topLimit)) {
+      lines.push(`  • ${s.hostname || s.storeTag} [${s.storeTag}] — ${s.connState} · ${s.issueSummary || 'issues'}`)
+    }
+  }
+
   const offlineList = groupFilter
     ? (sm.groupOfflineHostnames?.[groupFilter] || [])
     : (sm.offlineHostnames || [])
