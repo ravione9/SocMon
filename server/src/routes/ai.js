@@ -166,6 +166,23 @@ router.post('/chat', async (req, res) => {
       const storeIssuesStart = Date.now()
       const storeIssuesDirect = await tryDirectStoreIssuesAnswer(lastUser, allowedPages, ctx)
       if (storeIssuesDirect) {
+        if (storeIssuesDirect.skipLlmAnalysis) {
+          return res.json({
+            content: storeIssuesDirect.content,
+            provider: getAIProvider().name,
+            contextMeta: storeIssuesDirect.contextMeta,
+            contextPreview: storeIssuesDirect.contextPreview,
+            queryContext: storeIssuesDirect.queryContext || { topic: 'store', isFollowUp: ctx.isFollowUp },
+            modulesUsed: ['storeMonitor', 'storeProblems'],
+            fastPath: true,
+            metrics: {
+              totalMs: Date.now() - requestStart,
+              contextMs: Date.now() - storeIssuesStart,
+              llmMs: 0,
+              mode: 'direct-store-issues',
+            },
+          })
+        }
         const { payload, llmMs: storeLlmMs } = await appendLlmAnalysis(lastUser, storeIssuesDirect, chatMode, sanitized, ctx)
         return res.json({
           content: payload.content,

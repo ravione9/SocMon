@@ -439,9 +439,11 @@ export function extractStoreHostname(text) {
 
 function hasExplicitTimeRange(q) {
   return /\b(last|past)\s+\d+\s*(h|hr|hour|hours|m|min|d|day)/i.test(q)
-    || /\b(1 hr|24h|24 hour|24 hours|last hour|last day|last week)\b/i.test(q)
-    || /\b(?:time range|range|window)?\s*24\s*hours?\b/i.test(q)
+    || /\b(1 hr|12h|12 hour|12 hours|24h|24 hour|24 hours|last hour|last day|last week)\b/i.test(q)
+    || /\b(?:time range|range|window)?\s*(12|24)\s*hours?\b/i.test(q)
 }
+
+export { hasExplicitTimeRange }
 
 function extractRangeFromAssistant(text) {
   const t = String(text || '')

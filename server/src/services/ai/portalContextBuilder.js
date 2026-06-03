@@ -22,6 +22,7 @@ import {
   crashRecordMatches,
   formatRangeLabelFromInflux,
   parseQuestionTimeRange,
+  hasExplicitTimeRange,
   wantsCrashEventLog,
   extractStoreHostname,
 } from './queryContext.js'
@@ -774,15 +775,19 @@ function metricRangeToSince(metricRange) {
 /** Problem-tracker stores with issues in a time window (active or seen/resolved since). */
 async function rankProblemsFromTracker(since, groupFilter, limit) {
   try {
-    const rows = await StoreProblemHistory.find({
+    const filter = {
       $or: [
-        { status: 'active' },
+        { firstSeenAt: { $gte: since } },
         { lastSeenAt: { $gte: since } },
         { resolvedAt: { $gte: since } },
       ],
-    })
+    }
+    if (groupFilter === 'RP Group') filter.hostname = { $regex: /^RP/i }
+    else if (groupFilter === 'POS System Group') filter.hostname = { $regex: /^LK/i }
+
+    const rows = await StoreProblemHistory.find(filter)
       .sort({ severity: 1, lastSeenAt: -1 })
-      .limit(Math.max(limit * 8, 200))
+      .limit(Math.max(limit * 50, 2000))
       .lean()
 
     const byStore = new Map()
@@ -792,15 +797,42 @@ async function rankProblemsFromTracker(since, groupFilter, limit) {
       if (!key) continue
       const rank = problemSeverityRank(p.severity, p.online)
       const prev = byStore.get(key)
-      if (!prev || rank < prev.rank) {
-        byStore.set(key, { ...p, rank })
+      if (!prev) {
+        byStore.set(key, {
+          ...p,
+          rank,
+          issues: [p],
+          issueSummary: p.message || p.code,
+        })
+        continue
       }
+      prev.issues.push(p)
+      if (rank < prev.rank) {
+        prev.rank = rank
+        prev.severity = p.severity
+        prev.message = p.message
+        prev.code = p.code
+        prev.online = p.online
+        prev.connState = p.connState
+      }
+      prev.issueSummary = [...new Set(prev.issues.map(i => i.message || i.code).filter(Boolean))].join('; ')
+      prev.lastSeenAt = prev.issues.reduce((max, i) => {
+        const t = new Date(i.lastSeenAt || 0).getTime()
+        return t > max ? t : max
+      }, new Date(prev.lastSeenAt || 0).getTime())
+      prev.lastSeenAt = new Date(prev.lastSeenAt)
     }
     return [...byStore.values()].sort((a, b) => a.rank - b.rank)
   } catch (e) {
     console.warn('[storeIssues] problem tracker query failed:', e.message)
     return []
   }
+}
+
+function isHeartbeatOnlyInfluxIssue(s) {
+  const codes = s.issueCodes || []
+  return codes.length === 1 && codes[0] === 'offline'
+    && String(s.issueSummary || '').includes('heartbeat')
 }
 
 /**
@@ -817,6 +849,7 @@ export async function tryDirectStoreIssuesAnswer(question, allowedPages, ctx = n
   const metricRange = parseQuestionTimeRange(question)
   const rangeLabel = formatRangeLabelFromInflux(metricRange)
   const since = metricRangeToSince(metricRange)
+  const windowedQuery = hasExplicitTimeRange(question)
   const fetchedAt = new Date().toISOString()
 
   if (!isInfluxStoreConfigured()) {
@@ -857,15 +890,23 @@ export async function tryDirectStoreIssuesAnswer(question, allowedPages, ctx = n
   const summary = buildOverviewSummary(scoped)
   const lines = [
     `Store Monitor — top ${limit} devices with issues (${rangeLabel}, LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
-    groupFilter ? `Filter: ${groupFilter}` : '',
+    groupFilter ? `Filter: ${groupFilter}` : null,
+    windowedQuery
+      ? `Ranking source: problem tracker events in ${rangeLabel} (offline, hotspot, DNS, packet loss, etc.) — not the 10-min heartbeat snapshot alone.`
+      : null,
     '',
     summary.total > 0
-      ? `Total stores: ${summary.total} · Online: ${summary.online} · Offline: ${summary.offline} · With issues: ${summary.withIssues}`
+      ? `Current snapshot — ${groupFilter || 'all stores'}: ${summary.total} total · ${summary.online} online · ${summary.offline} offline · ${summary.withIssues} with active issues now`
       : trackerRanked.length
-        ? `Influx snapshot empty (Influx may be slow) — using problem tracker for ${rangeLabel} (${trackerRanked.length} stores with issues in window)`
+        ? `Influx snapshot empty — problem tracker shows ${trackerRanked.length} store(s) with issues in ${rangeLabel}`
         : 'Total stores: 0 · Online: 0 · Offline: 0 · With issues: 0',
+    trackerRanked.length
+      ? `Problem tracker — ${trackerRanked.length} distinct store(s) with issue events in ${rangeLabel}${groupFilter ? ` (${groupFilter})` : ''}`
+      : windowedQuery
+        ? `Problem tracker — no recorded issue events in ${rangeLabel}${groupFilter ? ` for ${groupFilter}` : ''} (may still show current snapshot issues below)`
+        : null,
     '',
-  ].filter(Boolean)
+  ].filter(line => line != null)
 
   if (snapshotNote) {
     lines.push(snapshotNote, '')
@@ -876,46 +917,58 @@ export async function tryDirectStoreIssuesAnswer(question, allowedPages, ctx = n
     .map(summarizeStore)
     .sort((a, b) => severityRank(a) - severityRank(b))
 
-  const merged = new Map()
-  for (const s of fromInflux) {
-    const key = s.storeTag || s.hostname
-    if (!key) continue
-    merged.set(key, { source: 'influx', rank: severityRank(s), influx: s })
-  }
-  for (const p of trackerRanked) {
-    const key = p.storeTag || p.hostname
-    if (!key) continue
-    const prev = merged.get(key)
-    if (!prev || p.rank < prev.rank) {
-      merged.set(key, { source: prev?.source === 'influx' ? 'both' : 'tracker', rank: p.rank, influx: prev?.influx, tracker: p })
-    } else if (prev && !prev.tracker) {
-      merged.set(key, { ...prev, source: 'both', tracker: p })
+  let ranked = []
+  if (windowedQuery && trackerRanked.length) {
+    ranked = trackerRanked.map(p => ({ source: 'tracker', rank: p.rank, tracker: p }))
+  } else {
+    const merged = new Map()
+    for (const s of fromInflux) {
+      if (windowedQuery && isHeartbeatOnlyInfluxIssue(s)) continue
+      const key = s.storeTag || s.hostname
+      if (!key) continue
+      merged.set(key, { source: 'influx', rank: severityRank(s), influx: s })
     }
+    for (const p of trackerRanked) {
+      const key = p.storeTag || p.hostname
+      if (!key) continue
+      const prev = merged.get(key)
+      if (!prev || p.rank < prev.rank) {
+        merged.set(key, { source: prev?.source === 'influx' ? 'both' : 'tracker', rank: p.rank, influx: prev?.influx, tracker: p })
+      } else if (prev && !prev.tracker) {
+        merged.set(key, { ...prev, source: 'both', tracker: p })
+      }
+    }
+    ranked = [...merged.values()].sort((a, b) => a.rank - b.rank)
   }
-
-  const ranked = [...merged.values()].sort((a, b) => a.rank - b.rank)
 
   if (ranked.length) {
-    lines.push(`Top ${Math.min(limit, ranked.length)} (worst first — live snapshot + problem tracker, ${rangeLabel}):`)
+    const rankSource = windowedQuery && trackerRanked.length
+      ? `problem tracker (${rangeLabel})`
+      : `live snapshot + problem tracker`
+    lines.push(`Top ${Math.min(limit, ranked.length)} (worst first — ${rankSource}):`)
     for (const row of ranked.slice(0, limit)) {
-      if (row.influx) {
+      if (row.tracker && (windowedQuery || !row.influx)) {
+        const p = row.tracker
+        const status = p.status === 'resolved' ? 'resolved in window' : 'active'
+        const issues = p.issueSummary || p.message || p.code
+        lines.push(`  • ${p.hostname || p.storeTag} [${p.storeTag}] — ${p.severity}: ${issues} (${status}, last seen ${formatPortalTimestamp(p.lastSeenAt)})`)
+      } else if (row.influx) {
         const s = row.influx
         const issues = s.issueSummary || (s.online ? 'online with issues' : 'offline')
         lines.push(`  • ${s.hostname || s.storeTag} [${s.storeTag}] — ${s.connState} · ${issues}`)
-      } else {
-        const p = row.tracker
-        const status = p.status === 'resolved' ? 'resolved in window' : 'active'
-        lines.push(`  • ${p.hostname || p.storeTag} [${p.storeTag}] — ${p.severity}: ${p.message || p.code} (${status}, since ${formatPortalTimestamp(p.firstSeenAt)})`)
       }
     }
     if (ranked.length > limit) {
-      lines.push(`  … ${ranked.length - limit} more with issues (open Store Monitor for full list)`)
+      lines.push(`  … ${ranked.length - limit} more with issues (open Store Monitor → Problems for full list)`)
     }
   } else if (summary.total === 0 && !trackerRanked.length) {
     lines.push('No stores with issues in the live snapshot or problem tracker for this window.')
     lines.push('If Store Monitor UI shows data, Influx may have timed out — retry in a few seconds.')
   } else {
-    lines.push(`No stores with active issues in the ${rangeLabel} window (all stores currently healthy in snapshot).`)
+    lines.push(`No stores with recorded issue events in ${rangeLabel}${groupFilter ? ` for ${groupFilter}` : ''}.`)
+    if (summary.withIssues > 0) {
+      lines.push(`Note: ${summary.withIssues} store(s) show issues in the current snapshot only (may be outside the ${rangeLabel} tracker window).`)
+    }
   }
 
   const tracker = getProblemSnapshotStatus()
@@ -923,13 +976,16 @@ export async function tryDirectStoreIssuesAnswer(question, allowedPages, ctx = n
 
   return {
     content: lines.join('\n'),
+    skipLlmAnalysis: Boolean(windowedQuery && trackerRanked.length > 0),
     contextMeta: [{
       id: 'storeMonitor',
       label: 'Store Monitor',
       freshness: 'live',
       fetchedAt,
       configured: true,
-      note: `Top ${limit} by issue severity`,
+      note: windowedQuery && trackerRanked.length
+        ? `Top ${limit} from problem tracker (${rangeLabel})`
+        : `Top ${limit} by issue severity`,
     }],
     contextPreview: {
       storeMonitor: {
