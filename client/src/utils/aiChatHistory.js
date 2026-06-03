@@ -136,3 +136,53 @@ export function adjustSessionPending(sessionId, delta) {
 export function getSessionPendingCount(sessionId) {
   return sessionId ? (pendingBySession.get(sessionId) || 0) : 0
 }
+
+const INFLIGHT_PREFIX = 'netpulse-ai-inflight'
+
+function inflightStorageKey(userKey) {
+  return `${INFLIGHT_PREFIX}:${userKey || 'anonymous'}`
+}
+
+/** Persist in-flight chat jobs — survives hard refresh (browser kills fetch, we resume on reload). */
+export function loadInflightRequests(userKey) {
+  try {
+    const raw = sessionStorage.getItem(inflightStorageKey(userKey))
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function saveInflightRequests(userKey, list) {
+  try {
+    const key = inflightStorageKey(userKey)
+    if (!list?.length) {
+      sessionStorage.removeItem(key)
+      return
+    }
+    sessionStorage.setItem(key, JSON.stringify(list))
+  } catch {
+    /* ignore quota errors */
+  }
+}
+
+export function addInflightRequest(userKey, job) {
+  const list = loadInflightRequests(userKey).filter(j => j.reqId !== job.reqId)
+  list.push({
+    ...job,
+    startedAt: job.startedAt || Date.now(),
+  })
+  saveInflightRequests(userKey, list)
+}
+
+export function removeInflightRequest(userKey, reqId) {
+  if (!reqId) return
+  const list = loadInflightRequests(userKey).filter(j => j.reqId !== reqId)
+  saveInflightRequests(userKey, list)
+}
+
+export function sessionHasAssistantForReq(messages, reqId) {
+  return (messages || []).some(m => m.role === 'assistant' && m.reqId === reqId)
+}

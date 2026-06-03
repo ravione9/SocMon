@@ -15,6 +15,10 @@ import {
   saveChatSessions,
   adjustSessionPending,
   getSessionPendingCount,
+  addInflightRequest,
+  removeInflightRequest,
+  loadInflightRequests,
+  sessionHasAssistantForReq,
 } from '../../utils/aiChatHistory.js'
 import { shouldStartNewThreadForQuestion } from '../../utils/aiChatSubject.js'
 import AiMessageContent from '../../components/ai/AiMessageContent.jsx'
@@ -868,9 +872,12 @@ function ChatTab({
   const [pendingCount, setPendingCount] = useState(0)
   const [sourcesOpen, setSourcesOpen] = useState(false)
   const [loadingHint, setLoadingHint] = useState('')
+  const [hydrated, setHydrated] = useState(false)
   const bottomRef = useRef(null)
   const abortControllersRef = useRef(new Map())
+  const userStopRequestedRef = useRef(false)
   const mountedRef = useRef(true)
+  const resumeInflightRanRef = useRef(false)
   const skipPersistRef = useRef(false)
   const hydratedRef = useRef(false)
   const activeSessionIdRef = useRef(null)
@@ -942,6 +949,8 @@ function ChatTab({
 
   useEffect(() => {
     skipPersistRef.current = true
+    resumeInflightRanRef.current = false
+    setHydrated(false)
     const loaded = loadChatSessions(userKey)
     if (loaded.length) {
       const first = loaded[0]
@@ -962,6 +971,7 @@ function ChatTab({
       saveChatSessions(userKey, [fresh])
     }
     hydratedRef.current = true
+    setHydrated(true)
   }, [userKey])
 
   useEffect(() => {
@@ -1034,11 +1044,107 @@ function ChatTab({
   }, [messages, loading, pendingCount])
 
   const stop = useCallback(() => {
-    for (const controller of abortControllersRef.current.values()) controller.abort()
+    userStopRequestedRef.current = true
+    const entries = [...abortControllersRef.current.entries()]
+    for (const [, controller] of entries) controller.abort()
     abortControllersRef.current.clear()
+    for (const [reqId] of entries) {
+      removeInflightRequest(userKey, reqId)
+    }
+    for (const sid of [...pendingBySessionRef.current.keys()]) {
+      const n = getSessionPendingCount(sid)
+      if (n > 0) adjustSessionPending(sid, -n)
+    }
+    pendingBySessionRef.current.clear()
     setPendingCount(0)
     setLoading(false)
-  }, [])
+    setLoadingHint('')
+    window.setTimeout(() => { userStopRequestedRef.current = false }, 200)
+  }, [userKey])
+
+  const executeChatRequest = useCallback(async ({
+    sessionId,
+    reqId,
+    history,
+    modeAtSend,
+    modulesAtSend,
+    autoModulesAtSend,
+    loadingHintText = '',
+  }) => {
+    trackSessionPending(sessionId, 1)
+    if (loadingHintText) setLoadingHint(loadingHintText)
+
+    addInflightRequest(userKey, {
+      reqId,
+      sessionId,
+      modeAtSend,
+      enabledModules: modulesAtSend,
+      autoModules: autoModulesAtSend,
+    })
+
+    const controller = new AbortController()
+    abortControllersRef.current.set(reqId, controller)
+
+    try {
+      const { data } = await aiAPI.chat(history, {
+        modules: modulesAtSend,
+        autoModules: autoModulesAtSend,
+        mode: modeAtSend,
+        signal: controller.signal,
+      })
+      removeInflightRequest(userKey, reqId)
+      const assistantMsg = {
+        role: 'assistant',
+        content: data.content,
+        contextMeta: data.contextMeta,
+        contextPreview: data.contextPreview,
+        queryContext: data.queryContext,
+        chartSeries: data.chartSeries,
+        metrics: data.metrics,
+        fastPath: data.fastPath,
+        reqId,
+      }
+      commitSessionMessages(
+        sessionId,
+        prev => insertAfterUserReq(prev, reqId, assistantMsg),
+        modeAtSend,
+      )
+    } catch (err) {
+      const cancelled = err.code === 'ERR_CANCELED' || err.name === 'CanceledError'
+      if (cancelled) {
+        removeInflightRequest(userKey, reqId)
+        if (userStopRequestedRef.current) {
+          commitSessionMessages(
+            sessionId,
+            prev => insertAfterUserReq(prev, reqId, { role: 'assistant', content: 'Stopped — request cancelled.', reqId }),
+            modeAtSend,
+          )
+        }
+        return
+      }
+      removeInflightRequest(userKey, reqId)
+      const data = err.response?.data
+      const errorDetail = data?.errorTable ? data : null
+      const msg = data?.error || err.message || 'Chat failed'
+      toast.error(msg)
+      commitSessionMessages(
+        sessionId,
+        prev => insertAfterUserReq(prev, reqId, {
+          role: 'assistant',
+          content: errorDetail ? '' : `Error: ${msg}`,
+          errorDetail,
+          reqId,
+        }),
+        modeAtSend,
+      )
+    } finally {
+      abortControllersRef.current.delete(reqId)
+      trackSessionPending(sessionId, -1)
+      if (getSessionPendingCount(sessionId) === 0 && activeSessionIdRef.current === sessionId) {
+        setLoadingHint('')
+      }
+    }
+  }, [userKey, commitSessionMessages, trackSessionPending])
 
   const send = useCallback(async (text) => {
     const content = String(text || input).trim()
@@ -1080,87 +1186,88 @@ function ChatTab({
     }
     commitSessionMessages(sessionId, next, modeAtSend)
     setInput('')
-    trackSessionPending(sessionId, 1)
+
     const qLower = content.toLowerCase()
+    let hint = ''
     if (/\b(crash|crashed|crashes)\b/.test(qLower)) {
-      setLoadingHint('Fetching crash logs from Store Monitor…')
+      hint = 'Fetching crash logs from Store Monitor…'
     } else if (/\b(issue|issues|top\s+\d+|store mon)\b/.test(qLower)) {
-      setLoadingHint('Fetching Store Monitor issues (live Influx)…')
+      hint = 'Fetching Store Monitor issues (live Influx)…'
     } else if (/\b(wifi|wi-?fi|rop|rp group)\b/.test(qLower)) {
-      setLoadingHint('Fetching Store Monitor Wi-Fi connectivity…')
-    } else {
-      setLoadingHint('')
+      hint = 'Fetching Store Monitor Wi-Fi connectivity…'
     }
 
-    const controller = new AbortController()
-    abortControllersRef.current.set(reqId, controller)
+    const history = next.filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({
+      role: m.role,
+      content: m.content,
+    }))
 
-    try {
-      const history = next.filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({
-        role: m.role,
-        content: m.content,
-      }))
-      const { data } = await aiAPI.chat(history, {
-        modules: enabledModules,
-        autoModules,
-        mode: modeAtSend,
-        signal: controller.signal,
+    await executeChatRequest({
+      sessionId,
+      reqId,
+      history,
+      modeAtSend,
+      modulesAtSend: enabledModules,
+      autoModulesAtSend: autoModules,
+      loadingHintText: hint,
+    })
+  }, [input, messages, enabledModules, autoModules, chatMode, userKey, commitSessionMessages, executeChatRequest])
+
+  useEffect(() => {
+    if (!hydrated || resumeInflightRanRef.current) return
+    resumeInflightRanRef.current = true
+
+    const jobs = loadInflightRequests(userKey)
+    if (!jobs.length) return
+
+    const sessions = loadChatSessions(userKey)
+    let resumed = 0
+
+    for (const job of jobs) {
+      const session = sessions.find(s => s.id === job.sessionId)
+      if (!session) {
+        removeInflightRequest(userKey, job.reqId)
+        continue
+      }
+      if (sessionHasAssistantForReq(session.messages, job.reqId)) {
+        removeInflightRequest(userKey, job.reqId)
+        continue
+      }
+      const userMsg = session.messages.find(m => m.role === 'user' && m.reqId === job.reqId)
+      if (!userMsg) {
+        removeInflightRequest(userKey, job.reqId)
+        continue
+      }
+
+      const history = session.messages
+        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .map(m => ({ role: m.role, content: m.content }))
+
+      resumed += 1
+      void executeChatRequest({
+        sessionId: job.sessionId,
+        reqId: job.reqId,
+        history,
+        modeAtSend: job.modeAtSend || session.chatMode || 'monitor',
+        modulesAtSend: job.enabledModules || enabledModules,
+        autoModulesAtSend: job.autoModules ?? autoModules,
+        loadingHintText: 'Resuming pending query after page reload…',
       })
-      const assistantMsg = {
-        role: 'assistant',
-        content: data.content,
-        contextMeta: data.contextMeta,
-        contextPreview: data.contextPreview,
-        queryContext: data.queryContext,
-        chartSeries: data.chartSeries,
-        metrics: data.metrics,
-        fastPath: data.fastPath,
-        reqId,
-      }
-      commitSessionMessages(
-        sessionId,
-        prev => insertAfterUserReq(prev, reqId, assistantMsg),
-        modeAtSend,
-      )
-    } catch (err) {
-      const cancelled = err.code === 'ERR_CANCELED' || err.name === 'CanceledError'
-      if (cancelled) {
-        commitSessionMessages(
-          sessionId,
-          prev => insertAfterUserReq(prev, reqId, { role: 'assistant', content: 'Stopped — request cancelled.', reqId }),
-          modeAtSend,
-        )
-        return
-      }
-      const data = err.response?.data
-      const errorDetail = data?.errorTable ? data : null
-      const msg = data?.error || err.message || 'Chat failed'
-      toast.error(msg)
-      commitSessionMessages(
-        sessionId,
-        prev => insertAfterUserReq(prev, reqId, {
-          role: 'assistant',
-          content: errorDetail ? '' : `Error: ${msg}`,
-          errorDetail,
-          reqId,
-        }),
-        modeAtSend,
-      )
-    } finally {
-      abortControllersRef.current.delete(reqId)
-      trackSessionPending(sessionId, -1)
-      if (getSessionPendingCount(sessionId) === 0) setLoadingHint('')
     }
-  }, [input, messages, enabledModules, autoModules, chatMode, userKey, commitSessionMessages, trackSessionPending])
+
+    if (resumed > 0) {
+      toast(`Resuming ${resumed} pending ${resumed === 1 ? 'query' : 'queries'}…`, { icon: '⏳', duration: 4000 })
+    }
+  }, [hydrated, userKey, enabledModules, autoModules, executeChatRequest])
 
   const loadingLabel = loadingHint
     || (chatMode === 'agent'
-    ? 'Agent selecting tools and fetching live data…'
-    : chatMode === 'rca'
-    ? 'Correlating signals across Store Monitor, Sentinel, SOC, NOC…'
-    : chatMode === 'details'
-      ? 'Fetching full hostname environment data…'
-      : 'Fetching live portal data & thinking…')
+      ? 'Agent selecting tools and fetching live data…'
+      : chatMode === 'rca'
+        ? 'Correlating signals across Store Monitor, Sentinel, SOC, NOC…'
+        : chatMode === 'details'
+          ? 'Fetching full hostname environment data…'
+          : 'Fetching live portal data & thinking…')
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6, minHeight: 0, overflow: 'hidden' }}>
