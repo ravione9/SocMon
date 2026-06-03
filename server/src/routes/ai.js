@@ -160,15 +160,16 @@ router.post('/chat', async (req, res) => {
     const xdrStart = Date.now()
     const xdrDirect = await tryDirectXdrAnswer(lastUser, allowedPages, ctx)
     if (xdrDirect) {
+      const { payload: xdrPayload, llmMs: xdrLlmMs } = await appendLlmAnalysis(lastUser, xdrDirect, chatMode, sanitized, ctx)
       return res.json({
-        content: xdrDirect.content,
+        content: xdrPayload.content,
         provider: getAIProvider().name,
-        contextMeta: xdrDirect.contextMeta,
-        contextPreview: xdrDirect.contextPreview,
-        queryContext: xdrDirect.queryContext || { topic: ctx.topic, appName: ctx.appName, isFollowUp: ctx.isFollowUp },
+        contextMeta: xdrPayload.contextMeta,
+        contextPreview: xdrPayload.contextPreview,
+        queryContext: xdrPayload.queryContext || { topic: ctx.topic, appName: ctx.appName, isFollowUp: ctx.isFollowUp },
         modulesUsed: ['sentinelXdr'],
-        fastPath: true,
-        metrics: { totalMs: Date.now() - requestStart, contextMs: Date.now() - xdrStart, llmMs: 0, mode: 'direct-xdr' },
+        fastPath: !xdrPayload.llmSynthesized,
+        metrics: { totalMs: Date.now() - requestStart, contextMs: Date.now() - xdrStart, llmMs: xdrLlmMs, mode: xdrPayload.llmSynthesized ? 'direct-xdr-llm' : 'direct-xdr' },
       })
     }
 
@@ -245,15 +246,16 @@ router.post('/chat', async (req, res) => {
     const nocStart = Date.now()
     const nocDirect = await tryDirectNocAnswer(lastUser, allowedPages, ctx)
     if (nocDirect) {
+      const { payload: nocPayload, llmMs: nocLlmMs } = await appendLlmAnalysis(lastUser, nocDirect, chatMode, sanitized, ctx)
       return res.json({
-        content: nocDirect.content,
+        content: nocPayload.content,
         provider: getAIProvider().name,
-        contextMeta: nocDirect.contextMeta,
-        contextPreview: nocDirect.contextPreview,
-        queryContext: nocDirect.queryContext || { topic: 'noc', isFollowUp: ctx.isFollowUp },
+        contextMeta: nocPayload.contextMeta,
+        contextPreview: nocPayload.contextPreview,
+        queryContext: nocPayload.queryContext || { topic: 'noc', isFollowUp: ctx.isFollowUp },
         modulesUsed: ['noc', 'sentinel'].filter(id => allowedPages.includes(id)),
-        fastPath: true,
-        metrics: { totalMs: Date.now() - requestStart, contextMs: Date.now() - nocStart, llmMs: 0, mode: 'direct-noc' },
+        fastPath: !nocPayload.llmSynthesized,
+        metrics: { totalMs: Date.now() - requestStart, contextMs: Date.now() - nocStart, llmMs: nocLlmMs, mode: nocPayload.llmSynthesized ? 'direct-noc-llm' : 'direct-noc' },
       })
     }
 
@@ -283,17 +285,14 @@ router.post('/chat', async (req, res) => {
     const hostnameStart = Date.now()
     const hostnameDirect = await tryDirectHostnameAnswer(lastUser, allowedPages, ctx)
     if (hostnameDirect) {
+      const { payload: hnPayload, llmMs: hnLlmMs } = await appendLlmAnalysis(lastUser, hostnameDirect, chatMode, sanitized, ctx)
       return res.json({
-        content: hostnameDirect.content,
+        content: hnPayload.content,
         provider: getAIProvider().name,
-        contextMeta: hostnameDirect.contextMeta,
-        contextPreview: hostnameDirect.contextPreview,
+        contextMeta: hnPayload.contextMeta,
+        contextPreview: hnPayload.contextPreview,
         chartSeries: hostnameDirect.chartSeries,
-        queryContext: hostnameDirect.queryContext || {
-          topic: 'hostname',
-          hostname: ctx.hostname,
-          isFollowUp: ctx.isFollowUp,
-        },
+        queryContext: hnPayload.queryContext || { topic: 'hostname', hostname: ctx.hostname, isFollowUp: ctx.isFollowUp },
         modulesUsed: ['storeMonitor', 'storeProblems', 'storeCrashes', 'sentinelXdr', 'soc', 'noc'].filter(id => {
           if (id === 'storeMonitor' || id === 'storeProblems' || id === 'storeCrashes') return true
           if (id === 'sentinelXdr') return allowedPages.includes('sentinel')
@@ -301,37 +300,24 @@ router.post('/chat', async (req, res) => {
           if (id === 'noc') return allowedPages.includes('noc')
           return false
         }),
-        fastPath: true,
-        metrics: {
-          totalMs: Date.now() - requestStart,
-          contextMs: Date.now() - hostnameStart,
-          llmMs: 0,
-          mode: 'direct-hostname',
-        },
+        fastPath: !hnPayload.llmSynthesized,
+        metrics: { totalMs: Date.now() - requestStart, contextMs: Date.now() - hostnameStart, llmMs: hnLlmMs, mode: hnPayload.llmSynthesized ? 'direct-hostname-llm' : 'direct-hostname' },
       })
     }
 
     const crashStart = Date.now()
     const crashDirect = await tryDirectCrashAnswer(lastUser, allowedPages, ctx)
     if (crashDirect) {
+      const { payload: crPayload, llmMs: crLlmMs } = await appendLlmAnalysis(lastUser, crashDirect, chatMode, sanitized, ctx)
       return res.json({
-        content: crashDirect.content,
+        content: crPayload.content,
         provider: getAIProvider().name,
-        contextMeta: crashDirect.contextMeta,
-        contextPreview: crashDirect.contextPreview,
-        queryContext: crashDirect.queryContext || {
-          topic: ctx.topic || 'crash',
-          appName: ctx.appName,
-          isFollowUp: ctx.isFollowUp,
-        },
+        contextMeta: crPayload.contextMeta,
+        contextPreview: crPayload.contextPreview,
+        queryContext: crPayload.queryContext || { topic: ctx.topic || 'crash', appName: ctx.appName, isFollowUp: ctx.isFollowUp },
         modulesUsed: ['storeCrashes'],
-        fastPath: true,
-        metrics: {
-          totalMs: Date.now() - requestStart,
-          contextMs: Date.now() - crashStart,
-          llmMs: 0,
-          mode: 'direct-crash',
-        },
+        fastPath: !crPayload.llmSynthesized,
+        metrics: { totalMs: Date.now() - requestStart, contextMs: Date.now() - crashStart, llmMs: crLlmMs, mode: crPayload.llmSynthesized ? 'direct-crash-llm' : 'direct-crash' },
       })
     }
 
@@ -451,21 +437,18 @@ router.post('/chat', async (req, res) => {
       moduleIds = [...new Set([...moduleIds, ...suggested])]
     }
 
-    // Hostname status/details — never wait on LLM (avoids Claude/OpenAI auth errors in prod).
+    // Hostname details — fetch live data, then always run through LLM.
     if (isHostnameDataRequest(lastUser) && extractStoreHostname(lastUser)) {
       const hostnamePreLlm = await tryDirectHostnameAnswer(lastUser, allowedPages, ctx)
       if (hostnamePreLlm) {
+        const { payload: hnPre, llmMs: hnPreLlmMs } = await appendLlmAnalysis(lastUser, hostnamePreLlm, chatMode, sanitized, ctx)
         return res.json({
-          content: hostnamePreLlm.content,
+          content: hnPre.content,
           provider: getAIProvider().name,
-          contextMeta: hostnamePreLlm.contextMeta,
-          contextPreview: hostnamePreLlm.contextPreview,
+          contextMeta: hnPre.contextMeta,
+          contextPreview: hnPre.contextPreview,
           chartSeries: hostnamePreLlm.chartSeries,
-          queryContext: hostnamePreLlm.queryContext || {
-            topic: 'hostname',
-            hostname: ctx.hostname || extractStoreHostname(lastUser),
-            isFollowUp: ctx.isFollowUp,
-          },
+          queryContext: hnPre.queryContext || { topic: 'hostname', hostname: ctx.hostname || extractStoreHostname(lastUser), isFollowUp: ctx.isFollowUp },
           modulesUsed: ['storeMonitor', 'storeProblems', 'storeCrashes', 'sentinelXdr', 'soc', 'noc'].filter(id => {
             if (id === 'storeMonitor' || id === 'storeProblems' || id === 'storeCrashes') return true
             if (id === 'sentinelXdr') return allowedPages.includes('sentinel')
@@ -473,13 +456,8 @@ router.post('/chat', async (req, res) => {
             if (id === 'noc') return allowedPages.includes('noc')
             return false
           }),
-          fastPath: true,
-          metrics: {
-            totalMs: Date.now() - requestStart,
-            contextMs: 0,
-            llmMs: 0,
-            mode: 'direct-hostname',
-          },
+          fastPath: !hnPre.llmSynthesized,
+          metrics: { totalMs: Date.now() - requestStart, contextMs: 0, llmMs: hnPreLlmMs, mode: hnPre.llmSynthesized ? 'direct-hostname-llm' : 'direct-hostname' },
         })
       }
     }
