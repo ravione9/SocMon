@@ -274,13 +274,33 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
 export function formatEnvironmentSections(env, rangeLabel, formatTs) {
   const lines = []
   const fmt = formatTs || ((v) => String(v || '—'))
+  const pushHeader = (title) => {
+    if (lines.length) lines.push('')
+    lines.push(title)
+  }
 
   if (env.sentinel) {
-    lines.push('', '── Sentinel (LIVE — Elasticsearch) ──')
     const s = env.sentinel
     if (!s.configured) {
+      pushHeader('── Sentinel (LIVE — Elasticsearch) ──')
       lines.push(`  Not configured${s.error ? `: ${s.error}` : ''}`)
     } else {
+      const hasSentinelData =
+        Number(s.usbConnected || 0) > 0
+        || Number(s.usbDisconnected || 0) > 0
+        || Number(s.threatsDetected || 0) > 0
+        || Number(s.activeThreats || 0) > 0
+        || Number(s.agentConnected || 0) > 0
+        || Number(s.agentDisconnected || 0) > 0
+        || (s.usbSamples?.length || 0) > 0
+        || (s.threatSamples?.length || 0) > 0
+        || (s.s1Threats?.threats?.length || 0) > 0
+        || Boolean(s.s1Threats?.error)
+        || (s.errors?.length || 0) > 0
+      if (!hasSentinelData) {
+        // Hide section when there is no matching data for this hostname/window.
+      } else {
+        pushHeader('── Sentinel (LIVE — Elasticsearch) ──')
       lines.push(`  USB connected: ${s.usbConnected} · disconnected: ${s.usbDisconnected}`)
       lines.push(`  Threats detected: ${s.threatsDetected} · active: ${s.activeThreats}`)
       lines.push(`  Agent connected events: ${s.agentConnected} · disconnected: ${s.agentDisconnected}`)
@@ -305,42 +325,59 @@ export function formatEnvironmentSections(env, rangeLabel, formatTs) {
       } else if (s.s1Threats?.error) {
         lines.push(`  SentinelOne API: ${s.s1Threats.error}`)
       }
+      }
     }
   }
 
   if (env.soc) {
-    lines.push('', '── SOC / Firewall (LIVE — Elasticsearch) ──')
     const s = env.soc
     if (!s.configured) {
+      pushHeader('── SOC / Firewall (LIVE — Elasticsearch) ──')
       lines.push(`  Not configured${s.error ? `: ${s.error}` : ''}`)
     } else {
-      lines.push(`  Events (${rangeLabel}): ${s.total} · denies: ${s.denies} · IPS: ${s.ips} · UTM: ${s.utm}`)
-      if (s.samples?.length) {
-        lines.push('  Recent firewall events:')
-        for (const e of s.samples.slice(0, 5)) {
-          lines.push(`    • ${fmt(e.ts)} · ${e.action}/${e.subtype} · ${e.src} → ${e.dst} · ${e.msg}`)
+      const hasSocData =
+        Number(s.total || 0) > 0
+        || Number(s.denies || 0) > 0
+        || Number(s.ips || 0) > 0
+        || Number(s.utm || 0) > 0
+        || (s.samples?.length || 0) > 0
+        || Boolean(s.error)
+      if (hasSocData) {
+        pushHeader('── SOC / Firewall (LIVE — Elasticsearch) ──')
+        lines.push(`  Events (${rangeLabel}): ${s.total} · denies: ${s.denies} · IPS: ${s.ips} · UTM: ${s.utm}`)
+        if (s.samples?.length) {
+          lines.push('  Recent firewall events:')
+          for (const e of s.samples.slice(0, 5)) {
+            lines.push(`    • ${fmt(e.ts)} · ${e.action}/${e.subtype} · ${e.src} → ${e.dst} · ${e.msg}`)
+          }
         }
-      } else {
-        lines.push('  No firewall events matched this hostname in the window.')
       }
     }
   }
 
   if (env.noc) {
-    lines.push('', '── NOC / Switch (LIVE — Elasticsearch) ──')
     const n = env.noc
     if (!n.configured) {
+      pushHeader('── NOC / Switch (LIVE — Elasticsearch) ──')
       lines.push(`  Not configured${n.error ? `: ${n.error}` : ''}`)
     } else {
-      lines.push(`  Events (${rangeLabel}): ${n.total} · UPDOWN: ${n.updown} · MAC flaps: ${n.macflap} · VLAN mismatch: ${n.vlanMismatch}`)
-      if (n.samples?.length) {
-        lines.push('  Recent switch events:')
-        for (const e of n.samples.slice(0, 5)) {
-          const iface = e.iface ? ` · ${e.iface}` : ''
-          lines.push(`    • ${fmt(e.ts)} · ${e.device} · ${e.mnemonic}${iface} · ${e.msg}`)
+      const hasNocData =
+        Number(n.total || 0) > 0
+        || Number(n.updown || 0) > 0
+        || Number(n.macflap || 0) > 0
+        || Number(n.vlanMismatch || 0) > 0
+        || (n.samples?.length || 0) > 0
+        || Boolean(n.error)
+      if (hasNocData) {
+        pushHeader('── NOC / Switch (LIVE — Elasticsearch) ──')
+        lines.push(`  Events (${rangeLabel}): ${n.total} · UPDOWN: ${n.updown} · MAC flaps: ${n.macflap} · VLAN mismatch: ${n.vlanMismatch}`)
+        if (n.samples?.length) {
+          lines.push('  Recent switch events:')
+          for (const e of n.samples.slice(0, 5)) {
+            const iface = e.iface ? ` · ${e.iface}` : ''
+            lines.push(`    • ${fmt(e.ts)} · ${e.device} · ${e.mnemonic}${iface} · ${e.msg}`)
+          }
         }
-      } else {
-        lines.push('  No Cisco/switch events matched this hostname in the window.')
       }
     }
   }

@@ -22,13 +22,16 @@ export function isInfraMonitorQuery(question) {
 const SWITCH_WORD = /\b(switch(?:es)?|all switches)\b/i
 const ROUTER_WORD = /\b(router(?:s)?)\b/i
 
-/** fortigate | cisco | checkpoint | network | switch (cisco + snmp network) */
+/** fortigate | cisco | checkpoint | network | switch | server | vm | database */
 export function detectDeviceTypeFilter(question) {
   const q = String(question || '')
   if (/\b(fortinet|fortigate|fgt)\b/i.test(q)) return 'fortigate'
   if (SWITCH_WORD.test(q)) return 'switch'
   if (/\b(cisco|catalyst|nexus|meraki)\b/i.test(q)) return 'cisco'
   if (ROUTER_WORD.test(q)) return 'cisco'
+  if (/\b(servers?|all servers?|server health|server availability)\b/i.test(q)) return 'server'
+  if (/\b(virtual machines?|vms?)\b/i.test(q)) return 'vm'
+  if (/\b(databases?|db servers?|mssql servers?)\b/i.test(q)) return 'database'
   if (/\b(checkpoint|check point)\b/i.test(q)) return 'checkpoint'
   if (/\b(juniper)\b/i.test(q)) return 'juniper'
   return null
