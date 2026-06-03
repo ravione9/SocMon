@@ -1,11 +1,1044 @@
-export default function AIPage() {
+import { useCallback, useEffect, useRef, useState } from 'react'
+import toast from 'react-hot-toast'
+import { aiAPI } from '../../api/ai.js'
+import { useUrlTab } from '../../hooks/useUrlTab.js'
+
+const TABS = [
+  { id: 'chat', label: 'Chat' },
+  { id: 'search', label: 'Log search' },
+  { id: 'anomalies', label: 'Anomalies' },
+  { id: 'triage', label: 'Alert triage' },
+]
+
+const C = {
+  text: 'var(--text)',
+  text2: 'var(--text2)',
+  text3: 'var(--text3)',
+  bg2: 'var(--bg2)',
+  bg3: 'var(--bg3)',
+  border: 'var(--border)',
+  accent: 'var(--accent)',
+  green: 'var(--green)',
+  amber: 'var(--amber)',
+  red: 'var(--red)',
+}
+
+const PAGE_ROOT = {
+  width: '100%',
+  boxSizing: 'border-box',
+  height: 'calc(var(--app-vh, 100vh) - 52px - 32px)',
+  display: 'flex',
+  flexDirection: 'column',
+  minHeight: 0,
+  overflow: 'hidden',
+}
+
+const STARTER_PROMPTS = {
+  monitor: [
+    'Give me a store monitor summary — online, offline, and stores with issues.',
+    'Show me all USB disconnection within 5 min with timestamp',
+    'How many firewall denies in the last hour?',
+  ],
+  details: [
+    'Give me complete details of RP4531-E521BCXS last 6 hours',
+    'Full hostname report for RP4430 with Sentinel, SOC, and NOC data',
+    'Show metrics chart for RP4139-E528B7N1 last 24 hours',
+  ],
+  rca: [
+    'Why is RP4531-E521BCXS offline? Root cause last 6 hours',
+    'Investigate connectivity issues on RP4430 — correlate all signals',
+    'What caused USB disconnections on RP4139? RCA last 1 hour',
+  ],
+}
+
+const CHAT_MODES = [
+  { id: 'monitor', label: 'Monitor', hint: 'Fast live counts, summaries, and alerts' },
+  { id: 'details', label: 'Details', hint: 'Deep hostname / store reports with all environments' },
+  { id: 'rca', label: 'RCA', hint: 'Root cause analysis with correlated timeline' },
+]
+
+function formatPortalTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return String(iso)
+  return d.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+    timeZoneName: 'short',
+  })
+}
+
+function formatMetricNum(v) {
+  if (v == null || Number.isNaN(Number(v))) return '—'
+  const n = Number(v)
+  return Number.isInteger(n) ? String(n) : n.toFixed(1)
+}
+
+function Sparkline({ values, color = C.accent }) {
+  if (!values?.length) return null
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  const w = 280
+  const h = 40
+  const pad = 3
+  const coords = values.map((v, i) => {
+    const x = pad + (i / Math.max(values.length - 1, 1)) * (w - pad * 2)
+    const y = max === min
+      ? h / 2
+      : pad + (1 - (v - min) / (max - min)) * (h - pad * 2)
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  })
+  const area = `${pad},${h - pad} ${coords.join(' ')} ${w - pad},${h - pad}`
   return (
-    <div style={{ color: 'var(--text)', fontFamily: 'var(--sans)' }}>
-      <div className="card" style={{ maxWidth: 560, padding: '24px 28px' }}>
-        <h1 style={{ fontSize: 20, fontWeight: 700, color: 'var(--text)', margin: '0 0 8px', fontFamily: 'var(--sans)' }}>AI Assistant</h1>
-        <p style={{ margin: 0, color: 'var(--text3)', fontSize: 13, lineHeight: 1.5, fontFamily: 'var(--mono)' }}>
-          Module under development — AI features will use your platform context and policies when enabled.
+    <svg
+      width="100%"
+      height={h}
+      viewBox={`0 0 ${w} ${h}`}
+      preserveAspectRatio="none"
+      style={{ display: 'block', borderRadius: 4 }}
+      aria-hidden
+    >
+      <polygon points={area} fill={`${color}22`} />
+      <polyline
+        fill="none"
+        stroke={color}
+        strokeWidth="2"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+        vectorEffect="non-scaling-stroke"
+        points={coords.join(' ')}
+      />
+    </svg>
+  )
+}
+
+function MetricChartsPanel({ series = [] }) {
+  if (!series.length) return null
+  const colors = [C.accent, C.green, C.amber, '#a78bfa', '#38bdf8', '#fb7185', '#fbbf24', '#34d399']
+  return (
+    <div style={{ marginTop: 12, width: '100%', display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {series.map((s, i) => (
+        <div
+          key={s.id || s.name}
+          style={{
+            padding: '10px 12px',
+            borderRadius: 8,
+            background: C.bg2,
+            border: `1px solid ${C.border}`,
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: C.text2 }}>{s.label || s.name}</span>
+            <span style={{ fontSize: 10, fontFamily: 'var(--mono)', color: C.text3, whiteSpace: 'nowrap' }}>
+              latest {formatMetricNum(s.latest)} · min {formatMetricNum(s.min)} · max {formatMetricNum(s.max)}
+            </span>
+          </div>
+          <Sparkline values={s.values} color={colors[i % colors.length]} />
+          <div style={{ marginTop: 4, fontSize: 10, color: C.text3, fontFamily: 'var(--mono)' }}>
+            {s.samples ?? s.values?.length ?? 0} samples
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function FreshnessBadge({ freshness }) {
+  const live = freshness === 'live'
+  return (
+    <span
+      style={{
+        display: 'inline-block',
+        padding: '2px 8px',
+        borderRadius: 6,
+        fontSize: 10,
+        fontWeight: 700,
+        fontFamily: 'var(--mono)',
+        background: live ? 'rgba(34,211,160,.15)' : 'rgba(245,166,35,.15)',
+        color: live ? C.green : C.amber,
+        border: `1px solid ${live ? 'rgba(34,211,160,.35)' : 'rgba(245,166,35,.35)'}`,
+      }}
+    >
+      {live ? 'LIVE' : 'PERIODIC'}
+    </span>
+  )
+}
+
+function ContextMetaPanel({ meta = [], fastPath, preview, metrics, queryContext }) {
+  if (!meta?.length && !fastPath && !preview && !metrics && !queryContext) return null
+  return (
+    <div
+      style={{
+        marginTop: 8,
+        padding: '8px 10px',
+        borderRadius: 8,
+        background: 'rgba(79,126,245,.06)',
+        border: `1px solid ${C.border}`,
+        fontSize: 10,
+        color: C.text3,
+        fontFamily: 'var(--mono)',
+        lineHeight: 1.6,
+      }}
+    >
+      <div style={{ fontWeight: 700, color: C.text2, marginBottom: 4 }}>
+        {fastPath
+          ? (metrics?.mode === 'direct-rca'
+            ? 'Root cause analysis from correlated live data'
+            : metrics?.mode === 'direct-crash'
+            ? 'Instant crash answer from live Influx data'
+            : metrics?.mode === 'direct-hostname'
+              ? 'Instant hostname report from live store data'
+              : metrics?.mode === 'direct-xdr'
+              ? 'Instant XDR answer from live SentinelOne PowerQuery'
+              : 'Instant answer from live NetPulse data')
+          : 'Data sources for this reply'}
+      </div>
+      {metrics && (
+        <div style={{ marginBottom: 6 }}>
+          mode={metrics.mode || 'llm'} · total={metrics.totalMs}ms · context={metrics.contextMs}ms · llm={metrics.llmMs}ms
+        </div>
+      )}
+      {queryContext && (
+        <div style={{ marginBottom: 6, color: C.text2 }}>
+          topic={queryContext.topic || 'general'}
+          {queryContext.hostname ? ` · host=${queryContext.hostname}` : ''}
+          {queryContext.appName ? ` · app=${queryContext.appName}` : ''}
+          {queryContext.isFollowUp ? ' · follow-up' : ''}
+        </div>
+      )}
+      {meta.map(m => (
+        <div key={m.id} style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginBottom: 4 }}>
+          <FreshnessBadge freshness={m.freshness} />
+          <span style={{ color: C.text2 }}>{m.label}</span>
+          {m.fetchedAt && <span>· fetched {formatPortalTime(m.fetchedAt)}</span>}
+          {m.snapshotIntervalMinutes && <span>· snap every {m.snapshotIntervalMinutes}m</span>}
+          {m.error && <span style={{ color: C.red }}>· {m.error}</span>}
+        </div>
+      ))}
+      {preview?.storeMonitor && (
+        <div style={{ marginTop: 6, borderTop: `1px solid ${C.border}`, paddingTop: 6 }}>
+          <div style={{ color: C.text2, marginBottom: 2 }}>
+            Store Monitor: total {preview.storeMonitor.total} · online {preview.storeMonitor.online} · offline {preview.storeMonitor.offline} · issues {preview.storeMonitor.withIssues}
+          </div>
+          {(preview.storeMonitor.offlineHostnames || []).slice(0, 5).map((h) => (
+            <div key={`${h.storeTag}-${h.hostname}`} style={{ marginLeft: 4 }}>
+              • {h.hostname || h.storeTag} [{h.storeTag}] · {h.connState}
+            </div>
+          ))}
+        </div>
+      )}
+      {preview?.crashes && (
+        <div style={{ marginTop: 6, borderTop: `1px solid ${C.border}`, paddingTop: 6 }}>
+          <div style={{ color: C.text2, marginBottom: 2 }}>
+            Crashes ({preview.crashes.range}{preview.crashes.appFilter ? ` · ${preview.crashes.appFilter}` : ''}): {preview.crashes.totalEvents} events
+            {preview.crashes.affectedStores != null ? ` · ${preview.crashes.affectedStores} stores` : ''}
+            {preview.crashes.eventLog ? ` · event log (${preview.crashes.eventsShown ?? 0} shown)` : ''}
+          </div>
+          {(preview.crashes.affectedStoreList || []).slice(0, 5).map((s) => (
+            <div key={`${s.storeTag}-${s.hostname}`} style={{ marginLeft: 4 }}>
+              • {s.hostname || s.storeTag} [{s.storeTag}]: {s.totalCrashes}
+            </div>
+          ))}
+          {(preview.crashes.topApps || []).slice(0, 3).map((a) => (
+            <div key={a.appName} style={{ marginLeft: 4 }}>
+              • {a.appName}: {a.totalCrashes}
+            </div>
+          ))}
+        </div>
+      )}
+      {preview?.xdr && (
+        <div style={{ marginTop: 6, borderTop: `1px solid ${C.border}`, paddingTop: 6 }}>
+          <div style={{ color: C.text2, marginBottom: 2 }}>
+            XDR ({preview.xdr.range}): {preview.xdr.totalEvents} events · {preview.xdr.rowCount} rows shown
+          </div>
+          {(preview.xdr.topEndpoints || []).slice(0, 3).map((e) => (
+            <div key={e.key} style={{ marginLeft: 4 }}>
+              • {e.key}: {e.count}
+            </div>
+          ))}
+        </div>
+      )}
+      {preview?.rca && (
+        <div style={{ marginTop: 6, borderTop: `1px solid ${C.border}`, paddingTop: 6 }}>
+          <div style={{ color: C.text2 }}>
+            RCA{preview.rca.window ? ` ${preview.rca.window}` : ''}
+            {preview.rca.anchor ? ` · ${preview.rca.anchor}` : ''}
+            {preview.rca.timelineEvents != null ? ` · ${preview.rca.timelineEvents} events` : ''}
+            {preview.rca.topHypothesis ? ` · ${preview.rca.topHypothesis} (${preview.rca.topConfidence})` : ''}
+            {preview.rca.llmSynthesis ? ' · LLM narrative' : ''}
+          </div>
+        </div>
+      )}
+      {preview?.noc && (
+        <div style={{ marginTop: 6, borderTop: `1px solid ${C.border}`, paddingTop: 6 }}>
+          <div style={{ color: C.text2 }}>
+            NOC{preview.noc.window ? ` ${preview.noc.window}` : ''}: {preview.noc.total ?? 0} events
+            {preview.noc.updown != null ? ` · UPDOWN ${preview.noc.updown}` : ''}
+            {preview.noc.usbDisconnect != null ? ` · USB ↓${preview.noc.usbDisconnect}` : ''}
+            {preview.noc.rpGroupOnly ? ' · RP Group' : ''}
+          </div>
+        </div>
+      )}
+      {preview?.sentinel && (
+        <div style={{ marginTop: 6, borderTop: `1px solid ${C.border}`, paddingTop: 6 }}>
+          <div style={{ color: C.text2 }}>
+            Sentinel: USB ↑{preview.sentinel.usbConnected} ↓{preview.sentinel.usbDisconnected} · threats {preview.sentinel.threats}
+          </div>
+        </div>
+      )}
+      {preview?.soc && (
+        <div style={{ marginTop: 6, borderTop: `1px solid ${C.border}`, paddingTop: 6 }}>
+          <div style={{ color: C.text2 }}>
+            SOC{preview.soc.window ? ` ${preview.soc.window}` : ''}: {(preview.soc.total ?? preview.soc.totalEvents ?? 0)} events · denies {preview.soc.denies ?? 0}
+            {preview.soc.allows != null ? ` · allows ${preview.soc.allows}` : ''}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DataSourcesPanel({ modules, enabled, onToggle, autoModules, onAutoToggle }) {
+  if (!modules.length) return null
+  return (
+    <div
+      style={{
+        padding: '10px 12px',
+        borderRadius: 10,
+        border: `1px solid ${C.border}`,
+        background: C.bg2,
+        flexShrink: 0,
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: C.text }}>Data sources</span>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: C.text3, cursor: 'pointer' }}>
+          <input type="checkbox" checked={autoModules} onChange={e => onAutoToggle(e.target.checked)} />
+          Auto-detect from question
+        </label>
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        {modules.map(m => {
+          const on = enabled.includes(m.id)
+          return (
+            <button
+              key={m.id}
+              type="button"
+              onClick={() => onToggle(m.id)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '6px 10px',
+                borderRadius: 8,
+                border: `1px solid ${on ? C.accent : C.border}`,
+                background: on ? 'rgba(79,126,245,.12)' : C.bg3,
+                color: on ? C.accent : C.text3,
+                fontSize: 11,
+                cursor: 'pointer',
+              }}
+            >
+              <FreshnessBadge freshness={m.freshness} />
+              {m.label}
+            </button>
+          )
+        })}
+      </div>
+      <p style={{ margin: '8px 0 0', fontSize: 10, color: C.text3, lineHeight: 1.5 }}>
+        <strong style={{ color: C.green }}>Live</strong> = queried from Influx/ES when you send.{' '}
+        <strong style={{ color: C.amber }}>Periodic</strong> = problem tracker snapshot (~2 min job).
+      </p>
+    </div>
+  )
+}
+
+function TabBar({ tab, setTab }) {
+  return (
+    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10, flexShrink: 0 }}>
+      {TABS.map(t => (
+        <button
+          key={t.id}
+          type="button"
+          onClick={() => setTab(t.id)}
+          style={{
+            padding: '8px 14px',
+            borderRadius: 8,
+            border: `1px solid ${tab === t.id ? C.accent : C.border}`,
+            background: tab === t.id ? 'rgba(79,126,245,.12)' : C.bg3,
+            color: tab === t.id ? C.accent : C.text2,
+            fontSize: 12,
+            fontWeight: 600,
+            fontFamily: 'var(--mono)',
+            cursor: 'pointer',
+          }}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function ChatModeBar({ mode, onModeChange }) {
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+      <span style={{ fontSize: 11, color: C.text3, fontWeight: 600 }}>Chat mode</span>
+      {CHAT_MODES.map(m => (
+        <button
+          key={m.id}
+          type="button"
+          title={m.hint}
+          onClick={() => onModeChange(m.id)}
+          style={{
+            padding: '6px 12px',
+            borderRadius: 8,
+            border: `1px solid ${mode === m.id ? C.accent : C.border}`,
+            background: mode === m.id ? 'rgba(79,126,245,.12)' : C.bg3,
+            color: mode === m.id ? C.accent : C.text2,
+            fontSize: 11,
+            fontWeight: 600,
+            cursor: 'pointer',
+          }}
+        >
+          {m.label}
+        </button>
+      ))}
+      <span style={{ fontSize: 10, color: C.text3, flex: '1 1 200px' }}>
+        {CHAT_MODES.find(m => m.id === mode)?.hint}
+      </span>
+    </div>
+  )
+}
+
+function ChatTab({ provider, model, availableModules, enabledModules, onToggleModule, autoModules, onAutoToggle }) {
+  const [chatMode, setChatMode] = useState('monitor')
+  const [messages, setMessages] = useState([
+    {
+      role: 'assistant',
+      content:
+        'NetPulse AI — three chat modes:\n\n' +
+        '• Monitor — fast live summaries (stores, firewall, USB, XDR counts).\n' +
+        '• Details — full per-hostname reports across Store Monitor, Sentinel, SOC, NOC.\n' +
+        '• RCA — root cause analysis with correlated timeline, ranked hypotheses, and recommended actions.\n\n' +
+        'Enable data sources above, pick a mode, then ask your question.',
+    },
+  ])
+  const [input, setInput] = useState('')
+  const [loading, setLoading] = useState(false)
+  const bottomRef = useRef(null)
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, loading])
+
+  const send = useCallback(async (text) => {
+    const content = String(text || input).trim()
+    if (!content || loading) return
+
+    const userMsg = { role: 'user', content }
+    const next = [...messages, userMsg]
+    setMessages(next)
+    setInput('')
+    setLoading(true)
+
+    try {
+      const history = next.filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({
+        role: m.role,
+        content: m.content,
+      }))
+      const { data } = await aiAPI.chat(history, {
+        modules: enabledModules,
+        autoModules,
+        mode: chatMode,
+      })
+      setMessages([
+        ...next,
+        {
+          role: 'assistant',
+          content: data.content,
+          contextMeta: data.contextMeta,
+          contextPreview: data.contextPreview,
+          queryContext: data.queryContext,
+          chartSeries: data.chartSeries,
+          metrics: data.metrics,
+          fastPath: data.fastPath,
+        },
+      ])
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message || 'Chat failed'
+      toast.error(msg)
+      setMessages([...next, { role: 'assistant', content: `Error: ${msg}` }])
+    } finally {
+      setLoading(false)
+    }
+  }, [input, loading, messages, enabledModules, autoModules, chatMode])
+
+  const loadingLabel = chatMode === 'rca'
+    ? 'Correlating signals across Store Monitor, Sentinel, SOC, NOC…'
+    : chatMode === 'details'
+      ? 'Fetching full hostname environment data…'
+      : 'Fetching live portal data & thinking…'
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 10, minHeight: 0, overflow: 'hidden' }}>
+      <ChatModeBar mode={chatMode} onModeChange={setChatMode} />
+      <DataSourcesPanel
+        modules={availableModules}
+        enabled={enabledModules}
+        onToggle={onToggleModule}
+        autoModules={autoModules}
+        onAutoToggle={onAutoToggle}
+      />
+
+      <div
+        style={{
+          flex: 1,
+          display: 'flex',
+          flexDirection: 'column',
+          minHeight: 0,
+          borderRadius: 12,
+          border: `1px solid ${C.border}`,
+          background: C.bg2,
+          overflow: 'hidden',
+        }}
+      >
+        <div
+          style={{
+            flex: 1,
+            overflowY: 'auto',
+            padding: '16px 20px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 14,
+          }}
+        >
+          {messages.map((m, i) => (
+            <div
+              key={i}
+              style={{
+                alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
+                width: '100%',
+                maxWidth: m.role === 'user' ? 'min(520px, 72%)' : '100%',
+                padding: '12px 16px',
+                borderRadius: 12,
+                background: m.role === 'user' ? 'rgba(79,126,245,.15)' : C.bg3,
+                border: `1px solid ${m.role === 'user' ? 'rgba(79,126,245,.35)' : C.border}`,
+                fontSize: 13,
+                lineHeight: 1.55,
+                color: C.text,
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              }}
+            >
+              {m.content}
+              {m.chartSeries?.length > 0 && <MetricChartsPanel series={m.chartSeries} />}
+              {(m.contextMeta?.length > 0 || m.contextPreview || m.metrics || m.fastPath || m.queryContext) && (
+                <ContextMetaPanel
+                  meta={m.contextMeta || []}
+                  fastPath={m.fastPath}
+                  preview={m.contextPreview}
+                  metrics={m.metrics}
+                  queryContext={m.queryContext}
+                />
+              )}
+            </div>
+          ))}
+          {loading && (
+            <div style={{ fontSize: 12, color: C.text3, fontFamily: 'var(--mono)', padding: '4px 2px' }}>
+              {loadingLabel}
+            </div>
+          )}
+          <div ref={bottomRef} />
+        </div>
+
+        <div
+          style={{
+            flexShrink: 0,
+            borderTop: `1px solid ${C.border}`,
+            background: C.bg3,
+            padding: '14px 16px',
+          }}
+        >
+          {messages.length <= 1 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+              {(STARTER_PROMPTS[chatMode] || STARTER_PROMPTS.monitor).map(p => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => send(p)}
+                  disabled={loading}
+                  style={{
+                    padding: '8px 12px',
+                    borderRadius: 8,
+                    border: `1px solid ${C.border}`,
+                    background: C.bg2,
+                    color: C.text2,
+                    fontSize: 11,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    flex: '1 1 240px',
+                    maxWidth: '100%',
+                  }}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 10, alignItems: 'stretch' }}>
+            <textarea
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  send()
+                }
+              }}
+              placeholder="Ask NetPulse AI… (Enter to send, Shift+Enter for newline)"
+              rows={3}
+              disabled={loading}
+              style={{
+                flex: 1,
+                resize: 'none',
+                minHeight: 72,
+                maxHeight: 160,
+                padding: '12px 14px',
+                borderRadius: 10,
+                border: `1px solid ${C.border}`,
+                background: C.bg2,
+                color: C.text,
+                fontSize: 13,
+                fontFamily: 'var(--sans)',
+                lineHeight: 1.45,
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => send()}
+              disabled={loading || !input.trim()}
+              style={{
+                minWidth: 92,
+                padding: '0 20px',
+                borderRadius: 10,
+                border: 'none',
+                background: C.accent,
+                color: '#fff',
+                fontWeight: 700,
+                fontSize: 13,
+                cursor: loading || !input.trim() ? 'not-allowed' : 'pointer',
+                opacity: loading || !input.trim() ? 0.6 : 1,
+              }}
+            >
+              Send
+            </button>
+          </div>
+
+          <div style={{ marginTop: 10, fontSize: 10, color: C.text3, fontFamily: 'var(--mono)', textAlign: 'center' }}>
+            Provider: {provider || '…'} {model ? `· ${model}` : ''}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function LogSearchTab() {
+  const [question, setQuestion] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState(null)
+
+  const run = async () => {
+    const q = question.trim()
+    if (!q) return
+    setLoading(true)
+    setResult(null)
+    try {
+      const { data } = await aiAPI.search(q)
+      setResult(data)
+      toast.success(`${data.total ?? 0} hits`)
+    } catch (err) {
+      toast.error(err.response?.data?.error || err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <p style={{ margin: 0, fontSize: 12, color: C.text3, lineHeight: 1.5 }}>
+        <FreshnessBadge freshness="live" /> Natural language → Elasticsearch on{' '}
+        <code style={{ fontFamily: 'var(--mono)' }}>firewall-*</code> and{' '}
+        <code style={{ fontFamily: 'var(--mono)' }}>cisco-*</code> — queried live at search time.
+      </p>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <input
+          value={question}
+          onChange={e => setQuestion(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && run()}
+          placeholder='e.g. denied traffic from 10.1.2.3 in the last hour'
+          style={{
+            flex: '1 1 280px',
+            padding: '10px 12px',
+            borderRadius: 10,
+            border: `1px solid ${C.border}`,
+            background: C.bg3,
+            color: C.text,
+            fontSize: 13,
+          }}
+        />
+        <button
+          type="button"
+          onClick={run}
+          disabled={loading || !question.trim()}
+          style={{
+            padding: '10px 16px',
+            borderRadius: 10,
+            border: 'none',
+            background: C.accent,
+            color: '#fff',
+            fontWeight: 700,
+            fontSize: 12,
+            cursor: 'pointer',
+            opacity: loading ? 0.7 : 1,
+          }}
+        >
+          {loading ? 'Searching…' : 'Search'}
+        </button>
+      </div>
+
+      {result && (
+        <>
+          <div style={{ fontSize: 11, color: C.text3, fontFamily: 'var(--mono)', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <FreshnessBadge freshness="live" />
+            Index: {result.query?.index} · Total: {result.total}
+            {result.fetchedAt && ` · ${new Date(result.fetchedAt).toLocaleTimeString()}`}
+          </div>
+          <pre
+            style={{
+              margin: 0,
+              padding: 12,
+              borderRadius: 10,
+              background: C.bg2,
+              border: `1px solid ${C.border}`,
+              fontSize: 11,
+              overflow: 'auto',
+              maxHeight: 160,
+              color: C.text2,
+            }}
+          >
+            {JSON.stringify(result.query?.body, null, 2)}
+          </pre>
+          <div style={{ overflow: 'auto', maxHeight: 360, border: `1px solid ${C.border}`, borderRadius: 10 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+              <thead>
+                <tr style={{ background: C.bg3 }}>
+                  {['Time', 'Device', 'Message'].map(h => (
+                    <th key={h} style={{ padding: '8px 10px', textAlign: 'left', color: C.text3, fontFamily: 'var(--mono)' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(result.hits || []).slice(0, 50).map((hit, i) => (
+                  <tr key={i}>
+                    <td style={{ padding: '8px 10px', borderTop: `1px solid ${C.border}`, color: C.text2, whiteSpace: 'nowrap' }}>
+                      {hit['@timestamp'] || hit.timestamp || '—'}
+                    </td>
+                    <td style={{ padding: '8px 10px', borderTop: `1px solid ${C.border}`, color: C.text2 }}>
+                      {hit.device_name || hit.host?.name || '—'}
+                    </td>
+                    <td style={{ padding: '8px 10px', borderTop: `1px solid ${C.border}`, color: C.text2, maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {hit.message || hit.cisco_message || hit.fgt?.msg || JSON.stringify(hit).slice(0, 120)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function AnomaliesTab() {
+  const [site, setSite] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState(null)
+
+  const run = async () => {
+    setLoading(true)
+    try {
+      const { data } = await aiAPI.anomalies(site.trim() || undefined)
+      setResult(data)
+    } catch (err) {
+      toast.error(err.response?.data?.error || err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <p style={{ margin: 0, fontSize: 12, color: C.text3, lineHeight: 1.5 }}>
+        <FreshnessBadge freshness="live" /> Live ES aggregation (last 1 hour) + AI interpretation.
+      </p>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <input
+          value={site}
+          onChange={e => setSite(e.target.value)}
+          placeholder="Optional site name filter"
+          style={{
+            flex: '1 1 200px',
+            padding: '10px 12px',
+            borderRadius: 10,
+            border: `1px solid ${C.border}`,
+            background: C.bg3,
+            color: C.text,
+            fontSize: 13,
+          }}
+        />
+        <button
+          type="button"
+          onClick={run}
+          disabled={loading}
+          style={{
+            padding: '10px 16px',
+            borderRadius: 10,
+            border: 'none',
+            background: C.accent,
+            color: '#fff',
+            fontWeight: 700,
+            fontSize: 12,
+            cursor: 'pointer',
+          }}
+        >
+          {loading ? 'Analyzing…' : 'Run analysis'}
+        </button>
+      </div>
+      {result && (
+        <div style={{ padding: 16, borderRadius: 12, background: C.bg2, border: `1px solid ${C.border}` }}>
+          {result.fetchedAt && (
+            <div style={{ fontSize: 10, color: C.text3, fontFamily: 'var(--mono)', marginBottom: 8, display: 'flex', gap: 6, alignItems: 'center' }}>
+              <FreshnessBadge freshness="live" /> fetched {new Date(result.fetchedAt).toLocaleTimeString()} · {result.window}
+            </div>
+          )}
+          <div style={{ fontSize: 13, color: C.text, marginBottom: 12, lineHeight: 1.5 }}>{result.summary}</div>
+          {(result.anomalies || []).length === 0 ? (
+            <div style={{ fontSize: 12, color: C.text3 }}>No anomalies reported.</div>
+          ) : (
+            <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {result.anomalies.map((a, i) => (
+                <li key={i} style={{ fontSize: 12, color: C.text2 }}>
+                  <span style={{ color: severityColor(a.severity), fontWeight: 700, fontFamily: 'var(--mono)', marginRight: 8 }}>
+                    {(a.severity || 'info').toUpperCase()}
+                  </span>
+                  <strong>{a.type}</strong> — {a.description}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function TriageTab() {
+  const [form, setForm] = useState({
+    srcip: '',
+    dstip: '',
+    action: '',
+    message: '',
+    device_name: '',
+    site_name: '',
+  })
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState(null)
+
+  const set = (key, val) => setForm(f => ({ ...f, [key]: val }))
+
+  const run = async () => {
+    setLoading(true)
+    setResult(null)
+    try {
+      const { data } = await aiAPI.triage(form)
+      setResult(data)
+    } catch (err) {
+      toast.error(err.response?.data?.error || err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, width: '100%' }}>
+      <p style={{ margin: 0, fontSize: 12, color: C.text3, lineHeight: 1.5 }}>
+        Paste alert fields for AI triage (severity, category, recommendation as JSON).
+      </p>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        {[
+          ['srcip', 'Source IP'],
+          ['dstip', 'Dest IP'],
+          ['action', 'Action'],
+          ['device_name', 'Device'],
+          ['site_name', 'Site'],
+        ].map(([key, label]) => (
+          <label key={key} style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, color: C.text3 }}>
+            {label}
+            <input
+              value={form[key]}
+              onChange={e => set(key, e.target.value)}
+              style={{
+                padding: '8px 10px',
+                borderRadius: 8,
+                border: `1px solid ${C.border}`,
+                background: C.bg3,
+                color: C.text,
+                fontSize: 12,
+              }}
+            />
+          </label>
+        ))}
+      </div>
+      <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, color: C.text3 }}>
+        Message
+        <textarea
+          value={form.message}
+          onChange={e => set('message', e.target.value)}
+          rows={3}
+          style={{
+            padding: '8px 10px',
+            borderRadius: 8,
+            border: `1px solid ${C.border}`,
+            background: C.bg3,
+            color: C.text,
+            fontSize: 12,
+            resize: 'vertical',
+          }}
+        />
+      </label>
+      <button
+        type="button"
+        onClick={run}
+        disabled={loading}
+        style={{
+          alignSelf: 'flex-start',
+          padding: '10px 16px',
+          borderRadius: 10,
+          border: 'none',
+          background: C.accent,
+          color: '#fff',
+          fontWeight: 700,
+          fontSize: 12,
+          cursor: 'pointer',
+        }}
+      >
+        {loading ? 'Triaging…' : 'Triage alert'}
+      </button>
+      {result && (
+        <pre
+          style={{
+            margin: 0,
+            padding: 14,
+            borderRadius: 10,
+            background: C.bg2,
+            border: `1px solid ${C.border}`,
+            fontSize: 12,
+            color: C.text2,
+            overflow: 'auto',
+          }}
+        >
+          {JSON.stringify(result, null, 2)}
+        </pre>
+      )}
+    </div>
+  )
+}
+
+function severityColor(sev) {
+  const s = String(sev || '').toLowerCase()
+  if (s.includes('critical') || s.includes('high')) return C.red
+  if (s.includes('medium')) return C.amber
+  return C.green
+}
+
+export default function AIPage() {
+  const [tab, setTab] = useUrlTab('chat', TABS)
+  const [provider, setProvider] = useState('')
+  const [model, setModel] = useState('')
+  const [availableModules, setAvailableModules] = useState([])
+  const [enabledModules, setEnabledModules] = useState([])
+  const [autoModules, setAutoModules] = useState(true)
+
+  useEffect(() => {
+    aiAPI.getProvider()
+      .then(({ data }) => {
+        setProvider(data.provider)
+        setModel(data.model || '')
+      })
+      .catch(() => {})
+    aiAPI.getModules()
+      .then(({ data }) => {
+        const mods = data.modules || []
+        setAvailableModules(mods)
+        setEnabledModules(mods.filter(m => m.id === 'storeMonitor' || m.id === 'storeProblems').map(m => m.id))
+      })
+      .catch(() => {})
+  }, [])
+
+  const toggleModule = (id) => {
+    setEnabledModules(prev => (prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]))
+  }
+
+  return (
+    <div style={{ ...PAGE_ROOT, color: C.text, fontFamily: 'var(--sans)' }}>
+      <div style={{ flexShrink: 0, marginBottom: 10 }}>
+        <h1 style={{ fontSize: 22, fontWeight: 700, margin: '0 0 4px', letterSpacing: '-0.02em' }}>AI Assistant</h1>
+        <p style={{ margin: 0, fontSize: 12, color: C.text3, lineHeight: 1.5 }}>
+          Real portal data + AI reasoning —{' '}
+          <FreshnessBadge freshness="live" /> live queries and{' '}
+          <FreshnessBadge freshness="periodic" /> periodic snapshots, clearly labeled.
+          {provider ? ` Provider: ${provider}${model ? ` / ${model}` : ''}.` : ''}
         </p>
+      </div>
+
+      <TabBar tab={tab} setTab={setTab} />
+
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {tab === 'chat' && (
+          <ChatTab
+            provider={provider}
+            model={model}
+            availableModules={availableModules}
+            enabledModules={enabledModules}
+            onToggleModule={toggleModule}
+            autoModules={autoModules}
+            onAutoToggle={setAutoModules}
+          />
+        )}
+        {tab === 'search' && (
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingRight: 4 }}>
+            <LogSearchTab />
+          </div>
+        )}
+        {tab === 'anomalies' && (
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingRight: 4 }}>
+            <AnomaliesTab />
+          </div>
+        )}
+        {tab === 'triage' && (
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingRight: 4 }}>
+            <TriageTab />
+          </div>
+        )}
       </div>
     </div>
   )

@@ -29,6 +29,7 @@ import ticketRoutes from './routes/tickets.js'
 import logsRoutes from './routes/logs.js'
 import alertRoutes from './routes/alerts.js'
 import aiRoutes from './routes/ai.js'
+import agentPortalRoutes from './routes/agentPortal.js'
 import statsRoutes from './routes/stats.js'
 import sentinelRoutes from './routes/sentinel.js'
 import sentinelOneRoutes from './routes/sentinelOne.js'
@@ -145,6 +146,7 @@ app.use('/api/tickets', ticketRoutes)
 app.use('/api/logs',    logsRoutes)
 app.use('/api/alerts',  alertRoutes)
 app.use('/api/ai',      aiRoutes)
+app.use('/api/agent',   agentPortalRoutes)
 app.use('/api/stats',   statsRoutes)
 app.use('/api/sentinel', sentinelRoutes)
 app.use('/api/sentinel-one', sentinelOneRoutes)

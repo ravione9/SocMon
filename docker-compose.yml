@@ -54,6 +54,7 @@ services:
       - .env
     environment:
       NODE_ENV: development
+      TZ: Asia/Kolkata
       # guacd runs as a sibling container on the internal Docker network.
       # The server talks to it via the service name, not localhost.
       GUACD_HOST: guacd

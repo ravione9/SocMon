@@ -12,6 +12,8 @@ api.interceptors.request.use(config => {
     config.timeout = 120000
   } else if (reqUrl.includes('/store-monitor')) {
     config.timeout = 300000
+  } else if (reqUrl.includes('/api/ai')) {
+    config.timeout = 360000
   }
   return config
 })

@@ -909,6 +909,79 @@ export async function fetchCrashSummary(rangeParam = '-24h', fromSec, toSec) {
 }
 
 /**
+ * Pivot raw Flux crash rows into individual events (hostname + timestamp + app).
+ * @param {object[]} rows from fetchCrashEvents
+ * @returns {Array<{ ts: string, hostname: string, storeTag: string, appName: string|null, crashType: string, count: number, message: string|null, eventId: string|null }>}
+ */
+export function buildCrashEventList(rows) {
+  const BLANK_APP = new Set(['none', 'null', 'n/a', '', 'undefined', 'unknown'])
+  const BLANK_CRASH_TYPE = new Set(['none', 'null', 'n/a', '', 'undefined', 'unknown'])
+  const byKey = new Map()
+
+  for (const row of rows || []) {
+    const rowCrashTypeTag = String(row.crash_type || '').toLowerCase().trim()
+    if (rowCrashTypeTag && BLANK_CRASH_TYPE.has(rowCrashTypeTag)) continue
+
+    const ts = row._time
+    if (!ts) continue
+    const storeTag = row.store_tag || row.hostname || ''
+    const hostname = row.hostname || row.store_tag || ''
+    const appRaw = row.app_name || ''
+    const appName = (!appRaw || BLANK_APP.has(String(appRaw).toLowerCase().trim())) ? null : appRaw
+    const crashType = row._measurement || 'app_crash'
+    const key = `${ts}|${storeTag}|${hostname}|${appName || ''}|${crashType}`
+
+    if (!byKey.has(key)) {
+      byKey.set(key, {
+        ts,
+        hostname,
+        storeTag,
+        appName,
+        crashType,
+        count: 0,
+        message: null,
+        eventId: null,
+      })
+    }
+    const ev = byKey.get(key)
+    if (row._field === 'count') ev.count += num(row._value) || 1
+    if (row._field === 'message') ev.message = row._value
+    if (row._field === 'event_id') ev.eventId = row._value
+    if (ev.count === 0 && row._field !== 'count') ev.count = 1
+  }
+
+  return [...byKey.values()]
+    .filter(e => e.count > 0 || e.message || e.eventId)
+    .sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime())
+}
+
+/**
+ * Individual crash events with hostname and timestamp.
+ */
+export async function fetchCrashEventList(rangeParam = '-24h', fromSec, toSec, { appName, storeTag, hostname } = {}) {
+  let rows = await fetchCrashEvents(rangeParam, fromSec, toSec)
+  if (storeTag) {
+    const tag = String(storeTag).toLowerCase()
+    rows = rows.filter(r => String(r.store_tag || '').toLowerCase() === tag || String(r.hostname || '').toLowerCase() === tag)
+  }
+  if (hostname) {
+    const h = String(hostname).toLowerCase()
+    rows = rows.filter(r => String(r.hostname || '').toLowerCase().includes(h) || String(r.store_tag || '').toLowerCase().includes(h))
+  }
+  let events = buildCrashEventList(rows)
+  if (appName) {
+    const f = String(appName).toLowerCase()
+    events = events.filter(e => {
+      const a = String(e.appName || '').toLowerCase()
+      const msg = String(e.message || '').toLowerCase()
+      if (a) return a === f || a.includes(f) || f.includes(a)
+      return msg.includes(f)
+    })
+  }
+  return events
+}
+
+/**
  * Per-store crash counts in the last N minutes — used by the alert engine.
  * Returns Map< storeKey, Map<"appName||crashType", count> >
  */
