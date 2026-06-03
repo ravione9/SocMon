@@ -894,14 +894,15 @@ function ChatTab({
     let nextMessages = null
     setSessions(prev => {
       const existing = prev.find(s => s.id === sessionId)
-      if (!existing) return prev
-      const base = existing.messages || defaultWelcomeMessages()
+      const base = existing?.messages
+        || (activeSessionIdRef.current === sessionId ? messages : null)
+        || defaultWelcomeMessages()
       nextMessages = typeof updater === 'function' ? updater(base) : updater
       const snapshot = buildSessionSnapshot(
         sessionId,
         nextMessages,
-        modeOverride ?? existing.chatMode ?? 'monitor',
-        existing.createdAt,
+        modeOverride ?? existing?.chatMode ?? chatMode,
+        existing?.createdAt,
       )
       const next = persistSessionInList(userKey, prev, snapshot)
       sessionsRef.current = next
@@ -911,7 +912,7 @@ function ChatTab({
       setMessages(nextMessages)
     }
     return nextMessages
-  }, [buildSessionSnapshot, userKey])
+  }, [buildSessionSnapshot, userKey, messages, chatMode])
 
   const trackSessionPending = useCallback((sessionId, delta) => {
     const cur = pendingBySessionRef.current.get(sessionId) || 0
@@ -1043,7 +1044,9 @@ function ChatTab({
     if (!sessionId) return
 
     const existingSession = sessionsRef.current.find(s => s.id === sessionId)
-    let baseMessages = existingSession?.messages || messages
+    let baseMessages = (activeSessionIdRef.current === sessionId && messages?.length)
+      ? messages
+      : (existingSession?.messages || defaultWelcomeMessages())
     let modeAtSend = existingSession?.chatMode || chatMode
 
     if (shouldStartNewThreadForQuestion(content, baseMessages) && hasUserMessages(baseMessages)) {
@@ -1059,12 +1062,18 @@ function ChatTab({
       setActiveSessionId(fresh.id)
       baseMessages = fresh.messages
       modeAtSend = fresh.chatMode
+      setMessages(fresh.messages)
       toast('New chat started — different device from the previous question.', { icon: '💬', duration: 3500 })
     }
 
     const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const userMsg = { role: 'user', content, reqId }
     const next = [...baseMessages, userMsg]
+    // Show the user's question immediately in the active pane (don't wait on session persist).
+    if (activeSessionIdRef.current === sessionId) {
+      skipPersistRef.current = true
+      setMessages(next)
+    }
     commitSessionMessages(sessionId, next, modeAtSend)
     setInput('')
     trackSessionPending(sessionId, 1)
@@ -1206,11 +1215,16 @@ function ChatTab({
             return (
             <div
               key={msgKey}
-              className={isError ? 'ai-msg-error' : m.role === 'assistant' ? 'ai-msg-assistant' : undefined}
+              className={
+                isError ? 'ai-msg-error'
+                  : isUser ? 'ai-msg-user'
+                    : 'ai-msg-assistant'
+              }
               style={{
                 alignSelf: isUser ? 'flex-end' : 'stretch',
-                width: '100%',
-                maxWidth: isUser ? 'min(520px, 72%)' : '100%',
+                width: isUser ? 'auto' : '100%',
+                maxWidth: isUser ? 'min(520px, 85%)' : '100%',
+                minWidth: isUser ? 48 : undefined,
                 padding: isUser ? '10px 14px' : '12px 14px',
                 borderRadius: isUser ? 12 : 16,
                 background: isUser

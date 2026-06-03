@@ -12,6 +12,11 @@
   border-left: 2px solid rgba(99, 120, 200, 0.4) !important;
 }
 
+.ai-msg-user {
+  flex-shrink: 0;
+  align-self: flex-end !important;
+}
+
 /* Error message card — override gradient to pure red tint */
 .ai-msg-error {
   background: rgba(248, 113, 113, 0.06) !important;
