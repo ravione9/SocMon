@@ -1,4 +1,5 @@
 import { isXdrQuestion } from './xdrDirectAnswer.js'
+import { isGeoConnectionQuery } from './geoConnectionQuery.js'
 import { isNetworkInfraQuery, isZabbixQuestion, isInfraDeviceStatusQuery, extractHostGroupFilter, extractHostGroupFromThread, extractIpv4, extractIpv4FromThread, extractZabbixHostFromThread, extractInfraHostName, extractInfraHostFromThread } from './zabbixDirectAnswer.js'
 import { isFirewallQuestion, isSocReportQuery } from './socDirectAnswer.js'
 import { isDisconnectionLogQuery } from './nocDirectAnswer.js'
@@ -31,13 +32,30 @@ const FOLLOWUP_AFFECTED = /\b(which stores|what stores|stores are affected|affec
 const APP_ONLY = /\b(only for|just for|only about|asking about only)\b/i
 const HOSTNAME_DETAIL = /\b(complete details|full details|all environ|all enviro|all data|full data|give me all|give me.*details|details of|everything about|store details|this hostname|usb|threat)\b/i
 
-/** Store agent hostname — RP1537-E519BNZT or WGGN-4CE225BH1H (prefix may omit store digits). */
-export const STORE_HOSTNAME_RE = /\b([A-Z]{2,5}(?:\d+)?-(?=[A-Z0-9]*[A-Z])[A-Z0-9]{4,})\b/i
+/** Store agent hostname — RP1190-E519BNYW, RP1537-E519BNZT, WGGN-4CE225BH1H */
+export const STORE_HOSTNAME_RE = /\b([A-Z]{2,8}(?:\d{2,6})?-[A-Z0-9]{4,})\b/i
+
+/** Store/retail hostname question — search Store Monitor, Sentinel, SOC, NOC (not Infra Zabbix-only). */
+export function isStoreHostnamePortalQuery(q) {
+  const text = String(q || '')
+  const host = extractStoreHostname(text)
+  if (!host) return false
+  if (/\b(zabbix|infra mon|infra host|network devices?|servers? status)\b/i.test(text) && !HOSTNAME_DETAIL.test(text)) {
+    return false
+  }
+  if (HOSTNAME_DETAIL.test(text)) return true
+  if (/\b(data|details|info|information|status|health|report|environment|environ)\b/i.test(text) && /\b(of|for|about)\b/i.test(text)) {
+    return true
+  }
+  return false
+}
 
 /** Question asks for a hostname-scoped data dump (instant path, no LLM). */
 export function isHostnameDataRequest(q) {
   const text = String(q || '')
-  if (isZabbixQuestion(text) || isNetworkInfraQuery(text)) return false
+  if (isStoreHostnamePortalQuery(text)) return true
+  if (/\b(zabbix|infra mon)\b/i.test(text)) return false
+  if (isNetworkInfraQuery(text)) return false
   if (HOSTNAME_DETAIL.test(text)) return true
   if (/\b(all data|full data|all info|give me all|complete data|entire data|all details)\b/i.test(text)) {
     if (/\b(zabbix|network devices?|server status|servers? status)\b/i.test(text)) return false
@@ -61,6 +79,37 @@ function isFollowUpPhrasing(q) {
   return FOLLOWUP_MARKERS.test(String(q || ''))
 }
 
+function sameSubjectAsPrior(currentQuestion, priorUser, priorAssistant) {
+  const curIp = extractIpv4(currentQuestion)
+  const curHost = extractStoreHostname(currentQuestion)
+  const priorIp = extractIpv4(priorUser) || extractIpv4FromThread(priorAssistant)
+  const priorHost = extractStoreHostname(priorUser) || extractStoreHostname(priorAssistant)
+  if (curIp && priorIp) return curIp === priorIp
+  if (curHost && priorHost) return curHost === priorHost
+  return false
+}
+
+function isXdrIntent(q) {
+  return isXdrQuestion(q) || isGeoConnectionQuery(q)
+}
+
+/** New user turn targets a different IP/hostname than the prior exchange — do not inherit Zabbix/thread context. */
+function detectSubjectChange(currentQuestion, priorUser, priorAssistant, priorTopic) {
+  const q = String(currentQuestion || '')
+  if (isXdrIntent(q) && priorTopic && priorTopic !== 'xdr') return true
+  const currentIp = extractIpv4(q)
+  const currentHostname = extractStoreHostname(q)
+  const priorIp = extractIpv4(priorUser) || extractIpv4FromThread(priorAssistant)
+  const priorHostname = extractStoreHostname(priorUser) || extractStoreHostname(priorAssistant)
+
+  if (currentHostname && priorIp && !currentIp) return true
+  if (currentHostname && priorHostname && currentHostname !== priorHostname) return true
+  if (currentIp && priorHostname && !priorIp) return true
+  if (currentIp && priorIp && currentIp !== priorIp) return true
+  if (currentHostname && priorTopic === 'zabbix' && !isFollowUpPhrasing(q) && !isZabbixQuestion(q)) return true
+  return false
+}
+
 /**
  * @typedef {'crash'|'xdr'|'store'|'soc'|'general'} QueryTopic
  */
@@ -82,37 +131,63 @@ export function resolveQueryContext(messages, opts = {}) {
   const priorTopic = inferTopicFromAssistant(priorAssistant)
   const threadText = thread.map(m => m.content).join('\n')
 
-  const isFollowUp = userMessages.length > 1
-    && (isFollowUpPhrasing(currentQuestion)
-      || currentQuestion.split(/\s+/).length <= 24
-      || Boolean(priorTopic))
+  const subjectChanged = userMessages.length > 1
+    && detectSubjectChange(currentQuestion, priorUser, priorAssistant, priorTopic)
+
+  const inheritsThread = userMessages.length > 1 && !subjectChanged
+
+  const sameSubject = sameSubjectAsPrior(currentQuestion, priorUser, priorAssistant)
+
+  const isFollowUp = inheritsThread && (
+    isFollowUpPhrasing(currentQuestion)
+    || (
+      priorTopic
+      && sameSubject
+      && /\b(it|this|that|same|those|above|more|also|why|how|utilization|utilisation|disk|bandwidth|memory|cpu|problems|ping|interface|tunnel|vpn|explain|resource)\b/i.test(currentQuestion)
+      && currentQuestion.split(/\s+/).length <= 32
+    )
+  )
   const followUpKind = detectFollowUpKind(currentQuestion)
 
+  const xdrIntent = isXdrIntent(currentQuestion)
+
   const ip = extractIpv4(currentQuestion)
-    || (isFollowUp ? extractIpv4FromThread(threadText) : null)
-    || (isFollowUp ? extractIpv4FromThread(priorAssistant) : null)
+    || (!xdrIntent && isFollowUp ? extractIpv4FromThread(threadText) : null)
+    || (!xdrIntent && isFollowUp ? extractIpv4FromThread(priorAssistant) : null)
 
-  const zabbixHost = extractZabbixHostFromThread(currentQuestion)
-    || (isFollowUp && priorTopic === 'zabbix'
-      ? extractZabbixHostFromThread(priorAssistant) || extractZabbixHostFromThread(threadText)
-      : null)
+  const zabbixHost = !xdrIntent
+    ? (
+      extractZabbixHostFromThread(currentQuestion)
+      || (isFollowUp && priorTopic === 'zabbix'
+        ? extractZabbixHostFromThread(priorAssistant) || extractZabbixHostFromThread(threadText)
+        : null)
+    )
+    : null
 
-  const infraHost = extractInfraHostName(currentQuestion)
-    || (isFollowUp ? extractInfraHostFromThread(priorUser) : null)
-    || (isFollowUp ? extractInfraHostFromThread(threadText) : null)
-    || (isFollowUp && priorTopic === 'zabbix' ? extractInfraHostFromThread(priorAssistant) : null)
+  const infraHost = !xdrIntent
+    ? (
+      extractInfraHostName(currentQuestion)
+      || (isFollowUp ? extractInfraHostFromThread(priorUser) : null)
+      || (isFollowUp ? extractInfraHostFromThread(threadText) : null)
+      || (isFollowUp && priorTopic === 'zabbix' ? extractInfraHostFromThread(priorAssistant) : null)
+    )
+    : null
 
-  const ctxLite = { isFollowUp, priorTopic, threadText, priorAssistant, priorUser, ip, zabbixHost, infraHost }
+  const ctxLite = { isFollowUp, subjectChanged, priorTopic, threadText, priorAssistant, priorUser, ip, zabbixHost, infraHost, hostname: extractStoreHostname(currentQuestion) }
   const hostGroup = extractHostGroupFilter(currentQuestion, ctxLite)
     || (isFollowUp && priorTopic === 'zabbix' ? extractHostGroupFromThread(threadText) : null)
 
-  const hostname = extractStoreHostname(currentQuestion)
-    || (!isZabbixQuestion(currentQuestion) && !isNetworkInfraQuery(currentQuestion) && isFollowUp && priorTopic === 'hostname'
-      ? extractStoreHostname(priorAssistant)
-      : null)
-    || (!isZabbixQuestion(currentQuestion) && !isNetworkInfraQuery(currentQuestion) && isFollowUp && priorTopic === 'hostname'
-      ? extractStoreHostname(threadText)
-      : null)
+  const hostname = !xdrIntent
+    ? (
+      extractStoreHostname(currentQuestion)
+      || (!isZabbixQuestion(currentQuestion) && !isNetworkInfraQuery(currentQuestion) && isFollowUp && priorTopic === 'hostname'
+        ? extractStoreHostname(priorAssistant)
+        : null)
+      || (!isZabbixQuestion(currentQuestion) && !isNetworkInfraQuery(currentQuestion) && isFollowUp && priorTopic === 'hostname'
+        ? extractStoreHostname(threadText)
+        : null)
+    )
+    : null
 
   const appNameFromCurrent = extractAppName(currentQuestion)
   const appName = appNameFromCurrent
@@ -120,11 +195,14 @@ export function resolveQueryContext(messages, opts = {}) {
     || (appNameFromCurrent ? null : extractAppNameFromAssistant(priorAssistant))
 
   let topic = detectTopicFromQuestion(currentQuestion, appName, { chatMode, isFollowUp, priorTopic })
+  if (!topic && xdrIntent) topic = 'xdr'
   if (!topic && chatMode === 'rca') topic = 'rca'
   if (!topic && chatMode === 'details' && hostname) topic = 'hostname'
   if (!topic && hostname && isHostnameDataRequest(currentQuestion)) topic = 'hostname'
-  if (!topic && isFollowUp && priorTopic) topic = priorTopic
-  if (!topic && isFollowUp && (ip || zabbixHost) && priorTopic === 'zabbix') topic = 'zabbix'
+  if (!topic && isStoreHostnamePortalQuery(currentQuestion)) topic = 'hostname'
+  if (!topic && hostname && subjectChanged) topic = 'hostname'
+  if (!topic && isFollowUp && priorTopic && !subjectChanged) topic = priorTopic
+  if (!topic && isFollowUp && (ip || zabbixHost) && priorTopic === 'zabbix' && !subjectChanged) topic = 'zabbix'
   if (!topic && appName && (APP_ONLY.test(currentQuestion) || priorTopic === 'crash')) {
     topic = 'crash'
   }
@@ -150,6 +228,7 @@ export function resolveQueryContext(messages, opts = {}) {
     topic,
     priorTopic,
     isFollowUp,
+    subjectChanged,
     followUpKind,
     appName,
     hostname,
@@ -172,6 +251,7 @@ export function resolveQueryContext(messages, opts = {}) {
     infraHost,
     range,
     isFollowUp,
+    subjectChanged,
     followUpKind,
     wantsStoreList,
     wantsCrashEventList,
@@ -199,6 +279,7 @@ function inferTopicFromAssistant(text) {
 function detectTopicFromQuestion(q, appName, ctx = {}) {
   const text = String(q || '')
   if (isRcaQuery(text, ctx)) return 'rca'
+  if (isXdrQuestion(text) || isGeoConnectionQuery(text)) return 'xdr'
   if (isSocReportQuery(text)) return 'soc'
   if (isZabbixQuestion(text)) return 'zabbix'
   if (isInfraDeviceStatusQuery(text)) return 'zabbix'
@@ -233,16 +314,18 @@ export function wantsCrashEventLog(question, ctx = null) {
   return false
 }
 
-function pickDirectHandler({ currentQuestion, topic, priorTopic, isFollowUp, followUpKind, appName, hostname, ip, zabbixHost, chatMode = 'monitor' }) {
+function pickDirectHandler({ currentQuestion, topic, priorTopic, isFollowUp, subjectChanged, followUpKind, appName, hostname, ip, zabbixHost, chatMode = 'monitor' }) {
   const q = String(currentQuestion || '')
-  const ctxLite = { isFollowUp, priorTopic, chatMode, hostname, ip, zabbixHost, directHandler: null }
+  const ctxLite = { isFollowUp, subjectChanged, priorTopic, chatMode, hostname, ip, zabbixHost, directHandler: null }
   const storeMonitorIntent = /\b(offline|online|down|monitor status|store monitor|how many stores)\b/i.test(q)
   const chartRequest = /\b(graph|graphical|chart|visual|plot|timeline)\b/i.test(q)
 
   if ((isRcaQuery(q, ctxLite) || topic === 'rca') && chatMode !== 'details') return 'rca'
   if (chatMode === 'details' && hostname && !isRcaQuery(q, ctxLite)) return 'hostname'
 
+  if (isXdrQuestion(q) || isGeoConnectionQuery(q) || topic === 'xdr') return 'xdr'
   if (isSocReportQuery(q) || (isFirewallQuestion(q) && !isZabbixQuestion(q, ctxLite))) return 'soc'
+  if (hostname && isStoreHostnamePortalQuery(q)) return 'hostname'
   if (isZabbixQuestion(q, { ...ctxLite, ip, zabbixHost })) return 'zabbix'
   if (isDisconnectionLogQuery(q, { isFollowUp, priorTopic })) return 'noc'
   if (isFollowUp && priorTopic === 'noc' && /\b(usb|hostname|rp group|timestamp|disconn|show|list|required|only)\b/i.test(q)) return 'noc'
@@ -258,7 +341,7 @@ function pickDirectHandler({ currentQuestion, topic, priorTopic, isFollowUp, fol
 
   if (hostnameDetail) return 'hostname'
 
-  if (isXdrQuestion(q) || topic === 'xdr' || (isFollowUp && priorTopic === 'xdr' && !storeMonitorIntent)) return 'xdr'
+  if (isFollowUp && priorTopic === 'xdr' && !storeMonitorIntent) return 'xdr'
   if (
     !storeMonitorIntent && (
       topic === 'crash'

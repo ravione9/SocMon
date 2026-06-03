@@ -1,8 +1,10 @@
 import { createZabbixClient } from '../../services/zabbix.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 import { isInfluxStoreConfigured, fetchStoreSnapshot, buildOverviewSummary } from '../influxStore.js'
-import { extractStoreHostname } from './queryContext.js'
+import { extractStoreHostname, isStoreHostnamePortalQuery } from './queryContext.js'
 import { isSocReportQuery } from './socDirectAnswer.js'
+import { isXdrQuestion } from './xdrDirectAnswer.js'
+import { isGeoConnectionQuery } from './geoConnectionQuery.js'
 import { wantsDeepInfraFetch } from './directLlmSynthesis.js'
 
 const IPV4_RE = /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/
@@ -73,6 +75,12 @@ export function extractZabbixHostFromThread(text) {
 /** Resolve IP or Zabbix host for follow-ups ("same device", "explain VPN", etc.). */
 export function resolveInfraHostFilter(question, ctx = null) {
   const q = String(question || '')
+  if (ctx?.subjectChanged) {
+    return {
+      ip: extractIpv4(q) || null,
+      host: extractInfraHostName(q) || null,
+    }
+  }
   const ip = extractIpv4(q)
     || ctx?.ip
     || (ctx?.isFollowUp ? extractIpv4FromThread(ctx?.threadText) : null)
@@ -245,6 +253,10 @@ function isClarificationPhrase(q) {
 
 export function isZabbixQuestion(question, ctx = null) {
   const q = String(question || '')
+  // XDR / geo hunts must never route to Infra Zabbix (even if prior chat mentions an IP).
+  if (isXdrQuestion(q) || isGeoConnectionQuery(q)) return false
+  if (/\bxdr\b/i.test(q) && /\b(sentinel|connection|connec|china|country|device|endpoint)\b/i.test(q)) return false
+  if (isStoreHostnamePortalQuery(q) && !extractIpv4(q)) return false
   if (isSocReportQuery(q)) return false
   if (isClarificationPhrase(q)) return false
   if (wantsDiskUsage(q) && (extractHostGroupFilter(q, ctx) || /\b(server|servers|zabbix|infra|host|group)\b/i.test(q))) return true
@@ -252,11 +264,14 @@ export function isZabbixQuestion(question, ctx = null) {
   if (wantsBandwidthUtil(q, ctx) && extractHostGroupFilter(q, ctx)) return true
   if (extractHostGroupFilter(q, ctx) && wantsDiskUsage(q)) return true
   if (extractHostGroupFilter(q, ctx) && /\b(server|servers|host)\b/i.test(q) && !/\b(bandwidth|soc|firewall)\b/i.test(q)) return true
-  if (ctx?.isFollowUp && ctx?.priorTopic === 'zabbix' && !isSocReportQuery(q)) {
-    if (/\b(group|why|only|server|host|disk|this|that|\d+|bandwidth|same|device|firewall|fortigate|vpn|tunnel|problem|issue|explain|what|how|more|status|ping|interface|analysis|recommend)\b/i.test(q)) {
+  if (ctx?.isFollowUp && ctx?.priorTopic === 'zabbix' && !isSocReportQuery(q) && !ctx?.subjectChanged) {
+    if (extractStoreHostname(q) && !extractIpv4(q)) return false
+    if (/\b(group|why|only|server|disk|this|that|\d+|bandwidth|same|device|firewall|fortigate|vpn|tunnel|problem|issue|explain|what|how|more|ping|interface|analysis|recommend)\b/i.test(q)) {
       return true
     }
-    if (ctx?.ip || ctx?.zabbixHost || ctx?.infraHost) return true
+    if ((ctx?.ip || ctx?.zabbixHost || ctx?.infraHost) && /\b(same|this|that|it|those|above|device|host|firewall|tunnel|vpn|more|also|why|how)\b/i.test(q)) {
+      return true
+    }
   }
   return ZABBIX_MARKERS.test(q)
     || isIpInfraQuery(q)
@@ -1035,6 +1050,7 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
  */
 export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) {
   if (!isZabbixQuestion(question, ctx)) return null
+  if (ctx?.subjectChanged && extractStoreHostname(question) && !extractIpv4(question)) return null
   if (prefersLlmSynthesis(question, ctx)) return null
 
   const fetchedAt = new Date().toISOString()

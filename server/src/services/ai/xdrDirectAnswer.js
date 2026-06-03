@@ -112,7 +112,7 @@ export function buildXdrQueryFromQuestion(question) {
   }
 
   const countryFilter = extractCountryFromQuestion(q)
-  if (countryFilter && /\b(connection|connect|connected|traffic|ip connect)\b/.test(q)) {
+  if (countryFilter && isGeoConnectionQuery(q)) {
     return buildGeoConnectionPowerQuery(countryFilter.name)
   }
 
@@ -123,7 +123,8 @@ export function isXdrQuestion(question) {
   const q = String(question || '')
   if (XDR_KEYWORDS.test(q)) return true
   if (LOGIN_FAIL_KEYWORDS.test(q)) return true
-  if (XDR_KEYWORDS.test(q) && isGeoConnectionQuery(q)) return true
+  if (isGeoConnectionQuery(q)) return true
+  if (/\bxdr\b/i.test(q) && /\b(device|connec|china|country|how many|endpoint|sentinel)\b/i.test(q)) return true
   return false
 }
 
@@ -376,8 +377,33 @@ export async function tryDirectXdrAnswer(question, allowedPages, ctx = null) {
     }
   }
 
-  // No safe template — return null so Monitor can fall back to Agent + live tools (or plain LLM).
-  if (!rawQuery) return null
+  // Build geo query when user clearly asked XDR + country even if phrasing was loose/typoed.
+  if (!rawQuery) {
+    const countryFilter = extractCountryFromQuestion(effectiveQuestion)
+    if (countryFilter && (isGeoConnectionQuery(effectiveQuestion) || isXdrQuestion(effectiveQuestion))) {
+      rawQuery = buildGeoConnectionPowerQuery(countryFilter.name)
+    } else if (isXdrQuestion(effectiveQuestion)) {
+      return {
+        content: [
+          'Could not map this question to a SentinelOne XDR PowerQuery template.',
+          '',
+          'Try: "Sentinel XDR connections to China last 12 hours" or "how many devices connecting to China in XDR".',
+        ].join('\n'),
+        contextMeta: [{
+          id: 'sentinelXdr',
+          label: 'SentinelOne XDR',
+          freshness: 'live',
+          fetchedAt,
+          configured: true,
+          error: 'No PowerQuery template matched',
+        }],
+        contextPreview: {},
+        queryContext: { topic: 'xdr', isFollowUp: ctx?.isFollowUp },
+      }
+    } else {
+      return null
+    }
+  }
 
   const range = ctx?.range
     ? pqRangeFromQuestion(ctx.range)

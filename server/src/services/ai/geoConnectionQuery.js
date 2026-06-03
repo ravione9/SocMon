@@ -16,7 +16,7 @@ const COUNTRY_ALIASES = [
   { re: /\b(australia|australian|au)\b/i, name: 'Australia' },
 ]
 
-const CONNECTION_MARKERS = /\b(connections?|connect|connected|ip connect|network connection|traffic sessions?)\b/i
+const CONNECTION_MARKERS = /\b(connections?|connect\w*|connected|ip connect|network connection|traffic sessions?|going to|devices?\b.*\b(?:to|from|china|india))\b/i
 
 /**
  * @param {string} question
@@ -42,7 +42,14 @@ export function extractCountryFromQuestion(question) {
 
 export function isGeoConnectionQuery(question) {
   const q = String(question || '')
-  return Boolean(extractCountryFromQuestion(q) && CONNECTION_MARKERS.test(q))
+  const country = extractCountryFromQuestion(q)
+  if (!country) return false
+  if (CONNECTION_MARKERS.test(q)) return true
+  // "how many devices going to china" / XDR phrasing without exact "connection" spelling
+  if (/\b(how many|count|total|devices?|endpoints?|machines?)\b/i.test(q)) return true
+  if (/\bxdr\b/i.test(q)) return true
+  if (/\b(sentinel|sentinelone)\b/i.test(q)) return true
+  return false
 }
 
 /**

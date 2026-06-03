@@ -28,7 +28,8 @@ import { tryDirectNocAnswer } from '../services/ai/nocDirectAnswer.js'
 import { tryDirectRcaAnswer } from '../services/ai/rcaAnalysis.js'
 import { tryDirectHostnameAnswer } from '../services/ai/hostnameDirectAnswer.js'
 import { tryDirectXdrAnswer } from '../services/ai/xdrDirectAnswer.js'
-import { resolveQueryContext, isHostnameDataRequest, extractStoreHostname } from '../services/ai/queryContext.js'
+import { resolveQueryContext, isHostnameDataRequest, isStoreHostnamePortalQuery, extractStoreHostname } from '../services/ai/queryContext.js'
+import { isXdrQuestion } from '../services/ai/xdrDirectAnswer.js'
 import { runAgentChat } from '../services/ai/agentChat.js'
 import { needsLiveAgentFallback } from '../services/ai/queryLiveDataFallback.js'
 import { appendLlmAnalysis } from '../services/ai/directLlmSynthesis.js'
@@ -171,6 +172,39 @@ router.post('/chat', async (req, res) => {
         fastPath: !xdrPayload.llmSynthesized,
         metrics: { totalMs: Date.now() - requestStart, contextMs: Date.now() - xdrStart, llmMs: xdrLlmMs, mode: xdrPayload.llmSynthesized ? 'direct-xdr-llm' : 'direct-xdr' },
       })
+    }
+
+    const hostnameEarlyStart = Date.now()
+    if (
+      !isXdrQuestion(lastUser)
+      && (isStoreHostnamePortalQuery(lastUser) || (extractStoreHostname(lastUser) && isHostnameDataRequest(lastUser)))
+    ) {
+      const hostnameEarly = await tryDirectHostnameAnswer(lastUser, allowedPages, ctx)
+      if (hostnameEarly) {
+        const { payload: hnPayload, llmMs: hnLlmMs } = await appendLlmAnalysis(lastUser, hostnameEarly, chatMode, sanitized, ctx)
+        return res.json({
+          content: hnPayload.content,
+          provider: getAIProvider().name,
+          contextMeta: hnPayload.contextMeta,
+          contextPreview: hnPayload.contextPreview,
+          chartSeries: hostnameEarly.chartSeries,
+          queryContext: hnPayload.queryContext || { topic: 'hostname', hostname: ctx.hostname || extractStoreHostname(lastUser), isFollowUp: ctx.isFollowUp },
+          modulesUsed: ['storeMonitor', 'storeProblems', 'storeCrashes', 'sentinelXdr', 'soc', 'noc'].filter(id => {
+            if (id === 'storeMonitor' || id === 'storeProblems' || id === 'storeCrashes') return allowedPages.includes('storeMonitor')
+            if (id === 'sentinelXdr') return allowedPages.includes('sentinel')
+            if (id === 'soc') return allowedPages.includes('soc')
+            if (id === 'noc') return allowedPages.includes('noc')
+            return false
+          }),
+          fastPath: !hnPayload.llmSynthesized,
+          metrics: {
+            totalMs: Date.now() - requestStart,
+            contextMs: Date.now() - hostnameEarlyStart,
+            llmMs: hnLlmMs,
+            mode: hnPayload.llmSynthesized ? 'direct-hostname-llm' : 'direct-hostname',
+          },
+        })
+      }
     }
 
     const zabbixStart = Date.now()
