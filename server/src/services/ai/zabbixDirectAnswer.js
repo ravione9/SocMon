@@ -232,9 +232,21 @@ export function isIpInfraQuery(question) {
   return true
 }
 
+/** Detect clarification / definition phrases that should never route to live data.
+ *  e.g. "details means all the resource details", "by details I mean ...", "I meant ..." */
+function isClarificationPhrase(q) {
+  const t = String(q || '')
+  if (/\b\w+\s+means?\b/i.test(t)) return true
+  if (/\bby\s+\w+\s+I\s+mean\b/i.test(t)) return true
+  if (/\bI\s+mean(t|)\b/i.test(t)) return true
+  if (/\bwhat\s+I\s+(mean|meant|said)\b/i.test(t)) return true
+  return false
+}
+
 export function isZabbixQuestion(question, ctx = null) {
   const q = String(question || '')
   if (isSocReportQuery(q)) return false
+  if (isClarificationPhrase(q)) return false
   if (wantsDiskUsage(q) && (extractHostGroupFilter(q, ctx) || /\b(server|servers|zabbix|infra|host|group)\b/i.test(q))) return true
   if (wantsHostGroupCheck(q) && extractIpv4(q)) return true
   if (wantsBandwidthUtil(q, ctx) && extractHostGroupFilter(q, ctx)) return true
@@ -244,7 +256,7 @@ export function isZabbixQuestion(question, ctx = null) {
     if (/\b(group|why|only|server|host|disk|this|that|\d+|bandwidth|same|device|firewall|fortigate|vpn|tunnel|problem|issue|explain|what|how|more|status|ping|interface|analysis|recommend)\b/i.test(q)) {
       return true
     }
-    if (ctx?.ip || ctx?.zabbixHost) return true
+    if (ctx?.ip || ctx?.zabbixHost || ctx?.infraHost) return true
   }
   return ZABBIX_MARKERS.test(q)
     || isIpInfraQuery(q)
@@ -1058,7 +1070,12 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
   if (allowedPages.includes('infra')) {
     targets.push({ key: 'infra', label: 'Infra Zabbix', client: createZabbixClient('ZABBIX') })
   }
-  if (allowedPages.includes('storeZabbix') && (wantsStoreZabbix(question) || hostFilter)) {
+  // Only query Store Zabbix when explicitly requested — avoid noisy "not configured" entries
+  // when the user is asking about infra hosts or IPs that live only in Infra Zabbix.
+  const storeZabbixExplicit = wantsStoreZabbix(question)
+    || /\b(store|retail|pos)\b/i.test(String(question || ''))
+    || (ctx?.isFollowUp && ctx?.priorStoreZabbix)
+  if (allowedPages.includes('storeZabbix') && storeZabbixExplicit) {
     targets.push({ key: 'storeZabbix', label: 'Store Zabbix', client: createZabbixClient('STORE_ZABBIX') })
   }
 

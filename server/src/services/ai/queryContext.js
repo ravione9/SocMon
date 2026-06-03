@@ -178,6 +178,7 @@ export function resolveQueryContext(messages, opts = {}) {
     directHandler,
     threadText,
     chatMode,
+    priorStoreZabbix: /Store Zabbix/i.test(priorAssistant),
   }
 }
 

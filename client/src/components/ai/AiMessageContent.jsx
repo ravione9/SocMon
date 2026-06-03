@@ -605,6 +605,11 @@ function SectionBlock({ title, lines }) {
   const showHostCards = hosts.length > 0 && inHostDetails
   const bodyLines = showHostCards ? filterHostDetailLines(rest) : rest
 
+  // Skip entirely when a data source is not configured — avoids noisy "Not configured" cards
+  if (isStoreUnconfigured && kpis.length === 0 && rest.filter(l => l.trim() && !/Not configured/i.test(l)).length === 0) {
+    return null
+  }
+
   return (
     <div className="ai-section-card" style={{ border: `1px solid ${theme.accent}44`, background: theme.bg, marginBottom: 4 }}>
       <div className="ai-section-head" style={{ background: `linear-gradient(90deg, ${theme.accent}28, transparent)`, borderBottom: `1px solid ${theme.accent}33` }}>
@@ -613,7 +618,7 @@ function SectionBlock({ title, lines }) {
         </div>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 14, fontWeight: 800, color: theme.accent, letterSpacing: '-0.01em' }}>{title}</div>
-          <div style={{ fontSize: 10, color: C.text3, fontFamily: 'var(--mono)', marginTop: 2 }}>{theme.emoji} module</div>
+          <div style={{ fontSize: 10, color: C.text3, fontFamily: 'var(--mono)', marginTop: 2 }}>Live data</div>
         </div>
         {isStoreUnconfigured && <Badge tone="warn" small>Not configured</Badge>}
       </div>
