@@ -1112,31 +1112,34 @@ function ChatTab({
             gap: 14,
           }}
         >
-          {messages.map((m, i) => (
+          {messages.map((m, i) => {
+            const isUser = m.role === 'user'
+            const isError = Boolean(m.errorDetail)
+            return (
             <div
               key={i}
-              className={m.role === 'assistant' ? 'ai-msg-assistant' : undefined}
+              className={isError ? 'ai-msg-error' : m.role === 'assistant' ? 'ai-msg-assistant' : undefined}
               style={{
-                alignSelf: m.role === 'user' ? 'flex-end' : 'stretch',
+                alignSelf: isUser ? 'flex-end' : 'stretch',
                 width: '100%',
-                maxWidth: m.role === 'user' ? 'min(520px, 72%)' : '100%',
-                padding: m.role === 'user' ? '10px 14px' : '12px 14px',
-                borderRadius: m.role === 'user' ? 12 : 16,
-                background: m.role === 'user'
+                maxWidth: isUser ? 'min(520px, 72%)' : '100%',
+                padding: isUser ? '10px 14px' : '12px 14px',
+                borderRadius: isUser ? 12 : 16,
+                background: isUser
                   ? 'linear-gradient(135deg, rgba(79,126,245,.18), rgba(79,126,245,.08))'
                   : 'linear-gradient(180deg, var(--bg3) 0%, rgba(0,0,0,.08) 100%)',
-                border: m.role === 'user'
+                border: isUser
                   ? '1px solid rgba(79,126,245,.35)'
                   : '1px solid var(--border)',
-                boxShadow: m.role === 'assistant' ? '0 4px 20px rgba(0,0,0,.12)' : 'none',
+                boxShadow: !isUser && !isError ? '0 4px 20px rgba(0,0,0,.12)' : 'none',
                 fontSize: 13,
                 lineHeight: 1.55,
                 color: C.text,
-                whiteSpace: m.role === 'user' ? 'pre-wrap' : 'normal',
+                whiteSpace: isUser ? 'pre-wrap' : 'normal',
                 wordBreak: 'break-word',
               }}
             >
-              {m.errorDetail ? (
+              {isError ? (
                 <AiErrorPanel detail={m.errorDetail} />
               ) : m.role === 'assistant' ? (
                 <AiMessageContent content={m.content} />
@@ -1154,7 +1157,7 @@ function ChatTab({
                 />
               )}
             </div>
-          ))}
+          )})}
           {loading && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '4px 2px', flexWrap: 'wrap' }}>
               <span style={{ fontSize: 12, color: C.text3, fontFamily: 'var(--mono)' }}>

@@ -6,20 +6,17 @@
   font-size: 80%;
 }
 
+/* Assistant message card — just a thin left accent, no height cap
+   (the messages list container already handles scrolling) */
 .ai-msg-assistant {
-  max-height: min(52vh, 480px);
-  overflow-y: auto;
-  overflow-x: hidden;
-  scrollbar-gutter: stable;
+  border-left: 2px solid rgba(99, 120, 200, 0.4) !important;
 }
 
-.ai-msg-assistant::-webkit-scrollbar {
-  width: 6px;
-}
-
-.ai-msg-assistant::-webkit-scrollbar-thumb {
-  background: rgba(99, 120, 200, 0.35);
-  border-radius: 999px;
+/* Error message card — override gradient to pure red tint */
+.ai-msg-error {
+  background: rgba(248, 113, 113, 0.06) !important;
+  border: 1px solid rgba(248, 113, 113, 0.4) !important;
+  box-shadow: none !important;
 }
 
 .ai-chat-input-dock {
