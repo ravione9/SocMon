@@ -331,6 +331,8 @@ function detectFollowUpKind(q) {
 /** User wants per-crash rows with hostname + timestamp (not aggregate summary). */
 export function wantsCrashEventLog(question, ctx = null) {
   const text = String(question || '')
+  if (/\b(crash|crashed|crashes)\b/i.test(text) && /\b(log|logs|event|events)\b/i.test(text)) return true
+  if (/\bhow many\b/i.test(text) && /\b(crash|crashed|crashes)\b/i.test(text) && /\b(log|logs)\b/i.test(text)) return true
   if (/\bcrash events?\b/i.test(text) && /\b(timestamp|hostname|time stamp|with time)\b/i.test(text)) return true
   if (/\b(timestamp|time stamp|timestamps|crash time|app crash time|crash event|each crash|event log|with hostname|hostname and time|when the app cras\w*|when did|what time)\b/i.test(text)) return true
   if (/\b(with|need|give|show)\b/i.test(text) && /\b(time|timestamp|hostname)\b/i.test(text) && /\b(crash|app)\b/i.test(text)) return true

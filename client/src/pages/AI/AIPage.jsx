@@ -13,6 +13,8 @@ import {
   loadChatSessions,
   persistSessionInList,
   saveChatSessions,
+  adjustSessionPending,
+  getSessionPendingCount,
 } from '../../utils/aiChatHistory.js'
 import { shouldStartNewThreadForQuestion } from '../../utils/aiChatSubject.js'
 import AiMessageContent from '../../components/ai/AiMessageContent.jsx'
@@ -865,13 +867,20 @@ function ChatTab({
   const [loading, setLoading] = useState(false)
   const [pendingCount, setPendingCount] = useState(0)
   const [sourcesOpen, setSourcesOpen] = useState(false)
+  const [loadingHint, setLoadingHint] = useState('')
   const bottomRef = useRef(null)
   const abortControllersRef = useRef(new Map())
+  const mountedRef = useRef(true)
   const skipPersistRef = useRef(false)
   const hydratedRef = useRef(false)
   const activeSessionIdRef = useRef(null)
   const sessionsRef = useRef([])
   const pendingBySessionRef = useRef(new Map())
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   const buildSessionSnapshot = useCallback((id, msgs, mode, createdAt) => ({
     id,
@@ -884,43 +893,43 @@ function ChatTab({
 
   const syncActiveLoading = useCallback(() => {
     const sid = activeSessionIdRef.current
-    const n = sid ? (pendingBySessionRef.current.get(sid) || 0) : 0
+    const n = sid ? getSessionPendingCount(sid) : 0
     setPendingCount(n)
     setLoading(n > 0)
   }, [])
 
-  /** Persist messages to a specific session; only update visible pane if that session is active. */
+  const trackSessionPending = useCallback((sessionId, delta) => {
+    adjustSessionPending(sessionId, delta)
+    pendingBySessionRef.current.set(sessionId, getSessionPendingCount(sessionId))
+    if (sessionId === activeSessionIdRef.current) syncActiveLoading()
+  }, [syncActiveLoading])
+
+  /** Persist messages to session storage; survives navigation away from the AI page. */
   const commitSessionMessages = useCallback((sessionId, updater, modeOverride) => {
-    let nextMessages = null
-    setSessions(prev => {
-      const existing = prev.find(s => s.id === sessionId)
-      const base = existing?.messages
-        || (activeSessionIdRef.current === sessionId ? messages : null)
-        || defaultWelcomeMessages()
-      nextMessages = typeof updater === 'function' ? updater(base) : updater
-      const snapshot = buildSessionSnapshot(
-        sessionId,
-        nextMessages,
-        modeOverride ?? existing?.chatMode ?? chatMode,
-        existing?.createdAt,
-      )
-      const next = persistSessionInList(userKey, prev, snapshot)
-      sessionsRef.current = next
-      return next
-    })
-    if (nextMessages && activeSessionIdRef.current === sessionId) {
-      setMessages(nextMessages)
+    const list = sessionsRef.current?.length
+      ? sessionsRef.current
+      : loadChatSessions(userKey)
+    const existing = list.find(s => s.id === sessionId)
+    const base = existing?.messages
+      || (activeSessionIdRef.current === sessionId ? messages : null)
+      || defaultWelcomeMessages()
+    const nextMessages = typeof updater === 'function' ? updater(base) : updater
+    const snapshot = buildSessionSnapshot(
+      sessionId,
+      nextMessages,
+      modeOverride ?? existing?.chatMode ?? chatMode,
+      existing?.createdAt,
+    )
+    const next = persistSessionInList(userKey, list, snapshot)
+    sessionsRef.current = next
+    if (mountedRef.current) {
+      setSessions(next)
+      if (activeSessionIdRef.current === sessionId) {
+        setMessages(nextMessages)
+      }
     }
     return nextMessages
   }, [buildSessionSnapshot, userKey, messages, chatMode])
-
-  const trackSessionPending = useCallback((sessionId, delta) => {
-    const cur = pendingBySessionRef.current.get(sessionId) || 0
-    const next = Math.max(0, cur + delta)
-    if (next === 0) pendingBySessionRef.current.delete(sessionId)
-    else pendingBySessionRef.current.set(sessionId, next)
-    if (sessionId === activeSessionIdRef.current) syncActiveLoading()
-  }, [syncActiveLoading])
 
   useEffect(() => {
     sessionsRef.current = sessions
@@ -1024,11 +1033,6 @@ function ChatTab({
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, loading, pendingCount])
 
-  useEffect(() => () => {
-    for (const controller of abortControllersRef.current.values()) controller.abort()
-    abortControllersRef.current.clear()
-  }, [])
-
   const stop = useCallback(() => {
     for (const controller of abortControllersRef.current.values()) controller.abort()
     abortControllersRef.current.clear()
@@ -1077,6 +1081,16 @@ function ChatTab({
     commitSessionMessages(sessionId, next, modeAtSend)
     setInput('')
     trackSessionPending(sessionId, 1)
+    const qLower = content.toLowerCase()
+    if (/\b(crash|crashed|crashes)\b/.test(qLower)) {
+      setLoadingHint('Fetching crash logs from Store Monitor…')
+    } else if (/\b(issue|issues|top\s+\d+|store mon)\b/.test(qLower)) {
+      setLoadingHint('Fetching Store Monitor issues (live Influx)…')
+    } else if (/\b(wifi|wi-?fi|rop|rp group)\b/.test(qLower)) {
+      setLoadingHint('Fetching Store Monitor Wi-Fi connectivity…')
+    } else {
+      setLoadingHint('')
+    }
 
     const controller = new AbortController()
     abortControllersRef.current.set(reqId, controller)
@@ -1135,16 +1149,18 @@ function ChatTab({
     } finally {
       abortControllersRef.current.delete(reqId)
       trackSessionPending(sessionId, -1)
+      if (getSessionPendingCount(sessionId) === 0) setLoadingHint('')
     }
   }, [input, messages, enabledModules, autoModules, chatMode, userKey, commitSessionMessages, trackSessionPending])
 
-  const loadingLabel = chatMode === 'agent'
+  const loadingLabel = loadingHint
+    || (chatMode === 'agent'
     ? 'Agent selecting tools and fetching live data…'
     : chatMode === 'rca'
     ? 'Correlating signals across Store Monitor, Sentinel, SOC, NOC…'
     : chatMode === 'details'
       ? 'Fetching full hostname environment data…'
-      : 'Fetching live portal data & thinking…'
+      : 'Fetching live portal data & thinking…')
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6, minHeight: 0, overflow: 'hidden' }}>

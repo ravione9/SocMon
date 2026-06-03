@@ -213,6 +213,29 @@ router.post('/chat', async (req, res) => {
       }
     }
 
+    if (allowedPages.includes('storeMonitor') && /\b(crash|crashed|crashes|crahed|app crash|app hang)\b/i.test(lastUser)) {
+      const crashEarlyStart = Date.now()
+      const crashEarly = await tryDirectCrashAnswer(lastUser, allowedPages, ctx)
+      if (crashEarly) {
+        const { payload: crPayload, llmMs: crLlmMs } = await appendLlmAnalysis(lastUser, crashEarly, chatMode, sanitized, ctx)
+        return res.json({
+          content: crPayload.content,
+          provider: getAIProvider().name,
+          contextMeta: crPayload.contextMeta,
+          contextPreview: crPayload.contextPreview,
+          queryContext: crPayload.queryContext || { topic: 'crash', appName: ctx.appName, isFollowUp: ctx.isFollowUp },
+          modulesUsed: ['storeCrashes'],
+          fastPath: !crPayload.llmSynthesized,
+          metrics: {
+            totalMs: Date.now() - requestStart,
+            contextMs: Date.now() - crashEarlyStart,
+            llmMs: crLlmMs,
+            mode: crPayload.llmSynthesized ? 'direct-crash-llm' : 'direct-crash',
+          },
+        })
+      }
+    }
+
     const xdrStart = Date.now()
     const xdrDirect = await tryDirectXdrAnswer(lastUser, allowedPages, ctx)
     if (xdrDirect) {
@@ -391,22 +414,6 @@ router.post('/chat', async (req, res) => {
         }),
         fastPath: !hnPayload.llmSynthesized,
         metrics: { totalMs: Date.now() - requestStart, contextMs: Date.now() - hostnameStart, llmMs: hnLlmMs, mode: hnPayload.llmSynthesized ? 'direct-hostname-llm' : 'direct-hostname' },
-      })
-    }
-
-    const crashStart = Date.now()
-    const crashDirect = await tryDirectCrashAnswer(lastUser, allowedPages, ctx)
-    if (crashDirect) {
-      const { payload: crPayload, llmMs: crLlmMs } = await appendLlmAnalysis(lastUser, crashDirect, chatMode, sanitized, ctx)
-      return res.json({
-        content: crPayload.content,
-        provider: getAIProvider().name,
-        contextMeta: crPayload.contextMeta,
-        contextPreview: crPayload.contextPreview,
-        queryContext: crPayload.queryContext || { topic: ctx.topic || 'crash', appName: ctx.appName, isFollowUp: ctx.isFollowUp },
-        modulesUsed: ['storeCrashes'],
-        fastPath: !crPayload.llmSynthesized,
-        metrics: { totalMs: Date.now() - requestStart, contextMs: Date.now() - crashStart, llmMs: crLlmMs, mode: crPayload.llmSynthesized ? 'direct-crash-llm' : 'direct-crash' },
       })
     }
 

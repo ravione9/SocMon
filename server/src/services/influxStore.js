@@ -700,54 +700,85 @@ function isWifiInterfaceTag(value) {
 
 /**
  * Unique stores that reported Wi-Fi connectivity at least once in the Flux window.
+ * Uses grouped count queries — the naive "pull all points" query exceeds Node string limits on 24h windows.
  * @param {string} metricRange e.g. '-24h'
  * @param {number} [fromTs]
  * @param {number} [toTs]
  */
-export async function fetchWifiConnectivityHistory(metricRange = '-24h', fromTs, toTs) {
-  const rangeClause = buildFluxRangeClause(metricRange, fromTs, toTs)
+const _wifiHistoryCache = new Map()
+const WIFI_HISTORY_CACHE_MS = 60_000
+
+async function fetchConnectivityStoreCounts(rangeClause, extraFilter = '') {
   const bucket = fluxEscape(cfg().bucket)
+  const filterExtra = extraFilter ? ` and ${extraFilter}` : ''
   const flux = `
 from(bucket: "${bucket}")
   |> range(${rangeClause})
-  |> filter(fn: (r) => r._measurement == "connectivity")
-  |> keep(columns: ["_time", "store_tag", "hostname", "serial", "conn_state", "active_interface"])
+  |> filter(fn: (r) => r._measurement == "connectivity"${filterExtra})
+  |> group(columns: ["store_tag", "hostname", "serial"])
+  |> count()
 `
-  const rows = await queryFlux(flux).catch((e) => {
-    console.warn('[influxStore] fetchWifiConnectivityHistory failed:', e.message)
+  return queryFlux(flux).catch((e) => {
+    console.warn('[influxStore] fetchConnectivityStoreCounts failed:', e.message)
     return []
   })
+}
+
+function upsertWifiHistoryStore(map, row, patch) {
+  const tag = row.store_tag || buildSyntheticStoreTag(row.hostname, row.serial)
+  if (!tag) return
+  const prev = map.get(tag) || {
+    storeTag: tag,
+    hostname: row.hostname || '',
+    serial: row.serial || '',
+    wifiHealthySamples: 0,
+    wifiInterfaceSamples: 0,
+    totalSamples: 0,
+  }
+  if (row.hostname) prev.hostname = row.hostname
+  if (row.serial) prev.serial = row.serial
+  map.set(tag, { ...prev, ...patch })
+}
+
+export async function fetchWifiConnectivityHistory(metricRange = '-24h', fromTs, toTs) {
+  const cacheKey = `${metricRange}|${fromTs ?? ''}|${toTs ?? ''}`
+  const cached = _wifiHistoryCache.get(cacheKey)
+  if (cached && Date.now() - cached.ts < WIFI_HISTORY_CACHE_MS) return cached.data
+
+  const rangeClause = buildFluxRangeClause(metricRange, fromTs, toTs)
+  const wifiIfaceFilter = 'r.active_interface =~ /(?i)(wi-?fi|wireless)/'
+
+  const [allRows, healthyRows, ifaceRows] = await Promise.all([
+    fetchConnectivityStoreCounts(rangeClause),
+    fetchConnectivityStoreCounts(rangeClause, 'r.conn_state == "wifi_healthy"'),
+    fetchConnectivityStoreCounts(rangeClause, wifiIfaceFilter),
+  ])
 
   const byStore = new Map()
-  for (const row of rows) {
-    const tag = row.store_tag || buildSyntheticStoreTag(row.hostname, row.serial)
-    if (!tag) continue
-    if (!byStore.has(tag)) {
-      byStore.set(tag, {
-        storeTag: tag,
-        hostname: row.hostname || '',
-        serial: row.serial || '',
-        wifiHealthySamples: 0,
-        wifiInterfaceSamples: 0,
-        totalSamples: 0,
-      })
-    }
-    const rec = byStore.get(tag)
-    rec.totalSamples++
-    if (String(row.conn_state || '').toLowerCase() === 'wifi_healthy') rec.wifiHealthySamples++
-    if (isWifiInterfaceTag(row.active_interface)) rec.wifiInterfaceSamples++
-    if (row.hostname) rec.hostname = row.hostname
-    if (row.serial) rec.serial = row.serial
+  for (const row of allRows) {
+    upsertWifiHistoryStore(byStore, row, { totalSamples: num(row._value) || 0 })
+  }
+  for (const row of healthyRows) {
+    upsertWifiHistoryStore(byStore, row, { wifiHealthySamples: num(row._value) || 1 })
+  }
+  for (const row of ifaceRows) {
+    upsertWifiHistoryStore(byStore, row, { wifiInterfaceSamples: num(row._value) || 1 })
   }
 
   const stores = [...byStore.values()]
-  return {
+  const result = {
     metricRange,
     stores,
     storesWithData: stores.length,
     uniqueWifiHealthy: stores.filter(s => s.wifiHealthySamples > 0).length,
     uniqueWifiInterface: stores.filter(s => s.wifiInterfaceSamples > 0).length,
   }
+  _wifiHistoryCache.set(cacheKey, { data: result, ts: Date.now() })
+  if (_wifiHistoryCache.size > 8) {
+    const oldest = [..._wifiHistoryCache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0]
+    if (oldest) _wifiHistoryCache.delete(oldest[0])
+  }
+  return result
 }
 
 export async function fetchStoreHistory(storeTag, rangeSec = 3600, fromSec, toSec) {

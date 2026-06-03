@@ -973,10 +973,14 @@ export async function tryDirectStoreConnectivityAnswer(question, allowedPages, c
   if (!wantsWifi) return null
 
   const fetchedAt = new Date().toISOString()
-  const [stores, wifiHistory] = await Promise.all([
-    fetchStoreSnapshot(10, range),
-    fetchWifiConnectivityHistory(range),
-  ])
+  const wifiHistory = await fetchWifiConnectivityHistory(range)
+
+  let stores = await fetchStoreSnapshot(10, range)
+  if (!stores.length) stores = getAnyCachedStoreSnapshot() || []
+  if (!stores.length) stores = await fetchStoreIssuesLite(10, range)
+  if (!stores.length && range !== '-24h') {
+    stores = getAnyCachedStoreSnapshot() || await fetchStoreIssuesLite(10, '-24h')
+  }
 
   const groupStores = stores.filter(s =>
     deriveStoreGroups(s.hostname, s.gatewayVendor, s.isFortinet).includes(groupFilter),
@@ -992,6 +996,7 @@ export async function tryDirectStoreConnectivityAnswer(question, allowedPages, c
   const uniqueWifiHealthy = histInGroup.filter(s => s.wifiHealthySamples > 0).length
   const uniqueWifiInterface = histInGroup.filter(s => s.wifiInterfaceSamples > 0).length
   const withDataInWindow = histInGroup.length
+  const historyUnavailable = withDataInWindow === 0 && groupStores.length > 0 && wifiHistory.storesWithData === 0
   const snapStats = buildGroupConnectivityStats(groupStores)[groupFilter] || {
     total: groupStores.length,
     wifiConnected: groupStores.filter(isStoreOnWifi).length,
@@ -1007,9 +1012,15 @@ export async function tryDirectStoreConnectivityAnswer(question, allowedPages, c
     `Filter: ${groupFilter} (same rules as Store Monitor → ROP Groups tab)`,
     '',
     `── ${rangeLabel} — Wi-Fi history (unique devices) ──`,
-    `Devices with Wi-Fi Healthy at least once: ${uniqueWifiHealthy} of ${withDataInWindow} stores reporting in window`,
-    `Devices with active Wi-Fi interface at least once: ${uniqueWifiInterface}`,
-    `Stores with connectivity data in window: ${withDataInWindow} (group total ${groupStores.length})`,
+    historyUnavailable
+      ? `Wi-Fi history query returned no rows (Influx may be slow) — see latest snapshot below for current counts.`
+      : `Devices with Wi-Fi Healthy at least once: ${uniqueWifiHealthy} of ${withDataInWindow} stores reporting in window`,
+    historyUnavailable
+      ? `Currently on Wi-Fi (snapshot): ${snapStats.wifiConnected} devices (${snapStats.wifiHealthy} Wi-Fi Healthy)`
+      : `Devices with active Wi-Fi interface at least once: ${uniqueWifiInterface}`,
+    historyUnavailable
+      ? `Stores in ${groupFilter}: ${groupStores.length} (connectivity history unavailable for window)`
+      : `Stores with connectivity data in window: ${withDataInWindow} (group total ${groupStores.length})`,
     '',
     '── Latest snapshot in window ──',
     `Total stores: ${summary.total}`,

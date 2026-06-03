@@ -120,3 +120,19 @@ export function formatSessionWhen(iso) {
 export function hasUserMessages(messages) {
   return (messages || []).some(m => m.role === 'user' && String(m.content || '').trim())
 }
+
+/** In-flight AI requests per session — survives leaving the AI page. */
+const pendingBySession = new Map()
+
+export function adjustSessionPending(sessionId, delta) {
+  if (!sessionId) return 0
+  const cur = pendingBySession.get(sessionId) || 0
+  const next = Math.max(0, cur + delta)
+  if (next === 0) pendingBySession.delete(sessionId)
+  else pendingBySession.set(sessionId, next)
+  return next
+}
+
+export function getSessionPendingCount(sessionId) {
+  return sessionId ? (pendingBySession.get(sessionId) || 0) : 0
+}
