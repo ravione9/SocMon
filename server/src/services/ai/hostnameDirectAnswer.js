@@ -12,6 +12,7 @@ import {
   extractStoreHostname,
   formatRangeLabelFromInflux,
   isHostnameDataRequest,
+  isStoreHostnamePortalQuery,
   parseQuestionTimeRange,
 } from './queryContext.js'
 import { isNetworkInfraQuery, isZabbixQuestion } from './zabbixDirectAnswer.js'
@@ -114,9 +115,10 @@ function formatPing(store) {
 
 export function isHostnameDetailQuery(question, ctx = null) {
   const q = String(question || '')
-  if (isZabbixQuestion(q) || isNetworkInfraQuery(q)) return false
   const hostname = extractStoreHostname(question) || ctx?.hostname
   if (hostname && isHostnameDataRequest(q)) return true
+  if (isStoreHostnamePortalQuery(q)) return true
+  if (isZabbixQuestion(q, ctx) || isNetworkInfraQuery(q)) return false
   if (ctx?.followUpKind === 'chart' && ctx?.priorTopic === 'hostname') return true
   if (/\b(graph|graphical|chart|visual|plot|timeline)\b/i.test(q) && ctx?.priorTopic === 'hostname') return true
   if (!hostname && !(ctx?.isFollowUp && ctx?.priorTopic === 'hostname')) return false

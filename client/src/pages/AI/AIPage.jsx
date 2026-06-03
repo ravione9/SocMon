@@ -14,8 +14,17 @@ import {
   persistSessionInList,
   saveChatSessions,
 } from '../../utils/aiChatHistory.js'
+import { shouldStartNewThreadForQuestion } from '../../utils/aiChatSubject.js'
 import AiMessageContent from '../../components/ai/AiMessageContent.jsx'
 import './AIPage.css'
+
+function insertAfterUserReq(messages, reqId, msg) {
+  const idx = (messages || []).findIndex(m => m.reqId === reqId && m.role === 'user')
+  if (idx === -1) return [...(messages || []), msg]
+  const out = [...messages]
+  out.splice(idx + 1, 0, msg)
+  return out
+}
 
 const TABS = [
   { id: 'chat', label: 'Chat' },
@@ -860,6 +869,9 @@ function ChatTab({
   const abortControllersRef = useRef(new Map())
   const skipPersistRef = useRef(false)
   const hydratedRef = useRef(false)
+  const activeSessionIdRef = useRef(null)
+  const sessionsRef = useRef([])
+  const pendingBySessionRef = useRef(new Map())
 
   const buildSessionSnapshot = useCallback((id, msgs, mode, createdAt) => ({
     id,
@@ -870,18 +882,70 @@ function ChatTab({
     createdAt: createdAt || new Date().toISOString(),
   }), [])
 
+  const syncActiveLoading = useCallback(() => {
+    const sid = activeSessionIdRef.current
+    const n = sid ? (pendingBySessionRef.current.get(sid) || 0) : 0
+    setPendingCount(n)
+    setLoading(n > 0)
+  }, [])
+
+  /** Persist messages to a specific session; only update visible pane if that session is active. */
+  const commitSessionMessages = useCallback((sessionId, updater, modeOverride) => {
+    let nextMessages = null
+    setSessions(prev => {
+      const existing = prev.find(s => s.id === sessionId)
+      if (!existing) return prev
+      const base = existing.messages || defaultWelcomeMessages()
+      nextMessages = typeof updater === 'function' ? updater(base) : updater
+      const snapshot = buildSessionSnapshot(
+        sessionId,
+        nextMessages,
+        modeOverride ?? existing.chatMode ?? 'monitor',
+        existing.createdAt,
+      )
+      const next = persistSessionInList(userKey, prev, snapshot)
+      sessionsRef.current = next
+      return next
+    })
+    if (nextMessages && activeSessionIdRef.current === sessionId) {
+      setMessages(nextMessages)
+    }
+    return nextMessages
+  }, [buildSessionSnapshot, userKey])
+
+  const trackSessionPending = useCallback((sessionId, delta) => {
+    const cur = pendingBySessionRef.current.get(sessionId) || 0
+    const next = Math.max(0, cur + delta)
+    if (next === 0) pendingBySessionRef.current.delete(sessionId)
+    else pendingBySessionRef.current.set(sessionId, next)
+    if (sessionId === activeSessionIdRef.current) syncActiveLoading()
+  }, [syncActiveLoading])
+
+  useEffect(() => {
+    sessionsRef.current = sessions
+  }, [sessions])
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId
+    syncActiveLoading()
+  }, [activeSessionId, syncActiveLoading])
+
   useEffect(() => {
     skipPersistRef.current = true
     const loaded = loadChatSessions(userKey)
     if (loaded.length) {
       const first = loaded[0]
       setSessions(loaded)
+      sessionsRef.current = loaded
+      activeSessionIdRef.current = first.id
       setActiveSessionId(first.id)
       setMessages(first.messages || defaultWelcomeMessages())
       setChatMode(first.chatMode || 'monitor')
     } else {
       const fresh = createChatSession({ chatMode: 'monitor' })
       setSessions([fresh])
+      sessionsRef.current = [fresh]
+      activeSessionIdRef.current = fresh.id
       setActiveSessionId(fresh.id)
       setMessages(fresh.messages)
       setChatMode(fresh.chatMode)
@@ -907,41 +971,53 @@ function ChatTab({
     const target = sessions.find(s => s.id === sessionId)
     if (!target) return
     skipPersistRef.current = true
+    activeSessionIdRef.current = sessionId
     setActiveSessionId(sessionId)
     setMessages(target.messages || defaultWelcomeMessages())
     setChatMode(target.chatMode || 'monitor')
     setInput('')
-  }, [activeSessionId, sessions])
+    syncActiveLoading()
+  }, [activeSessionId, sessions, syncActiveLoading])
 
   const startNewChat = useCallback(() => {
     skipPersistRef.current = true
     const fresh = createChatSession({ chatMode })
-    setSessions(prev => persistSessionInList(userKey, prev, fresh))
+    setSessions(prev => {
+      const next = persistSessionInList(userKey, prev, fresh)
+      sessionsRef.current = next
+      return next
+    })
+    activeSessionIdRef.current = fresh.id
     setActiveSessionId(fresh.id)
     setMessages(fresh.messages)
     setInput('')
-  }, [chatMode, userKey])
+    syncActiveLoading()
+  }, [chatMode, userKey, syncActiveLoading])
 
   const removeSession = useCallback((sessionId) => {
     const next = deleteChatSession(userKey, sessionId, sessions)
     if (sessionId === activeSessionId) {
       skipPersistRef.current = true
       if (next.length) {
+        activeSessionIdRef.current = next[0].id
         setActiveSessionId(next[0].id)
         setMessages(next[0].messages || defaultWelcomeMessages())
         setChatMode(next[0].chatMode || 'monitor')
       } else {
         const fresh = createChatSession({ chatMode: 'monitor' })
         const saved = saveChatSessions(userKey, [fresh])
+        sessionsRef.current = saved
+        activeSessionIdRef.current = fresh.id
         setSessions(saved)
         setActiveSessionId(fresh.id)
         setMessages(fresh.messages)
         setChatMode(fresh.chatMode)
       }
+      syncActiveLoading()
     } else {
       setSessions(next)
     }
-  }, [activeSessionId, sessions, userKey])
+  }, [activeSessionId, sessions, userKey, syncActiveLoading])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -963,13 +1039,35 @@ function ChatTab({
     const content = String(text || input).trim()
     if (!content) return
 
+    let sessionId = activeSessionIdRef.current
+    if (!sessionId) return
+
+    const existingSession = sessionsRef.current.find(s => s.id === sessionId)
+    let baseMessages = existingSession?.messages || messages
+    let modeAtSend = existingSession?.chatMode || chatMode
+
+    if (shouldStartNewThreadForQuestion(content, baseMessages) && hasUserMessages(baseMessages)) {
+      const fresh = createChatSession({ chatMode: modeAtSend })
+      setSessions(prev => {
+        const next = persistSessionInList(userKey, prev, fresh)
+        sessionsRef.current = next
+        return next
+      })
+      skipPersistRef.current = true
+      sessionId = fresh.id
+      activeSessionIdRef.current = fresh.id
+      setActiveSessionId(fresh.id)
+      baseMessages = fresh.messages
+      modeAtSend = fresh.chatMode
+      toast('New chat started — different device from the previous question.', { icon: '💬', duration: 3500 })
+    }
+
     const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const userMsg = { role: 'user', content, reqId }
-    const next = [...messages, userMsg]
-    setMessages(next)
+    const next = [...baseMessages, userMsg]
+    commitSessionMessages(sessionId, next, modeAtSend)
     setInput('')
-    setLoading(true)
-    setPendingCount(c => c + 1)
+    trackSessionPending(sessionId, 1)
 
     const controller = new AbortController()
     abortControllersRef.current.set(reqId, controller)
@@ -982,7 +1080,7 @@ function ChatTab({
       const { data } = await aiAPI.chat(history, {
         modules: enabledModules,
         autoModules,
-        mode: chatMode,
+        mode: modeAtSend,
         signal: controller.signal,
       })
       const assistantMsg = {
@@ -996,52 +1094,40 @@ function ChatTab({
         fastPath: data.fastPath,
         reqId,
       }
-      setMessages(prev => {
-        const idx = prev.findIndex(m => m.reqId === reqId && m.role === 'user')
-        if (idx === -1) return [...prev, assistantMsg]
-        const out = [...prev]
-        out.splice(idx + 1, 0, assistantMsg)
-        return out
-      })
+      commitSessionMessages(
+        sessionId,
+        prev => insertAfterUserReq(prev, reqId, assistantMsg),
+        modeAtSend,
+      )
     } catch (err) {
       const cancelled = err.code === 'ERR_CANCELED' || err.name === 'CanceledError'
       if (cancelled) {
-        setMessages(prev => {
-          const idx = prev.findIndex(m => m.reqId === reqId && m.role === 'user')
-          const stopMsg = { role: 'assistant', content: 'Stopped — request cancelled.', reqId }
-          if (idx === -1) return [...prev, stopMsg]
-          const out = [...prev]
-          out.splice(idx + 1, 0, stopMsg)
-          return out
-        })
+        commitSessionMessages(
+          sessionId,
+          prev => insertAfterUserReq(prev, reqId, { role: 'assistant', content: 'Stopped — request cancelled.', reqId }),
+          modeAtSend,
+        )
         return
       }
       const data = err.response?.data
       const errorDetail = data?.errorTable ? data : null
       const msg = data?.error || err.message || 'Chat failed'
       toast.error(msg)
-      const errMsg = {
-        role: 'assistant',
-        content: errorDetail ? '' : `Error: ${msg}`,
-        errorDetail,
-        reqId,
-      }
-      setMessages(prev => {
-        const idx = prev.findIndex(m => m.reqId === reqId && m.role === 'user')
-        if (idx === -1) return [...prev, errMsg]
-        const out = [...prev]
-        out.splice(idx + 1, 0, errMsg)
-        return out
-      })
+      commitSessionMessages(
+        sessionId,
+        prev => insertAfterUserReq(prev, reqId, {
+          role: 'assistant',
+          content: errorDetail ? '' : `Error: ${msg}`,
+          errorDetail,
+          reqId,
+        }),
+        modeAtSend,
+      )
     } finally {
       abortControllersRef.current.delete(reqId)
-      setPendingCount(c => {
-        const nextCount = Math.max(0, c - 1)
-        if (nextCount === 0) setLoading(false)
-        return nextCount
-      })
+      trackSessionPending(sessionId, -1)
     }
-  }, [input, messages, enabledModules, autoModules, chatMode])
+  }, [input, messages, enabledModules, autoModules, chatMode, userKey, commitSessionMessages, trackSessionPending])
 
   const loadingLabel = chatMode === 'agent'
     ? 'Agent selecting tools and fetching live data…'
@@ -1103,6 +1189,7 @@ function ChatTab({
         }}
       >
         <div
+          key={activeSessionId || 'none'}
           style={{
             flex: 1,
             overflowY: 'auto',
@@ -1115,9 +1202,10 @@ function ChatTab({
           {messages.map((m, i) => {
             const isUser = m.role === 'user'
             const isError = Boolean(m.errorDetail)
+            const msgKey = m.reqId ? `${m.role}-${m.reqId}` : `${activeSessionId}-m${i}`
             return (
             <div
-              key={i}
+              key={msgKey}
               className={isError ? 'ai-msg-error' : m.role === 'assistant' ? 'ai-msg-assistant' : undefined}
               style={{
                 alignSelf: isUser ? 'flex-end' : 'stretch',

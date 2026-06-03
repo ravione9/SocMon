@@ -13,6 +13,7 @@ import {
   extractCountryFromQuestion,
   fetchFirewallCountryConnections,
   isGeoConnectionQuery,
+  isStoreMonitorConnectivityQuery,
 } from './geoConnectionQuery.js'
 
 const IPV4_RE = /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/
@@ -121,6 +122,7 @@ export function buildXdrQueryFromQuestion(question) {
 
 export function isXdrQuestion(question) {
   const q = String(question || '')
+  if (isStoreMonitorConnectivityQuery(q)) return false
   if (XDR_KEYWORDS.test(q)) return true
   if (LOGIN_FAIL_KEYWORDS.test(q)) return true
   if (isGeoConnectionQuery(q)) return true
@@ -316,9 +318,12 @@ export async function tryDirectXdrAnswer(question, allowedPages, ctx = null) {
   }
 
   const shouldRun =
-    isXdrQuestion(question)
-    || ctx?.directHandler === 'xdr'
-    || (ctx?.isFollowUp && ctx.priorTopic === 'xdr')
+    !isStoreMonitorConnectivityQuery(question)
+    && (
+      isXdrQuestion(question)
+      || ctx?.directHandler === 'xdr'
+      || (ctx?.isFollowUp && ctx.priorTopic === 'xdr')
+    )
 
   if (!shouldRun) return null
 

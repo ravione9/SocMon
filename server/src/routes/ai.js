@@ -31,6 +31,7 @@ import { tryDirectHostnameAnswer } from '../services/ai/hostnameDirectAnswer.js'
 import { tryDirectXdrAnswer } from '../services/ai/xdrDirectAnswer.js'
 import { resolveQueryContext, isHostnameDataRequest, isStoreHostnamePortalQuery, extractStoreHostname } from '../services/ai/queryContext.js'
 import { isXdrQuestion } from '../services/ai/xdrDirectAnswer.js'
+import { isStoreMonitorConnectivityQuery } from '../services/ai/geoConnectionQuery.js'
 import { runAgentChat } from '../services/ai/agentChat.js'
 import { needsLiveAgentFallback } from '../services/ai/queryLiveDataFallback.js'
 import { appendLlmAnalysis } from '../services/ai/directLlmSynthesis.js'
@@ -154,6 +155,40 @@ router.post('/chat', async (req, res) => {
             contextMs: Date.now() - agentStart,
             llmMs: 0,
             mode: 'agent-error',
+          },
+        })
+      }
+    }
+
+    if (isStoreMonitorConnectivityQuery(lastUser) && allowedPages.includes('storeMonitor')) {
+      const storeConnStart = Date.now()
+      const portalContext = await buildPortalContext(req.user, ['storeMonitor'], { userMessage: lastUser })
+      const direct = tryDirectStoreAnswer(lastUser, portalContext, ctx)
+      if (direct) {
+        const storePayload = {
+          content: direct,
+          contextMeta: portalContext.meta,
+          contextPreview: buildContextPreview(portalContext),
+          queryContext: {
+            topic: 'store',
+            isFollowUp: ctx.isFollowUp,
+            storeGroup: extractStoreGroupFilter(lastUser) || undefined,
+          },
+        }
+        const { payload, llmMs: storeLlmMs } = await appendLlmAnalysis(lastUser, storePayload, chatMode, sanitized, ctx)
+        return res.json({
+          content: payload.content,
+          provider: getAIProvider().name,
+          contextMeta: payload.contextMeta,
+          contextPreview: payload.contextPreview,
+          queryContext: payload.queryContext,
+          modulesUsed: ['storeMonitor'],
+          fastPath: !payload.llmSynthesized,
+          metrics: {
+            totalMs: Date.now() - requestStart,
+            contextMs: Date.now() - storeConnStart,
+            llmMs: storeLlmMs,
+            mode: payload.llmSynthesized ? 'direct-store-conn-llm' : 'direct-store-conn',
           },
         })
       }
@@ -498,6 +533,7 @@ router.post('/chat', async (req, res) => {
     }
 
     const storeOnly = ctx.directHandler === 'store'
+      || isStoreMonitorConnectivityQuery(lastUser)
       || (/\b(store|stores|offline|online|down|monitor|hostname)\b/i.test(lastUser)
         && !/\b(firewall|fortigate|deny|soc|crash|crashed|crashes)\b/i.test(lastUser)
         && ctx.priorTopic !== 'crash'

@@ -116,40 +116,24 @@ function parseStructuredMessage(raw) {
   }
 }
 
-function parseStatParts(rest) {
-  return rest.split(/\s·\s/).map(p => {
-    const text = p.trim()
-    let tone = 'neutral'
-    if (/available|online|reachable|ok|up|allowed/i.test(text)) tone = 'good'
-    else if (/down|offline|unreachable|deny|critical|disaster|high/i.test(text)) tone = 'bad'
-    else if (/unknown|degraded|warning|average|issues|stale|no data/i.test(text)) tone = 'warn'
-    const kv = text.match(/^(.+?)\s+([\d.,]+|[\w%]+)$/)
-    return kv
-      ? { label: kv[1].trim(), value: kv[2], tone }
-      : { label: text, value: '', tone }
-  })
-}
-
 function parseKpiLines(lines) {
   const kpis = []
   const rest = []
   for (const line of lines) {
     const t = line.trim()
-    const m = t.match(/^(Version|Total monitored|Active problems|Reachable|Unreachable|Degraded|Latency avg):\s*(.+)$/i)
+    const m = t.match(/^(Version|Total monitored|Active problems):\s*(.+)$/i)
     if (m) {
       const label = m[1]
-      const parts = parseStatParts(m[2])
-      if (parts.length >= 2 || label.toLowerCase() === 'active problems') {
-        if (parts.length === 1 && /^\d+$/.test(parts[0].label)) {
-          kpis.push({ label, value: parts[0].label, tone: Number(parts[0].label) > 0 ? 'warn' : 'good' })
-        } else if (parts.length === 1 && !parts[0].value) {
-          const num = m[2].match(/(\d+)/)
-          kpis.push({ label, value: num ? num[1] : m[2], tone: num && Number(num[1]) > 0 ? 'warn' : 'neutral' })
-        } else {
-          for (const p of parts) kpis.push(p)
-        }
+      const value = m[2].trim()
+      let tone = 'neutral'
+      if (/^active problems$/i.test(label)) {
+        const n = Number(value.match(/(\d+)/)?.[1])
+        tone = Number.isFinite(n) && n > 0 ? 'warn' : 'good'
+        kpis.push({ label, value: Number.isFinite(n) ? String(n) : value, tone })
+      } else if (/^total monitored$/i.test(label)) {
+        kpis.push({ label, value, tone: 'neutral' })
       } else {
-        rest.push(line)
+        kpis.push({ label, value, tone: 'neutral' })
       }
     } else {
       rest.push(line)
@@ -200,37 +184,67 @@ function Badge({ children, tone = 'neutral', small = false, pulse = false }) {
   )
 }
 
-function KpiGrid({ items }) {
+function KpiRow({ items }) {
   if (!items?.length) return null
   return (
-    <div className="ai-kpi-grid">
+    <div className="ai-kpi-row">
       {items.map((item, i) => {
         const t = TONE_STYLES[item.tone] || TONE_STYLES.neutral
         return (
-          <div
-            key={`${item.label}-${i}`}
-            className="ai-kpi-card"
-            style={{ borderColor: t.border, background: t.bg }}
-          >
-            <div className="ai-kpi-value" style={{ color: t.color }}>{item.value || '—'}</div>
-            <div className="ai-kpi-label" style={{ color: t.color }}>{item.label}</div>
-          </div>
+          <span key={`${item.label}-${i}`} className="ai-kpi-chip">
+            <span className="ai-kpi-chip-lbl">{item.label}</span>
+            <span className="ai-kpi-chip-val" style={{ color: t.color }}>{item.value || '—'}</span>
+          </span>
         )
       })}
     </div>
   )
 }
 
-function ProblemsBanner({ count }) {
-  if (!count || count <= 0) return null
-  const tone = count >= 5 ? 'bad' : 'warn'
-  const t = TONE_STYLES[tone]
+function parseProblemLine(line) {
+  const m = String(line || '').match(/^\s*•\s*\[([^\]]+)\]\s*(.+)$/)
+  if (!m) return null
+  const tone = severityTone(m[1])
+  const rest = m[2]
+  const since = rest.match(/ · since (.+)$/)
+  const name = since ? rest.slice(0, since.index) : rest
+  return { severity: m[1], tone, name: name.trim(), since: since?.[1] || '' }
+}
+
+function ProblemsTable({ lines }) {
+  const rows = lines.map(parseProblemLine).filter(Boolean)
+  if (!rows.length) return null
   return (
-    <div className="ai-problems-banner" style={{ background: t.bg, border: `1px solid ${t.border}`, color: t.color }}>
-      <span style={{ fontSize: 18 }}>{tone === 'bad' ? '🚨' : '⚠️'}</span>
-      <span>{count} active problem{count !== 1 ? 's' : ''} detected — review below</span>
+    <div className="ai-problems-wrap">
+      <table className="ai-problems-table">
+        <thead>
+          <tr>
+            <th>Severity</th>
+            <th>Problem</th>
+            <th>Since</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => {
+            const t = TONE_STYLES[r.tone] || TONE_STYLES.neutral
+            return (
+              <tr key={i}>
+                <td>
+                  <span className="ai-prob-sev" style={{ color: t.color }}>{r.severity}</span>
+                </td>
+                <td className="ai-prob-name">{r.name}</td>
+                <td className="ai-prob-since">{r.since || '—'}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
     </div>
   )
+}
+
+function isProblemLine(line) {
+  return /^\s*•\s*\[[^\]]+\]/.test(String(line || ''))
 }
 
 function TrafficBar({ label, inVal, outVal, status, maxBps, rank }) {
@@ -285,7 +299,7 @@ function TrafficBar({ label, inVal, outVal, status, maxBps, rank }) {
 function TrafficList({ lines, maxTrafficBps }) {
   const [expanded, setExpanded] = useState(false)
   const items = useMemo(() => {
-    return lines
+    const raw = lines
       .map(line => {
         const m = line.match(/^\s*•\s*(.+?) · in (.+?) · out (.+?)(?: · (\w+))?\s*$/)
         if (!m) return null
@@ -295,7 +309,19 @@ function TrafficList({ lines, maxTrafficBps }) {
         return { label: m[1], inVal: m[2], outVal: m[3], status: m[4], peak }
       })
       .filter(Boolean)
-      .sort((a, b) => b.peak - a.peak)
+    const merged = new Map()
+    for (const item of raw) {
+      const prev = merged.get(item.label)
+      if (!prev) {
+        merged.set(item.label, { ...item })
+        continue
+      }
+      if (item.inVal && item.inVal !== '—') prev.inVal = item.inVal
+      if (item.outVal && item.outVal !== '—') prev.outVal = item.outVal
+      if (item.status) prev.status = item.status
+      prev.peak = Math.max(prev.peak, item.peak)
+    }
+    return [...merged.values()].sort((a, b) => b.peak - a.peak)
   }, [lines])
 
   if (!items.length) return null
@@ -323,96 +349,26 @@ function TrafficList({ lines, maxTrafficBps }) {
   )
 }
 
-function HostCard({ name, status, groups, ips, type }) {
+function HostRow({ name, status, groups, ips, type }) {
   const tone = severityTone(status)
-  const t = TONE_STYLES[tone]
   return (
-    <div className="ai-host-card" style={{ borderColor: t.border }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 22 }}>{type === 'fortigate' ? '🔥' : type === 'cisco' ? '🔌' : '🖥️'}</span>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{name}</div>
-            {type && type !== 'other' && (
-              <div style={{ fontSize: 10, color: C.text3, fontFamily: 'var(--mono)', marginTop: 2 }}>{type}</div>
-            )}
-          </div>
-        </div>
-        <Badge tone={tone}>{status}</Badge>
-      </div>
+    <div className="ai-host-row">
+      <span className="ai-host-row-name">{name}</span>
+      {type && type !== 'other' && <Badge tone="neutral" small>{type}</Badge>}
+      <Badge tone={tone} small>{status}</Badge>
       {groups?.length > 0 && (
-        <div>
-          <div style={{ fontSize: 9, fontWeight: 700, color: C.text3, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>Groups</div>
-          <div className="ai-tag-row">
-            {groups.map(g => <span key={g} className="ai-tag">{g}</span>)}
-          </div>
-        </div>
+        <span className="ai-host-row-meta">{groups.join(', ')}</span>
       )}
       {ips?.length > 0 && (
-        <div style={{ fontSize: 11, color: C.text3, fontFamily: 'var(--mono)' }}>
-          <span style={{ color: C.text2, fontWeight: 600 }}>IPs </span>
-          {ips.join(' · ')}
-        </div>
+        <span className="ai-host-row-meta ai-host-row-ips">{ips.join(', ')}</span>
       )}
-    </div>
-  )
-}
-
-function ProblemItem({ line }) {
-  const m = line.match(/^\s*•\s*\[([^\]]+)\]\s*(.+)$/)
-  if (!m) return null
-  const tone = severityTone(m[1])
-  const rest = m[2]
-  const since = rest.match(/ · since (.+)$/)
-  const name = since ? rest.slice(0, since.index) : rest
-  const t = TONE_STYLES[tone]
-  return (
-    <div
-      style={{
-        display: 'flex',
-        gap: 12,
-        alignItems: 'flex-start',
-        padding: '10px 12px',
-        marginBottom: 8,
-        borderRadius: 10,
-        background: t.bg,
-        border: `1px solid ${t.border}`,
-        boxShadow: tone === 'bad' ? '0 2px 12px rgba(248,113,113,.15)' : undefined,
-      }}
-    >
-      <span style={{ fontSize: 16, flexShrink: 0, marginTop: 1 }}>
-        {tone === 'bad' ? '🔴' : tone === 'warn' ? '🟡' : '🔵'}
-      </span>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginBottom: 4 }}>
-          <Badge tone={tone} small>{m[1]}</Badge>
-        </div>
-        <div style={{ fontSize: 13, fontWeight: 600, color: C.text, lineHeight: 1.4 }}>{name.trim()}</div>
-        {since && (
-          <div style={{ fontSize: 10, color: C.text3, fontFamily: 'var(--mono)', marginTop: 4 }}>
-            ⏱ since {since[1]}
-          </div>
-        )}
-      </div>
     </div>
   )
 }
 
 function SubSectionTitle({ title, icon }) {
   return (
-    <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      gap: 8,
-      fontSize: 11,
-      fontWeight: 700,
-      color: C.text2,
-      margin: '14px 0 8px',
-      fontFamily: 'var(--mono)',
-      letterSpacing: '0.03em',
-      textTransform: 'uppercase',
-    }}
-    >
+    <div className="ai-subsection-title">
       <span>{icon || '▸'}</span>
       {title}
     </div>
@@ -426,19 +382,11 @@ function SectionLine({ line, maxTrafficBps, skipTraffic }) {
   if (skipTraffic && (/Interface traffic/i.test(trimmed) || /^\s*•\s*.+ · in .+ · out .+/i.test(trimmed))) return null
 
   if (/^Not configured/i.test(trimmed)) {
-    return (
-      <div style={{ padding: '12px 14px', borderRadius: 10, background: TONE_STYLES.warn.bg, border: `1px solid ${TONE_STYLES.warn.border}`, color: C.amber, fontSize: 12, lineHeight: 1.5 }}>
-        ⚠ {trimmed.replace(/^\s+/, '')}
-      </div>
-    )
+    return <div className="ai-inline-note ai-inline-note-warn">⚠ {trimmed.replace(/^\s+/, '')}</div>
   }
 
   if (/^Unreachable:/i.test(trimmed)) {
-    return (
-      <div style={{ padding: '12px 14px', borderRadius: 10, background: TONE_STYLES.bad.bg, border: `1px solid ${TONE_STYLES.bad.border}`, color: C.red, fontSize: 12 }}>
-        ✕ {trimmed.replace(/^\s+/, '')}
-      </div>
-    )
+    return <div className="ai-inline-note ai-inline-note-bad">✕ {trimmed.replace(/^\s+/, '')}</div>
   }
 
   const subHeader = trimmed.match(/^\s{2}([A-Za-z][^:]+):$/)
@@ -457,15 +405,13 @@ function SectionLine({ line, maxTrafficBps, skipTraffic }) {
     return <SubSectionTitle title={subHeader[1]} icon={icons[subHeader[1]] || '▸'} />
   }
 
-  const problem = trimmed.match(/^\s*•\s*\[[^\]]+\]/)
-  if (problem) return <ProblemItem line={trimmed} />
+  if (isProblemLine(trimmed)) return null
 
   const hostBullet = trimmed.match(/^\s*•\s*(.+?)\s*\[(\w+)\]\s*—\s*(available|unavailable|down|unknown|up)$/i)
   if (hostBullet) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, padding: '6px 8px', borderRadius: 8, background: 'rgba(0,0,0,.06)' }}>
-        <span style={{ fontSize: 14 }}>🖥️</span>
-        <span style={{ fontSize: 12, color: C.text, fontWeight: 600, flex: 1 }}>{hostBullet[1]}</span>
+      <div className="ai-host-row">
+        <span className="ai-host-row-name">{hostBullet[1]}</span>
         <Badge tone="neutral" small>{hostBullet[2]}</Badge>
         <Badge tone={severityTone(hostBullet[3])} small>{hostBullet[3]}</Badge>
       </div>
@@ -475,8 +421,8 @@ function SectionLine({ line, maxTrafficBps, skipTraffic }) {
   const hostSimple = trimmed.match(/^\s*•\s*(.+?)(?:\s—\s|\s-\s)(available|unavailable|down|unknown|up)$/i)
   if (hostSimple) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, padding: '6px 8px', borderRadius: 8, background: 'rgba(0,0,0,.06)' }}>
-        <span style={{ fontSize: 12, color: C.text, fontWeight: 600, flex: 1 }}>{hostSimple[1]}</span>
+      <div className="ai-host-row">
+        <span className="ai-host-row-name">{hostSimple[1]}</span>
         <Badge tone={severityTone(hostSimple[2])} small>{hostSimple[2]}</Badge>
       </div>
     )
@@ -490,10 +436,9 @@ function SectionLine({ line, maxTrafficBps, skipTraffic }) {
   const pingLine = trimmed.match(/^\s*•\s*(.+?) · ping (OK|FAIL|unreachable)/i)
   if (pingLine) {
     const tone = /ok/i.test(pingLine[2]) ? 'good' : 'bad'
-    const t = TONE_STYLES[tone]
     return (
-      <div style={{ padding: '10px 12px', borderRadius: 10, background: t.bg, border: `1px solid ${t.border}`, fontSize: 12, color: C.text2, fontFamily: 'var(--mono)', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span>{tone === 'good' ? '✅' : '❌'}</span>
+      <div className={`ai-ping-line ai-ping-line-${tone}`}>
+        <span>{tone === 'good' ? '✓' : '✕'}</span>
         {trimmed.replace(/^\s*•\s*/, '')}
       </div>
     )
@@ -576,7 +521,31 @@ function parseHostDetails(lines) {
     }
   }
   if (current) hosts.push(current)
-  return hosts
+  const seen = new Set()
+  return hosts.filter(h => {
+    if (seen.has(h.name)) return false
+    seen.add(h.name)
+    return true
+  })
+}
+
+function filterSampleHostsWhenDetails(lines) {
+  let skip = false
+  return lines.filter(line => {
+    if (/^\s{2}Sample hosts/i.test(line)) {
+      skip = true
+      return false
+    }
+    if (/^\s{2}Device breakdown:/i.test(line)) return false
+    if (skip) {
+      if (/^\s{2}[A-Za-z][^:]+:$/.test(line) && !/^\s{4,}/.test(line)) {
+        skip = false
+        return true
+      }
+      if (/^\s*•\s/.test(line)) return false
+    }
+    return true
+  })
 }
 
 function maxTrafficFromLines(lines) {
@@ -593,6 +562,35 @@ function maxTrafficFromLines(lines) {
   return max || 1e6
 }
 
+function splitBodyLines(lines) {
+  const blocks = []
+  let current = { kind: 'lines', lines: [] }
+
+  const flush = () => {
+    if (current.kind === 'problems' && current.lines.length) blocks.push(current)
+    else if (current.kind === 'lines' && current.lines.length) blocks.push(current)
+    current = { kind: 'lines', lines: [] }
+  }
+
+  for (const line of lines) {
+    if (isProblemLine(line)) {
+      if (current.kind !== 'problems') {
+        flush()
+        current = { kind: 'problems', lines: [] }
+      }
+      current.lines.push(line)
+      continue
+    }
+    if (current.kind === 'problems') {
+      flush()
+      current = { kind: 'lines', lines: [] }
+    }
+    current.lines.push(line)
+  }
+  flush()
+  return blocks
+}
+
 function SectionBlock({ title, lines }) {
   const theme = themeForSection(title)
   const { kpis, rest } = parseKpiLines(lines)
@@ -605,65 +603,49 @@ function SectionBlock({ title, lines }) {
   const hasTraffic = rest.some(l => / · in .+ · out .+/i.test(l))
   const inHostDetails = rest.some(l => /Host details:/i.test(l))
   const showHostCards = hosts.length > 0 && inHostDetails
-  const bodyLines = showHostCards ? filterHostDetailLines(rest) : rest
+  let bodyLines = showHostCards ? filterHostDetailLines(rest) : rest
+  if (showHostCards) bodyLines = filterSampleHostsWhenDetails(bodyLines)
+  const bodyBlocks = splitBodyLines(bodyLines)
 
-  // Hide sections with no useful data — unconfigured or empty matches
   if (isUnconfigured || (hasNoHost && (!totalMonitored || totalMonitored.value === '0'))) {
     return null
   }
 
   return (
-    <div
-      className="ai-section-card"
-      style={{
-        border: `1px solid ${theme.accent}33`,
-        borderLeft: `3px solid ${theme.accent}`,
-        background: 'rgba(0,0,0,.12)',
-        borderRadius: 10,
-        marginBottom: 8,
-        overflow: 'hidden',
-      }}
-    >
-      {/* Compact header strip */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '7px 12px',
-        background: `${theme.accent}14`,
-        borderBottom: `1px solid ${theme.accent}22`,
-      }}>
-        <span style={{ fontSize: 14 }}>{theme.icon}</span>
-        <span style={{ fontSize: 12, fontWeight: 700, color: theme.accent, letterSpacing: '-0.01em' }}>{title}</span>
+    <div className="ai-section">
+      <div className="ai-section-head" style={{ borderColor: `${theme.accent}44` }}>
+        <span className="ai-section-icon">{theme.icon}</span>
+        <span className="ai-section-title" style={{ color: theme.accent }}>{title}</span>
         {Number(problemCount) > 0 && (
-          <span style={{
-            marginLeft: 'auto', fontSize: 10, fontWeight: 700, fontFamily: 'var(--mono)',
-            color: Number(problemCount) >= 5 ? 'var(--red)' : 'var(--amber)',
-            background: Number(problemCount) >= 5 ? 'rgba(248,113,113,.12)' : 'rgba(245,166,35,.12)',
-            border: `1px solid ${Number(problemCount) >= 5 ? 'rgba(248,113,113,.35)' : 'rgba(245,166,35,.35)'}`,
-            borderRadius: 999, padding: '2px 8px',
-          }}>
-            {problemCount} {Number(problemCount) === 1 ? 'problem' : 'problems'}
+          <span className={`ai-section-prob-count${Number(problemCount) >= 5 ? ' ai-section-prob-count-high' : ''}`}>
+            {problemCount} active
           </span>
         )}
       </div>
-      <div style={{ padding: '10px 12px 12px' }}>
-        <KpiGrid items={kpis} />
+      <div className="ai-section-body">
+        <KpiRow items={kpis} />
+        {bodyBlocks.map((block, bi) => {
+          if (block.kind === 'problems') {
+            return <ProblemsTable key={`prob-${bi}`} lines={block.lines} />
+          }
+          return block.lines.map((line, i) => (
+            <SectionLine key={`${bi}-${i}`} line={line} maxTrafficBps={maxTrafficBps} skipTraffic={hasTraffic} />
+          ))
+        })}
         {showHostCards && (
           <>
-            <SubSectionTitle title="Host details" icon="🏷️" />
+            <SubSectionTitle title="Host details" icon="▸" />
             {hosts.map(h => (
-              <HostCard key={h.name} name={h.name} status={h.status} type={h.type} groups={h.groups} ips={h.ips} />
+              <HostRow key={h.name} name={h.name} status={h.status} type={h.type} groups={h.groups} ips={h.ips} />
             ))}
           </>
         )}
         {hasTraffic && (
           <>
-            <SubSectionTitle title="Interface traffic" icon="📈" />
+            <SubSectionTitle title="Interface traffic" icon="▸" />
             <TrafficList lines={bodyLines} maxTrafficBps={maxTrafficBps} />
           </>
         )}
-        {bodyLines.map((line, i) => (
-          <SectionLine key={i} line={line} maxTrafficBps={maxTrafficBps} skipTraffic={hasTraffic} />
-        ))}
       </div>
     </div>
   )

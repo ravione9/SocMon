@@ -4,7 +4,8 @@ import { getESClient } from '../../config/elasticsearch.js'
 
 const COUNTRY_ALIASES = [
   { re: /\b(china|chinese|prc|cn)\b/i, name: 'China' },
-  { re: /\b(india|indian|in)\b/i, name: 'India' },
+  // Do NOT use bare \bin\b — matches "in rop group", "in store mon", etc.
+  { re: /\b(india|indian)\b/i, name: 'India' },
   { re: /\b(united states|u\.?s\.?a?\.?|america|american)\b/i, name: 'United States' },
   { re: /\b(russia|russian|ru)\b/i, name: 'Russia' },
   { re: /\b(pakistan|pakistani|pk)\b/i, name: 'Pakistan' },
@@ -18,12 +19,28 @@ const COUNTRY_ALIASES = [
 
 const CONNECTION_MARKERS = /\b(connections?|connect\w*|connected|ip connect|network connection|traffic sessions?|going to|devices?\b.*\b(?:to|from|china|india))\b/i
 
+/** Store Monitor connectivity (WiFi, RP/RoP group) — not XDR geo. */
+export function isStoreMonitorConnectivityQuery(question) {
+  const q = String(question || '').toLowerCase()
+  if (/\b(sentinel|xdr|sentinelone|powerquery|fortigate|firewall|zabbix)\b/.test(q)) return false
+  const ropGroup = /\b(rop|rp)\s*group\b/.test(q) || (/\bro\s*p\b/.test(q) && /\bgroup\b/.test(q))
+  const storeCtx = /\b(store|stores|store mon|retail)\b/.test(q) || ropGroup
+  const connCtx = /\b(wifi|wi-?fi|wireless|hotspot|ethernet|isp|connectivity|connect|connected|interface)\b/.test(q)
+  if (ropGroup && connCtx) return true
+  if (storeCtx && /\b(wifi|wi-?fi|wireless)\b/.test(q)) return true
+  if (/\b(how many|count)\b/.test(q) && /\b(device|devices)\b/.test(q) && (ropGroup || /\b(wifi|wi-?fi)\b/.test(q))) {
+    return true
+  }
+  return false
+}
+
 /**
  * @param {string} question
  * @returns {CountryFilter|null}
  */
 export function extractCountryFromQuestion(question) {
   const q = String(question || '')
+  if (isStoreMonitorConnectivityQuery(q)) return null
   let name = null
   for (const { re, name: canonical } of COUNTRY_ALIASES) {
     if (re.test(q)) {
@@ -42,6 +59,7 @@ export function extractCountryFromQuestion(question) {
 
 export function isGeoConnectionQuery(question) {
   const q = String(question || '')
+  if (isStoreMonitorConnectivityQuery(q)) return false
   const country = extractCountryFromQuestion(q)
   if (!country) return false
   if (CONNECTION_MARKERS.test(q)) return true

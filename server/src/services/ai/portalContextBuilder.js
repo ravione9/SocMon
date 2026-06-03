@@ -12,6 +12,7 @@ import {
 import { getProblemSnapshotStatus } from '../storeProblemSnapshotter.js'
 import { computeUserPageAccess } from '../../utils/computeUserPageAccess.js'
 import { isXdrQuestion } from './xdrDirectAnswer.js'
+import { isStoreMonitorConnectivityQuery } from './geoConnectionQuery.js'
 import { isNetworkInfraQuery, isZabbixQuestion, extractIpv4, isInfraMonitorQuery, isIpInfraQuery, prefersLlmSynthesis, buildZabbixInfraContext, wantsDiskUsage, extractHostGroupFilter } from './zabbixDirectAnswer.js'
 import {
   appNameMatches,
@@ -85,6 +86,10 @@ export function suggestContextModules(message, allowedPages, ctx = null) {
   if (ctx?.topic === 'crash' || (ctx?.isFollowUp && ctx?.priorTopic === 'crash')) {
     return []
   }
+  if (isStoreMonitorConnectivityQuery(text) || ctx?.directHandler === 'store') {
+    if (pages.has('storeMonitor')) modules.add('storeMonitor')
+    return [...modules]
+  }
   if (ctx?.topic === 'xdr' || (ctx?.isFollowUp && ctx?.priorTopic === 'xdr')) {
     return []
   }
@@ -100,7 +105,11 @@ export function suggestContextModules(message, allowedPages, ctx = null) {
     return [...modules]
   }
 
-  if (pages.has('storeMonitor') && (STORE_KEYWORDS.test(text) || OVERVIEW_KEYWORDS.test(text))) {
+  if (pages.has('storeMonitor') && (
+    STORE_KEYWORDS.test(text)
+    || OVERVIEW_KEYWORDS.test(text)
+    || isStoreMonitorConnectivityQuery(text)
+  )) {
     const infraDiskQuery = wantsDiskUsage(text) && (extractHostGroupFilter(text) || isZabbixQuestion(text))
     if (!infraDiskQuery) {
       modules.add('storeMonitor')
@@ -199,6 +208,47 @@ export function extractStoreGroupFilter(question) {
   return null
 }
 
+/** Match Store Monitor → Stores tab interface filter. */
+function isStoreOnWifi(store) {
+  const iface = String(store.activeInterface || '').toLowerCase()
+  if (iface === 'wi-fi' || iface === 'wifi' || iface.includes('wireless')) return true
+  return store.connState === 'wifi_healthy'
+}
+
+function isStoreOnEthernet(store) {
+  const iface = String(store.activeInterface || '').toLowerCase()
+  if (iface === 'ethernet' || iface === 'lan') return true
+  return store.connState === 'lan_healthy'
+}
+
+function buildGroupConnectivityStats(stores) {
+  const names = ['RP Group', 'POS System Group', 'SD-WAN Group', 'General Group']
+  const out = {}
+  for (const name of names) {
+    const list = stores.filter(s => deriveStoreGroups(s.hostname, s.gatewayVendor, s.isFortinet).includes(name))
+    if (!list.length) continue
+    const connBreakdown = {}
+    let wifiConnected = 0
+    let ethernetConnected = 0
+    for (const s of list) {
+      const k = s.connState || 'unknown'
+      connBreakdown[k] = (connBreakdown[k] || 0) + 1
+      if (isStoreOnWifi(s)) wifiConnected++
+      if (isStoreOnEthernet(s)) ethernetConnected++
+    }
+    out[name] = {
+      total: list.length,
+      connBreakdown,
+      wifiConnected,
+      ethernetConnected,
+      wifiHealthy: connBreakdown.wifi_healthy || 0,
+      lanHealthy: connBreakdown.lan_healthy || 0,
+      hotspot: connBreakdown.hotspot || 0,
+    }
+  }
+  return out
+}
+
 function buildGroupSummaries(stores) {
   const names = ['RP Group', 'POS System Group', 'SD-WAN Group', 'General Group']
   const out = {}
@@ -264,6 +314,7 @@ async function buildStoreMonitorContext(staleMinutes = 10, detail = 'standard') 
     note: `Online = heartbeat within last ${staleMinutes} min. Queried live when you sent the message.`,
     summary,
     groupSummaries: buildGroupSummaries(stores),
+    groupConnectivityStats: buildGroupConnectivityStats(stores),
     groupOfflineHostnames: buildGroupOfflineHostnames(stores),
     offlineCount: offline.length,
   }
@@ -709,13 +760,19 @@ export function tryDirectStoreAnswer(question, portalContext, ctx = null) {
   if (/\b(sentinel|xdr|sentinelone|powerquery)\b/.test(q)) return null
   if (extractIpv4(q) || isZabbixQuestion(q) || isNetworkInfraQuery(q) || isInfraMonitorQuery(q)) return null
   const storeIntent =
-    /\b(stores?|offline|online|down|store monitor|store mon|monitor status|how many stores)\b/.test(q)
+    isStoreMonitorConnectivityQuery(question)
+    || /\b(stores?|offline|online|down|store monitor|store mon|monitor status|how many stores)\b/.test(q)
     || (/\bstatus\b/.test(q) && /\b(store|stores|store mon)\b/.test(q))
-    || (/\b(how many|count)\b/.test(q) && /\b(store|stores)\b/.test(q))
+    || (/\b(how many|count)\b/.test(q) && /\b(store|stores|device|devices)\b/.test(q))
     || (/\bgroup\b/.test(q) && /\b(store|stores|store mon|rop|rp)\b/.test(q))
   if (!storeIntent) return null
 
   const groupFilter = extractStoreGroupFilter(question)
+  const wantsWifi = /\b(wifi|wi-?fi|wireless)\b/.test(q)
+  const wantsEthernet = /\b(ethernet|lan)\b/.test(q) && !wantsWifi
+  const connStats = groupFilter
+    ? sm.groupConnectivityStats?.[groupFilter]
+    : null
   const s = groupFilter && sm.groupSummaries?.[groupFilter]
     ? sm.groupSummaries[groupFilter]
     : sm.summary
@@ -735,6 +792,31 @@ export function tryDirectStoreAnswer(question, portalContext, ctx = null) {
     `Offline / down: ${s.offline}`,
     `With issues: ${s.withIssues}`,
   )
+
+  if (wantsWifi && connStats) {
+    lines.push('')
+    lines.push(`Wi-Fi connected devices: ${connStats.wifiConnected} of ${connStats.total} (${groupFilter})`)
+    lines.push(`  • Wi-Fi Healthy (connState): ${connStats.wifiHealthy}`)
+    lines.push(`  • LAN Healthy: ${connStats.lanHealthy}`)
+    if (connStats.hotspot) lines.push(`  • Hotspot: ${connStats.hotspot}`)
+    if (connStats.wifiConnected !== connStats.wifiHealthy) {
+      lines.push(`  • Active interface Wi-Fi (broader count): ${connStats.wifiConnected}`)
+    }
+  } else if (wantsEthernet && connStats) {
+    lines.push('')
+    lines.push(`Ethernet/LAN connected devices: ${connStats.ethernetConnected} of ${connStats.total} (${groupFilter})`)
+    lines.push(`  • LAN Healthy (connState): ${connStats.lanHealthy}`)
+    lines.push(`  • Wi-Fi Healthy: ${connStats.wifiHealthy}`)
+  } else if (wantsWifi && !groupFilter && sm.groupConnectivityStats) {
+    let wifiTotal = 0
+    let storeTotal = 0
+    for (const g of Object.values(sm.groupConnectivityStats)) {
+      wifiTotal += g.wifiConnected || 0
+      storeTotal += g.total || 0
+    }
+    lines.push('')
+    lines.push(`Wi-Fi connected devices (all groups): ${wifiTotal} of ${storeTotal}`)
+  }
 
   if (s.avgPingMs != null) lines.push(`Average ping: ${s.avgPingMs} ms`)
   if (s.avgDownloadMbps != null) lines.push(`Average download: ${s.avgDownloadMbps} Mbps`)
@@ -857,6 +939,17 @@ export function buildContextPreview(context) {
           online: g.online,
           offline: g.offline,
           withIssues: g.withIssues,
+        }]),
+      )
+    }
+    if (sm.groupConnectivityStats) {
+      preview.storeGroupConnectivity = Object.fromEntries(
+        Object.entries(sm.groupConnectivityStats).map(([name, g]) => [name, {
+          total: g.total,
+          wifiConnected: g.wifiConnected,
+          wifiHealthy: g.wifiHealthy,
+          lanHealthy: g.lanHealthy,
+          ethernetConnected: g.ethernetConnected,
         }]),
       )
     }

@@ -1,5 +1,5 @@
 import { isXdrQuestion } from './xdrDirectAnswer.js'
-import { isGeoConnectionQuery } from './geoConnectionQuery.js'
+import { isGeoConnectionQuery, isStoreMonitorConnectivityQuery } from './geoConnectionQuery.js'
 import { isNetworkInfraQuery, isZabbixQuestion, isInfraDeviceStatusQuery, extractHostGroupFilter, extractHostGroupFromThread, extractIpv4, extractIpv4FromThread, extractZabbixHostFromThread, extractInfraHostName, extractInfraHostFromThread } from './zabbixDirectAnswer.js'
 import { isFirewallQuestion, isSocReportQuery } from './socDirectAnswer.js'
 import { isDisconnectionLogQuery } from './nocDirectAnswer.js'
@@ -90,6 +90,7 @@ function sameSubjectAsPrior(currentQuestion, priorUser, priorAssistant) {
 }
 
 function isXdrIntent(q) {
+  if (isStoreMonitorConnectivityQuery(q)) return false
   return isXdrQuestion(q) || isGeoConnectionQuery(q)
 }
 
@@ -279,6 +280,7 @@ function inferTopicFromAssistant(text) {
 function detectTopicFromQuestion(q, appName, ctx = {}) {
   const text = String(q || '')
   if (isRcaQuery(text, ctx)) return 'rca'
+  if (isStoreMonitorConnectivityQuery(text)) return 'store'
   if (isXdrQuestion(text) || isGeoConnectionQuery(text)) return 'xdr'
   if (isSocReportQuery(text)) return 'soc'
   if (isZabbixQuestion(text)) return 'zabbix'
@@ -322,6 +324,8 @@ function pickDirectHandler({ currentQuestion, topic, priorTopic, isFollowUp, sub
 
   if ((isRcaQuery(q, ctxLite) || topic === 'rca') && chatMode !== 'details') return 'rca'
   if (chatMode === 'details' && hostname && !isRcaQuery(q, ctxLite)) return 'hostname'
+
+  if (isStoreMonitorConnectivityQuery(q)) return 'store'
 
   if (isXdrQuestion(q) || isGeoConnectionQuery(q) || topic === 'xdr') return 'xdr'
   if (isSocReportQuery(q) || (isFirewallQuestion(q) && !isZabbixQuestion(q, ctxLite))) return 'soc'
