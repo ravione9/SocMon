@@ -319,6 +319,43 @@ export const API_DOC_ENDPOINTS = [
 
   // ── Store monitor ─────────────────────────────────────────────────────────
   ep({
+    id: 'store-full',
+    groupId: 'store',
+    pageKey: 'storeMonitor',
+    method: 'GET',
+    path: '/api/store-monitor/full',
+    title: 'Full bundle (all store monitor data)',
+    description:
+      'Primary wide API — one call returns live summary, every store row, flattened problems, crash aggregates, settings, and store alert rules/events. Use this instead of calling overview + problems + crashes + alerts separately.',
+    queryParams: [
+      { name: 'staleMinutes', placeholder: '10', description: 'Stale threshold minutes (2–60)', example: '10' },
+      { name: 'range', placeholder: '-24h', description: 'Store metrics window', example: '-24h' },
+      { name: 'crashRange', placeholder: '-24h', description: 'Crash window (defaults to range)', example: '-24h' },
+      { name: 'q', placeholder: 'RP4531', description: 'Filter hostname / storeTag / serial / IP' },
+      { name: 'connState', placeholder: 'offline', description: 'online | offline | unknown' },
+      { name: 'issuesOnly', placeholder: 'true', description: 'Only stores with issues' },
+      { name: 'includeCrashes', placeholder: 'true', description: 'Include crashes block (default true)' },
+      { name: 'includeAlerts', placeholder: 'true', description: 'Include alert rules + recent events (default true)' },
+      { name: 'includeSettings', placeholder: 'true', description: 'Include monitor settings (default true)' },
+      { name: 'includeProblemHistory', placeholder: 'false', description: 'Mongo problem snapshots (heavier)' },
+      { name: 'alertEventsLimit', placeholder: '50', description: 'Max recent alert events', example: '50' },
+      { name: 'problemHistoryLimit', placeholder: '20', description: 'Max problem history snapshots' },
+    ],
+    responseExample: {
+      summary: { total: 1200, online: 1190, offline: 5, withIssues: 12 },
+      stores: [{ hostname: 'RP4531-E521BCXS', storeTag: 'RP4531', connState: 'offline', issues: [] }],
+      problems: [],
+      crashes: { totalEvents: 42, byApp: [], byType: [] },
+      alerts: { rules: [], recentEvents: [] },
+      settings: { manualRopSdwanCodeList: [] },
+    },
+    notes: [
+      'Recommended for integrations and dashboards.',
+      'For one store time-series use GET /api/store-monitor/stores/{storeTag}/history.',
+      'Set includeProblemHistory=true only when you need Mongo snapshot trends.',
+    ],
+  }),
+  ep({
     id: 'store-meta',
     groupId: 'store',
     pageKey: 'storeMonitor',
@@ -852,7 +889,7 @@ export const API_DOCS_INTRO = {
     },
     {
       heading: 'Getting data quickly',
-      body: 'For automation, prefer:\n1. POST /api/agent/query — direct answers + full context, no UI\n2. GET /api/store-monitor/overview — live store list + summary\n3. POST /api/ai/chat with mode:details — full hostname report\n4. GET /api/sentinel/hostname-search — Sentinel ES by hostname\n5. GET /api/logs/search — raw firewall/Cisco logs',
+      body: 'For automation, prefer:\n1. GET /api/store-monitor/full — all live store monitor data in one call\n2. POST /api/agent/query — direct answers + full context, no UI\n3. GET /api/store-monitor/overview — stores + summary only (lighter)\n4. POST /api/ai/chat with mode:details — full hostname report\n5. GET /api/logs/search — raw firewall/Cisco logs',
     },
     {
       heading: 'Query parameters',

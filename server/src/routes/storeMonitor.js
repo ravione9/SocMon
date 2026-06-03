@@ -28,9 +28,24 @@ import StoreMonitorSetting from '../models/StoreMonitorSetting.js'
 import StoreProblemHistory from '../models/StoreProblemHistory.js'
 import { requirePageWrite } from '../middleware/requireAppPage.js'
 import { runProblemSnapshot, getProblemSnapshotStatus } from '../services/storeProblemSnapshotter.js'
+import { buildStoreMonitorFull } from '../services/storeMonitorBundle.js'
 
 const router = Router()
 router.use(authenticate, requireAppPage('storeMonitor'))
+
+/**
+ * GET /api/store-monitor/full — wide bundle: summary, all stores, problems, crashes, settings, alerts.
+ * Query: same filters as /overview plus includeCrashes, includeAlerts, includeProblemHistory, includeSettings (bool).
+ */
+router.get('/full', async (req, res, next) => {
+  try {
+    const payload = await buildStoreMonitorFull(req.query)
+    if (!payload.configured) return res.status(503).json(payload)
+    res.json(payload)
+  } catch (e) {
+    next(e)
+  }
+})
 
 router.get('/meta', async (_req, res, next) => {
   try {
