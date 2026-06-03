@@ -14,6 +14,7 @@ import {
   persistSessionInList,
   saveChatSessions,
 } from '../../utils/aiChatHistory.js'
+import AiMessageContent from '../../components/ai/AiMessageContent.jsx'
 
 const TABS = [
   { id: 'chat', label: 'Chat' },
@@ -1116,18 +1117,24 @@ function ChatTab({
                 alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
                 width: '100%',
                 maxWidth: m.role === 'user' ? 'min(520px, 72%)' : '100%',
-                padding: '12px 16px',
+                padding: m.role === 'user' ? '12px 16px' : '14px 16px',
                 borderRadius: 12,
                 background: m.role === 'user' ? 'rgba(79,126,245,.15)' : C.bg3,
                 border: `1px solid ${m.role === 'user' ? 'rgba(79,126,245,.35)' : C.border}`,
                 fontSize: 13,
                 lineHeight: 1.55,
                 color: C.text,
-                whiteSpace: 'pre-wrap',
+                whiteSpace: m.role === 'user' ? 'pre-wrap' : 'normal',
                 wordBreak: 'break-word',
               }}
             >
-              {m.errorDetail ? <AiErrorPanel detail={m.errorDetail} /> : m.content}
+              {m.errorDetail ? (
+                <AiErrorPanel detail={m.errorDetail} />
+              ) : m.role === 'assistant' ? (
+                <AiMessageContent content={m.content} />
+              ) : (
+                m.content
+              )}
               {m.chartSeries?.length > 0 && <MetricChartsPanel series={m.chartSeries} />}
               {(m.contextMeta?.length > 0 || m.contextPreview || m.metrics || m.fastPath || m.queryContext) && (
                 <ContextMetaPanel
