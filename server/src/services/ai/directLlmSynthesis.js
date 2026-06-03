@@ -51,7 +51,7 @@ export function wantsDeepInfraFetch(question, chatMode = 'monitor', ctx = null) 
   if (chatMode === 'agent') return false
   if (!wantsLlmSynthesis(question, chatMode, ctx)) return false
   const q = String(question || '')
-  if (IPV4_RE.test(q) || ctx?.ip) return true
+  if (IPV4_RE.test(q) || ctx?.ip || ctx?.infraHost) return true
   return /\b(for|of|about|on)\s+[a-z0-9][\w.-]*\b/i.test(q) || Boolean(ctx?.zabbixHost)
 }
 

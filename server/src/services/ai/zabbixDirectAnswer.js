@@ -6,10 +6,43 @@ import { isSocReportQuery } from './socDirectAnswer.js'
 import { wantsDeepInfraFetch } from './directLlmSynthesis.js'
 
 const IPV4_RE = /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/
+const IPV4_RE_G = /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/g
+
+const INFRA_HOST_STOP = /^(zabbix|infra|overview|detail|detailed|status|server|host|device|monitor|check|give|from|there|this|that|same|available|need|complete|analysis)$/i
 
 export function extractIpv4(text) {
   const m = String(text || '').match(IPV4_RE)
   return m ? m[0] : null
+}
+
+/** Zabbix infra host name (e.g. ASRS_BACKUP_DB) from natural language. */
+export function extractInfraHostName(text) {
+  const t = String(text || '')
+  const patterns = [
+    /\b(?:details?\s+(?:on|of|for)|about|overview\s+(?:of|for)|report\s+(?:on|for|of)|check\s+(?:on|for))\s+([A-Za-z][A-Za-z0-9_.-]{3,})\b/i,
+    /\b(?:host|server|database|db)\s+([A-Z][A-Z0-9_]{2,})\b/i,
+    /\b([A-Z][A-Z0-9_]{2,})\b/,
+  ]
+  for (const re of patterns) {
+    const m = t.match(re)
+    const name = m?.[1]
+    if (name && !INFRA_HOST_STOP.test(name)) return name
+  }
+  return null
+}
+
+/** Infra host from prior chat (user question, Host filter line, or failed lookup). */
+export function extractInfraHostFromThread(text) {
+  const t = String(text || '')
+  const hostFilter = t.match(/\bHost filter:\s*(\S+)/i)
+  if (hostFilter?.[1] && hostFilter[1] !== 'true' && !IPV4_RE.test(hostFilter[1])) {
+    return hostFilter[1]
+  }
+  const noMatch = t.match(/No monitored host matched "([^"]+)"/i)
+  if (noMatch) return noMatch[1]
+  const deviceAnalysis = t.match(/\bdevice analysis\s*—\s*(\S+)/i)
+  if (deviceAnalysis?.[1] && !IPV4_RE.test(deviceAnalysis[1])) return deviceAnalysis[1]
+  return extractInfraHostName(t)
 }
 
 /** Most relevant IP from prior chat (Host filter line, device analysis title, or last IP). */
@@ -21,8 +54,8 @@ export function extractIpv4FromThread(text) {
   if (analysis) return analysis[1]
   const iface = t.match(/\bInterface IPs:\s*((?:\d{1,3}\.){3}\d{1,3})\b/i)
   if (iface) return iface[1]
-  const ips = [...t.matchAll(IPV4_RE)]
-  return ips.length ? ips[ips.length - 1][0] : null
+  const ips = t.match(IPV4_RE_G) || []
+  return ips.length ? ips[ips.length - 1] : null
 }
 
 /** FortiGate / network host name from a prior Zabbix assistant reply. */
@@ -46,16 +79,23 @@ export function resolveInfraHostFilter(question, ctx = null) {
     || (ctx?.isFollowUp ? extractIpv4FromThread(ctx?.priorAssistant) : null)
     || (ctx?.isFollowUp ? extractIpv4FromThread(ctx?.priorUser) : null)
 
-  let host = extractZabbixHostFromThread(q)
+  let host = extractInfraHostName(q)
+    || extractZabbixHostFromThread(q)
   if (!host && ctx?.isFollowUp) {
-    host = ctx?.zabbixHost
+    host = ctx?.infraHost
+      || ctx?.zabbixHost
+      || extractInfraHostFromThread(ctx?.priorUser)
+      || extractInfraHostFromThread(ctx?.threadText)
+      || extractInfraHostFromThread(ctx?.priorAssistant)
       || extractZabbixHostFromThread(ctx?.priorAssistant)
       || extractZabbixHostFromThread(ctx?.threadText)
       || extractZabbixHostFromThread(ctx?.priorUser)
   }
 
-  const wantsHostFromCtx = ctx?.isFollowUp && host
-    && /\b(same|this|that|it|device|host|firewall|fortigate|vpn|tunnel|problem|issue|explain|why|what|how|more|status|bandwidth|ping|interface)\b/i.test(q)
+  const wantsHostFromCtx = ctx?.isFollowUp && host && (
+    /\b(same|this|that|it|there|device|host|firewall|fortigate|vpn|tunnel|problem|issue|explain|why|what|how|more|status|bandwidth|ping|interface|zabbix|available|overview|detailed|check)\b/i.test(q)
+    || /\b(available in zabbix|from zabbix|in zabbix)\b/i.test(q)
+  )
 
   return {
     ip: ip || null,
@@ -988,6 +1028,10 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
   const fetchedAt = new Date().toISOString()
   const { ip, host: zabbixHostFromCtx } = resolveInfraHostFilter(question, ctx)
   const hostname = extractStoreHostname(question) || ctx?.hostname
+  const infraHost = extractInfraHostName(question)
+    || ctx?.infraHost
+    || (ctx?.isFollowUp ? extractInfraHostFromThread(ctx?.priorUser) : null)
+    || (ctx?.isFollowUp ? extractInfraHostFromThread(ctx?.threadText) : null)
   const hostGroupFilter = extractHostGroupFilter(question, ctx) || ctx?.hostGroup
   const isMembershipCheck = wantsHostGroupCheck(question) && ip && hostGroupFilter
   const scopedHostGroup = hostGroupFilter && !ip && !(hostname && /\b(for|of|about|status)\b/i.test(question)) ? hostGroupFilter : ''
@@ -1001,9 +1045,11 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
   const deviceTypeFilter = (scopedHostGroup || isMembershipCheck) ? null : detectDeviceTypeFilter(question, ctx)
   const hostFilter = ip
     || zabbixHostFromCtx
+    || infraHost
     || (hostname && (/\b(for|of|about|status)\b/i.test(question) || ctx?.isFollowUp) ? hostname : '')
   const wantsIsp = /\bisp\b/i.test(question)
-  const deepAnalysis = wantsDeepInfraFetch(question, ctx?.chatMode, ctx) && Boolean(ip || hostFilter)
+  const deepAnalysis = wantsDeepInfraFetch(question, ctx?.chatMode, { ...ctx, zabbixHost: zabbixHostFromCtx || infraHost })
+    && Boolean(ip || hostFilter)
   const includePing = wantsPingStatus(question) || deepAnalysis
   const includeBandwidth = bandwidthQuery || deepAnalysis
   const problemLimit = deepAnalysis ? 50 : 12

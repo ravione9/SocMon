@@ -1,14 +1,41 @@
-/* SocMon AI page — 20% smaller than default UI scale */
+/* SocMon AI — fill layout viewport; slightly denser type (no layout-breaking zoom) */
 .ai-page-root {
-  zoom: 0.8;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  font-size: 80%;
 }
 
-@supports not (zoom: 0.8) {
-  .ai-page-root {
-    zoom: unset;
-    transform: scale(0.8);
-    transform-origin: top left;
-    width: 125% !important;
-    height: calc((var(--app-vh, 100vh) - 52px - 16px) / 0.8) !important;
-  }
+.ai-msg-assistant {
+  max-height: min(52vh, 480px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+}
+
+.ai-msg-assistant::-webkit-scrollbar {
+  width: 6px;
+}
+
+.ai-msg-assistant::-webkit-scrollbar-thumb {
+  background: rgba(99, 120, 200, 0.35);
+  border-radius: 999px;
+}
+
+.ai-chat-input-dock {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg3);
+  padding: 8px 10px;
+}
+
+.ai-footer-note {
+  text-align: center;
+  font-size: 10px;
+  color: var(--text3);
+  font-family: var(--mono);
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.08);
+  border: 1px dashed var(--border);
 }

@@ -1,5 +1,5 @@
 import { isXdrQuestion } from './xdrDirectAnswer.js'
-import { isNetworkInfraQuery, isZabbixQuestion, isInfraDeviceStatusQuery, extractHostGroupFilter, extractHostGroupFromThread, extractIpv4, extractIpv4FromThread, extractZabbixHostFromThread } from './zabbixDirectAnswer.js'
+import { isNetworkInfraQuery, isZabbixQuestion, isInfraDeviceStatusQuery, extractHostGroupFilter, extractHostGroupFromThread, extractIpv4, extractIpv4FromThread, extractZabbixHostFromThread, extractInfraHostName, extractInfraHostFromThread } from './zabbixDirectAnswer.js'
 import { isFirewallQuestion, isSocReportQuery } from './socDirectAnswer.js'
 import { isDisconnectionLogQuery } from './nocDirectAnswer.js'
 import { isRcaQuery } from './rcaAnalysis.js'
@@ -97,7 +97,12 @@ export function resolveQueryContext(messages, opts = {}) {
       ? extractZabbixHostFromThread(priorAssistant) || extractZabbixHostFromThread(threadText)
       : null)
 
-  const ctxLite = { isFollowUp, priorTopic, threadText, priorAssistant, priorUser, ip, zabbixHost }
+  const infraHost = extractInfraHostName(currentQuestion)
+    || (isFollowUp ? extractInfraHostFromThread(priorUser) : null)
+    || (isFollowUp ? extractInfraHostFromThread(threadText) : null)
+    || (isFollowUp && priorTopic === 'zabbix' ? extractInfraHostFromThread(priorAssistant) : null)
+
+  const ctxLite = { isFollowUp, priorTopic, threadText, priorAssistant, priorUser, ip, zabbixHost, infraHost }
   const hostGroup = extractHostGroupFilter(currentQuestion, ctxLite)
     || (isFollowUp && priorTopic === 'zabbix' ? extractHostGroupFromThread(threadText) : null)
 
@@ -164,6 +169,7 @@ export function resolveQueryContext(messages, opts = {}) {
     hostGroup,
     ip,
     zabbixHost,
+    infraHost,
     range,
     isFollowUp,
     followUpKind,

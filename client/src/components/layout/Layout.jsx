@@ -41,13 +41,24 @@ export default function Layout() {
 
   const pageKey = pathToPageKey(location.pathname)
   const accessLevel = pageKey && user ? getPageAccessLevel(user, pageKey) : null
+  const isAiPage = pageKey === 'ai'
 
   return (
     <div style={{ display:'flex', height:'var(--app-vh, 100vh)', overflow:'hidden', background:'var(--bg)' }}>
       <Sidebar />
       <div style={{ flex:1, display:'flex', flexDirection:'column', overflow:'hidden' }}>
         <Topbar />
-        <main style={{ flex:1, overflowY:'auto', padding:'16px 20px', color:'var(--text)' }}>
+        <main
+          style={{
+            flex: 1,
+            overflow: isAiPage ? 'hidden' : 'auto',
+            padding: isAiPage ? '8px 12px' : '16px 20px',
+            color: 'var(--text)',
+            display: isAiPage ? 'flex' : 'block',
+            flexDirection: 'column',
+            minHeight: 0,
+          }}
+        >
           {accessLevel === 'read' && (
             <div
               role="status"
@@ -60,12 +71,15 @@ export default function Layout() {
                 fontSize: 12,
                 fontFamily: 'var(--mono)',
                 color: 'var(--text2)',
+                flexShrink: 0,
               }}
             >
               <strong style={{ color: 'var(--amber)' }}>View only</strong> — You have read-only access to this area. Actions that change data may be unavailable.
             </div>
           )}
-          <Outlet />
+          <div style={isAiPage ? { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' } : undefined}>
+            <Outlet />
+          </div>
         </main>
       </div>
     </div>

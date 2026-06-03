@@ -40,10 +40,11 @@ const C = {
 const PAGE_ROOT = {
   width: '100%',
   boxSizing: 'border-box',
-  height: 'calc(var(--app-vh, 100vh) - 52px - 16px)',
+  flex: 1,
+  minHeight: 0,
+  height: '100%',
   display: 'flex',
   flexDirection: 'column',
-  minHeight: 0,
   overflow: 'hidden',
 }
 
@@ -1114,11 +1115,12 @@ function ChatTab({
           {messages.map((m, i) => (
             <div
               key={i}
+              className={m.role === 'assistant' ? 'ai-msg-assistant' : undefined}
               style={{
                 alignSelf: m.role === 'user' ? 'flex-end' : 'stretch',
                 width: '100%',
                 maxWidth: m.role === 'user' ? 'min(520px, 72%)' : '100%',
-                padding: m.role === 'user' ? '12px 16px' : '16px 18px',
+                padding: m.role === 'user' ? '10px 14px' : '12px 14px',
                 borderRadius: m.role === 'user' ? 12 : 16,
                 background: m.role === 'user'
                   ? 'linear-gradient(135deg, rgba(79,126,245,.18), rgba(79,126,245,.08))'
@@ -1180,14 +1182,7 @@ function ChatTab({
           <div ref={bottomRef} />
         </div>
 
-        <div
-          style={{
-            flexShrink: 0,
-            borderTop: `1px solid ${C.border}`,
-            background: C.bg3,
-            padding: '10px 12px',
-          }}
-        >
+        <div className="ai-chat-input-dock">
           {messages.length <= 1 && !hasUserMessages(messages) && (
             <div style={{ display: 'flex', gap: 6, marginBottom: 8, overflowX: 'auto', paddingBottom: 2 }}>
               {(STARTER_PROMPTS[chatMode] || STARTER_PROMPTS.monitor).map(p => (
@@ -1673,8 +1668,8 @@ export default function AIPage() {
 
   return (
     <div className="ai-page-root" style={{ ...PAGE_ROOT, color: C.text, fontFamily: 'var(--sans)' }}>
-      <div style={{ flexShrink: 0, marginBottom: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-        <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0, letterSpacing: '-0.02em' }}>SocMon AI</h1>
+      <div style={{ flexShrink: 0, marginBottom: 4, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+        <h1 style={{ fontSize: 15, fontWeight: 700, margin: 0, letterSpacing: '-0.02em' }}>SocMon AI</h1>
         <TabBar tab={tab} setTab={setTab} compact />
       </div>
 
