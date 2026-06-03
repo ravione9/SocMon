@@ -149,6 +149,7 @@ const HOST_GROUP_META_STOP = /^(zabbix|infra|monitoring|monitor|netpulse|socmon|
 function isValidHostGroupName(name) {
   const n = String(name || '').trim()
   if (!n) return false
+  if (IPV4_RE.test(n)) return false
   if (GROUP_NAME_STOP.test(n)) return false
   if (HOST_GROUP_META_STOP.test(n)) return false
   return true
@@ -222,8 +223,13 @@ export function wantsDiskUsage(question) {
 }
 
 export function wantsHostGroupCheck(question) {
-  return /\b(belong(?:s|ing)?\s+to|belonging\s+to|member\s+of|in\s+(?:the\s+)?group|host\s*group)\b/i.test(String(question || ''))
-    || (extractHostGroupFilter(question) != null && extractIpv4(question) != null)
+  const q = String(question || '')
+  if (/\b(belong(?:s|ing)?\s+to|belonging\s+to|member\s+of|in\s+(?:the\s+)?group|host\s*group)\b/i.test(q)) {
+    return true
+  }
+  const ip = extractIpv4(q)
+  const hg = extractHostGroupFilter(q)
+  return Boolean(ip && hg && hg !== ip && !IPV4_RE.test(hg))
 }
 
 /** fortigate | cisco | checkpoint | network | switch | server | vm | database */
@@ -577,7 +583,7 @@ export function wantsPingStatus(question) {
 
 export function wantsBandwidthUtil(question, ctx = null) {
   const q = String(question || '')
-  if (!/\b(bandwidth|utilization|utilisation|traffic|throughput|bits\s*received|bits\s*sent|interface\s+usage)\b/i.test(q)) {
+  if (!/\b(bandwidth|utilization|utilisation|traffic|throughput|bits\s*received|bits\s*sent|interface\s+usage|interface\s+bandwidth)\b/i.test(q)) {
     return false
   }
   return Boolean(extractIpv4(q))
@@ -1089,13 +1095,19 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     || (ctx?.isFollowUp ? extractInfraHostFromThread(ctx?.priorUser) : null)
     || (ctx?.isFollowUp ? extractInfraHostFromThread(ctx?.threadText) : null)
   const alertsQuery = wantsZabbixAlertsQuery(question)
+  const bandwidthQuery = wantsBandwidthUtil(question, ctx)
   let hostGroupFilter = extractHostGroupFilter(question, ctx) || ctx?.hostGroup
+  if (ip && hostGroupFilter && (hostGroupFilter === ip || IPV4_RE.test(hostGroupFilter))) {
+    hostGroupFilter = ''
+  }
+  if (bandwidthQuery && ip) {
+    hostGroupFilter = ''
+  }
   if (alertsQuery && !hasExplicitHostGroupInQuestion(question)) {
     hostGroupFilter = ''
   }
-  const isMembershipCheck = wantsHostGroupCheck(question) && ip && hostGroupFilter
+  const isMembershipCheck = wantsHostGroupCheck(question) && ip && hostGroupFilter && !bandwidthQuery
   const scopedHostGroup = hostGroupFilter && !ip && !(hostname && /\b(for|of|about|status)\b/i.test(question)) ? hostGroupFilter : ''
-  const bandwidthQuery = wantsBandwidthUtil(question, ctx)
   const isGroupFollowUp = Boolean(
     ctx?.isFollowUp && scopedHostGroup && ctx?.priorTopic === 'zabbix' && !bandwidthQuery && !isSocReportQuery(question),
   )
@@ -1206,10 +1218,13 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
   const filterLabel = deviceTypeFilter ? TYPE_LABEL[deviceTypeFilter] || deviceTypeFilter : null
   const diskReport = Boolean(scopedHostGroup && includeDisk && wantsDiskUsage(question))
   const bandwidthReport = Boolean(scopedHostGroup && includeBandwidth)
+  const ipBandwidthReport = Boolean(bandwidthQuery && hostFilter && !scopedHostGroup)
 
   const lines = [
     alertsQuery
       ? `Infra Zabbix — active alerts & problems (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
+      : ipBandwidthReport
+        ? `Interface bandwidth — ${hostFilter} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
       : diskReport
       ? `Disk usage report — host group: ${scopedHostGroup} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
       : bandwidthReport
