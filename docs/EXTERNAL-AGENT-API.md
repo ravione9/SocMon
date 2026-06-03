@@ -13,7 +13,8 @@ Use **one** of:
 
 | Method | Headers |
 |--------|---------|
-| NetPulse user JWT | `Authorization: Bearer <jwt>` from `POST /api/auth/login` |
+| NetPulse user JWT | `Authorization: Bearer <jwt>` from `POST /api/auth/login` (short-lived session) |
+| User API JWT | `Authorization: Bearer <jwt>` from `POST /api/auth/api-tokens` after an admin enables **Allow API access** on the user (long-lived; revocable) |
 | Agent API key | `X-Netpulse-Agent-Key: <secret>` **or** `Authorization: Bearer <secret>` (non-JWT key) |
 
 ### Server configuration (`.env`)

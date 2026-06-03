@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken'
 import User from '../models/User.js'
+import { resolveUserFromBearerToken } from '../utils/jwtAuth.js'
 
 let cachedAgentUser = null
 
@@ -89,10 +90,10 @@ async function authenticateJwt(req, res, next) {
   try {
     const token = extractBearerToken(req)
     if (!token) return res.status(401).json({ error: 'No token provided' })
-    const decoded = jwt.verify(token, process.env.JWT_SECRET)
-    req.user = await User.findById(decoded.id)
-    if (!req.user || !req.user.active) return res.status(401).json({ error: 'Unauthorized' })
-    req.authMethod = 'jwt'
+    const resolved = await resolveUserFromBearerToken(token)
+    if (!resolved) return res.status(401).json({ error: 'Invalid or expired token' })
+    req.user = resolved.user
+    req.authMethod = resolved.authMethod === 'api_jwt' ? 'api_jwt' : 'jwt'
     next()
   } catch {
     res.status(401).json({ error: 'Invalid token' })

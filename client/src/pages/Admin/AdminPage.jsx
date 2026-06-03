@@ -238,6 +238,7 @@ export default function AdminPage() {
           email: data.email,
           role: data.role,
           active: data.active,
+          apiAccessEnabled: !!data.apiAccessEnabled,
         }
         if (!_id) {
           if (data.authKind === 'ad') {
@@ -423,7 +424,7 @@ export default function AdminPage() {
       devices: { _type:'devices', name:'', ip:'', type:'cisco-switch', site: sites[0]?._id||'', notes:'', tags:'', status:'unknown',
         mgmtUsername:'', mgmtPassword:'', savePassword:false, sshPort:22, httpsPort:443 },
       sites:   { _type:'sites', name:'', location:'', description:'', timezone:'Asia/Kolkata' },
-      users:   { _type:'users', name:'', email:'', password:'', authKind:'local', adLoginIdentity:'', role:'viewer', allowedPages: [...APP_PAGE_KEYS], customRoleId: '' },
+      users:   { _type:'users', name:'', email:'', password:'', authKind:'local', adLoginIdentity:'', role:'viewer', allowedPages: [...APP_PAGE_KEYS], customRoleId: '', apiAccessEnabled: false },
       alerts:  { _type:'alerts', name:'', description:'', type:'threshold', source:'all', severity:'medium', enabled:true },
     }
     setForm(defaults[type])
@@ -1452,6 +1453,18 @@ export default function AdminPage() {
             </div>
           )}
           <Field label="Active" value={form.active?.toString()||'true'} onChange={v=>f('active')(v==='true')} options={[{value:'true',label:'Active'},{value:'false',label:'Inactive'}]} />
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 14, cursor: 'pointer', fontSize: 12, color: 'var(--text2)', lineHeight: 1.45 }}>
+            <input
+              type="checkbox"
+              checked={!!form.apiAccessEnabled}
+              onChange={(e) => setForm((p) => ({ ...p, apiAccessEnabled: e.target.checked }))}
+              style={{ marginTop: 3, accentColor: 'var(--accent)' }}
+            />
+            <span>
+              <strong style={{ color: 'var(--text)' }}>Allow API access</strong> — user can generate long-lived JWT tokens
+              (top bar → API) for scripts and external agents. Permissions still follow page access above.
+            </span>
+          </label>
           <div style={{ display:'flex', gap:10, justifyContent:'flex-end', marginTop:22, paddingTop:18, borderTop:'1px solid var(--border)' }}>
             <Btn variant="ghost" label="Cancel" onClick={()=>setModal(null)} />
             <Btn label={loading ? 'Saving...' : 'Save user'} onClick={save} />

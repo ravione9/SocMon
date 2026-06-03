@@ -2,6 +2,7 @@ import { useLocation } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import { useAuthStore } from '../../store/authStore'
 import ThemePreferences from './ThemePreferences'
+import ApiTokensPanel from './ApiTokensPanel'
 const titles = {
   '/soc': 'Security Operations Center',
   '/noc': 'Network Operations Center',
@@ -27,6 +28,7 @@ export default function Topbar() {
     <header style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'10px 20px', background:'var(--bg2)', borderBottom:'1px solid var(--border)', flexShrink:0 }}>
       <div style={{ fontSize:15, fontWeight:700, color:'var(--text)' }}>{titles[pathname] || 'Lenskart'}</div>
       <div style={{ display:'flex', alignItems:'center', gap:16 }}>
+        <ApiTokensPanel />
         <ThemePreferences />
         <div style={{ display:'flex', alignItems:'center', gap:6, fontFamily:'var(--mono)', fontSize:11, color:'var(--green)', background:'color-mix(in srgb, var(--green) 10%, transparent)', border:'1px solid color-mix(in srgb, var(--green) 28%, transparent)', padding:'4px 10px', borderRadius:20 }}>
           <div style={{ width:6, height:6, background:'var(--green)', borderRadius:'50%', animation:'pulse 2s infinite' }} />

@@ -21,6 +21,8 @@ const userSchema = new mongoose.Schema({
   /** UI theme id; validated on write; only used when themeSaveToProfile is true. */
   theme: { type: String, default: null },
   themeSaveToProfile: { type: Boolean, default: false },
+  /** When true, user may create long-lived JWT API tokens (Admin → Users). */
+  apiAccessEnabled: { type: Boolean, default: false },
 }, { timestamps: true })
 
 userSchema.pre('validate', function(next) {

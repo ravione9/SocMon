@@ -2,6 +2,7 @@ import { Router } from 'express'
 import mongoose from 'mongoose'
 import bcrypt from 'bcryptjs'
 import User from '../models/User.js'
+import UserApiToken from '../models/UserApiToken.js'
 import CustomRole from '../models/CustomRole.js'
 import { sanitizeAllowedPages, normalizeAllowedPages, APP_PAGE_KEY_SET, APP_PAGE_KEYS } from '../constants/appPages.js'
 import { toClientUserPayload } from '../utils/computeUserPageAccess.js'
@@ -20,6 +21,7 @@ function pickUserPayload(body, opts = {}) {
     password,
     role,
     active,
+    apiAccessEnabled: rawApiAccess,
     allowedPages: rawPages,
     avatar,
     customRoleId: rawCr,
@@ -28,6 +30,7 @@ function pickUserPayload(body, opts = {}) {
   } = body
   const existingUser = opts.existingUser
   const out = { name, email, role, active, avatar }
+  if (typeof rawApiAccess === 'boolean') out.apiAccessEnabled = rawApiAccess
 
   if (!existingUser) {
     const authKind = rawAuthKind === 'ad' ? 'ad' : 'local'
@@ -104,6 +107,7 @@ router.get('/', async (_req, res) => {
         customRoleName: null,
         theme: u.theme,
         themeSaveToProfile: u.themeSaveToProfile,
+        apiAccessEnabled: !!u.apiAccessEnabled,
         createdAt: u.createdAt,
         updatedAt: u.updatedAt,
       }
@@ -185,6 +189,12 @@ router.put('/:id', async (req, res) => {
       '-password',
     )
     if (!user) return res.status(404).json({ error: 'User not found' })
+    if (payload.apiAccessEnabled === false) {
+      await UserApiToken.updateMany(
+        { userId: user._id, revokedAt: null },
+        { revokedAt: new Date() },
+      )
+    }
     const dto = await toClientUserPayload(user)
     res.json(dto)
   } catch (err) {

@@ -2,7 +2,13 @@ import { Router } from 'express'
 import { authenticate, authorize } from '../middleware/auth.js'
 import { requireAppPage } from '../middleware/requireAppPage.js'
 import { computeUserPageAccess } from '../utils/computeUserPageAccess.js'
-import { chat, getAIProvider } from '../services/ai/aiRouter.js'
+import {
+  chat,
+  getAIProvider,
+  getAIProviderConfigStatus,
+  formatLlmErrorForClient,
+  providerModelName,
+} from '../services/ai/aiRouter.js'
 import { triageAlert } from '../services/ai/triage.js'
 import { naturalLanguageSearch } from '../services/ai/nlSearch.js'
 import { detectAnomalies } from '../services/ai/anomaly.js'
@@ -55,9 +61,11 @@ router.get('/modules', authenticate, requireAppPage('ai'), async (req, res) => {
 router.get('/provider', authenticate, (req, res) => {
   try {
     const provider = getAIProvider()
+    const status = getAIProviderConfigStatus()
     res.json({
       provider: provider.name,
-      model: providerModelName(),
+      model: providerModelName(provider.name),
+      ...status,
     })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -70,7 +78,8 @@ router.post('/provider', authenticate, authorize('admin'), (req, res) => {
     return res.status(400).json({ error: `Invalid provider. Use: ${VALID_PROVIDERS.join(', ')}` })
   }
   process.env.AI_PROVIDER = provider
-  res.json({ provider, model: providerModelName() })
+  const status = getAIProviderConfigStatus()
+  res.json({ provider: status.active, model: providerModelName(status.active), ...status })
 })
 
 router.use(authenticate, requireAppPage('ai'))
@@ -510,13 +519,9 @@ router.post('/chat', async (req, res) => {
       },
     })
   } catch (err) {
-    const msg = String(err.message || 'AI request failed')
-    const authFailed = /authentication_error|invalid x-api-key|invalid api key|401/i.test(msg)
-    const status = authFailed ? 503 : 502
-    const hint = authFailed
-      ? ' LLM provider auth failed — set a valid ANTHROPIC_API_KEY / OPENAI_API_KEY, or use AI_PROVIDER=ollama. Hostname and store queries should use the direct (no-LLM) path; redeploy if you still see this for status-of-hostname questions.'
-      : ''
-    res.status(status).json({ error: `${msg}${hint}` })
+    const payload = formatLlmErrorForClient(err)
+    const status = payload.code === 'LLM_AUTH_FAILED' ? 503 : 502
+    res.status(status).json(payload)
   }
 })
 
@@ -562,13 +567,6 @@ router.get('/anomalies', async (req, res) => {
 router.post('/report', (_req, res) => {
   res.status(501).json({ error: 'Report generation is not implemented yet' })
 })
-
-function providerModelName() {
-  const name = process.env.AI_PROVIDER || 'claude'
-  if (name === 'ollama') return process.env.OLLAMA_MODEL || 'llama3'
-  if (name === 'openai') return process.env.OPENAI_MODEL || 'gpt-4o'
-  return process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514'
-}
 
 async function withTimeout(promise, timeoutMs, message = 'Timed out') {
   let timer

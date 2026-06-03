@@ -22,6 +22,7 @@ const IdcsPage     = lazy(() => import('./pages/IdcsManagement.jsx'))
 const ActiveDirectoryPage = lazy(() => import('./pages/ActiveDirectoryManagement.jsx'))
 const NexsUserManagementPage = lazy(() => import('./pages/Nexs/NexsUserManagementPage.jsx'))
 const EmailSimulationPage = lazy(() => import('./pages/EmailSim/EmailSimulationPage.jsx'))
+const ApiDocsPage = lazy(() => import('./pages/ApiDocs/ApiDocsPage.jsx'))
 
 function PrivateRoute({ children }) {
   const token = useAuthStore(s => s.token)
@@ -44,6 +45,7 @@ export default function App() {
     <Suspense fallback={<PageLoading />}>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/api-docs" element={<PrivateRoute><ApiDocsPage /></PrivateRoute>} />
         <Route path="/" element={<PrivateRoute><Layout /></PrivateRoute>}>
           <Route index element={<DefaultRedirect />} />
           <Route path="no-access" element={<NoAccessPage />} />

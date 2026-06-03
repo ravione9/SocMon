@@ -199,7 +199,12 @@ async function start() {
   const PORT = process.env.PORT || 5000
   httpServer.listen(PORT, () => {
     console.log(`Lenskart server running on port ${PORT}`)
-    console.log(`AI provider: ${process.env.AI_PROVIDER || 'claude'}`)
+    const { resolveProviderName, getAIProviderConfigStatus } = await import('./services/ai/aiRouter.js')
+    const ps = getAIProviderConfigStatus()
+    console.log(
+      `AI provider: ${ps.active} (AI_PROVIDER=${ps.configured}${ps.autoFallback ? ', auto-fallback' : ''})`,
+    )
+    if (ps.hint) console.warn(`[ai] ${ps.hint}`)
   })
 }
 

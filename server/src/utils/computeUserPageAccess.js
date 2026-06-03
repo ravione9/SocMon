@@ -88,6 +88,7 @@ export async function toClientUserPayload(userDoc) {
     customRoleName,
     theme: u.theme,
     themeSaveToProfile: u.themeSaveToProfile,
+    apiAccessEnabled: !!u.apiAccessEnabled,
     createdAt: u.createdAt,
     updatedAt: u.updatedAt,
   }

@@ -66,3 +66,23 @@ export function resolvedWsUrl() {
   if (shouldPreferRelativeDevProxy(base)) return ''
   return base
 }
+
+/**
+ * Full URL for a portal route (e.g. /api-docs) using the same host, port, and path
+ * context as the page the user opened — not a hard-coded localhost origin.
+ */
+export function portalAppUrl(path = '/') {
+  if (typeof window === 'undefined') return path
+  const p = String(path || '/').startsWith('/') ? path : `/${path}`
+  return new URL(p, window.location.href).href
+}
+
+/**
+ * API base URL as seen from the browser (same origin when using the Vite/nginx proxy).
+ */
+export function resolvedPortalOrigin() {
+  if (typeof window === 'undefined') return ''
+  const api = resolvedApiBase()
+  if (api) return rewriteLocalhostToIPv4(api)
+  return window.location.origin.replace(/\/$/, '')
+}

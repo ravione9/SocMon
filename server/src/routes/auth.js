@@ -1,10 +1,27 @@
 import { Router } from 'express'
-import jwt from 'jsonwebtoken'
 import User from '../models/User.js'
 import { verifyAdPortalPassword } from '../services/adService.js'
 import { toClientUserPayload } from '../utils/computeUserPageAccess.js'
+import { authenticate } from '../middleware/auth.js'
+import {
+  signLoginJwt,
+  resolveUserFromBearerToken,
+  listUserApiTokens,
+  createUserApiToken,
+  revokeUserApiToken,
+} from '../utils/jwtAuth.js'
 
 const router = Router()
+
+async function requireSessionUser(req, res, next) {
+  if (req.authMethod === 'api_jwt') {
+    return res.status(403).json({
+      error: 'Sign in to the portal to manage API tokens. API JWTs cannot create or revoke other tokens.',
+      code: 'SESSION_REQUIRED',
+    })
+  }
+  next()
+}
 
 const THEME_IDS = [
   'midnight',
@@ -41,6 +58,7 @@ async function authMeJson(userDoc) {
     pageAccess: dto.pageAccess,
     customRoleId: dto.customRoleId,
     customRoleName: dto.customRoleName,
+    apiAccessEnabled: !!dto.apiAccessEnabled,
     ...userThemePayload(userDoc),
   }
 }
@@ -73,7 +91,7 @@ router.post('/login', async (req, res) => {
     }
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' })
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '7d' })
+    const token = signLoginJwt(user._id)
 
     await User.findByIdAndUpdate(user._id, { lastLogin: new Date() })
     user.lastLogin = new Date()
@@ -103,31 +121,17 @@ router.get('/me', async (req, res) => {
   try {
     const token = req.headers.authorization?.replace('Bearer ', '')
     if (!token) return res.status(401).json({ error: 'No token' })
-    let decoded
-    try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET)
-    } catch {
-      return res.status(401).json({ error: 'Invalid token' })
-    }
-    const user = await User.findById(decoded.id)
-    if (!user) return res.status(404).json({ error: 'User not found' })
-    res.json(await authMeJson(user))
+    const resolved = await resolveUserFromBearerToken(token)
+    if (!resolved) return res.status(401).json({ error: 'Invalid token' })
+    res.json(await authMeJson(resolved.user))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
 })
 
-router.patch('/me', async (req, res) => {
+router.patch('/me', authenticate, requireSessionUser, async (req, res) => {
   try {
-    const token = req.headers.authorization?.replace('Bearer ', '')
-    if (!token) return res.status(401).json({ error: 'No token' })
-    let decoded
-    try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET)
-    } catch {
-      return res.status(401).json({ error: 'Invalid token' })
-    }
-    const user = await User.findById(decoded.id)
+    const user = req.user
     if (!user) return res.status(404).json({ error: 'User not found' })
 
     const { theme, themeSaveToProfile } = req.body
@@ -157,6 +161,49 @@ router.patch('/me', async (req, res) => {
     res.json(await authMeJson(user))
   } catch (err) {
     res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/api-tokens', authenticate, requireSessionUser, async (req, res) => {
+  try {
+    const tokens = await listUserApiTokens(req.user._id)
+    res.json({
+      apiAccessEnabled: !!req.user.apiAccessEnabled,
+      tokens: tokens.map((t) => ({
+        id: t._id,
+        label: t.label,
+        expiresAt: t.expiresAt,
+        lastUsedAt: t.lastUsedAt,
+        createdAt: t.createdAt,
+      })),
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.post('/api-tokens', authenticate, requireSessionUser, async (req, res) => {
+  try {
+    const { jwt: token, meta } = await createUserApiToken(req.user, {
+      label: req.body?.label,
+      expiresIn: req.body?.expiresIn,
+    })
+    res.status(201).json({
+      token,
+      ...meta,
+      message: 'Copy this token now. It will not be shown again.',
+    })
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message, code: err.code })
+  }
+})
+
+router.delete('/api-tokens/:id', authenticate, requireSessionUser, async (req, res) => {
+  try {
+    await revokeUserApiToken(req.user._id, req.params.id)
+    res.json({ ok: true })
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message })
   }
 })
 

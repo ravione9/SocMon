@@ -170,6 +170,131 @@ function FreshnessBadge({ freshness }) {
   )
 }
 
+function ConfigTable({ title, rows, columns = ['label', 'value'] }) {
+  if (!rows?.length) return null
+  const colA = columns[0] === 'what' ? 'what' : 'label'
+  const colB = columns[1] === 'detail' ? 'detail' : 'value'
+  return (
+    <div style={{ marginTop: title ? 10 : 0 }}>
+      {title && (
+        <div style={{ fontSize: 10, fontWeight: 700, color: C.text2, marginBottom: 6, fontFamily: 'var(--mono)' }}>
+          {title}
+        </div>
+      )}
+      <table
+        style={{
+          width: '100%',
+          borderCollapse: 'collapse',
+          fontSize: 11,
+          fontFamily: 'var(--mono)',
+          lineHeight: 1.45,
+        }}
+      >
+        <tbody>
+          {rows.map((row, i) => (
+            <tr key={row.key || row.what || i} style={{ borderTop: i ? `1px solid ${C.border}` : undefined }}>
+              <td
+                style={{
+                  padding: '8px 10px 8px 0',
+                  color: C.text3,
+                  verticalAlign: 'top',
+                  width: '38%',
+                  fontWeight: 600,
+                }}
+              >
+                {row[colA]}
+              </td>
+              <td
+                style={{
+                  padding: '8px 0',
+                  color: row.ok === false ? C.red : row.ok === true ? C.green : C.text2,
+                  verticalAlign: 'top',
+                  wordBreak: 'break-word',
+                  whiteSpace: 'pre-wrap',
+                }}
+              >
+                {row[colB]}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function AiErrorPanel({ detail }) {
+  if (!detail?.errorTable?.length) return null
+  return (
+    <div
+      style={{
+        padding: '12px 14px',
+        borderRadius: 10,
+        background: 'rgba(248,113,113,.08)',
+        border: `1px solid ${C.red}`,
+      }}
+    >
+      <div style={{ fontSize: 13, fontWeight: 700, color: C.red, marginBottom: 10 }}>{detail.error}</div>
+      <ConfigTable rows={detail.errorTable} columns={['what', 'detail']} />
+      {detail.providerStatus?.rows?.length > 0 && (
+        <ConfigTable title="Server configuration" rows={detail.providerStatus.rows} />
+      )}
+    </div>
+  )
+}
+
+function ProviderStatusBanner({ status, onSwitchOllama, switching }) {
+  if (!status) return null
+  const ollamaRow = status.rows?.find((r) => r.key === 'ollama')
+  const claudeRow = status.rows?.find((r) => r.key === 'claude')
+  const needsAttention =
+    !!status.hint ||
+    (status.active === 'claude' && !claudeRow?.ok) ||
+    (status.active === 'ollama' && !ollamaRow?.ok) ||
+    (status.active !== 'ollama' && ollamaRow?.ok && !claudeRow?.ok)
+  if (!needsAttention) return null
+
+  return (
+    <div
+      style={{
+        flexShrink: 0,
+        padding: '12px 14px',
+        borderRadius: 10,
+        border: `1px solid ${C.amber}`,
+        background: 'rgba(245,166,35,.08)',
+        marginBottom: 10,
+      }}
+    >
+      <div style={{ fontSize: 12, fontWeight: 700, color: C.amber, marginBottom: 8 }}>LLM provider setup</div>
+      {status.hint && (
+        <p style={{ margin: '0 0 10px', fontSize: 11, color: C.text2, lineHeight: 1.5 }}>{status.hint}</p>
+      )}
+      <ConfigTable rows={status.rows} />
+      {ollamaRow?.ok && status.active !== 'ollama' && onSwitchOllama && (
+        <button
+          type="button"
+          disabled={switching}
+          onClick={onSwitchOllama}
+          style={{
+            marginTop: 10,
+            padding: '8px 14px',
+            borderRadius: 8,
+            border: 'none',
+            background: C.accent,
+            color: '#fff',
+            fontSize: 11,
+            fontWeight: 700,
+            fontFamily: 'var(--mono)',
+            cursor: switching ? 'wait' : 'pointer',
+          }}
+        >
+          {switching ? 'Switching…' : 'Use Ollama now'}
+        </button>
+      )}
+    </div>
+  )
+}
+
 function ContextMetaPanel({ meta = [], fastPath, preview, metrics, queryContext }) {
   if (!meta?.length && !fastPath && !preview && !metrics && !queryContext) return null
   return (
@@ -416,7 +541,18 @@ function ChatModeBar({ mode, onModeChange }) {
   )
 }
 
-function ChatTab({ provider, model, availableModules, enabledModules, onToggleModule, autoModules, onAutoToggle }) {
+function ChatTab({
+  provider,
+  model,
+  providerStatus,
+  onSwitchOllama,
+  switchingProvider,
+  availableModules,
+  enabledModules,
+  onToggleModule,
+  autoModules,
+  onAutoToggle,
+}) {
   const [chatMode, setChatMode] = useState('monitor')
   const [messages, setMessages] = useState([
     {
@@ -489,9 +625,18 @@ function ChatTab({ provider, model, availableModules, enabledModules, onToggleMo
         setMessages([...next, { role: 'assistant', content: 'Stopped — request cancelled.' }])
         return
       }
-      const msg = err.response?.data?.error || err.message || 'Chat failed'
+      const data = err.response?.data
+      const errorDetail = data?.errorTable ? data : null
+      const msg = data?.error || err.message || 'Chat failed'
       toast.error(msg)
-      setMessages([...next, { role: 'assistant', content: `Error: ${msg}` }])
+      setMessages([
+        ...next,
+        {
+          role: 'assistant',
+          content: errorDetail ? '' : `Error: ${msg}`,
+          errorDetail,
+        },
+      ])
     } finally {
       if (abortRef.current === controller) abortRef.current = null
       setLoading(false)
@@ -506,6 +651,11 @@ function ChatTab({ provider, model, availableModules, enabledModules, onToggleMo
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 10, minHeight: 0, overflow: 'hidden' }}>
+      <ProviderStatusBanner
+        status={providerStatus}
+        onSwitchOllama={onSwitchOllama}
+        switching={switchingProvider}
+      />
       <ChatModeBar mode={chatMode} onModeChange={setChatMode} />
       <DataSourcesPanel
         modules={availableModules}
@@ -555,7 +705,7 @@ function ChatTab({ provider, model, availableModules, enabledModules, onToggleMo
                 wordBreak: 'break-word',
               }}
             >
-              {m.content}
+              {m.errorDetail ? <AiErrorPanel detail={m.errorDetail} /> : m.content}
               {m.chartSeries?.length > 0 && <MetricChartsPanel series={m.chartSeries} />}
               {(m.contextMeta?.length > 0 || m.contextPreview || m.metrics || m.fastPath || m.queryContext) && (
                 <ContextMetaPanel
@@ -1030,17 +1180,30 @@ export default function AIPage() {
   const [tab, setTab] = useUrlTab('chat', TABS)
   const [provider, setProvider] = useState('')
   const [model, setModel] = useState('')
+  const [providerStatus, setProviderStatus] = useState(null)
+  const [switchingProvider, setSwitchingProvider] = useState(false)
   const [availableModules, setAvailableModules] = useState([])
   const [enabledModules, setEnabledModules] = useState([])
   const [autoModules, setAutoModules] = useState(true)
 
-  useEffect(() => {
-    aiAPI.getProvider()
+  const loadProvider = useCallback(() => {
+    return aiAPI.getProvider()
       .then(({ data }) => {
         setProvider(data.provider)
         setModel(data.model || '')
+        setProviderStatus({
+          configured: data.configured,
+          active: data.active ?? data.provider,
+          rows: data.rows,
+          hint: data.hint,
+          autoFallback: data.autoFallback,
+        })
       })
       .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    loadProvider()
     aiAPI.getModules()
       .then(({ data }) => {
         const mods = data.modules || []
@@ -1048,7 +1211,20 @@ export default function AIPage() {
         setEnabledModules(mods.filter(m => m.id === 'storeMonitor' || m.id === 'storeProblems').map(m => m.id))
       })
       .catch(() => {})
-  }, [])
+  }, [loadProvider])
+
+  const switchToOllama = useCallback(async () => {
+    setSwitchingProvider(true)
+    try {
+      await aiAPI.setProvider('ollama')
+      toast.success('Switched to Ollama')
+      await loadProvider()
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Could not switch provider')
+    } finally {
+      setSwitchingProvider(false)
+    }
+  }, [loadProvider])
 
   const toggleModule = (id) => {
     setEnabledModules(prev => (prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]))
@@ -1062,7 +1238,16 @@ export default function AIPage() {
           Real portal data + AI reasoning —{' '}
           <FreshnessBadge freshness="live" /> live queries and{' '}
           <FreshnessBadge freshness="periodic" /> periodic snapshots, clearly labeled.
-          {provider ? ` Provider: ${provider}${model ? ` / ${model}` : ''}.` : ''}
+          {provider ? (
+            <>
+              {' '}
+              Provider: <strong style={{ color: C.text2 }}>{provider}</strong>
+              {model ? ` / ${model}` : ''}
+              {providerStatus?.autoFallback ? ' (auto-selected)' : ''}.
+            </>
+          ) : (
+            ''
+          )}
         </p>
       </div>
 
@@ -1073,6 +1258,9 @@ export default function AIPage() {
           <ChatTab
             provider={provider}
             model={model}
+            providerStatus={providerStatus}
+            onSwitchOllama={switchToOllama}
+            switchingProvider={switchingProvider}
             availableModules={availableModules}
             enabledModules={enabledModules}
             onToggleModule={toggleModule}
