@@ -196,19 +196,14 @@ export function prefersLlmSynthesis(question, ctx = null) {
   const q = String(question || '')
   if (c.chatMode === 'rca') return false
 
-  const simpleDirect =
-    /\b(how many|count|total|status of all|ping status|list all|give me the)\b/i.test(q)
-    && !/\b(explain|why|analyze|analyse|compare|utilization|utilisation|bandwidth|throughput)\b/i.test(q)
-  if (simpleDirect && /\b(switch|router|device|host|server|zabbix|infra|firewall)\b/i.test(q)) {
-    return false
-  }
+  // Bandwidth / interface / IP queries are now handled by the direct path
+  // (buildZabbixInfraContext returns named per-port Mbps data). No LLM needed.
+  if (wantsBandwidthUtil(q)) return false
+  if (extractIpv4(q)) return false
+  if (/\b(all port|every port|each port|all interface|every interface)\b/i.test(q)) return false
 
-  if (wantsBandwidthUtil(q)) return true
-  if (/\b(all port|every port|each port|all interface|every interface)\b/i.test(q)) return true
-  if (/\b(explain|summarize|summarise|analyze|analyse|compare|why|help me understand|interpret|recommend|what does|which port|highest|lowest|top|busiest|congested|worst|best)\b/i.test(q)) {
-    return true
-  }
-  if (extractIpv4(q) && /\b(port|interface|traffic|utilization|utilisation|bandwidth|cpu|memory|disk|health|usage)\b/i.test(q)) {
+  // Only send to LLM for open-ended analytical questions with no live data equivalent
+  if (/\b(explain|why|help me understand|interpret|recommend|compare|analyse|analyze|summarize|summarise)\b/i.test(q)) {
     return true
   }
   return false
@@ -817,22 +812,31 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
 
     if (includeBandwidth && data.interfaceMetrics?.byHost) {
       const ifm = data.interfaceMetrics.byHost
+      const nameMap = data.interfaceMetrics.indexToNameByHost || {}
       lines.push('  Interface traffic (net.if.in / net.if.out):')
       for (const h of data.hosts) {
-        const ifaces = ifm[h.hostid]
+        const hid = String(h.hostid || '')
+        const ifaces = ifm[hid]
         if (!ifaces) continue
         lines.push(`    ${h.name}:`)
+        const hostNames = nameMap[hid] || {}
         const entries = Object.entries(ifaces).sort((a, b) => {
-          const rank = { down: 0, up: 1 }
-          return (rank[a[1].status] ?? 2) - (rank[b[1].status] ?? 2)
+          const aUp = a[1].status === 'up', bUp = b[1].status === 'up'
+          if (aUp && !bUp) return -1
+          if (bUp && !aUp) return 1
+          return (b[1].in ?? 0) - (a[1].in ?? 0)
         })
-        for (const [iface, m] of entries.slice(0, 40)) {
+        let shown = 0
+        for (const [idx, m] of entries) {
+          if (m.in == null && m.out == null && m.status !== 'up') continue
+          if (shown >= 40) { lines.push(`      … more interfaces`); break }
+          const label = hostNames[idx] || idx
           const inVal = m.in != null ? formatBytesPerSec(m.in) : '—'
           const outVal = m.out != null ? formatBytesPerSec(m.out) : '—'
           const st = m.status ? ` · ${m.status}` : ''
-          lines.push(`      • ${iface} · in ${inVal} · out ${outVal}${st}`)
+          lines.push(`      • ${label} · in ${inVal} · out ${outVal}${st}`)
+          shown++
         }
-        if (entries.length > 40) lines.push(`      … ${entries.length - 40} more interfaces`)
       }
       if (!Object.keys(ifm).length) {
         lines.push('    No net.if.in/out items found for matched hosts.')
