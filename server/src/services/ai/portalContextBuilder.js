@@ -6,6 +6,7 @@ import {
   fetchStoreIssuesLite,
   getAnyCachedStoreSnapshot,
   fetchWifiConnectivityHistory,
+  fetchStoreDowntimeSummary,
   buildOverviewSummary,
   fetchCrashSummary,
   fetchCrashEventList,
@@ -15,13 +16,14 @@ import {
 import { getProblemSnapshotStatus } from '../storeProblemSnapshotter.js'
 import { computeUserPageAccess } from '../../utils/computeUserPageAccess.js'
 import { isXdrQuestion } from './xdrDirectAnswer.js'
-import { isStoreMonitorConnectivityQuery, isStoreMonitorIssuesQuery, extractTopLimit } from './geoConnectionQuery.js'
+import { isStoreMonitorConnectivityQuery, isStoreMonitorIssuesQuery, isStoreDowntimeQuery, extractTopLimit } from './geoConnectionQuery.js'
 import { isNetworkInfraQuery, isZabbixQuestion, extractIpv4, isInfraMonitorQuery, isIpInfraQuery, prefersLlmSynthesis, buildZabbixInfraContext, wantsDiskUsage, extractHostGroupFilter } from './zabbixDirectAnswer.js'
 import {
   appNameMatches,
   crashRecordMatches,
   formatRangeLabelFromInflux,
   parseQuestionTimeRange,
+  parseAbsoluteTimeWindow,
   hasExplicitTimeRange,
   wantsCrashEventLog,
   extractStoreHostname,
@@ -29,7 +31,7 @@ import {
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 
 export { parseQuestionTimeRange } from './queryContext.js'
-export { isStoreMonitorIssuesQuery, extractTopLimit } from './geoConnectionQuery.js'
+export { isStoreMonitorIssuesQuery, isStoreDowntimeQuery, extractTopLimit } from './geoConnectionQuery.js'
 
 /** @typedef {'live' | 'periodic'} DataFreshness */
 
@@ -1038,6 +1040,125 @@ export async function tryDirectStoreIssuesAnswer(question, allowedPages, ctx = n
   }
 }
 
+function resolveDowntimeWindow(question, ctx) {
+  const abs = parseAbsoluteTimeWindow(question)
+    || (ctx?.fromTs && ctx?.toTs
+      ? { fromTs: ctx.fromTs, toTs: ctx.toTs, label: ctx.absoluteRangeLabel || 'custom window' }
+      : null)
+  if (abs?.fromTs && abs?.toTs) return abs
+
+  const range = ctx?.range || parseQuestionTimeRange(question) || parseQuestionTimeRange(ctx?.priorUser)
+  const m = String(range).match(/^-(\d+)(m|h|d)$/)
+  if (!m) return null
+  const n = parseInt(m[1], 10)
+  const mult = m[2] === 'm' ? 60 : m[2] === 'h' ? 3600 : 86400
+  const toTs = Math.floor(Date.now() / 1000)
+  return {
+    fromTs: toTs - n * mult,
+    toTs,
+    label: formatRangeLabelFromInflux(range),
+  }
+}
+
+/**
+ * Historical store downtime (machine-hours) from Influx heartbeat — not live offline count.
+ * @param {string} question
+ * @param {string[]} allowedPages
+ * @param {ReturnType<import('./queryContext.js').resolveQueryContext>} [ctx]
+ */
+export async function tryDirectStoreDowntimeAnswer(question, allowedPages, ctx = null) {
+  if (!allowedPages.includes('storeMonitor')) return null
+  if (!isStoreDowntimeQuery(question, ctx)) return null
+  if (!isInfluxStoreConfigured()) {
+    return {
+      content: 'Store Monitor InfluxDB is not configured — cannot calculate historical downtime.',
+      contextMeta: [{ id: 'storeMonitor', label: 'Store Monitor', freshness: 'live', configured: false }],
+      contextPreview: {},
+      queryContext: { topic: 'store', isFollowUp: ctx?.isFollowUp },
+      skipLlmAnalysis: true,
+    }
+  }
+
+  const abs = resolveDowntimeWindow(question, ctx)
+  if (!abs?.fromTs || !abs?.toTs) {
+    return {
+      content: [
+        'Specify a historical window to calculate store downtime, for example:',
+        '• "3rd June 11 am to 8 pm IST — total downtime hours for all store machines"',
+        '• "last 12 hours store downtime in hours"',
+      ].join('\n'),
+      contextMeta: [{ id: 'storeMonitor', label: 'Store Monitor', freshness: 'live', configured: true }],
+      contextPreview: {},
+      queryContext: { topic: 'store', isFollowUp: ctx?.isFollowUp },
+      skipLlmAnalysis: true,
+    }
+  }
+
+  const fetchedAt = new Date().toISOString()
+  const summary = await fetchStoreDowntimeSummary(abs.fromTs, abs.toTs)
+  const rangeLabel = abs.label || ctx?.absoluteRangeLabel || formatRangeLabelFromInflux(ctx?.range)
+
+  const lines = [
+    `Store Monitor — downtime report (HISTORICAL — fetched ${formatPortalTimestamp(fetchedAt)})`,
+    `Window: ${rangeLabel} (${summary.windowHours} hours)`,
+    'Source: InfluxDB heartbeat history (5-minute buckets where online=0)',
+    '',
+    '── Totals (all store machines) ──',
+    `Stores reporting heartbeat in window: ${summary.storesReporting}`,
+    `Stores with any offline time: ${summary.storesWithOffline}`,
+    `Total downtime (machine-hours): ${summary.totalOfflineHours.toLocaleString()} hours`,
+    `Total downtime (machine-minutes): ${summary.totalOfflineMinutes.toLocaleString()} minutes`,
+  ]
+  if (summary.storesWithOffline > 0) {
+    lines.push(`Average offline per affected store: ${summary.avgOfflineHoursAffected} hours`)
+  }
+  if (summary.downtimePct != null) {
+    lines.push(`Downtime vs max possible (${summary.storesReporting} stores × ${summary.windowHours} h): ${summary.downtimePct}%`)
+  }
+  lines.push('')
+  lines.push('Note: this is summed offline time across all machines in the window — not the current live offline count.')
+  if (summary.topOffline.length) {
+    lines.push('')
+    lines.push('── Top offline stores in window ──')
+    for (const s of summary.topOffline.slice(0, 10)) {
+      lines.push(`• ${s.hostname || s.storeTag}: ${s.offlineHours} h offline (${s.sampleBuckets} heartbeat buckets)`)
+    }
+  }
+  lines.push('', '(Historical Influx heartbeat — SocMon.)')
+
+  return {
+    content: lines.join('\n'),
+    contextMeta: [{
+      id: 'storeMonitor',
+      label: 'Store Monitor',
+      freshness: 'live',
+      fetchedAt,
+      configured: true,
+      note: `Downtime from heartbeat history · ${rangeLabel}`,
+    }],
+    contextPreview: {
+      storeDowntime: {
+        window: rangeLabel,
+        windowHours: summary.windowHours,
+        storesReporting: summary.storesReporting,
+        storesWithOffline: summary.storesWithOffline,
+        totalOfflineHours: summary.totalOfflineHours,
+        totalOfflineMinutes: summary.totalOfflineMinutes,
+        downtimePct: summary.downtimePct,
+        topOffline: summary.topOffline.slice(0, 10),
+      },
+    },
+    queryContext: {
+      topic: 'store',
+      isFollowUp: ctx?.isFollowUp,
+      range: ctx?.range,
+      fromTs: abs.fromTs,
+      toTs: abs.toTs,
+    },
+    skipLlmAnalysis: true,
+  }
+}
+
 /**
  * Store Monitor WiFi / RP group with Influx history window (e.g. last 24h).
  * @param {string} question
@@ -1173,6 +1294,7 @@ export function tryDirectStoreAnswer(question, portalContext, ctx = null) {
     return null
   }
   if (CRASH_KEYWORDS.test(q)) return null
+  if (isStoreDowntimeQuery(question, ctx)) return null
   if (/\b(sentinel|xdr|sentinelone|powerquery)\b/.test(q)) return null
   if (extractIpv4(q) || isZabbixQuestion(q) || isNetworkInfraQuery(q) || isInfraMonitorQuery(q)) return null
   const storeIntent =

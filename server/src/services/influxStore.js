@@ -781,6 +781,115 @@ export async function fetchWifiConnectivityHistory(metricRange = '-24h', fromTs,
   return result
 }
 
+const HEARTBEAT_BUCKET_MIN = 5
+const _downtimeCache = new Map()
+const DOWNTIME_CACHE_MS = 120_000
+
+async function fetchHeartbeatBucketCounts(rangeClause, bucketEvery, offlineOnly) {
+  const bucket = fluxEscape(cfg().bucket)
+  let flux = `
+from(bucket: "${bucket}")
+  |> range(${rangeClause})
+  |> filter(fn: (r) => r._measurement == "heartbeat" and r._field == "online")
+  |> aggregateWindow(every: ${bucketEvery}, fn: last, createEmpty: false)
+`
+  if (offlineOnly) {
+    flux += `  |> filter(fn: (r) => r._value == 0.0 or r._value == 0)\n`
+  }
+  flux += `  |> group(columns: ["store_tag", "hostname", "serial"])
+  |> count()
+`
+  return queryFlux(flux).catch((e) => {
+    console.warn('[influxStore] fetchHeartbeatBucketCounts failed:', e.message)
+    return []
+  })
+}
+
+/**
+ * Aggregate offline machine-hours from Influx heartbeat history for an absolute window.
+ * @param {number} fromTs Unix seconds
+ * @param {number} toTs Unix seconds
+ */
+export async function fetchStoreDowntimeSummary(fromTs, toTs, bucketMin = HEARTBEAT_BUCKET_MIN) {
+  const cacheKey = `${fromTs}|${toTs}|${bucketMin}`
+  const cached = _downtimeCache.get(cacheKey)
+  if (cached && Date.now() - cached.ts < DOWNTIME_CACHE_MS) return cached.data
+
+  const rangeClause = buildFluxRangeClause(null, fromTs, toTs)
+  const bucketEvery = `${bucketMin}m`
+  const [offlineRows, sampleRows] = await Promise.all([
+    fetchHeartbeatBucketCounts(rangeClause, bucketEvery, true),
+    fetchHeartbeatBucketCounts(rangeClause, bucketEvery, false),
+  ])
+
+  const samplesByTag = new Map()
+  for (const row of sampleRows) {
+    const tag = row.store_tag || buildSyntheticStoreTag(row.hostname, row.serial)
+    if (!tag) continue
+    samplesByTag.set(tag, {
+      storeTag: tag,
+      hostname: row.hostname || '',
+      serial: row.serial || '',
+      sampleBuckets: num(row._value) || 0,
+    })
+  }
+
+  const storeOffline = []
+  let totalOfflineMinutes = 0
+  for (const row of offlineRows) {
+    const tag = row.store_tag || buildSyntheticStoreTag(row.hostname, row.serial)
+    if (!tag) continue
+    const offlineBuckets = num(row._value) || 0
+    const offlineMinutes = offlineBuckets * bucketMin
+    if (offlineMinutes <= 0) continue
+    totalOfflineMinutes += offlineMinutes
+    const meta = samplesByTag.get(tag)
+    storeOffline.push({
+      storeTag: tag,
+      hostname: row.hostname || meta?.hostname || '',
+      serial: row.serial || meta?.serial || '',
+      offlineMinutes,
+      offlineHours: Math.round((offlineMinutes / 60) * 100) / 100,
+      sampleBuckets: meta?.sampleBuckets || 0,
+    })
+  }
+
+  storeOffline.sort((a, b) => b.offlineMinutes - a.offlineMinutes)
+  const windowMinutes = Math.max(1, Math.round((toTs - fromTs) / 60))
+  const windowHours = Math.round((windowMinutes / 60) * 100) / 100
+  const storesReporting = samplesByTag.size
+  const storesWithOffline = storeOffline.length
+  const totalOfflineHours = Math.round((totalOfflineMinutes / 60) * 100) / 100
+  const avgOfflineHoursAffected = storesWithOffline
+    ? Math.round((totalOfflineHours / storesWithOffline) * 100) / 100
+    : 0
+  const maxPossibleHours = storesReporting * windowHours
+  const downtimePct = maxPossibleHours > 0
+    ? Math.round((totalOfflineHours / maxPossibleHours) * 10000) / 100
+    : null
+
+  const result = {
+    fromTs,
+    toTs,
+    windowHours,
+    windowMinutes,
+    bucketMin,
+    storesReporting,
+    storesWithOffline,
+    totalOfflineMinutes,
+    totalOfflineHours,
+    avgOfflineHoursAffected,
+    downtimePct,
+    topOffline: storeOffline.slice(0, 15),
+  }
+  _downtimeCache.set(cacheKey, { data: result, ts: Date.now() })
+  if (_downtimeCache.size > 8) {
+    const oldest = [..._downtimeCache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0]
+    if (oldest) _downtimeCache.delete(oldest[0])
+  }
+  return result
+}
+
 export async function fetchStoreHistory(storeTag, rangeSec = 3600, fromSec, toSec) {
   const tag = fluxEscape(storeTag)
   const synthetic = parseSyntheticStoreTag(storeTag)

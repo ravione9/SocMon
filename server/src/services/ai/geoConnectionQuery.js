@@ -79,6 +79,22 @@ export function isStoreMonitorIssuesQuery(question) {
   return storeCtx && issuesCtx && (listCtx || /\btop\s+\d+\b/.test(q))
 }
 
+const ABS_DATE_HINT = /\b(\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?)\b/i
+const ABS_TIME_HINT = /\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\s*(?:to|until|-)\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)\b/i
+
+/** Store downtime / outage hours across machines in a historical window — not live snapshot. */
+export function isStoreDowntimeQuery(question, ctx = null) {
+  const thread = [ctx?.priorUser, question].filter(Boolean).join(' ')
+  const q = thread.toLowerCase()
+  if (/\b(sentinel|xdr|zabbix|fortigate|sentinelone|solarwinds|infra mon)\b/.test(q)) return false
+  const downtimeCtx = /\b(down\s*time|downtime|offline\s*(?:time|hours?|duration)|outage\s*(?:hours?|time)?)\b/.test(q)
+    || (/\boutage\b/.test(q) && /\b(store|stores|machine|machines)\b/.test(q))
+  const storeCtx = /\b(store|stores|store mon|store monitor|retail|store machine|store machines|all store)\b/.test(q)
+    || /\ball\s+store\b/.test(q)
+  const windowCtx = STORE_CONN_TIME.test(q) || (ABS_DATE_HINT.test(q) && ABS_TIME_HINT.test(q))
+  return downtimeCtx && storeCtx && windowCtx
+}
+
 export function extractTopLimit(question, defaultLimit = 20) {
   const m = String(question || '').match(/\btop\s+(\d+)\b/i)
   if (!m) return defaultLimit

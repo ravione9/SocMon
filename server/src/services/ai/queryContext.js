@@ -4,7 +4,7 @@ import { isNetworkInfraQuery, isZabbixQuestion, isInfraDeviceStatusQuery, extrac
 import { isFirewallQuestion, isSocReportQuery } from './socDirectAnswer.js'
 import { isDisconnectionLogQuery } from './nocDirectAnswer.js'
 import { isRcaQuery } from './rcaAnalysis.js'
-import { isStoreMonitorIssuesQuery } from './geoConnectionQuery.js'
+import { isStoreMonitorIssuesQuery, isStoreDowntimeQuery } from './geoConnectionQuery.js'
 
 /**
  * Parse time window from natural language, e.g. "last 1 hr" → "-1h".
@@ -206,6 +206,7 @@ export function resolveQueryContext(messages, opts = {}) {
   const storeConnCtx = { isFollowUp, priorTopic, priorAssistant, priorUser, chatMode }
   let topic = detectTopicFromQuestion(currentQuestion, appName, { chatMode, isFollowUp, priorTopic })
   if (isStoreMonitorIssuesQuery(currentQuestion)) topic = 'store'
+  if (isStoreDowntimeQuery(currentQuestion, storeConnCtx)) topic = 'store'
   if (isStoreMonitorConnectivityQuery(currentQuestion, storeConnCtx)
     || isStoreConnectivityFollowUp(currentQuestion, storeConnCtx)) {
     topic = 'store'
@@ -221,6 +222,9 @@ export function resolveQueryContext(messages, opts = {}) {
   if (!topic && appName && (APP_ONLY.test(currentQuestion) || priorTopic === 'crash')) {
     topic = 'crash'
   }
+
+  const absWindow = parseAbsoluteTimeWindow(currentQuestion)
+    || (isFollowUp ? parseAbsoluteTimeWindow(priorUser) : null)
 
   let range = parseQuestionTimeRange(currentQuestion)
   if (isFollowUp && !hasExplicitTimeRange(currentQuestion)) {
@@ -272,6 +276,9 @@ export function resolveQueryContext(messages, opts = {}) {
     zabbixHost,
     infraHost,
     range,
+    fromTs: absWindow?.fromTs ?? null,
+    toTs: absWindow?.toTs ?? null,
+    absoluteRangeLabel: absWindow?.label ?? null,
     isFollowUp,
     subjectChanged,
     followUpKind,
@@ -301,6 +308,7 @@ function inferTopicFromAssistant(text) {
 function detectTopicFromQuestion(q, appName, ctx = {}) {
   const text = String(q || '')
   if (isStoreMonitorIssuesQuery(text)) return 'store'
+  if (isStoreDowntimeQuery(text, ctx)) return 'store'
   if (isStoreMonitorConnectivityQuery(text, ctx)) return 'store'
   if (isStoreConnectivityFollowUp(text, ctx)) return 'store'
   if (isRcaQuery(text, ctx)) return 'rca'
@@ -437,10 +445,89 @@ export function extractStoreHostname(text) {
   return m ? m[1].toUpperCase() : null
 }
 
+const MONTH_INDEX = {
+  jan: 0, january: 0,
+  feb: 1, february: 1,
+  mar: 2, march: 2,
+  apr: 3, april: 3,
+  may: 4,
+  jun: 5, june: 5,
+  jul: 6, july: 6,
+  aug: 7, august: 7,
+  sep: 8, sept: 8, september: 8,
+  oct: 9, october: 9,
+  nov: 10, november: 10,
+  dec: 11, december: 11,
+}
+
+const ABS_DATE_RE = /(?:on\s+)?(?:(\d{1,2})(?:st|nd|rd|th)?\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?)\s*(?:,?\s*(\d{4}))?/i
+const ABS_TIME_RE = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*(?:to|until|-)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i
+
+function parse12hClock(hourStr, minuteStr, ampm) {
+  let hour = parseInt(hourStr, 10)
+  const minute = parseInt(minuteStr || '0', 10)
+  const mer = String(ampm || '').toLowerCase()
+  if (mer === 'pm' && hour !== 12) hour += 12
+  if (mer === 'am' && hour === 12) hour = 0
+  return { hour, minute }
+}
+
+function istUnixSec(day, monthIndex, year, hour, minute) {
+  const pad = (n) => String(n).padStart(2, '0')
+  const iso = `${year}-${pad(monthIndex + 1)}-${pad(day)}T${pad(hour)}:${pad(minute)}:00+05:30`
+  return Math.floor(new Date(iso).getTime() / 1000)
+}
+
+function formatIstWindowLabel(day, monthIndex, year, startHour, startMin, endHour, endMin) {
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  const fmtClock = (h, m) => {
+    const mer = h >= 12 ? 'PM' : 'AM'
+    const hr12 = h % 12 || 12
+    return m ? `${hr12}:${String(m).padStart(2, '0')} ${mer}` : `${hr12} ${mer}`
+  }
+  return `${day} ${months[monthIndex]} ${year}, ${fmtClock(startHour, startMin)} – ${fmtClock(endHour, endMin)} IST`
+}
+
+/**
+ * Parse absolute calendar windows, e.g. "3rd June 11 am to 8 pm IST".
+ * @param {string} q
+ * @returns {{ fromTs: number, toTs: number, label: string }|null}
+ */
+export function parseAbsoluteTimeWindow(q) {
+  const text = String(q || '').toLowerCase().replace(/\u2013|\u2014/g, '-')
+  const dateM = text.match(ABS_DATE_RE)
+  const timeM = text.match(ABS_TIME_RE)
+  if (!dateM || !timeM) return null
+
+  const day = parseInt(dateM[1] || dateM[4], 10)
+  const monthToken = String(dateM[2] || dateM[3] || '').slice(0, 3)
+  const monthIndex = MONTH_INDEX[monthToken]
+  if (!Number.isFinite(day) || monthIndex == null) return null
+
+  let year = dateM[5] ? parseInt(dateM[5], 10) : new Date().getFullYear()
+  if (!dateM[5]) {
+    const probe = istUnixSec(day, monthIndex, year, 0, 0)
+    if (probe * 1000 > Date.now() + 86400000) year -= 1
+  }
+
+  const start = parse12hClock(timeM[1], timeM[2], timeM[3])
+  const end = parse12hClock(timeM[4], timeM[5], timeM[6])
+  const fromTs = istUnixSec(day, monthIndex, year, start.hour, start.minute)
+  let toTs = istUnixSec(day, monthIndex, year, end.hour, end.minute)
+  if (toTs <= fromTs) toTs += 86400
+
+  return {
+    fromTs,
+    toTs,
+    label: formatIstWindowLabel(day, monthIndex, year, start.hour, start.minute, end.hour, end.minute),
+  }
+}
+
 function hasExplicitTimeRange(q) {
   return /\b(last|past)\s+\d+\s*(h|hr|hour|hours|m|min|d|day)/i.test(q)
     || /\b(1 hr|12h|12 hour|12 hours|24h|24 hour|24 hours|last hour|last day|last week)\b/i.test(q)
     || /\b(?:time range|range|window)?\s*(12|24)\s*hours?\b/i.test(q)
+    || (ABS_DATE_RE.test(q) && ABS_TIME_RE.test(q))
 }
 
 export { hasExplicitTimeRange }

@@ -20,6 +20,7 @@ import {
   inferContextDetail,
   suggestContextModules,
   tryDirectStoreAnswer,
+  tryDirectStoreDowntimeAnswer,
   tryDirectStoreConnectivityAnswer,
   tryDirectStoreIssuesAnswer,
   tryDirectCrashAnswer,
@@ -33,7 +34,7 @@ import { tryDirectHostnameAnswer } from '../services/ai/hostnameDirectAnswer.js'
 import { tryDirectXdrAnswer } from '../services/ai/xdrDirectAnswer.js'
 import { resolveQueryContext, isHostnameDataRequest, isStoreHostnamePortalQuery, extractStoreHostname } from '../services/ai/queryContext.js'
 import { isXdrQuestion } from '../services/ai/xdrDirectAnswer.js'
-import { isStoreMonitorConnectivityQuery, isStoreMonitorIssuesQuery } from '../services/ai/geoConnectionQuery.js'
+import { isStoreMonitorConnectivityQuery, isStoreMonitorIssuesQuery, isStoreDowntimeQuery } from '../services/ai/geoConnectionQuery.js'
 import { runAgentChat } from '../services/ai/agentChat.js'
 import { needsLiveAgentFallback } from '../services/ai/queryLiveDataFallback.js'
 import { appendLlmAnalysis } from '../services/ai/directLlmSynthesis.js'
@@ -157,6 +158,28 @@ router.post('/chat', async (req, res) => {
             contextMs: Date.now() - agentStart,
             llmMs: 0,
             mode: 'agent-error',
+          },
+        })
+      }
+    }
+
+    if (isStoreDowntimeQuery(lastUser, ctx) && allowedPages.includes('storeMonitor')) {
+      const downtimeStart = Date.now()
+      const downtimeDirect = await tryDirectStoreDowntimeAnswer(lastUser, allowedPages, ctx)
+      if (downtimeDirect) {
+        return res.json({
+          content: downtimeDirect.content,
+          provider: getAIProvider().name,
+          contextMeta: downtimeDirect.contextMeta,
+          contextPreview: downtimeDirect.contextPreview,
+          queryContext: downtimeDirect.queryContext || { topic: 'store', isFollowUp: ctx.isFollowUp },
+          modulesUsed: ['storeMonitor'],
+          fastPath: true,
+          metrics: {
+            totalMs: Date.now() - requestStart,
+            contextMs: Date.now() - downtimeStart,
+            llmMs: 0,
+            mode: 'direct-store-downtime',
           },
         })
       }
