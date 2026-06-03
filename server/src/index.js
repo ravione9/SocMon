@@ -51,6 +51,7 @@ import emailSimPublicRoutes from './routes/emailSimPublic.js'
 import customRoleRoutes from './routes/customRoles.js'
 import sslRoutes from './routes/ssl.js'
 import { errorHandler } from './middleware/errorHandler.js'
+import { getAIProviderConfigStatus } from './services/ai/aiRouter.js'
 
 /** CORS: localhost and 127.0.0.1 are different browser origins; allow both when either is configured. */
 function resolveCorsOrigins() {
@@ -199,7 +200,6 @@ async function start() {
   const PORT = process.env.PORT || 5000
   httpServer.listen(PORT, () => {
     console.log(`Lenskart server running on port ${PORT}`)
-    const { resolveProviderName, getAIProviderConfigStatus } = await import('./services/ai/aiRouter.js')
     const ps = getAIProviderConfigStatus()
     console.log(
       `AI provider: ${ps.active} (AI_PROVIDER=${ps.configured}${ps.autoFallback ? ', auto-fallback' : ''})`,
