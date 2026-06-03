@@ -3,6 +3,8 @@ import StoreProblemHistory from '../../models/StoreProblemHistory.js'
 import {
   isInfluxStoreConfigured,
   fetchStoreSnapshot,
+  fetchStoreIssuesLite,
+  getAnyCachedStoreSnapshot,
   fetchWifiConnectivityHistory,
   buildOverviewSummary,
   fetchCrashSummary,
@@ -752,8 +754,56 @@ export async function tryDirectCrashAnswer(question, allowedPages, ctx = null) {
   }
 }
 
+function problemMatchesGroupFilter(p, groupFilter) {
+  if (!groupFilter) return true
+  const h = String(p.hostname || '').toUpperCase()
+  if (groupFilter === 'RP Group') return h.startsWith('RP')
+  if (groupFilter === 'POS System Group') return h.startsWith('LK')
+  const groups = deriveStoreGroups(p.hostname, p.gatewayVendor, /fortinet/i.test(String(p.gatewayVendor || '')))
+  return groups.includes(groupFilter)
+}
+
+function metricRangeToSince(metricRange) {
+  const m = String(metricRange || '-24h').match(/^-(\d+)(h|d|m)$/)
+  if (!m) return new Date(Date.now() - 24 * 3600000)
+  const n = parseInt(m[1], 10)
+  const ms = m[2] === 'h' ? n * 3600000 : m[2] === 'd' ? n * 86400000 : n * 60000
+  return new Date(Date.now() - ms)
+}
+
+/** Problem-tracker stores with issues in a time window (active or seen/resolved since). */
+async function rankProblemsFromTracker(since, groupFilter, limit) {
+  try {
+    const rows = await StoreProblemHistory.find({
+      $or: [
+        { status: 'active' },
+        { lastSeenAt: { $gte: since } },
+        { resolvedAt: { $gte: since } },
+      ],
+    })
+      .sort({ severity: 1, lastSeenAt: -1 })
+      .limit(Math.max(limit * 8, 200))
+      .lean()
+
+    const byStore = new Map()
+    for (const p of rows) {
+      if (!problemMatchesGroupFilter(p, groupFilter)) continue
+      const key = p.storeTag || p.hostname
+      if (!key) continue
+      const rank = problemSeverityRank(p.severity, p.online)
+      const prev = byStore.get(key)
+      if (!prev || rank < prev.rank) {
+        byStore.set(key, { ...p, rank })
+      }
+    }
+    return [...byStore.values()].sort((a, b) => a.rank - b.rank)
+  } catch (e) {
+    console.warn('[storeIssues] problem tracker query failed:', e.message)
+    return []
+  }
+}
+
 /**
- * Top N stores/devices with issues — live Influx snapshot (+ problem tracker fallback).
  * @param {string} question
  * @param {string[]} allowedPages
  * @param {ReturnType<import('./queryContext.js').resolveQueryContext>} [ctx]
@@ -764,6 +814,9 @@ export async function tryDirectStoreIssuesAnswer(question, allowedPages, ctx = n
 
   const limit = extractTopLimit(question)
   const groupFilter = extractStoreGroupFilter(question)
+  const metricRange = parseQuestionTimeRange(question)
+  const rangeLabel = formatRangeLabelFromInflux(metricRange)
+  const since = metricRangeToSince(metricRange)
   const fetchedAt = new Date().toISOString()
 
   if (!isInfluxStoreConfigured()) {
@@ -775,65 +828,94 @@ export async function tryDirectStoreIssuesAnswer(question, allowedPages, ctx = n
     }
   }
 
-  const stores = await fetchStoreSnapshot(10, '-24h')
+  const [trackerRanked, storesInitial] = await Promise.all([
+    rankProblemsFromTracker(since, groupFilter, limit),
+    fetchStoreSnapshot(10, metricRange),
+  ])
+
+  let stores = storesInitial
+  let snapshotNote = null
+  if (!stores.length) {
+    stores = getAnyCachedStoreSnapshot() || []
+    if (stores.length) snapshotNote = 'Using recent cached Store Monitor snapshot (fresh Influx fetch returned no data).'
+  }
+  if (!stores.length) {
+    stores = await fetchStoreIssuesLite(10, metricRange)
+    if (stores.length) snapshotNote = 'Using lightweight Store Monitor fetch (full snapshot unavailable).'
+  }
+  if (!stores.length && metricRange !== '-24h') {
+    stores = getAnyCachedStoreSnapshot() || await fetchStoreIssuesLite(10, '-24h')
+    if (stores.length && !snapshotNote) {
+      snapshotNote = 'Using 24h fallback window (12h fetch unavailable).'
+    }
+  }
+
   let scoped = groupFilter
     ? stores.filter(s => deriveStoreGroups(s.hostname, s.gatewayVendor, s.isFortinet).includes(groupFilter))
     : stores
 
   const summary = buildOverviewSummary(scoped)
   const lines = [
-    `Store Monitor — top ${limit} devices with issues (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
+    `Store Monitor — top ${limit} devices with issues (${rangeLabel}, LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`,
     groupFilter ? `Filter: ${groupFilter}` : '',
     '',
-    `Total stores: ${summary.total} · Online: ${summary.online} · Offline: ${summary.offline} · With issues: ${summary.withIssues}`,
+    summary.total > 0
+      ? `Total stores: ${summary.total} · Online: ${summary.online} · Offline: ${summary.offline} · With issues: ${summary.withIssues}`
+      : trackerRanked.length
+        ? `Influx snapshot empty (Influx may be slow) — using problem tracker for ${rangeLabel} (${trackerRanked.length} stores with issues in window)`
+        : 'Total stores: 0 · Online: 0 · Offline: 0 · With issues: 0',
     '',
   ].filter(Boolean)
+
+  if (snapshotNote) {
+    lines.push(snapshotNote, '')
+  }
 
   const fromInflux = scoped
     .filter(s => s.issueCount > 0 || !s.online)
     .map(summarizeStore)
     .sort((a, b) => severityRank(a) - severityRank(b))
 
-  if (fromInflux.length) {
-    lines.push(`Top ${Math.min(limit, fromInflux.length)} (live Influx snapshot, worst first):`)
-    for (const s of fromInflux.slice(0, limit)) {
-      const issues = s.issueSummary || (s.online ? 'online with issues' : 'offline')
-      lines.push(`  • ${s.hostname || s.storeTag} [${s.storeTag}] — ${s.connState} · ${issues}`)
+  const merged = new Map()
+  for (const s of fromInflux) {
+    const key = s.storeTag || s.hostname
+    if (!key) continue
+    merged.set(key, { source: 'influx', rank: severityRank(s), influx: s })
+  }
+  for (const p of trackerRanked) {
+    const key = p.storeTag || p.hostname
+    if (!key) continue
+    const prev = merged.get(key)
+    if (!prev || p.rank < prev.rank) {
+      merged.set(key, { source: prev?.source === 'influx' ? 'both' : 'tracker', rank: p.rank, influx: prev?.influx, tracker: p })
+    } else if (prev && !prev.tracker) {
+      merged.set(key, { ...prev, source: 'both', tracker: p })
     }
-    if (fromInflux.length > limit) {
-      lines.push(`  … ${fromInflux.length - limit} more with issues (open Store Monitor for full list)`)
-    }
-  } else if (summary.total === 0) {
-    const active = await StoreProblemHistory.find({ status: 'active' })
-      .sort({ severity: 1, lastSeenAt: -1 })
-      .limit(limit * 3)
-      .lean()
-    const byStore = new Map()
-    for (const p of active) {
-      const key = p.storeTag || p.hostname
-      if (!key) continue
-      if (groupFilter) {
-        const h = String(p.hostname || '').toUpperCase()
-        if (groupFilter === 'RP Group' && !h.startsWith('RP')) continue
-        if (groupFilter === 'POS System Group' && !h.startsWith('LK')) continue
+  }
+
+  const ranked = [...merged.values()].sort((a, b) => a.rank - b.rank)
+
+  if (ranked.length) {
+    lines.push(`Top ${Math.min(limit, ranked.length)} (worst first — live snapshot + problem tracker, ${rangeLabel}):`)
+    for (const row of ranked.slice(0, limit)) {
+      if (row.influx) {
+        const s = row.influx
+        const issues = s.issueSummary || (s.online ? 'online with issues' : 'offline')
+        lines.push(`  • ${s.hostname || s.storeTag} [${s.storeTag}] — ${s.connState} · ${issues}`)
+      } else {
+        const p = row.tracker
+        const status = p.status === 'resolved' ? 'resolved in window' : 'active'
+        lines.push(`  • ${p.hostname || p.storeTag} [${p.storeTag}] — ${p.severity}: ${p.message || p.code} (${status}, since ${formatPortalTimestamp(p.firstSeenAt)})`)
       }
-      const rank = problemSeverityRank(p.severity, p.online)
-      const prev = byStore.get(key)
-      if (!prev || rank < prev.rank) {
-        byStore.set(key, { ...p, rank })
-      }
     }
-    const ranked = [...byStore.values()].sort((a, b) => a.rank - b.rank)
-    if (ranked.length) {
-      lines.push(`Influx snapshot empty — using problem tracker (${ranked.length} stores with active problems):`)
-      for (const p of ranked.slice(0, limit)) {
-        lines.push(`  • ${p.hostname || p.storeTag} [${p.storeTag}] — ${p.severity}: ${p.message || p.code} (since ${formatPortalTimestamp(p.firstSeenAt)})`)
-      }
-    } else {
-      lines.push('No stores with issues in the live snapshot or problem tracker.')
+    if (ranked.length > limit) {
+      lines.push(`  … ${ranked.length - limit} more with issues (open Store Monitor for full list)`)
     }
+  } else if (summary.total === 0 && !trackerRanked.length) {
+    lines.push('No stores with issues in the live snapshot or problem tracker for this window.')
+    lines.push('If Store Monitor UI shows data, Influx may have timed out — retry in a few seconds.')
   } else {
-    lines.push('No stores with active issues in the current live snapshot.')
+    lines.push(`No stores with active issues in the ${rangeLabel} window (all stores currently healthy in snapshot).`)
   }
 
   const tracker = getProblemSnapshotStatus()
@@ -853,13 +935,14 @@ export async function tryDirectStoreIssuesAnswer(question, allowedPages, ctx = n
       storeMonitor: {
         total: summary.total,
         withIssues: summary.withIssues,
-        topIssuesCount: Math.min(limit, fromInflux.length),
+        topIssuesCount: Math.min(limit, ranked.length),
       },
     },
     queryContext: {
       topic: 'store',
       isFollowUp: ctx?.isFollowUp,
       storeGroup: groupFilter || undefined,
+      range: metricRange,
     },
   }
 }

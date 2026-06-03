@@ -402,6 +402,8 @@ function _getCachedSnapshot(key) {
 }
 
 function _setCachedSnapshot(key, data, isCustom) {
+  // Never cache an empty snapshot — a partial Influx timeout can otherwise serve 0 stores for 90s.
+  if (!Array.isArray(data) || data.length === 0) return
   _snapshotCache.set(key, { data, ts: Date.now(), ttl: isCustom ? CACHE_TTL_CUSTOM_MS : CACHE_TTL_DEFAULT_MS })
   // Keep map small — evict oldest entries beyond 10 slots
   if (_snapshotCache.size > 10) {
@@ -416,15 +418,19 @@ function _setCachedSnapshot(key, data, isCustom) {
  * @param {number}  [fromTs]      Custom window start (Unix sec) — overrides metricRange
  * @param {number}  [toTs]        Custom window end   (Unix sec)
  */
-export async function fetchStoreSnapshot(staleMinutes = 10, metricRange = '-24h', fromTs, toTs) {
+export async function fetchStoreSnapshot(staleMinutes = 10, metricRange = '-24h', fromTs, toTs, options = {}) {
+  const skipCache = options?.skipCache === true
   const cacheKey = _snapshotCacheKey(metricRange, fromTs, toTs)
-  const cached = _getCachedSnapshot(cacheKey)
-  if (cached) return cached
+  if (!skipCache) {
+    const cached = _getCachedSnapshot(cacheKey)
+    if (cached) return cached
+  }
 
   // If a fetch for the same key is already in-flight, wait for it instead of
   // launching a duplicate set of 8 parallel Influx queries.
-  if (_snapshotCache.has(`inflight:${cacheKey}`)) {
-    return _snapshotCache.get(`inflight:${cacheKey}`)
+  const inflightKey = `inflight:${cacheKey}`
+  if (!skipCache && _snapshotCache.has(inflightKey)) {
+    return _snapshotCache.get(inflightKey)
   }
 
   const discoveryRange = '-7d'
@@ -445,13 +451,13 @@ export async function fetchStoreSnapshot(staleMinutes = 10, metricRange = '-24h'
   const bucket = fluxEscape(cfg().bucket)
 
   const fetchPromise = _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, rangeClause, isCustom, bucket)
-  _snapshotCache.set(`inflight:${cacheKey}`, fetchPromise)
+  if (!skipCache) _snapshotCache.set(inflightKey, fetchPromise)
   try {
     const result = await fetchPromise
-    _setCachedSnapshot(cacheKey, result, isCustom)
+    if (!skipCache) _setCachedSnapshot(cacheKey, result, isCustom)
     return result
   } finally {
-    _snapshotCache.delete(`inflight:${cacheKey}`)
+    if (!skipCache) _snapshotCache.delete(inflightKey)
   }
 }
 
@@ -605,11 +611,76 @@ async function _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, 
   return list
 }
 
+/** Return the newest non-empty cached snapshot (any range) when a fresh fetch fails or times out. */
+export function getAnyCachedStoreSnapshot(maxAgeMs = CACHE_TTL_DEFAULT_MS) {
+  let best = null
+  for (const [key, entry] of _snapshotCache.entries()) {
+    if (key.startsWith('inflight:')) continue
+    if (Date.now() - entry.ts > Math.min(entry.ttl, maxAgeMs)) continue
+    if (!Array.isArray(entry.data) || entry.data.length === 0) continue
+    if (!best || entry.ts > best.ts) best = { data: entry.data, ts: entry.ts }
+  }
+  return best?.data || null
+}
+
 /**
- * @param {string}  storeTag
- * @param {number}  rangeSec   - relative seconds back from now (used when fromSec/toSec absent)
- * @param {number}  [fromSec]  - Unix epoch seconds (custom range start)
- * @param {number}  [toSec]    - Unix epoch seconds (custom range stop)
+ * Lightweight store list for issue ranking — heartbeats + connectivity only (2 Influx queries).
+ * Used when the full 8-query snapshot times out under load.
+ */
+export async function fetchStoreIssuesLite(staleMinutes = 10, metricRange = '-12h') {
+  const now = Date.now()
+  const staleMs = staleMinutes * 60 * 1000
+  const VENDOR_FALLBACKS = new Set(['unknown', 'unidentified', '', 'n/a', 'none'])
+  const isMeaningfulVendor = (v) => v && !VENDOR_FALLBACKS.has(String(v).toLowerCase().trim())
+
+  const [heartbeats, connectivity] = await Promise.all([
+    fetchHeartbeats(metricRange),
+    fetchTaggedLatest('connectivity', ['conn_state', 'active_interface', 'active_ssid', 'gateway_ip', 'gateway_vendor'], metricRange),
+  ])
+
+  const stores = new Map()
+  for (const row of heartbeats) {
+    const s = ensureStore(stores, row)
+    if (!s) continue
+    const t = row._time ? new Date(row._time).getTime() : 0
+    s.lastSeen = rowTime(row)
+    s.online = num(row._value) === 1 && t > 0 && now - t <= staleMs
+    s.hadHeartbeat = true
+    s.hostname = row.hostname || s.hostname
+    s.serial = row.serial || s.serial
+  }
+
+  for (const row of connectivity) {
+    const s = ensureStore(stores, row)
+    if (!s) continue
+    if (row.conn_state && row.conn_state !== 'unknown') s.connState = row.conn_state
+    else if (!s.connState || s.connState === 'unknown') s.connState = row.conn_state || s.connState
+    if (row.active_interface) s.activeInterface = row.active_interface
+    if (row.active_ssid && row.active_ssid !== 'n/a') s.activeSsid = row.active_ssid
+    if (row.gateway_ip && row.gateway_ip !== 'n/a') s.gatewayIp = row.gateway_ip
+    const rowVendor = row.gateway_vendor
+    if (isMeaningfulVendor(rowVendor)) s.gatewayVendor = rowVendor
+    else if (!isMeaningfulVendor(s.gatewayVendor)) s.gatewayVendor = rowVendor || s.gatewayVendor
+    if (row._field === 'is_hotspot') s.isHotspot = String(row._value).toLowerCase() === 'true'
+    if (row._field === 'is_fortinet') s.isFortinet = String(row._value).toLowerCase() === 'true'
+    if (!s.lastSeen && row._time) s.lastSeen = rowTime(row)
+  }
+
+  const list = [...stores.values()]
+  for (const s of list) detectIssues(s, staleMinutes)
+  list.sort((a, b) => {
+    const sev = { critical: 0, high: 1, warning: 2, ok: 3 }
+    const d = (sev[a.severity] ?? 9) - (sev[b.severity] ?? 9)
+    if (d !== 0) return d
+    return String(a.hostname).localeCompare(String(b.hostname))
+  })
+  return list
+}
+
+/**
+ * @param {string} metricRange
+ * @param {number} [fromTs]
+ * @param {number} [toTs]
  */
 function buildFluxRangeClause(metricRange = '-24h', fromTs, toTs) {
   if (fromTs && Number.isFinite(Number(fromTs))) {
