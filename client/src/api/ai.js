@@ -1,12 +1,16 @@
 import api from './client'
 export const aiAPI = {
   chat: (messages, options = {}) =>
-    api.post('/api/ai/chat', {
-      messages,
-      modules: options.modules,
-      autoModules: options.autoModules,
-      mode: options.mode || 'monitor',
-    }),
+    api.post(
+      '/api/ai/chat',
+      {
+        messages,
+        modules: options.modules,
+        autoModules: options.autoModules,
+        mode: options.mode || 'monitor',
+      },
+      { signal: options.signal },
+    ),
   getModules: () => api.get('/api/ai/modules'),
   search: (question) => api.post('/api/ai/search', { question }),
   triage: (alert) => api.post('/api/ai/triage', { alert }),

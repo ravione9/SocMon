@@ -432,10 +432,19 @@ function ChatTab({ provider, model, availableModules, enabledModules, onToggleMo
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const bottomRef = useRef(null)
+  const abortRef = useRef(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, loading])
+
+  useEffect(() => () => abortRef.current?.abort(), [])
+
+  const stop = useCallback(() => {
+    abortRef.current?.abort()
+    abortRef.current = null
+    setLoading(false)
+  }, [])
 
   const send = useCallback(async (text) => {
     const content = String(text || input).trim()
@@ -447,6 +456,9 @@ function ChatTab({ provider, model, availableModules, enabledModules, onToggleMo
     setInput('')
     setLoading(true)
 
+    const controller = new AbortController()
+    abortRef.current = controller
+
     try {
       const history = next.filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({
         role: m.role,
@@ -456,6 +468,7 @@ function ChatTab({ provider, model, availableModules, enabledModules, onToggleMo
         modules: enabledModules,
         autoModules,
         mode: chatMode,
+        signal: controller.signal,
       })
       setMessages([
         ...next,
@@ -471,10 +484,16 @@ function ChatTab({ provider, model, availableModules, enabledModules, onToggleMo
         },
       ])
     } catch (err) {
+      const cancelled = err.code === 'ERR_CANCELED' || err.name === 'CanceledError'
+      if (cancelled) {
+        setMessages([...next, { role: 'assistant', content: 'Stopped — request cancelled.' }])
+        return
+      }
       const msg = err.response?.data?.error || err.message || 'Chat failed'
       toast.error(msg)
       setMessages([...next, { role: 'assistant', content: `Error: ${msg}` }])
     } finally {
+      if (abortRef.current === controller) abortRef.current = null
       setLoading(false)
     }
   }, [input, loading, messages, enabledModules, autoModules, chatMode])
@@ -550,8 +569,25 @@ function ChatTab({ provider, model, availableModules, enabledModules, onToggleMo
             </div>
           ))}
           {loading && (
-            <div style={{ fontSize: 12, color: C.text3, fontFamily: 'var(--mono)', padding: '4px 2px' }}>
-              {loadingLabel}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '4px 2px', flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 12, color: C.text3, fontFamily: 'var(--mono)' }}>{loadingLabel}</span>
+              <button
+                type="button"
+                onClick={stop}
+                style={{
+                  padding: '4px 12px',
+                  borderRadius: 8,
+                  border: `1px solid ${C.red}`,
+                  background: 'rgba(248,113,113,.12)',
+                  color: C.red,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  fontFamily: 'var(--mono)',
+                  cursor: 'pointer',
+                }}
+              >
+                Stop
+              </button>
             </div>
           )}
           <div ref={bottomRef} />
@@ -602,7 +638,7 @@ function ChatTab({ provider, model, availableModules, enabledModules, onToggleMo
                   send()
                 }
               }}
-              placeholder="Ask NetPulse AI… (Enter to send, Shift+Enter for newline)"
+              placeholder={loading ? 'Thinking… click Stop to cancel' : 'Ask NetPulse AI… (Enter to send, Shift+Enter for newline)'}
               rows={3}
               disabled={loading}
               style={{
@@ -620,25 +656,45 @@ function ChatTab({ provider, model, availableModules, enabledModules, onToggleMo
                 lineHeight: 1.45,
               }}
             />
-            <button
-              type="button"
-              onClick={() => send()}
-              disabled={loading || !input.trim()}
-              style={{
-                minWidth: 92,
-                padding: '0 20px',
-                borderRadius: 10,
-                border: 'none',
-                background: C.accent,
-                color: '#fff',
-                fontWeight: 700,
-                fontSize: 13,
-                cursor: loading || !input.trim() ? 'not-allowed' : 'pointer',
-                opacity: loading || !input.trim() ? 0.6 : 1,
-              }}
-            >
-              Send
-            </button>
+            {loading ? (
+              <button
+                type="button"
+                onClick={stop}
+                style={{
+                  minWidth: 92,
+                  padding: '0 20px',
+                  borderRadius: 10,
+                  border: `1px solid ${C.red}`,
+                  background: 'rgba(248,113,113,.15)',
+                  color: C.red,
+                  fontWeight: 700,
+                  fontSize: 13,
+                  cursor: 'pointer',
+                }}
+              >
+                Stop
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => send()}
+                disabled={!input.trim()}
+                style={{
+                  minWidth: 92,
+                  padding: '0 20px',
+                  borderRadius: 10,
+                  border: 'none',
+                  background: C.accent,
+                  color: '#fff',
+                  fontWeight: 700,
+                  fontSize: 13,
+                  cursor: !input.trim() ? 'not-allowed' : 'pointer',
+                  opacity: !input.trim() ? 0.6 : 1,
+                }}
+              >
+                Send
+              </button>
+            )}
           </div>
 
           <div style={{ marginTop: 10, fontSize: 10, color: C.text3, fontFamily: 'var(--mono)', textAlign: 'center' }}>

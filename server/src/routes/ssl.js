@@ -81,6 +81,30 @@ const NGINX_APP_LOCATIONS = `
         proxy_read_timeout 1800s;
         proxy_buffering off;
     }
+    location /api/store-monitor/ {
+        proxy_pass http://server:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 600s;
+        proxy_read_timeout 600s;
+        proxy_buffering off;
+    }
+    location /api/ai/ {
+        proxy_pass http://server:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 1800s;
+        proxy_read_timeout 1800s;
+        proxy_buffering off;
+    }
     location /api/ {
         proxy_pass http://server:5000;
         proxy_http_version 1.1;

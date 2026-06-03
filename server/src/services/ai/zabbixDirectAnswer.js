@@ -19,13 +19,16 @@ export function isInfraMonitorQuery(question) {
   return /\b(infra mon\w+|infra summar\w+)\b/i.test(String(question || ''))
 }
 
+const SWITCH_WORD = /\b(switch(?:es)?|all switches)\b/i
+const ROUTER_WORD = /\b(router(?:s)?)\b/i
+
 /** fortigate | cisco | checkpoint | network | switch (cisco + snmp network) */
 export function detectDeviceTypeFilter(question) {
   const q = String(question || '')
   if (/\b(fortinet|fortigate|fgt)\b/i.test(q)) return 'fortigate'
-  if (/\b(switches?|all switches)\b/i.test(q)) return 'switch'
+  if (SWITCH_WORD.test(q)) return 'switch'
   if (/\b(cisco|catalyst|nexus|meraki)\b/i.test(q)) return 'cisco'
-  if (/\b(routers?)\b/i.test(q)) return 'cisco'
+  if (ROUTER_WORD.test(q)) return 'cisco'
   if (/\b(checkpoint|check point)\b/i.test(q)) return 'checkpoint'
   if (/\b(juniper)\b/i.test(q)) return 'juniper'
   return null
@@ -39,8 +42,8 @@ export function isInfraDeviceStatusQuery(question) {
   if (/\b(store monitor|offline stores?|influx)\b/i.test(q)) return false
   if (deviceType && /\b(status|health|up|down|available|summary|summ\w*|monitor|problem|issue|give me|show|list|all)\b/i.test(q)) return true
   if (/\b(fortinet|fortigate)\s+firewall\b/i.test(q)) return true
-  if (/\b(cisco|network devices?|switches?|routers?|firewall device)\b/i.test(q) && /\b(status|health|summary|summ\w*|monitor|all)\b/i.test(q)) return true
-  if (/\b(ping|icmp|latency|packet\s*loss|response\s*time|sensor)\b/i.test(q) && (deviceType || /\b(switches?|routers?|network devices?)\b/i.test(q))) return true
+  if (/\b(cisco|network devices?|switch(?:es)?|router(?:s)?|firewall device)\b/i.test(q) && /\b(status|health|summary|summ\w*|monitor|all)\b/i.test(q)) return true
+  if (/\b(ping|icmp|latency|packet\s*loss|response\s*time|sensor)\b/i.test(q) && (deviceType || SWITCH_WORD.test(q) || ROUTER_WORD.test(q) || /\b(network devices?)\b/i.test(q))) return true
   return false
 }
 

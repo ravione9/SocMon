@@ -734,7 +734,10 @@ export default function StoreMonitorPage() {
       if (data.stores?.length) setSelectedTag((prev) => prev || data.stores[0].storeTag)
     } catch (e) {
       const isTimeout = e.code === 'ECONNABORTED' || /timeout/i.test(e.message)
-      setError(isTimeout
+      const isGatewayTimeout = e.response?.status === 504
+      setError(isGatewayTimeout
+        ? 'Gateway timeout (504) — nginx cut off the request before InfluxDB finished. Reload nginx with the updated store-monitor timeout, or ask admin to extend proxy_read_timeout for /api/store-monitor/.'
+        : isTimeout
         ? 'Request timed out — InfluxDB is taking too long. Try a shorter time range or click Retry.'
         : e.response?.data?.error || e.message || 'Failed to fetch data')
     } finally { setLoading(false) }
