@@ -2,6 +2,18 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import { aiAPI } from '../../api/ai.js'
 import { useUrlTab } from '../../hooks/useUrlTab.js'
+import { useAuthStore } from '../../store/authStore.js'
+import {
+  createChatSession,
+  defaultWelcomeMessages,
+  deleteChatSession,
+  deriveSessionTitle,
+  formatSessionWhen,
+  hasUserMessages,
+  loadChatSessions,
+  persistSessionInList,
+  saveChatSessions,
+} from '../../utils/aiChatHistory.js'
 
 const TABS = [
   { id: 'chat', label: 'Chat' },
@@ -639,6 +651,184 @@ function ChatModeBar({ mode, onModeChange }) {
   )
 }
 
+function ChatHistorySidebar({
+  sessions,
+  activeId,
+  onSelect,
+  onNewChat,
+  onDelete,
+  collapsed,
+  onToggleCollapsed,
+}) {
+  return (
+    <div
+      style={{
+        width: collapsed ? 44 : 248,
+        flexShrink: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        minHeight: 0,
+        borderRight: `1px solid ${C.border}`,
+        background: C.bg3,
+        transition: 'width 0.15s ease',
+        overflow: 'hidden',
+      }}
+    >
+      <div
+        style={{
+          padding: collapsed ? '10px 6px' : '10px 10px',
+          borderBottom: `1px solid ${C.border}`,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          flexShrink: 0,
+        }}
+      >
+        {!collapsed && (
+          <span style={{ flex: 1, fontSize: 11, fontWeight: 700, color: C.text2, fontFamily: 'var(--mono)' }}>
+            Chat history
+          </span>
+        )}
+        <button
+          type="button"
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          onClick={onToggleCollapsed}
+          style={{
+            padding: '4px 8px',
+            borderRadius: 6,
+            border: `1px solid ${C.border}`,
+            background: C.bg2,
+            color: C.text3,
+            fontSize: 12,
+            cursor: 'pointer',
+            flexShrink: 0,
+          }}
+        >
+          {collapsed ? '»' : '«'}
+        </button>
+      </div>
+
+      {!collapsed && (
+        <button
+          type="button"
+          onClick={onNewChat}
+          style={{
+            margin: '10px 10px 6px',
+            padding: '8px 10px',
+            borderRadius: 8,
+            border: `1px dashed ${C.accent}`,
+            background: 'rgba(79,126,245,.08)',
+            color: C.accent,
+            fontSize: 12,
+            fontWeight: 700,
+            cursor: 'pointer',
+            textAlign: 'left',
+            flexShrink: 0,
+          }}
+        >
+          + New chat
+        </button>
+      )}
+
+      <div style={{ flex: 1, overflowY: 'auto', padding: collapsed ? '6px 4px' : '4px 8px 10px' }}>
+        {sessions.map(s => {
+          const active = s.id === activeId
+          if (collapsed) {
+            return (
+              <button
+                key={s.id}
+                type="button"
+                title={s.title}
+                onClick={() => onSelect(s.id)}
+                style={{
+                  width: '100%',
+                  marginBottom: 4,
+                  padding: '6px 0',
+                  borderRadius: 6,
+                  border: `1px solid ${active ? C.accent : C.border}`,
+                  background: active ? 'rgba(79,126,245,.2)' : C.bg2,
+                  color: active ? C.accent : C.text3,
+                  fontSize: 10,
+                  cursor: 'pointer',
+                }}
+              >
+                ●
+              </button>
+            )
+          }
+          return (
+            <div
+              key={s.id}
+              style={{
+                display: 'flex',
+                alignItems: 'stretch',
+                gap: 4,
+                marginBottom: 4,
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => onSelect(s.id)}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  padding: '8px 10px',
+                  borderRadius: 8,
+                  border: `1px solid ${active ? C.accent : C.border}`,
+                  background: active ? 'rgba(79,126,245,.12)' : C.bg2,
+                  color: C.text,
+                  fontSize: 12,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                }}
+              >
+                <div
+                  style={{
+                    fontWeight: active ? 700 : 500,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    marginBottom: 2,
+                  }}
+                >
+                  {s.title || 'New chat'}
+                </div>
+                <div style={{ fontSize: 10, color: C.text3, fontFamily: 'var(--mono)' }}>
+                  {formatSessionWhen(s.updatedAt)}
+                  {s.chatMode ? ` · ${s.chatMode}` : ''}
+                </div>
+              </button>
+              <button
+                type="button"
+                title="Delete chat"
+                onClick={e => {
+                  e.stopPropagation()
+                  onDelete(s.id)
+                }}
+                style={{
+                  padding: '0 8px',
+                  borderRadius: 8,
+                  border: `1px solid ${C.border}`,
+                  background: C.bg2,
+                  color: C.text3,
+                  fontSize: 14,
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                }}
+              >
+                ×
+              </button>
+            </div>
+          )
+        })}
+        {!collapsed && sessions.length === 0 && (
+          <div style={{ fontSize: 11, color: C.text3, padding: '8px 4px' }}>No saved chats yet.</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function ChatTab({
   provider,
   model,
@@ -651,25 +841,104 @@ function ChatTab({
   autoModules,
   onAutoToggle,
 }) {
+  const user = useAuthStore(s => s.user)
+  const userKey = user?.email || user?.id || 'anonymous'
+
   const [chatMode, setChatMode] = useState('monitor')
-  const [messages, setMessages] = useState([
-    {
-      role: 'assistant',
-      content:
-        'NetPulse AI — four chat modes:\n\n' +
-        '• Monitor — tries instant live handlers first; if your wording is new, it auto-runs Agent tools (still live data, no guessing).\n' +
-        '• Agent — best for free-form questions: LLM picks tools (Zabbix, XDR, firewall, stores…) then explains with recommendations.\n' +
-        '• Details — full per-hostname reports across Store Monitor, Sentinel, SOC, NOC.\n' +
-        '• RCA — root cause analysis with correlated timeline, ranked hypotheses, and recommended actions.\n\n' +
-        'Users can ask in many ways — you do not need exact phrasing. Enable data sources above, pick a mode, then ask.',
-    },
-  ])
+  const [messages, setMessages] = useState(defaultWelcomeMessages())
+  const [sessions, setSessions] = useState([])
+  const [activeSessionId, setActiveSessionId] = useState(null)
+  const [historyCollapsed, setHistoryCollapsed] = useState(false)
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [pendingCount, setPendingCount] = useState(0)
   const [sourcesOpen, setSourcesOpen] = useState(false)
   const bottomRef = useRef(null)
   const abortControllersRef = useRef(new Map())
+  const skipPersistRef = useRef(false)
+  const hydratedRef = useRef(false)
+
+  const buildSessionSnapshot = useCallback((id, msgs, mode, createdAt) => ({
+    id,
+    title: deriveSessionTitle(msgs),
+    chatMode: mode,
+    messages: msgs,
+    updatedAt: new Date().toISOString(),
+    createdAt: createdAt || new Date().toISOString(),
+  }), [])
+
+  useEffect(() => {
+    skipPersistRef.current = true
+    const loaded = loadChatSessions(userKey)
+    if (loaded.length) {
+      const first = loaded[0]
+      setSessions(loaded)
+      setActiveSessionId(first.id)
+      setMessages(first.messages || defaultWelcomeMessages())
+      setChatMode(first.chatMode || 'monitor')
+    } else {
+      const fresh = createChatSession({ chatMode: 'monitor' })
+      setSessions([fresh])
+      setActiveSessionId(fresh.id)
+      setMessages(fresh.messages)
+      setChatMode(fresh.chatMode)
+      saveChatSessions(userKey, [fresh])
+    }
+    hydratedRef.current = true
+  }, [userKey])
+
+  useEffect(() => {
+    if (!hydratedRef.current || !activeSessionId || skipPersistRef.current) {
+      skipPersistRef.current = false
+      return
+    }
+    setSessions(prev => {
+      const existing = prev.find(s => s.id === activeSessionId)
+      const snapshot = buildSessionSnapshot(activeSessionId, messages, chatMode, existing?.createdAt)
+      return persistSessionInList(userKey, prev, snapshot)
+    })
+  }, [messages, chatMode, activeSessionId, userKey, buildSessionSnapshot])
+
+  const selectSession = useCallback((sessionId) => {
+    if (sessionId === activeSessionId) return
+    const target = sessions.find(s => s.id === sessionId)
+    if (!target) return
+    skipPersistRef.current = true
+    setActiveSessionId(sessionId)
+    setMessages(target.messages || defaultWelcomeMessages())
+    setChatMode(target.chatMode || 'monitor')
+    setInput('')
+  }, [activeSessionId, sessions])
+
+  const startNewChat = useCallback(() => {
+    skipPersistRef.current = true
+    const fresh = createChatSession({ chatMode })
+    setSessions(prev => persistSessionInList(userKey, prev, fresh))
+    setActiveSessionId(fresh.id)
+    setMessages(fresh.messages)
+    setInput('')
+  }, [chatMode, userKey])
+
+  const removeSession = useCallback((sessionId) => {
+    const next = deleteChatSession(userKey, sessionId, sessions)
+    if (sessionId === activeSessionId) {
+      skipPersistRef.current = true
+      if (next.length) {
+        setActiveSessionId(next[0].id)
+        setMessages(next[0].messages || defaultWelcomeMessages())
+        setChatMode(next[0].chatMode || 'monitor')
+      } else {
+        const fresh = createChatSession({ chatMode: 'monitor' })
+        const saved = saveChatSessions(userKey, [fresh])
+        setSessions(saved)
+        setActiveSessionId(fresh.id)
+        setMessages(fresh.messages)
+        setChatMode(fresh.chatMode)
+      }
+    } else {
+      setSessions(next)
+    }
+  }, [activeSessionId, sessions, userKey])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -799,15 +1068,34 @@ function ChatTab({
         />
       </div>
 
+      <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden', borderRadius: 12, border: `1px solid ${C.border}` }}>
+        <ChatHistorySidebar
+          sessions={sessions}
+          activeId={activeSessionId}
+          onSelect={selectSession}
+          onNewChat={startNewChat}
+          onDelete={removeSession}
+          collapsed={historyCollapsed}
+          onToggleCollapsed={() => setHistoryCollapsed(v => !v)}
+        />
+
+        <div
+          style={{
+            flex: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            minHeight: 0,
+            minWidth: 0,
+            background: C.bg2,
+            overflow: 'hidden',
+          }}
+        >
       <div
         style={{
           flex: 1,
           display: 'flex',
           flexDirection: 'column',
           minHeight: 0,
-          borderRadius: 12,
-          border: `1px solid ${C.border}`,
-          background: C.bg2,
           overflow: 'hidden',
         }}
       >
@@ -887,7 +1175,7 @@ function ChatTab({
             padding: '10px 12px',
           }}
         >
-          {messages.length <= 1 && (
+          {messages.length <= 1 && !hasUserMessages(messages) && (
             <div style={{ display: 'flex', gap: 6, marginBottom: 8, overflowX: 'auto', paddingBottom: 2 }}>
               {(STARTER_PROMPTS[chatMode] || STARTER_PROMPTS.monitor).map(p => (
                 <button
@@ -986,7 +1274,10 @@ function ChatTab({
 
           <div style={{ marginTop: 6, fontSize: 10, color: C.text3, fontFamily: 'var(--mono)', textAlign: 'center' }}>
             {provider ? `${provider}${model ? ` · ${model}` : ''}` : ''}
+            {activeSessionId && sessions.length > 0 ? ` · ${sessions.length} saved chat${sessions.length !== 1 ? 's' : ''}` : ''}
           </div>
+        </div>
+      </div>
         </div>
       </div>
     </div>
