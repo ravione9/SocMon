@@ -1260,7 +1260,7 @@ function ChatTab({
               {isError ? (
                 <AiErrorPanel detail={m.errorDetail} />
               ) : m.role === 'assistant' ? (
-                <AiMessageContent content={m.content} />
+                <AiMessageContent content={m.content} contextPreview={m.contextPreview} />
               ) : (
                 m.content
               )}

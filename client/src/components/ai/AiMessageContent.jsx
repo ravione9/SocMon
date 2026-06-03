@@ -243,6 +243,54 @@ function ProblemsTable({ lines }) {
   )
 }
 
+function StoreIssuesTable({ data }) {
+  if (!data?.rows?.length) return null
+  const groupPart = data.groupFilter ? ` · ${data.groupFilter}` : ''
+  return (
+    <div className="ai-store-issues-wrap">
+      <div className="ai-store-issues-summary">
+        <span>{data.totalStoresInWindow ?? data.rows.length} stores with alerts in {data.rangeLabel || 'window'}{groupPart}</span>
+        {data.totalAlertEvents != null && (
+          <span className="ai-store-issues-alert-total">{data.totalAlertEvents} alert types recorded</span>
+        )}
+      </div>
+      <div className="ai-problems-wrap">
+        <table className="ai-problems-table ai-store-issues-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Hostname</th>
+              <th>Alerts</th>
+              <th>Severity</th>
+              <th>Status</th>
+              <th>Issue summary</th>
+              <th>Last seen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.rows.map(row => {
+              const tone = severityTone(row.severity)
+              const t = TONE_STYLES[tone] || TONE_STYLES.neutral
+              const stTone = /active|offline|critical/i.test(row.status) ? 'bad' : /resolved/i.test(row.status) ? 'good' : 'neutral'
+              return (
+                <tr key={`${row.rank}-${row.storeTag}`}>
+                  <td className="ai-store-rank">{row.rank}</td>
+                  <td className="ai-prob-name">{row.hostname}</td>
+                  <td className="ai-store-alerts">{row.alertCount}</td>
+                  <td><span className="ai-prob-sev" style={{ color: t.color }}>{row.severity}</span></td>
+                  <td><Badge tone={stTone} small>{row.status}</Badge></td>
+                  <td className="ai-store-issue-summary">{row.issueSummary}</td>
+                  <td className="ai-prob-since">{row.lastSeen || '—'}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 function isProblemLine(line) {
   return /^\s*•\s*\[[^\]]+\]/.test(String(line || ''))
 }
@@ -856,16 +904,18 @@ function RichTextFallback({ content }) {
   )
 }
 
-export default function AiMessageContent({ content }) {
+export default function AiMessageContent({ content, contextPreview }) {
   const parsed = parseStructuredMessage(content)
+  const issuesTable = contextPreview?.storeIssuesTable
 
-  if (!parsed.structured) {
+  if (!parsed.structured && !issuesTable) {
     return <RichTextFallback content={content} />
   }
 
   return (
     <div className="ai-msg-root">
       <MessageHeader header={parsed.header} />
+      {issuesTable && <StoreIssuesTable data={issuesTable} />}
       {parsed.sections.map(s => (
         <SectionBlock key={s.title} title={s.title} lines={s.lines} />
       ))}

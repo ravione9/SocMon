@@ -835,6 +835,37 @@ function isHeartbeatOnlyInfluxIssue(s) {
     && String(s.issueSummary || '').includes('heartbeat')
 }
 
+function buildStoreIssuesTableRows(ranked, limit) {
+  return ranked.slice(0, limit).map((row, idx) => {
+    if (row.tracker) {
+      const p = row.tracker
+      const issues = p.issues || []
+      const active = issues.some(i => i.status === 'active')
+      return {
+        rank: idx + 1,
+        hostname: p.hostname || p.storeTag || '—',
+        storeTag: p.storeTag || '—',
+        severity: p.severity || '—',
+        alertCount: issues.length || 1,
+        status: active ? 'active' : 'resolved in window',
+        issueSummary: (p.issueSummary || p.message || p.code || '—').slice(0, 240),
+        lastSeen: formatPortalTimestamp(p.lastSeenAt),
+      }
+    }
+    const s = row.influx
+    return {
+      rank: idx + 1,
+      hostname: s.hostname || s.storeTag || '—',
+      storeTag: s.storeTag || '—',
+      severity: s.online ? 'warning' : 'critical',
+      alertCount: (s.issueCodes || []).length || 1,
+      status: s.online ? 'online' : 'offline',
+      issueSummary: (s.issueSummary || '—').slice(0, 240),
+      lastSeen: s.lastSeen ? formatPortalTimestamp(s.lastSeen) : '—',
+    }
+  })
+}
+
 /**
  * @param {string} question
  * @param {string[]} allowedPages
@@ -945,21 +976,13 @@ export async function tryDirectStoreIssuesAnswer(question, allowedPages, ctx = n
     const rankSource = windowedQuery && trackerRanked.length
       ? `problem tracker (${rangeLabel})`
       : `live snapshot + problem tracker`
-    lines.push(`Top ${Math.min(limit, ranked.length)} (worst first — ${rankSource}):`)
-    for (const row of ranked.slice(0, limit)) {
-      if (row.tracker && (windowedQuery || !row.influx)) {
-        const p = row.tracker
-        const status = p.status === 'resolved' ? 'resolved in window' : 'active'
-        const issues = p.issueSummary || p.message || p.code
-        lines.push(`  • ${p.hostname || p.storeTag} [${p.storeTag}] — ${p.severity}: ${issues} (${status}, last seen ${formatPortalTimestamp(p.lastSeenAt)})`)
-      } else if (row.influx) {
-        const s = row.influx
-        const issues = s.issueSummary || (s.online ? 'online with issues' : 'offline')
-        lines.push(`  • ${s.hostname || s.storeTag} [${s.storeTag}] — ${s.connState} · ${issues}`)
-      }
-    }
+    const tableRows = buildStoreIssuesTableRows(ranked, limit)
+    const pageAlertTotal = tableRows.reduce((n, r) => n + (r.alertCount || 0), 0)
+    lines.push(`── Top ${Math.min(limit, ranked.length)} · alert table (${rangeLabel}) ──`)
+    lines.push(`Alert types on this page: ${pageAlertTotal} · Ranked by severity (${rankSource})`)
+    lines.push('(Interactive table with alert counts — live problem tracker.)')
     if (ranked.length > limit) {
-      lines.push(`  … ${ranked.length - limit} more with issues (open Store Monitor → Problems for full list)`)
+      lines.push(`… ${ranked.length - limit} more stores with issues (open Store Monitor → Problems)`)
     }
   } else if (summary.total === 0 && !trackerRanked.length) {
     lines.push('No stores with issues in the live snapshot or problem tracker for this window.')
@@ -972,6 +995,11 @@ export async function tryDirectStoreIssuesAnswer(question, allowedPages, ctx = n
   }
 
   const tracker = getProblemSnapshotStatus()
+  const tableRows = ranked.length ? buildStoreIssuesTableRows(ranked, limit) : []
+  const totalAlertEvents = trackerRanked.reduce((n, p) => n + (p.issues?.length || 1), 0)
+  if (windowedQuery && trackerRanked.length) {
+    lines.push('', '(Live data only — problem-tracker counts are exact; LLM analysis skipped for time-window issue lists.)')
+  }
   lines.push('', `(Live Store Monitor — InfluxDB. Problem tracker refreshes ~${Math.round((tracker.intervalMs || 120000) / 60000)} min.)`)
 
   return {
@@ -993,6 +1021,13 @@ export async function tryDirectStoreIssuesAnswer(question, allowedPages, ctx = n
         withIssues: summary.withIssues,
         topIssuesCount: Math.min(limit, ranked.length),
       },
+      storeIssuesTable: tableRows.length ? {
+        rangeLabel,
+        groupFilter: groupFilter || null,
+        totalStoresInWindow: trackerRanked.length,
+        totalAlertEvents,
+        rows: tableRows,
+      } : undefined,
     },
     queryContext: {
       topic: 'store',
