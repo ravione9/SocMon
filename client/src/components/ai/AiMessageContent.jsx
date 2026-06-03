@@ -597,33 +597,55 @@ function SectionBlock({ title, lines }) {
   const theme = themeForSection(title)
   const { kpis, rest } = parseKpiLines(lines)
   const maxTrafficBps = maxTrafficFromLines(lines)
-  const isStoreUnconfigured = lines.some(l => /Not configured/i.test(l))
+  const isUnconfigured = lines.some(l => /Not configured/i.test(l))
+  const hasNoHost = lines.some(l => /No monitored host matched/i.test(l))
   const problemCount = kpis.find(k => /active problems/i.test(k.label))?.value
+  const totalMonitored = kpis.find(k => /total monitored/i.test(k.label))
   const hosts = parseHostDetails(lines)
   const hasTraffic = rest.some(l => / · in .+ · out .+/i.test(l))
   const inHostDetails = rest.some(l => /Host details:/i.test(l))
   const showHostCards = hosts.length > 0 && inHostDetails
   const bodyLines = showHostCards ? filterHostDetailLines(rest) : rest
 
-  // Skip entirely when a data source is not configured — avoids noisy "Not configured" cards
-  if (isStoreUnconfigured && kpis.length === 0 && rest.filter(l => l.trim() && !/Not configured/i.test(l)).length === 0) {
+  // Hide sections with no useful data — unconfigured or empty matches
+  if (isUnconfigured || (hasNoHost && (!totalMonitored || totalMonitored.value === '0'))) {
     return null
   }
 
   return (
-    <div className="ai-section-card" style={{ border: `1px solid ${theme.accent}44`, background: theme.bg, marginBottom: 4 }}>
-      <div className="ai-section-head" style={{ background: `linear-gradient(90deg, ${theme.accent}28, transparent)`, borderBottom: `1px solid ${theme.accent}33` }}>
-        <div className="ai-section-icon" style={{ background: `${theme.accent}22`, border: `1px solid ${theme.accent}44` }}>
-          {theme.icon}
-        </div>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 14, fontWeight: 800, color: theme.accent, letterSpacing: '-0.01em' }}>{title}</div>
-          <div style={{ fontSize: 10, color: C.text3, fontFamily: 'var(--mono)', marginTop: 2 }}>Live data</div>
-        </div>
-        {isStoreUnconfigured && <Badge tone="warn" small>Not configured</Badge>}
+    <div
+      className="ai-section-card"
+      style={{
+        border: `1px solid ${theme.accent}33`,
+        borderLeft: `3px solid ${theme.accent}`,
+        background: 'rgba(0,0,0,.12)',
+        borderRadius: 10,
+        marginBottom: 8,
+        overflow: 'hidden',
+      }}
+    >
+      {/* Compact header strip */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '7px 12px',
+        background: `${theme.accent}14`,
+        borderBottom: `1px solid ${theme.accent}22`,
+      }}>
+        <span style={{ fontSize: 14 }}>{theme.icon}</span>
+        <span style={{ fontSize: 12, fontWeight: 700, color: theme.accent, letterSpacing: '-0.01em' }}>{title}</span>
+        {Number(problemCount) > 0 && (
+          <span style={{
+            marginLeft: 'auto', fontSize: 10, fontWeight: 700, fontFamily: 'var(--mono)',
+            color: Number(problemCount) >= 5 ? 'var(--red)' : 'var(--amber)',
+            background: Number(problemCount) >= 5 ? 'rgba(248,113,113,.12)' : 'rgba(245,166,35,.12)',
+            border: `1px solid ${Number(problemCount) >= 5 ? 'rgba(248,113,113,.35)' : 'rgba(245,166,35,.35)'}`,
+            borderRadius: 999, padding: '2px 8px',
+          }}>
+            {problemCount} {Number(problemCount) === 1 ? 'problem' : 'problems'}
+          </span>
+        )}
       </div>
-      <div style={{ padding: '12px 16px 14px' }}>
-        <ProblemsBanner count={Number(problemCount) || 0} />
+      <div style={{ padding: '10px 12px 12px' }}>
         <KpiGrid items={kpis} />
         {showHostCards && (
           <>
@@ -655,28 +677,27 @@ function MessageHeader({ header }) {
   const isLive = /LIVE/i.test(titleLine)
   const liveMeta = titleLine.match(/\(LIVE\s*—\s*fetched\s*([^)]+)\)/i)
   const titleClean = titleLine.replace(/\(LIVE[^)]*\)/i, '').replace(/\s{2,}/g, ' ').trim()
-  const isAnalysis = /analysis|report|summary/i.test(titleClean)
-  const isIp = /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(titleClean)
 
   return (
-    <div className="ai-msg-header">
-      <div style={{ position: 'relative', zIndex: 1 }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, marginBottom: meta.length || liveMeta ? 8 : 0 }}>
-          <span style={{ fontSize: 24 }}>{isIp ? '🔥' : isAnalysis ? '📊' : '📡'}</span>
-          {isLive && <Badge tone="good" pulse>LIVE</Badge>}
-          <span style={{ fontSize: 15, fontWeight: 800, color: C.text, lineHeight: 1.35, letterSpacing: '-0.02em' }}>{titleClean}</span>
-        </div>
-        {liveMeta && (
-          <div style={{ fontSize: 11, color: C.text3, fontFamily: 'var(--mono)', marginBottom: meta.length ? 6 : 0, display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span>🕐</span> Fetched {liveMeta[1].trim()}
-          </div>
-        )}
-        {meta.map((line, i) => (
-          <div key={i} style={{ fontSize: 11, color: C.text2, fontFamily: 'var(--mono)', marginTop: i ? 3 : 0, padding: '4px 10px', borderRadius: 6, background: 'rgba(0,0,0,.12)', display: 'inline-block' }}>
-            {line.trim()}
-          </div>
-        ))}
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: (meta.length || liveMeta) ? 6 : 0 }}>
+        {isLive && <Badge tone="good" pulse>LIVE</Badge>}
+        <span style={{ fontSize: 13, fontWeight: 700, color: C.text, letterSpacing: '-0.01em' }}>{titleClean}</span>
       </div>
+      {liveMeta && (
+        <div style={{ fontSize: 10, color: C.text3, fontFamily: 'var(--mono)', marginBottom: meta.length ? 4 : 0 }}>
+          Fetched {liveMeta[1].trim()}
+        </div>
+      )}
+      {meta.map((line, i) => (
+        <div key={i} style={{
+          fontSize: 10, color: C.text2, fontFamily: 'var(--mono)',
+          marginTop: 3, padding: '2px 8px', borderRadius: 4,
+          background: 'rgba(0,0,0,.12)', display: 'inline-block',
+        }}>
+          {line.trim()}
+        </div>
+      ))}
     </div>
   )
 }

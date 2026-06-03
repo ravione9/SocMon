@@ -1182,19 +1182,23 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     lines.push('')
   }
 
-  for (const { label, data } of results) {
+  for (const { label, key, data } of results) {
+    // Skip secondary sources (Store Zabbix) when they have no matching data — avoids cluttering output
+    const isSecondary = key === 'storeZabbix'
+    if (isSecondary && (!data.configured || data.error)) continue
+    if (isSecondary && data.availability?.total === 0 && hostFilter) continue
+
     lines.push(`── ${label} ──`)
     if (!data.configured) {
-      lines.push('  Not configured — set ZABBIX_URL + ZABBIX_API_TOKEN (or STORE_ZABBIX_*) in .env')
-      lines.push('')
+      if (!isSecondary) {
+        lines.push('  Not configured — set ZABBIX_URL + ZABBIX_API_TOKEN in .env')
+        lines.push('')
+      }
       continue
     }
     if (data.error) {
       lines.push(`  Unreachable: ${data.error}`)
       if (data.url) lines.push(`  URL: ${data.url}`)
-      if (data.errorCode === 'ZABBIX_FETCH') {
-        lines.push('  Tip: if Zabbix works in your browser but not from Docker, use host.docker.internal port-forward or run the server on the host.')
-      }
       lines.push('')
       continue
     }
