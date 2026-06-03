@@ -44,7 +44,8 @@ For advanced monitoring questions: correlate store offline status with firewall 
 For Zabbix bandwidth/utilization questions: analyze zabbixInfra.hosts[].ports — list all interfaces, highlight highest traffic, note down ports, and give actionable ops guidance.
 For RCA-style questions without a direct answer: state hypotheses ranked by evidence, cite counts from context, and list recommended verification steps — never guess hostnames or event counts.
 CRITICAL: NEVER invent hostnames, store tags, IP addresses, event counts, or SentinelOne XDR rows.
-When portal context or a direct query result is provided below, use ONLY that data.
+When portal context or a direct query result is provided below, use ONLY that data for facts.
+Use the full conversation to resolve follow-ups ("same device", "that VPN", "what next") — do not ignore prior user or assistant messages.
 If live data is missing, say clearly that you cannot access it and tell the user which SocMon module to open.`
 
 router.get('/modules', authenticate, requireAppPage('ai'), async (req, res) => {
@@ -176,7 +177,7 @@ router.post('/chat', async (req, res) => {
       const socEarly = await tryDirectSOCAnswer(lastUser, allowedPages, ctx)
       if (socEarly) {
         const synthStart = Date.now()
-        const { payload, llmMs } = await appendLlmAnalysis(lastUser, socEarly, chatMode)
+        const { payload, llmMs } = await appendLlmAnalysis(lastUser, socEarly, chatMode, sanitized, ctx)
         return res.json({
           content: payload.content,
           provider: getAIProvider().name,
@@ -197,7 +198,7 @@ router.post('/chat', async (req, res) => {
 
     const zabbixDirect = await tryDirectZabbixAnswer(lastUser, allowedPages, ctx)
     if (zabbixDirect) {
-      const { payload, llmMs } = await appendLlmAnalysis(lastUser, zabbixDirect, chatMode)
+      const { payload, llmMs } = await appendLlmAnalysis(lastUser, zabbixDirect, chatMode, sanitized, ctx)
       return res.json({
         content: payload.content,
         provider: getAIProvider().name,
@@ -223,7 +224,7 @@ router.post('/chat', async (req, res) => {
     const socStart = Date.now()
     const socDirect = await tryDirectSOCAnswer(lastUser, allowedPages, ctx)
     if (socDirect) {
-      const { payload, llmMs } = await appendLlmAnalysis(lastUser, socDirect, chatMode)
+      const { payload, llmMs } = await appendLlmAnalysis(lastUser, socDirect, chatMode, sanitized, ctx)
       return res.json({
         content: payload.content,
         provider: getAIProvider().name,
@@ -530,7 +531,9 @@ router.post('/chat', async (req, res) => {
 
     const detail = inferContextDetail(lastUser)
     const maxTokens = detail === 'summary' ? 512 : detail === 'standard' ? 1024 : 1536
-    const recentMessages = sanitized.slice(-6)
+    const recentMessages = sanitized
+      .filter(m => !(m.role === 'assistant' && /^SocMon AI — four chat modes/i.test(m.content)))
+      .slice(-12)
     // Default 300s for Ollama (local LLM can be slow); cloud providers stay at 120s unless overridden.
     const providerName = getAIProvider().name
     const defaultTimeoutMs = providerName === 'ollama' ? 300000 : 120000

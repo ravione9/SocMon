@@ -1107,20 +1107,25 @@ function ChatTab({
             padding: '12px 14px',
             display: 'flex',
             flexDirection: 'column',
-            gap: 10,
+            gap: 14,
           }}
         >
           {messages.map((m, i) => (
             <div
               key={i}
               style={{
-                alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
+                alignSelf: m.role === 'user' ? 'flex-end' : 'stretch',
                 width: '100%',
                 maxWidth: m.role === 'user' ? 'min(520px, 72%)' : '100%',
-                padding: m.role === 'user' ? '12px 16px' : '14px 16px',
-                borderRadius: 12,
-                background: m.role === 'user' ? 'rgba(79,126,245,.15)' : C.bg3,
-                border: `1px solid ${m.role === 'user' ? 'rgba(79,126,245,.35)' : C.border}`,
+                padding: m.role === 'user' ? '12px 16px' : '16px 18px',
+                borderRadius: m.role === 'user' ? 12 : 16,
+                background: m.role === 'user'
+                  ? 'linear-gradient(135deg, rgba(79,126,245,.18), rgba(79,126,245,.08))'
+                  : 'linear-gradient(180deg, var(--bg3) 0%, rgba(0,0,0,.08) 100%)',
+                border: m.role === 'user'
+                  ? '1px solid rgba(79,126,245,.35)'
+                  : '1px solid var(--border)',
+                boxShadow: m.role === 'assistant' ? '0 4px 20px rgba(0,0,0,.12)' : 'none',
                 fontSize: 13,
                 lineHeight: 1.55,
                 color: C.text,

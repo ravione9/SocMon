@@ -1,5 +1,5 @@
 import { isXdrQuestion } from './xdrDirectAnswer.js'
-import { isNetworkInfraQuery, isZabbixQuestion, isInfraDeviceStatusQuery, extractHostGroupFilter, extractHostGroupFromThread } from './zabbixDirectAnswer.js'
+import { isNetworkInfraQuery, isZabbixQuestion, isInfraDeviceStatusQuery, extractHostGroupFilter, extractHostGroupFromThread, extractIpv4, extractIpv4FromThread, extractZabbixHostFromThread } from './zabbixDirectAnswer.js'
 import { isFirewallQuestion, isSocReportQuery } from './socDirectAnswer.js'
 import { isDisconnectionLogQuery } from './nocDirectAnswer.js'
 import { isRcaQuery } from './rcaAnalysis.js'
@@ -55,6 +55,12 @@ const STOPWORDS = new Set([
   'need', 'show', 'list', 'many', 'last', 'hour', 'hours', 'the', 'for',
 ])
 
+const FOLLOWUP_MARKERS = /\b(this|that|same|it|those|above|previous|earlier|also|what about|how about|tell me more|follow.?up|same device|same host|same ip|same firewall|the vpn|the tunnel|these problems|that host|that device)\b/i
+
+function isFollowUpPhrasing(q) {
+  return FOLLOWUP_MARKERS.test(String(q || ''))
+}
+
 /**
  * @typedef {'crash'|'xdr'|'store'|'soc'|'general'} QueryTopic
  */
@@ -76,10 +82,22 @@ export function resolveQueryContext(messages, opts = {}) {
   const priorTopic = inferTopicFromAssistant(priorAssistant)
   const threadText = thread.map(m => m.content).join('\n')
 
-  const isFollowUp = userMessages.length > 1 && currentQuestion.split(/\s+/).length <= 12
+  const isFollowUp = userMessages.length > 1
+    && (isFollowUpPhrasing(currentQuestion)
+      || currentQuestion.split(/\s+/).length <= 24
+      || Boolean(priorTopic))
   const followUpKind = detectFollowUpKind(currentQuestion)
 
-  const ctxLite = { isFollowUp, priorTopic, threadText, priorAssistant, priorUser }
+  const ip = extractIpv4(currentQuestion)
+    || (isFollowUp ? extractIpv4FromThread(threadText) : null)
+    || (isFollowUp ? extractIpv4FromThread(priorAssistant) : null)
+
+  const zabbixHost = extractZabbixHostFromThread(currentQuestion)
+    || (isFollowUp && priorTopic === 'zabbix'
+      ? extractZabbixHostFromThread(priorAssistant) || extractZabbixHostFromThread(threadText)
+      : null)
+
+  const ctxLite = { isFollowUp, priorTopic, threadText, priorAssistant, priorUser, ip, zabbixHost }
   const hostGroup = extractHostGroupFilter(currentQuestion, ctxLite)
     || (isFollowUp && priorTopic === 'zabbix' ? extractHostGroupFromThread(threadText) : null)
 
@@ -101,6 +119,7 @@ export function resolveQueryContext(messages, opts = {}) {
   if (!topic && chatMode === 'details' && hostname) topic = 'hostname'
   if (!topic && hostname && isHostnameDataRequest(currentQuestion)) topic = 'hostname'
   if (!topic && isFollowUp && priorTopic) topic = priorTopic
+  if (!topic && isFollowUp && (ip || zabbixHost) && priorTopic === 'zabbix') topic = 'zabbix'
   if (!topic && appName && (APP_ONLY.test(currentQuestion) || priorTopic === 'crash')) {
     topic = 'crash'
   }
@@ -129,6 +148,8 @@ export function resolveQueryContext(messages, opts = {}) {
     followUpKind,
     appName,
     hostname,
+    ip,
+    zabbixHost,
     chatMode,
   })
 
@@ -141,6 +162,8 @@ export function resolveQueryContext(messages, opts = {}) {
     appName,
     hostname,
     hostGroup,
+    ip,
+    zabbixHost,
     range,
     isFollowUp,
     followUpKind,
@@ -155,7 +178,7 @@ export function resolveQueryContext(messages, opts = {}) {
 /** @returns {QueryTopic|null} */
 function inferTopicFromAssistant(text) {
   const t = String(text || '')
-  if (/Disk usage report|Zabbix network|Infra Zabbix|Store Zabbix|Host group:/i.test(t)) return 'zabbix'
+  if (/Disk usage report|Zabbix network|Infra Zabbix|Store Zabbix|Host group:|Host filter:|device analysis|── AI Analysis ──/i.test(t)) return 'zabbix'
   if (/Store hostname report|Hostname report|Metrics chart/i.test(t)) return 'hostname'
   if (/App Crashes|Influx crash|crash events/i.test(t)) return 'crash'
   if (/SentinelOne XDR|PowerQuery used/i.test(t)) return 'xdr'
@@ -203,9 +226,9 @@ export function wantsCrashEventLog(question, ctx = null) {
   return false
 }
 
-function pickDirectHandler({ currentQuestion, topic, priorTopic, isFollowUp, followUpKind, appName, hostname, chatMode = 'monitor' }) {
+function pickDirectHandler({ currentQuestion, topic, priorTopic, isFollowUp, followUpKind, appName, hostname, ip, zabbixHost, chatMode = 'monitor' }) {
   const q = String(currentQuestion || '')
-  const ctxLite = { isFollowUp, priorTopic, chatMode, hostname, directHandler: null }
+  const ctxLite = { isFollowUp, priorTopic, chatMode, hostname, ip, zabbixHost, directHandler: null }
   const storeMonitorIntent = /\b(offline|online|down|monitor status|store monitor|how many stores)\b/i.test(q)
   const chartRequest = /\b(graph|graphical|chart|visual|plot|timeline)\b/i.test(q)
 
@@ -213,7 +236,7 @@ function pickDirectHandler({ currentQuestion, topic, priorTopic, isFollowUp, fol
   if (chatMode === 'details' && hostname && !isRcaQuery(q, ctxLite)) return 'hostname'
 
   if (isSocReportQuery(q) || (isFirewallQuestion(q) && !isZabbixQuestion(q, ctxLite))) return 'soc'
-  if (isZabbixQuestion(q, ctxLite)) return 'zabbix'
+  if (isZabbixQuestion(q, { ...ctxLite, ip, zabbixHost })) return 'zabbix'
   if (isDisconnectionLogQuery(q, { isFollowUp, priorTopic })) return 'noc'
   if (isFollowUp && priorTopic === 'noc' && /\b(usb|hostname|rp group|timestamp|disconn|show|list|required|only)\b/i.test(q)) return 'noc'
 

@@ -12,7 +12,7 @@ RULES:
 3. Use exact Zabbix host group names from the user (e.g. lenskart-database). For disk reports always use get_disk_report with the host group — not get_server_status.
 4. After tool results, write a clear summary: bullet points or short tables, then 1–3 actionable recommendations when relevant.
 5. If a tool returns an error, explain it and suggest what the user should check (Infra Monitoring page, group name spelling, permissions).
-6. For follow-ups ("this group", "why only 3"), reuse host group names from the conversation and call the correct tool again.
+6. For follow-ups ("this group", "why only 3", "same device", "explain that VPN"), reuse hostnames, IPs, and host groups from the conversation and call the correct tool again.
 7. For Sentinel/XDR hunts (failed login, DNS, IP Connect, country connections, PowerShell, threats) use get_xdr_investigation with the user's full question, or get_geo_connections for country traffic.`
 
 const MAX_AGENT_TURNS = 5
@@ -31,9 +31,12 @@ export async function runAgentChat(messages, opts = {}) {
   let contextMeta = []
   let contextPreview = {}
 
-  const llmMessages = messages.slice(-8).filter(m => m.role === 'user' || m.role === 'assistant')
-  let agentMessages = llmMessages.map(m => ({ role: m.role, content: m.content }))
-  const providerMessages = [...agentMessages]
+  const llmMessages = messages
+    .filter(m => m?.role === 'user' || m?.role === 'assistant')
+    .filter(m => !(m.role === 'assistant' && /^SocMon AI — four chat modes/i.test(m.content)))
+    .slice(-12)
+    .map(m => ({ role: m.role, content: m.content }))
+  const providerMessages = [...llmMessages]
 
   for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
     const llmStart = Date.now()
