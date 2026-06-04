@@ -1,6 +1,6 @@
 import { isXdrQuestion } from './xdrDirectAnswer.js'
 import { isGeoConnectionQuery, isStoreConnectivityFollowUp, isStoreMonitorConnectivityQuery } from './geoConnectionQuery.js'
-import { isNetworkInfraQuery, isZabbixQuestion, isInfraDeviceStatusQuery, extractHostGroupFilter, extractHostGroupFromThread, extractIpv4, extractIpv4FromThread, extractZabbixHostFromThread, extractInfraHostName, extractInfraHostFromThread, wantsCpuMemoryUtil } from './zabbixDirectAnswer.js'
+import { isNetworkInfraQuery, isZabbixQuestion, isInfraDeviceStatusQuery, extractHostGroupFilter, extractHostGroupFromThread, extractIpv4, extractIpv4FromThread, extractZabbixHostFromThread, extractInfraHostName, extractInfraHostFromThread } from './zabbixDirectAnswer.js'
 import { isFirewallQuestion, isSocReportQuery } from './socDirectAnswer.js'
 import { isDisconnectionLogQuery } from './nocDirectAnswer.js'
 import { isRcaQuery } from './rcaAnalysis.js'
