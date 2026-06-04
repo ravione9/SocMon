@@ -231,6 +231,17 @@ export function wantsCpuMemoryUtil(question) {
     || Boolean(extractIpv4(q))
 }
 
+/** Which resource metrics the user asked for (memory-only, cpu-only, or both). */
+export function resolveCpuMemoryScope(question) {
+  const q = String(question || '').toLowerCase()
+  const wantsCpu = /\bcpu\b/.test(q)
+  const wantsMemory = /\b(memory|mem|ram)\b/.test(q)
+  if (wantsCpu && wantsMemory) return { wantsCpu: true, wantsMemory: true }
+  if (wantsMemory) return { wantsCpu: false, wantsMemory: true }
+  if (wantsCpu) return { wantsCpu: true, wantsMemory: false }
+  return { wantsCpu: true, wantsMemory: true }
+}
+
 export function wantsHostGroupCheck(question) {
   const q = String(question || '')
   if (/\b(belong(?:s|ing)?\s+to|belonging\s+to|member\s+of|in\s+(?:the\s+)?group|host\s*group)\b/i.test(q)) {
@@ -1188,6 +1199,7 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     || (ctx?.isFollowUp ? extractInfraHostFromThread(ctx?.threadText) : null)
   const alertsQuery = wantsZabbixAlertsQuery(question)
   const cpuMemoryQuery = wantsCpuMemoryUtil(question)
+  const metricScope = resolveCpuMemoryScope(question)
   const bandwidthQuery = wantsBandwidthUtil(question, ctx)
   let hostGroupFilter = extractHostGroupFilter(question, ctx) || ctx?.hostGroup
   if (ip && hostGroupFilter && (hostGroupFilter === ip || IPV4_RE.test(hostGroupFilter))) {
@@ -1315,12 +1327,18 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
   const bandwidthReport = Boolean(scopedHostGroup && includeBandwidth)
   const ipBandwidthReport = Boolean(bandwidthQuery && hostFilter && !scopedHostGroup && !cpuMemoryQuery)
   const ipCpuMemoryReport = Boolean(cpuMemoryQuery && hostFilter && !scopedHostGroup)
+  const focusedMetricReport = ipCpuMemoryReport && !(metricScope.wantsCpu && metricScope.wantsMemory)
+  const metricReportTitle = metricScope.wantsMemory && !metricScope.wantsCpu
+    ? 'Memory utilization'
+    : metricScope.wantsCpu && !metricScope.wantsMemory
+      ? 'CPU utilization'
+      : 'CPU / memory utilization'
 
   const lines = [
     alertsQuery
       ? `Infra Zabbix — active alerts & problems (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
       : ipCpuMemoryReport
-        ? `CPU / memory utilization — ${hostFilter} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
+        ? `${metricReportTitle} — ${hostFilter} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
       : ipBandwidthReport
         ? `Interface bandwidth — ${hostFilter} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
       : diskReport
@@ -1367,6 +1385,42 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
       lines.push('')
       continue
     }
+
+    if (focusedMetricReport && includeCpuMemory && data.cpuMemoryMetrics?.byHost) {
+      const cm = data.cpuMemoryMetrics.byHost
+      const sectionTitle = metricScope.wantsMemory && !metricScope.wantsCpu
+        ? 'Memory utilization (Zabbix % items):'
+        : metricScope.wantsCpu && !metricScope.wantsMemory
+          ? 'CPU utilization (Zabbix % items):'
+          : 'CPU / memory utilization (Zabbix % items):'
+      lines.push(`  ${sectionTitle}`)
+      const hostsForMetrics = data.matchedHosts?.length ? data.matchedHosts : data.hosts
+      for (const h of hostsForMetrics) {
+        const hid = String(h.hostid || '')
+        const m = cm[hid]
+        lines.push(`    ${h.name}:`)
+        if (metricScope.wantsCpu) {
+          if (m?.cpu) {
+            lines.push(`      CPU: ${m.cpu.percent}% · ${m.cpu.itemName} · @ ${formatMetricClock(m.cpu.clock)}`)
+          } else {
+            lines.push('      CPU: no % item found (check Zabbix agent/template on this host)')
+          }
+        }
+        if (metricScope.wantsMemory) {
+          if (m?.memory) {
+            lines.push(`      Memory: ${m.memory.percent}% · ${m.memory.itemName} · @ ${formatMetricClock(m.memory.clock)}`)
+          } else {
+            lines.push('      Memory: no % item found (check Zabbix agent/template on this host)')
+          }
+        }
+      }
+      if (!Object.keys(cm).length) {
+        lines.push('    No matching utilization items on these hosts.')
+      }
+      lines.push('')
+      continue
+    }
+
     const a = data.availability
     const dt = data.deviceTypes || {}
     const dtDown = data.deviceTypeDown || {}
@@ -1470,25 +1524,34 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
 
     if (includeCpuMemory && data.cpuMemoryMetrics?.byHost) {
       const cm = data.cpuMemoryMetrics.byHost
-      lines.push('  CPU / memory utilization (Zabbix % items):')
+      const sectionTitle = metricScope.wantsMemory && !metricScope.wantsCpu
+        ? 'Memory utilization (Zabbix % items):'
+        : metricScope.wantsCpu && !metricScope.wantsMemory
+          ? 'CPU utilization (Zabbix % items):'
+          : 'CPU / memory utilization (Zabbix % items):'
+      lines.push(`  ${sectionTitle}`)
       const hostsForMetrics = data.matchedHosts?.length ? data.matchedHosts : data.hosts
       for (const h of hostsForMetrics) {
         const hid = String(h.hostid || '')
         const m = cm[hid]
         lines.push(`    ${h.name}:`)
-        if (m?.cpu) {
-          lines.push(`      CPU: ${m.cpu.percent}% · ${m.cpu.itemName} · @ ${formatMetricClock(m.cpu.clock)}`)
-        } else {
-          lines.push('      CPU: no % item found (check Zabbix agent/template on this host)')
+        if (metricScope.wantsCpu) {
+          if (m?.cpu) {
+            lines.push(`      CPU: ${m.cpu.percent}% · ${m.cpu.itemName} · @ ${formatMetricClock(m.cpu.clock)}`)
+          } else {
+            lines.push('      CPU: no % item found (check Zabbix agent/template on this host)')
+          }
         }
-        if (m?.memory) {
-          lines.push(`      Memory: ${m.memory.percent}% · ${m.memory.itemName} · @ ${formatMetricClock(m.memory.clock)}`)
-        } else {
-          lines.push('      Memory: no % item found (check Zabbix agent/template on this host)')
+        if (metricScope.wantsMemory) {
+          if (m?.memory) {
+            lines.push(`      Memory: ${m.memory.percent}% · ${m.memory.itemName} · @ ${formatMetricClock(m.memory.clock)}`)
+          } else {
+            lines.push('      Memory: no % item found (check Zabbix agent/template on this host)')
+          }
         }
       }
       if (!Object.keys(cm).length) {
-        lines.push('    No CPU/memory utilization items matched on these hosts.')
+        lines.push('    No matching utilization items on these hosts.')
       }
     }
 
@@ -1628,7 +1691,6 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     contextMeta,
     contextPreview: { zabbix: preview },
     queryContext: { topic: 'zabbix', hostname: hostFilter || undefined, isFollowUp: ctx?.isFollowUp },
-    skipLlmAnalysis: Boolean(cpuMemoryQuery && hostFilter),
   }
 }
 
