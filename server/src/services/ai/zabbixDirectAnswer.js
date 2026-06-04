@@ -52,6 +52,10 @@ export function extractIpv4FromThread(text) {
   const t = String(text || '')
   const hostFilter = t.match(/\bHost filter:\s*((?:\d{1,3}\.){3}\d{1,3})\b/i)
   if (hostFilter) return hostFilter[1]
+  const utilTitle = t.match(/\b(?:Memory|CPU)\s+utilization\s*—\s*((?:\d{1,3}\.){3}\d{1,3})\b/i)
+  if (utilTitle) return utilTitle[1]
+  const utilTitleBoth = t.match(/\bCPU \/ memory utilization\s*—\s*((?:\d{1,3}\.){3}\d{1,3})\b/i)
+  if (utilTitleBoth) return utilTitleBoth[1]
   const analysis = t.match(/\bdevice analysis\s*—\s*((?:\d{1,3}\.){3}\d{1,3})\b/i)
   if (analysis) return analysis[1]
   const iface = t.match(/\bInterface IPs:\s*((?:\d{1,3}\.){3}\d{1,3})\b/i)
@@ -81,15 +85,17 @@ export function resolveInfraHostFilter(question, ctx = null) {
       host: extractInfraHostName(q) || null,
     }
   }
+  const inheritZabbixThread = ctx?.isFollowUp
+    || (ctx?.priorTopic === 'zabbix' && wantsCpuMemoryUtil(q))
   const ip = extractIpv4(q)
     || ctx?.ip
-    || (ctx?.isFollowUp ? extractIpv4FromThread(ctx?.threadText) : null)
-    || (ctx?.isFollowUp ? extractIpv4FromThread(ctx?.priorAssistant) : null)
-    || (ctx?.isFollowUp ? extractIpv4FromThread(ctx?.priorUser) : null)
+    || (inheritZabbixThread ? extractIpv4FromThread(ctx?.threadText) : null)
+    || (inheritZabbixThread ? extractIpv4FromThread(ctx?.priorAssistant) : null)
+    || (inheritZabbixThread ? extractIpv4FromThread(ctx?.priorUser) : null)
 
   let host = extractInfraHostName(q)
     || extractZabbixHostFromThread(q)
-  if (!host && ctx?.isFollowUp) {
+  if (!host && inheritZabbixThread) {
     host = ctx?.infraHost
       || ctx?.zabbixHost
       || extractInfraHostFromThread(ctx?.priorUser)
@@ -100,7 +106,7 @@ export function resolveInfraHostFilter(question, ctx = null) {
       || extractZabbixHostFromThread(ctx?.priorUser)
   }
 
-  const wantsHostFromCtx = ctx?.isFollowUp && host && (
+  const wantsHostFromCtx = inheritZabbixThread && host && (
     /\b(same|this|that|it|there|device|host|firewall|fortigate|vpn|tunnel|problem|issue|explain|why|what|how|more|status|bandwidth|ping|interface|zabbix|available|overview|detailed|check)\b/i.test(q)
     || /\b(available in zabbix|from zabbix|in zabbix)\b/i.test(q)
   )
@@ -227,7 +233,7 @@ export function wantsCpuMemoryUtil(question) {
   const q = String(question || '')
   if (!/\b(cpu|memory|mem|ram)\b/i.test(q)) return false
   if (/\b(bandwidth|traffic|throughput|interface|net\.if|bits\s*received|bits\s*sent)\b/i.test(q)) return false
-  return /\b(utiliz|utilisation|usage|used|load|percent|performance|\%)\b/i.test(q)
+  return /\b(utilization|utilisation|usage|used|load|percent|performance|\%)\b/i.test(q)
     || Boolean(extractIpv4(q))
 }
 
@@ -314,6 +320,13 @@ export function isZabbixQuestion(question, ctx = null) {
   if (isClarificationPhrase(q)) return false
   if (wantsZabbixAlertsQuery(q)) return true
   if (wantsCpuMemoryUtil(q) && extractIpv4(q)) return true
+  if (ctx?.priorTopic === 'zabbix' && wantsCpuMemoryUtil(q)) {
+    const threadIp = ctx?.ip
+      || extractIpv4FromThread(ctx?.threadText)
+      || extractIpv4FromThread(ctx?.priorAssistant)
+      || extractIpv4FromThread(ctx?.priorUser)
+    if (threadIp) return true
+  }
   if (wantsDiskUsage(q) && (extractHostGroupFilter(q, ctx) || /\b(server|servers|zabbix|infra|host|group)\b/i.test(q))) return true
   if (wantsHostGroupCheck(q) && extractIpv4(q)) return true
   if (wantsBandwidthUtil(q, ctx) && extractHostGroupFilter(q, ctx)) return true

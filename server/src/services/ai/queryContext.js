@@ -1,6 +1,6 @@
 import { isXdrQuestion } from './xdrDirectAnswer.js'
 import { isGeoConnectionQuery, isStoreConnectivityFollowUp, isStoreMonitorConnectivityQuery } from './geoConnectionQuery.js'
-import { isNetworkInfraQuery, isZabbixQuestion, isInfraDeviceStatusQuery, extractHostGroupFilter, extractHostGroupFromThread, extractIpv4, extractIpv4FromThread, extractZabbixHostFromThread, extractInfraHostName, extractInfraHostFromThread } from './zabbixDirectAnswer.js'
+import { isNetworkInfraQuery, isZabbixQuestion, isInfraDeviceStatusQuery, extractHostGroupFilter, extractHostGroupFromThread, extractIpv4, extractIpv4FromThread, extractZabbixHostFromThread, extractInfraHostName, extractInfraHostFromThread, wantsCpuMemoryUtil } from './zabbixDirectAnswer.js'
 import { isFirewallQuestion, isSocReportQuery } from './socDirectAnswer.js'
 import { isDisconnectionLogQuery } from './nocDirectAnswer.js'
 import { isRcaQuery } from './rcaAnalysis.js'
@@ -89,7 +89,17 @@ function sameSubjectAsPrior(currentQuestion, priorUser, priorAssistant) {
   const priorHost = extractStoreHostname(priorUser) || extractStoreHostname(priorAssistant)
   if (curIp && priorIp) return curIp === priorIp
   if (curHost && priorHost) return curHost === priorHost
+  if (!curIp && !curHost && (priorIp || priorHost)) {
+    if (/\b(cpu|memory|mem|ram|disk|bandwidth|ping|utilization|utilisation|interface|traffic)\b/i.test(currentQuestion)) {
+      return true
+    }
+  }
   return false
+}
+
+function isZabbixResourceFollowUp(question, priorTopic) {
+  if (priorTopic !== 'zabbix') return false
+  return /\b(cpu|memory|mem|ram|disk|bandwidth|ping|utilization|utilisation|interface|traffic)\b/i.test(String(question || ''))
 }
 
 function isXdrIntent(q) {
@@ -149,6 +159,7 @@ export function resolveQueryContext(messages, opts = {}) {
   const isFollowUp = inheritsThread && (
     isFollowUpPhrasing(currentQuestion)
     || storeConnContinuation
+    || (priorTopic === 'zabbix' && isZabbixResourceFollowUp(currentQuestion, priorTopic))
     || (
       priorTopic
       && sameSubject
@@ -160,9 +171,14 @@ export function resolveQueryContext(messages, opts = {}) {
 
   const xdrIntent = isXdrIntent(currentQuestion)
 
+  const zabbixMetricContinuation = priorTopic === 'zabbix'
+    && isZabbixResourceFollowUp(currentQuestion, priorTopic)
+
   const ip = extractIpv4(currentQuestion)
     || (!xdrIntent && isFollowUp ? extractIpv4FromThread(threadText) : null)
+    || (!xdrIntent && zabbixMetricContinuation ? extractIpv4FromThread(threadText) : null)
     || (!xdrIntent && isFollowUp ? extractIpv4FromThread(priorAssistant) : null)
+    || (!xdrIntent && zabbixMetricContinuation ? extractIpv4FromThread(priorAssistant) : null)
 
   const zabbixHost = !xdrIntent
     ? (
@@ -211,6 +227,7 @@ export function resolveQueryContext(messages, opts = {}) {
     || isStoreConnectivityFollowUp(currentQuestion, storeConnCtx)) {
     topic = 'store'
   }
+  if (!topic && zabbixMetricContinuation && ip) topic = 'zabbix'
   if (!topic && xdrIntent) topic = 'xdr'
   if (!topic && chatMode === 'rca' && !isStoreMonitorIssuesQuery(currentQuestion)) topic = 'rca'
   if (!topic && chatMode === 'details' && hostname) topic = 'hostname'
@@ -294,7 +311,7 @@ export function resolveQueryContext(messages, opts = {}) {
 /** @returns {QueryTopic|null} */
 function inferTopicFromAssistant(text) {
   const t = String(text || '')
-  if (/Disk usage report|Zabbix network|Infra Zabbix|Store Zabbix|Host group:|Host filter:|device analysis|── AI Analysis ──/i.test(t)) return 'zabbix'
+  if (/Disk usage report|Zabbix network|Infra Zabbix|Store Zabbix|Host group:|Host filter:|device analysis|── AI Analysis ──|(?:Memory|CPU)\s+utilization\s*—|CPU \/ memory utilization\s*—/i.test(t)) return 'zabbix'
   if (/Store hostname report|Hostname report|Metrics chart/i.test(t)) return 'hostname'
   if (/App Crashes|Influx crash|crash events/i.test(t)) return 'crash'
   if (/SentinelOne XDR|PowerQuery used/i.test(t)) return 'xdr'
@@ -314,7 +331,7 @@ function detectTopicFromQuestion(q, appName, ctx = {}) {
   if (isRcaQuery(text, ctx)) return 'rca'
   if (isXdrQuestion(text) || isGeoConnectionQuery(text)) return 'xdr'
   if (isSocReportQuery(text)) return 'soc'
-  if (isZabbixQuestion(text)) return 'zabbix'
+  if (isZabbixQuestion(text, ctx)) return 'zabbix'
   if (isInfraDeviceStatusQuery(text)) return 'zabbix'
   if (isDisconnectionLogQuery(text)) return 'noc'
   if (isFirewallQuestion(text)) return 'soc'
@@ -382,6 +399,7 @@ function pickDirectHandler({ currentQuestion, topic, priorTopic, priorAssistant,
   if (hostnameDetail) return 'hostname'
 
   if (isFollowUp && priorTopic === 'xdr' && !storeMonitorIntent) return 'xdr'
+  if (isFollowUp && priorTopic === 'zabbix' && isZabbixResourceFollowUp(q, priorTopic) && ip) return 'zabbix'
   if (
     !storeMonitorIntent && (
       topic === 'crash'

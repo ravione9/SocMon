@@ -88,6 +88,8 @@ export async function appendLlmAnalysis(question, directPayload, chatMode = 'mon
     '',
     'STRICT RULES:',
     '- Facts (counts, hostnames, IPs, metrics, problem names) must come ONLY from the LIVE DATA block — never invent.',
+    '- Do not cite metrics from conversation history unless they also appear in LIVE DATA for this turn.',
+    '- If the user asked only for memory, do not discuss CPU unless LIVE DATA includes CPU for this turn (and vice versa).',
     '- If the data does not contain what the user asked for (e.g. they asked for CPU% but only availability is in the data), say so clearly and tell them how to get it.',
     '- Do not repeat the raw data back verbatim. Interpret and answer.',
     '- Be concise and ops-focused.',
