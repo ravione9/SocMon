@@ -222,6 +222,15 @@ export function wantsDiskUsage(question) {
     && /\b(usage|utilization|utilisation|util|report|used|free|capacity|full)\b/i.test(q)
 }
 
+/** Host CPU / RAM % from Zabbix — not interface bandwidth. */
+export function wantsCpuMemoryUtil(question) {
+  const q = String(question || '')
+  if (!/\b(cpu|memory|mem|ram)\b/i.test(q)) return false
+  if (/\b(bandwidth|traffic|throughput|interface|net\.if|bits\s*received|bits\s*sent)\b/i.test(q)) return false
+  return /\b(utiliz|utilisation|usage|used|load|percent|performance|\%)\b/i.test(q)
+    || Boolean(extractIpv4(q))
+}
+
 export function wantsHostGroupCheck(question) {
   const q = String(question || '')
   if (/\b(belong(?:s|ing)?\s+to|belonging\s+to|member\s+of|in\s+(?:the\s+)?group|host\s*group)\b/i.test(q)) {
@@ -293,6 +302,7 @@ export function isZabbixQuestion(question, ctx = null) {
   if (isSocReportQuery(q)) return false
   if (isClarificationPhrase(q)) return false
   if (wantsZabbixAlertsQuery(q)) return true
+  if (wantsCpuMemoryUtil(q) && extractIpv4(q)) return true
   if (wantsDiskUsage(q) && (extractHostGroupFilter(q, ctx) || /\b(server|servers|zabbix|infra|host|group)\b/i.test(q))) return true
   if (wantsHostGroupCheck(q) && extractIpv4(q)) return true
   if (wantsBandwidthUtil(q, ctx) && extractHostGroupFilter(q, ctx)) return true
@@ -455,6 +465,79 @@ const DISK_KEY_RES = [
 ]
 const DISK_INVERT_KEY_RE = /pfree/i
 
+const CPU_KEY_RES = [
+  /^system\.cpu\.util(\b|\[)/i,
+  /^system\.cpu\.utilization(\b|\[)/i,
+  /^perf_counter\[.*Processor.*Time/i,
+  /^vmware\.vm\.cpu\.usage\.perf/i,
+  /^vmware\.hv\.cpu\.usage\.perf/i,
+  /^vmware\.vm\.cpu\.utilization/i,
+  /^vmware\.hv\.cpu\.utilization/i,
+]
+
+const MEMORY_KEY_RES = [
+  /^vm\.memory\.utilization(\b|\[)/i,
+  /^vm\.memory\.util(\b|\[)/i,
+  /^vm\.memory\.size\[pused/i,
+  /^vmware\.vm\.memory\.usage/i,
+  /^vmware\.hv\.memory\.usage/i,
+  /^vmware\.vm\.memory\.utilization/i,
+  /^vmware\.hv\.memory\.utilization/i,
+  /^vm\.memory\.size\[pavailable/i,
+]
+const MEMORY_INVERT_KEY_RE = /pavailable/i
+
+function readPctUtilItem(it, inverted = false) {
+  const u = String(it.units || '').trim()
+  if (u !== '%' && !/%/.test(u)) return null
+  const v = parseFloat(it.lastvalue)
+  if (!Number.isFinite(v)) return null
+  const pct = inverted ? 100 - v : v
+  return Math.round(Math.max(0, Math.min(100, pct)) * 10) / 10
+}
+
+function pickHostPctMetric(itemRows, hostid, patterns, invertRe = null) {
+  for (const re of patterns) {
+    let best = null
+    for (const it of itemRows) {
+      if (String(it.hostid) !== String(hostid)) continue
+      const key = String(it.key_ || '')
+      if (!re.test(key)) continue
+      const inverted = invertRe && invertRe.test(key)
+      const pct = readPctUtilItem(it, inverted)
+      if (pct == null) continue
+      const clock = Number(it.lastclock) || 0
+      if (!best || clock >= best.clock) {
+        best = {
+          percent: pct,
+          itemName: it.name || key,
+          key,
+          clock,
+        }
+      }
+    }
+    if (best) return best
+  }
+  return null
+}
+
+async function fetchCpuMemoryMetrics(zabbixRpc, hostids) {
+  if (!hostids.length) return { byHost: {} }
+  const itemRows = await fetchUtilizationItems(zabbixRpc, hostids)
+  const byHost = {}
+  for (const hid of hostids) {
+    const cpu = pickHostPctMetric(itemRows, hid, CPU_KEY_RES)
+    const memory = pickHostPctMetric(itemRows, hid, MEMORY_KEY_RES, MEMORY_INVERT_KEY_RE)
+    if (cpu || memory) byHost[hid] = { cpu, memory }
+  }
+  return { byHost }
+}
+
+function formatMetricClock(clock) {
+  if (!clock) return '—'
+  return formatPortalTimestamp(Number(clock) * 1000)
+}
+
 function extractMountFromKey(key) {
   const m = String(key || '').match(/\[\s*([^,\]]+)/)
   return m ? m[1].replace(/^"|"$/g, '') : ''
@@ -583,6 +666,9 @@ export function wantsPingStatus(question) {
 
 export function wantsBandwidthUtil(question, ctx = null) {
   const q = String(question || '')
+  if (wantsCpuMemoryUtil(q) && !/\b(bandwidth|traffic|throughput|interface|port|net\.if|bits\s*received|bits\s*sent)\b/i.test(q)) {
+    return false
+  }
   if (!/\b(bandwidth|utilization|utilisation|traffic|throughput|bits\s*received|bits\s*sent|interface\s+usage|interface\s+bandwidth)\b/i.test(q)) {
     return false
   }
@@ -600,6 +686,7 @@ export function prefersLlmSynthesis(question, ctx = null) {
   // Bandwidth / interface / IP queries are now handled by the direct path
   // (buildZabbixInfraContext returns named per-port Mbps data). No LLM needed.
   if (wantsBandwidthUtil(q)) return false
+  if (wantsCpuMemoryUtil(q)) return false
   if (wantsDiskUsage(q)) return false
   if (extractHostGroupFilter(q)) return false
   if (extractIpv4(q)) return false
@@ -906,7 +993,7 @@ function classifyHost(h) {
 
 const SWITCH_DEVICE_TYPES = new Set(['cisco', 'network', 'juniper'])
 
-async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '', hostGroupFilter = '', includePing = false, includeBandwidth = false, includeDisk = false, problemLimit = 12 } = {}) {
+async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '', hostGroupFilter = '', includePing = false, includeBandwidth = false, includeDisk = false, includeCpuMemory = false, problemLimit = 12 } = {}) {
   const { isZabbixConfigured, zabbixRpc, getUrl } = client
   if (!isZabbixConfigured()) return { configured: false }
 
@@ -996,6 +1083,10 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
     if (includeDisk && hostids.length) {
       diskMetrics = await fetchDiskMetrics(zabbixRpc, hostids)
     }
+    let cpuMemoryMetrics = null
+    if (includeCpuMemory && hostids.length) {
+      cpuMemoryMetrics = await fetchCpuMemoryMetrics(zabbixRpc, hostids)
+    }
     let problemCount = 0
     let problems = []
     if (hostids.length) {
@@ -1051,6 +1142,7 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
       pingMetrics,
       interfaceMetrics,
       diskMetrics,
+      cpuMemoryMetrics,
       hostGroupFilter: groupName || null,
       hostGroupFound: groupMeta?.groupFound ?? (groupName ? null : undefined),
       matchedHosts: filtered.map(h => ({
@@ -1095,12 +1187,13 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     || (ctx?.isFollowUp ? extractInfraHostFromThread(ctx?.priorUser) : null)
     || (ctx?.isFollowUp ? extractInfraHostFromThread(ctx?.threadText) : null)
   const alertsQuery = wantsZabbixAlertsQuery(question)
+  const cpuMemoryQuery = wantsCpuMemoryUtil(question)
   const bandwidthQuery = wantsBandwidthUtil(question, ctx)
   let hostGroupFilter = extractHostGroupFilter(question, ctx) || ctx?.hostGroup
   if (ip && hostGroupFilter && (hostGroupFilter === ip || IPV4_RE.test(hostGroupFilter))) {
     hostGroupFilter = ''
   }
-  if (bandwidthQuery && ip) {
+  if ((bandwidthQuery || cpuMemoryQuery) && ip) {
     hostGroupFilter = ''
   }
   if (alertsQuery && !hasExplicitHostGroupInQuestion(question)) {
@@ -1122,8 +1215,9 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
   const wantsIsp = /\bisp\b/i.test(question)
   const deepAnalysis = wantsDeepInfraFetch(question, ctx?.chatMode, { ...ctx, zabbixHost: zabbixHostFromCtx || infraHost })
     && Boolean(ip || hostFilter)
-  const includePing = wantsPingStatus(question) || deepAnalysis
-  const includeBandwidth = bandwidthQuery || deepAnalysis
+  const includePing = wantsPingStatus(question) || (deepAnalysis && !cpuMemoryQuery)
+  const includeBandwidth = (bandwidthQuery || (deepAnalysis && !cpuMemoryQuery)) && !cpuMemoryQuery
+  const includeCpuMemory = cpuMemoryQuery || (deepAnalysis && /\b(cpu|memory|mem|ram)\b/i.test(question))
   const problemLimit = alertsQuery ? 25 : (deepAnalysis ? 50 : 12)
 
   const targets = []
@@ -1150,6 +1244,7 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
         includeBandwidth,
         problemLimit,
         includeDisk,
+        includeCpuMemory,
       }),
     }))),
     wantsIsp && allowedPages.includes('storeMonitor') && isInfluxStoreConfigured()
@@ -1218,11 +1313,14 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
   const filterLabel = deviceTypeFilter ? TYPE_LABEL[deviceTypeFilter] || deviceTypeFilter : null
   const diskReport = Boolean(scopedHostGroup && includeDisk && wantsDiskUsage(question))
   const bandwidthReport = Boolean(scopedHostGroup && includeBandwidth)
-  const ipBandwidthReport = Boolean(bandwidthQuery && hostFilter && !scopedHostGroup)
+  const ipBandwidthReport = Boolean(bandwidthQuery && hostFilter && !scopedHostGroup && !cpuMemoryQuery)
+  const ipCpuMemoryReport = Boolean(cpuMemoryQuery && hostFilter && !scopedHostGroup)
 
   const lines = [
     alertsQuery
       ? `Infra Zabbix — active alerts & problems (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
+      : ipCpuMemoryReport
+        ? `CPU / memory utilization — ${hostFilter} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
       : ipBandwidthReport
         ? `Interface bandwidth — ${hostFilter} (LIVE — fetched ${formatPortalTimestamp(fetchedAt)})`
       : diskReport
@@ -1370,6 +1468,30 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
       }
     }
 
+    if (includeCpuMemory && data.cpuMemoryMetrics?.byHost) {
+      const cm = data.cpuMemoryMetrics.byHost
+      lines.push('  CPU / memory utilization (Zabbix % items):')
+      const hostsForMetrics = data.matchedHosts?.length ? data.matchedHosts : data.hosts
+      for (const h of hostsForMetrics) {
+        const hid = String(h.hostid || '')
+        const m = cm[hid]
+        lines.push(`    ${h.name}:`)
+        if (m?.cpu) {
+          lines.push(`      CPU: ${m.cpu.percent}% · ${m.cpu.itemName} · @ ${formatMetricClock(m.cpu.clock)}`)
+        } else {
+          lines.push('      CPU: no % item found (check Zabbix agent/template on this host)')
+        }
+        if (m?.memory) {
+          lines.push(`      Memory: ${m.memory.percent}% · ${m.memory.itemName} · @ ${formatMetricClock(m.memory.clock)}`)
+        } else {
+          lines.push('      Memory: no % item found (check Zabbix agent/template on this host)')
+        }
+      }
+      if (!Object.keys(cm).length) {
+        lines.push('    No CPU/memory utilization items matched on these hosts.')
+      }
+    }
+
     if (includeBandwidth && data.interfaceMetrics?.byHost) {
       const ifm = data.interfaceMetrics.byHost
       const nameMap = data.interfaceMetrics.indexToNameByHost || {}
@@ -1506,6 +1628,7 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
     contextMeta,
     contextPreview: { zabbix: preview },
     queryContext: { topic: 'zabbix', hostname: hostFilter || undefined, isFollowUp: ctx?.isFollowUp },
+    skipLlmAnalysis: Boolean(cpuMemoryQuery && hostFilter),
   }
 }
 

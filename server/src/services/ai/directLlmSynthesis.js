@@ -74,6 +74,7 @@ function buildLlmMessages(conversationHistory, question, ctx = null) {
  */
 export async function appendLlmAnalysis(question, directPayload, chatMode = 'monitor', conversationHistory = [], ctx = null) {
   if (!directPayload?.content) return { payload: directPayload, llmMs: 0 }
+  if (directPayload.skipLlmAnalysis) return { payload: directPayload, llmMs: 0 }
 
   const activeReady = getAIProviderConfigStatus().rows?.find(r => r.key === 'active')?.ok
   if (!activeReady) return { payload: directPayload, llmMs: 0 }
