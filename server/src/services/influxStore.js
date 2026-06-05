@@ -542,6 +542,9 @@ async function _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, 
     s.hadHeartbeat = true
     s.hostname = row.hostname || s.hostname
     s.serial = row.serial || s.serial
+    // A heartbeat (even with value=0) proves the PS agent is running — count as activity.
+    // This rescues stores whose internet check fails (online=0) but agent is clearly alive.
+    if (t > 0 && (!s._latestActivityTs || t > s._latestActivityTs)) s._latestActivityTs = t
   }
 
   // Placeholder values written by the PS agent when detection fails — not real vendors
@@ -697,6 +700,7 @@ export async function fetchStoreIssuesLite(staleMinutes = 15, metricRange = '-12
     s.hadHeartbeat = true
     s.hostname = row.hostname || s.hostname
     s.serial = row.serial || s.serial
+    if (t > 0 && (!s._latestActivityTs || t > s._latestActivityTs)) s._latestActivityTs = t
   }
 
   for (const row of connectivity) {
