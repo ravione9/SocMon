@@ -320,11 +320,13 @@ function ensureStore(map, row) {
 
 function detectIssues(store, staleMinutes = 15) {
   const issues = []
-  // Only flag offline if we have never seen a heartbeat in the stale window.
-  // Don't penalise stores that simply haven't been discovered via heartbeat yet.
-  if (store.hadHeartbeat && !store.online) {
-    const staleLabel = staleMinutes >= 60 ? `${Math.round(staleMinutes / 60)} hour` : `${staleMinutes} min`
-    issues.push({ severity: 'critical', code: 'offline', message: `No heartbeat in last ${staleLabel}` })
+  // Only flag offline if the store has no recent activity at all.
+  // onlineReason='activity' means heartbeat is stale but other metrics are live — not truly offline.
+  if (!store.online && store.onlineReason !== 'activity') {
+    if (store.hadHeartbeat) {
+      const staleLabel = staleMinutes >= 60 ? `${Math.round(staleMinutes / 60)} hour` : `${staleMinutes} min`
+      issues.push({ severity: 'critical', code: 'offline', message: `No heartbeat in last ${staleLabel}` })
+    }
   }
   if (store.connState === 'isp_down') issues.push({ severity: 'critical', code: 'isp_down', message: 'ISP / internet down' })
   if (store.connState === 'hotspot' || store.isHotspot) issues.push({ severity: 'high', code: 'hotspot', message: 'Running on mobile hotspot' })
@@ -530,6 +532,15 @@ async function _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, 
     return v && !VENDOR_FALLBACKS.has(String(v).toLowerCase().trim())
   }
 
+  // Helper: bump the "latest any-data" timestamp for a store.
+  // Used below so a store is considered online if ANY metric arrived within staleMs,
+  // even if its heartbeat is stale (e.g. heartbeat module crashed but other probes run fine).
+  function bumpActivity(s, row) {
+    if (!row._time) return
+    const t = new Date(row._time).getTime()
+    if (t > 0 && (!s._latestActivityTs || t > s._latestActivityTs)) s._latestActivityTs = t
+  }
+
   for (const row of connectivity) {
     const s = ensureStore(stores, row)
     if (!s) continue
@@ -554,6 +565,7 @@ async function _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, 
     if (row._field === 'is_hotspot') s.isHotspot = String(row._value).toLowerCase() === 'true'
     if (row._field === 'is_fortinet') s.isFortinet = String(row._value).toLowerCase() === 'true'
     if (!s.lastSeen && row._time) s.lastSeen = rowTime(row)
+    bumpActivity(s, row)
   }
 
   for (const row of pingRows) {
@@ -565,6 +577,7 @@ async function _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, 
     if (row._field === 'packet_loss_pct') s.ping[target].packetLossPct = num(row._value)
     if (row._field === 'min_ms') s.ping[target].minMs = num(row._value)
     if (row._field === 'max_ms') s.ping[target].maxMs = num(row._value)
+    bumpActivity(s, row)
   }
 
   for (const row of dnsRows) {
@@ -574,6 +587,7 @@ async function _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, 
     if (!s.dns[domain]) s.dns[domain] = {}
     if (row._field === 'response_ms') s.dns[domain].responseMs = num(row._value)
     if (row._field === 'success') s.dns[domain].success = bool(row._value)
+    bumpActivity(s, row)
   }
 
   for (const row of httpRows) {
@@ -584,6 +598,7 @@ async function _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, 
     if (row._field === 'response_ms') s.http[url].responseMs = num(row._value)
     if (row._field === 'status_code') s.http[url].statusCode = num(row._value)
     if (row._field === 'success') s.http[url].success = bool(row._value)
+    bumpActivity(s, row)
   }
 
   for (const row of systemRows) {
@@ -591,6 +606,7 @@ async function _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, 
     if (!s) continue
     if (row._field === 'cpu_usage_pct') s.cpuPct = num(row._value)
     if (row._field === 'mem_used_pct') s.memPct = num(row._value)
+    bumpActivity(s, row)
   }
 
   for (const row of speedRows) {
@@ -598,6 +614,17 @@ async function _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, 
     if (!s) continue
     if (row._field === 'download_mbps') s.downloadMbps = num(row._value)
     if (row._field === 'upload_mbps') s.uploadMbps = num(row._value)
+    bumpActivity(s, row)
+  }
+
+  // Secondary online heuristic: if heartbeat is stale but ANY other metric arrived
+  // within staleMs, the agent is clearly running — treat the store as online.
+  // This prevents false "OFFLINE" when only the heartbeat module has an issue.
+  for (const [, s] of stores) {
+    if (!s.online && s._latestActivityTs && now - s._latestActivityTs <= staleMs) {
+      s.online = true
+      s.onlineReason = 'activity'  // heartbeat stale but metrics active
+    }
   }
 
   const list = [...stores.values()]
@@ -664,6 +691,19 @@ export async function fetchStoreIssuesLite(staleMinutes = 15, metricRange = '-12
     if (row._field === 'is_hotspot') s.isHotspot = String(row._value).toLowerCase() === 'true'
     if (row._field === 'is_fortinet') s.isFortinet = String(row._value).toLowerCase() === 'true'
     if (!s.lastSeen && row._time) s.lastSeen = rowTime(row)
+    // Track latest connectivity data time for activity heuristic
+    if (row._time) {
+      const t = new Date(row._time).getTime()
+      if (t > 0 && (!s._latestActivityTs || t > s._latestActivityTs)) s._latestActivityTs = t
+    }
+  }
+
+  // Secondary online heuristic: recent connectivity data → store is alive
+  for (const [, s] of stores) {
+    if (!s.online && s._latestActivityTs && now - s._latestActivityTs <= staleMs) {
+      s.online = true
+      s.onlineReason = 'activity'
+    }
   }
 
   const list = [...stores.values()]
