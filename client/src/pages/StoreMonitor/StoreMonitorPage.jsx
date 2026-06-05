@@ -1442,17 +1442,20 @@ export default function StoreMonitorPage() {
       {/* ══════════ NOC OVERVIEW ══════════ */}
       {tab==='noc' && (
         <>
-          {/* top KPIs */}
+          {/* top KPIs — clickable: jumps to Stores tab with filter pre-applied */}
           <div className="sm-g4 sm-section-mb">
             {[
-              { label:'Total Stores',   val: summary?.total||0,   color:'var(--text)' },
-              { label:'Online',         val: summary?.online||0,  color:'var(--green)', sub:`${pct(summary?.online||0,summary?.total||1).toFixed(1)}% uptime` },
-              { label:'Offline',        val: summary?.offline||0, color:'var(--red)',   sub:`${pct(summary?.offline||0,summary?.total||1).toFixed(1)}% down` },
-              { label:'With Issues',    val: summary?.withIssues||0, color:'var(--amber)' },
-              { label:'Avg Latency',    val: summary?.avgPingMs!=null?`${summary.avgPingMs} ms`:'—', color:'var(--text)' },
-              { label:'Avg Download',   val: summary?.avgDownloadMbps!=null?`${summary.avgDownloadMbps} Mbps`:'—', color:'var(--text)' },
+              { label:'Total Stores',  val: summary?.total||0,       color:'var(--text)',  action: () => { setStatusFilter(''); setIssuesOnly(false); setTab('stores') } },
+              { label:'Online',        val: summary?.online||0,       color:'var(--green)', sub:`${pct(summary?.online||0,summary?.total||1).toFixed(1)}% uptime`, action: () => { setStatusFilter('online'); setIssuesOnly(false); setTab('stores') } },
+              { label:'Offline',       val: summary?.offline||0,      color:'var(--red)',   sub:`${pct(summary?.offline||0,summary?.total||1).toFixed(1)}% down`, action: () => { setStatusFilter('offline'); setIssuesOnly(false); setTab('stores') } },
+              { label:'With Issues',   val: summary?.withIssues||0,   color:'var(--amber)', action: () => { setStatusFilter(''); setIssuesOnly(true); setTab('stores') } },
+              { label:'Avg Latency',   val: summary?.avgPingMs!=null?`${summary.avgPingMs} ms`:'—', color:'var(--text)', action: () => { setStatusFilter(''); setIssuesOnly(false); setTab('stores') } },
+              { label:'Avg Download',  val: summary?.avgDownloadMbps!=null?`${summary.avgDownloadMbps} Mbps`:'—', color:'var(--text)', action: () => { setStatusFilter(''); setIssuesOnly(false); setTab('stores') } },
             ].map((k) => (
-              <div key={k.label} className="sm-kpi">
+              <div key={k.label} className="sm-kpi" onClick={k.action}
+                style={{cursor:'pointer', transition:'box-shadow .15s, transform .15s'}}
+                onMouseEnter={(e)=>{ e.currentTarget.style.boxShadow='0 0 0 2px var(--accent)40'; e.currentTarget.style.transform='translateY(-1px)' }}
+                onMouseLeave={(e)=>{ e.currentTarget.style.boxShadow=''; e.currentTarget.style.transform='' }}>
                 <div className="sm-kpi-label">{k.label}</div>
                 <div className="sm-kpi-val" style={{color:k.color}}>{k.val}</div>
                 {k.sub && <div className="sm-kpi-sub">{k.sub}</div>}
@@ -1460,25 +1463,35 @@ export default function StoreMonitorPage() {
             ))}
           </div>
 
-          {/* group cards */}
+          {/* group cards — click total/online/offline to jump to Stores tab filtered by group + status */}
           <div className="sm-g4 sm-section-mb">
-            {groupSummary.map((g) => (
+            {groupSummary.map((g) => {
+              const goGroup = (status, issues) => {
+                setGroupFilter(g.id); setChartGroupFilter(''); setStatusFilter(status||''); setIssuesOnly(!!issues); setTab('stores')
+              }
+              return (
               <div key={g.id} className="sm-group-card" style={{borderLeft:`3px solid ${g.color}`}}>
                 <div className="sm-group-card-hd">
-                  <div className="sm-group-name" style={{color:g.color}}>{g.icon} {g.id}</div>
+                  <div className="sm-group-name" style={{color:g.color,cursor:'pointer'}} onClick={()=>goGroup('',false)} title="View all stores in this group">{g.icon} {g.id}</div>
                   <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>{g.health.toFixed(0)}% healthy</span>
                 </div>
                 <div className="sm-group-stats">
-                  <div className="sm-group-stat"><div className="sm-group-stat-val">{g.total}</div><div className="sm-group-stat-label">Total</div></div>
-                  <div className="sm-group-stat"><div className="sm-group-stat-val" style={{color:'var(--green)'}}>{g.online}</div><div className="sm-group-stat-label">Online</div></div>
-                  <div className="sm-group-stat"><div className="sm-group-stat-val" style={{color:'var(--red)'}}>{g.total-g.online}</div><div className="sm-group-stat-label">Offline</div></div>
+                  <div className="sm-group-stat" style={{cursor:'pointer'}} onClick={()=>goGroup('',false)} title="All stores">
+                    <div className="sm-group-stat-val">{g.total}</div><div className="sm-group-stat-label">Total</div>
+                  </div>
+                  <div className="sm-group-stat" style={{cursor:'pointer'}} onClick={()=>goGroup('online',false)} title="Online stores">
+                    <div className="sm-group-stat-val" style={{color:'var(--green)'}}>{g.online}</div><div className="sm-group-stat-label">Online</div>
+                  </div>
+                  <div className="sm-group-stat" style={{cursor:'pointer'}} onClick={()=>goGroup('offline',false)} title="Offline stores">
+                    <div className="sm-group-stat-val" style={{color:'var(--red)'}}>{g.total-g.online}</div><div className="sm-group-stat-label">Offline</div>
+                  </div>
                 </div>
                 <HealthBar pct={g.health}/>
-                <div style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                <div style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',cursor:'pointer'}} onClick={()=>goGroup('',true)} title="Stores with issues">
                   {g.issues} issue store{g.issues!==1?'s':''} · avg ping {g.avgPing!=null?`${g.avgPing.toFixed(0)}ms`:'—'}
                 </div>
               </div>
-            ))}
+            )})}
           </div>
 
           {/* charts row */}
