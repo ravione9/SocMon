@@ -57,6 +57,7 @@ const REPORT_TYPES = [
 ]
 
 const TIME_RANGES = [
+  { key: '-15m', label: '15 Min' },
   { key: '-1h',  label: '1 Hour' },
   { key: '-3h',  label: '3 Hours' },
   { key: '-6h',  label: '6 Hours' },
@@ -65,7 +66,7 @@ const TIME_RANGES = [
   { key: '-2d',  label: '2 Days' },
   { key: '-7d',  label: '7 Days' },
 ]
-const HISTORY_SECS = { '-1h': 3600, '-3h': 10800, '-6h': 21600, '-12h': 43200, '-24h': 86400, '-2d': 172800, '-7d': 604800, '-30d': 30 * 86400 }
+const HISTORY_SECS = { '-15m': 900, '-1h': 3600, '-3h': 10800, '-6h': 21600, '-12h': 43200, '-24h': 86400, '-2d': 172800, '-7d': 604800, '-30d': 30 * 86400 }
 
 function toLocalInput(date) {
   const d = date instanceof Date ? date : new Date(date)
@@ -563,7 +564,7 @@ export default function StoreMonitorPage() {
   const theme      = useThemeStore((s) => s.theme)
   const tc         = useMemo(() => getThemeCssColors(theme), [theme])
   const [tab, setTabRaw] = useUrlTab('noc', TABS.map((t) => t.id), 'smtab')
-  const [range, setRange] = useState('-1h')
+  const [range, setRange] = useState('-15m')
   /* global custom time range */
   const _nowDef = new Date()
   const [globalCustom, setGlobalCustom] = useState({

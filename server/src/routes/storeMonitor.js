@@ -72,7 +72,7 @@ router.get('/meta', async (_req, res, next) => {
   }
 })
 
-const VALID_RANGES = new Set(['-1h', '-3h', '-6h', '-12h', '-24h', '-2d', '-7d'])
+const VALID_RANGES = new Set(['-15m', '-1h', '-3h', '-6h', '-12h', '-24h', '-2d', '-7d'])
 
 router.get('/overview', async (req, res, next) => {
   try {
