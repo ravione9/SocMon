@@ -328,7 +328,21 @@ function detectIssues(store, staleMinutes = 15) {
       issues.push({ severity: 'critical', code: 'offline', message: `No heartbeat in last ${staleLabel}` })
     }
   }
-  if (store.connState === 'isp_down') issues.push({ severity: 'critical', code: 'isp_down', message: 'ISP / internet down' })
+  // Detect if internet is actually reachable via HTTP/DNS probes.
+  // If HTTP returns 200 or DNS resolves, ICMP block is the likely cause of
+  // ping/isp_down failures — treat those as lower-severity ICMP-filtered events.
+  const httpWorks = Object.values(store.http).some((h) => h.success === true || (h.statusCode != null && h.statusCode >= 200 && h.statusCode < 400))
+  const dnsWorks  = Object.values(store.dns).some((d) => d.success === true)
+  const internetReachable = httpWorks || dnsWorks
+
+  if (store.connState === 'isp_down') {
+    if (internetReachable) {
+      // ICMP is blocked/filtered but HTTP/DNS confirm internet is up — downgrade
+      issues.push({ severity: 'warning', code: 'isp_down', message: 'Ping fails (ICMP blocked?) but HTTP & DNS reachable — likely ICMP filtering by ISP/router' })
+    } else {
+      issues.push({ severity: 'critical', code: 'isp_down', message: 'ISP / internet down' })
+    }
+  }
   if (store.connState === 'hotspot' || store.isHotspot) issues.push({ severity: 'high', code: 'hotspot', message: 'Running on mobile hotspot' })
   if (store.connState === 'no_connectivity') issues.push({ severity: 'high', code: 'no_connectivity', message: 'No network connectivity' })
 
@@ -338,9 +352,14 @@ function detectIssues(store, staleMinutes = 15) {
     const lossEntries = pingEntries.filter(([, p]) => p.packetLossPct != null)
     if (lossEntries.length && lossEntries.every(([, p]) => p.packetLossPct >= 5)) {
       const worst = lossEntries.reduce((a, b) => b[1].packetLossPct > a[1].packetLossPct ? b : a)
-      issues.push({ severity: 'high', code: 'packet_loss', message: `High packet loss to all targets (worst: ${worst[0]} ${worst[1].packetLossPct}%)` })
+      if (internetReachable) {
+        // 100% ICMP loss but HTTP/DNS work → ICMP filtered, not real packet loss
+        issues.push({ severity: 'warning', code: 'packet_loss', message: `ICMP filtered by ISP/router (${worst[0]}: ${worst[1].packetLossPct}% loss, but HTTP & DNS are healthy)` })
+      } else {
+        issues.push({ severity: 'high', code: 'packet_loss', message: `High packet loss to all targets (worst: ${worst[0]} ${worst[1].packetLossPct}%)` })
+      }
     }
-    const latEntries = pingEntries.filter(([, p]) => p.avgMs != null)
+    const latEntries = pingEntries.filter(([, p]) => p.avgMs != null && p.avgMs > 0)
     if (latEntries.length && latEntries.every(([, p]) => p.avgMs >= 200)) {
       const worst = latEntries.reduce((a, b) => b[1].avgMs > a[1].avgMs ? b : a)
       issues.push({ severity: 'warning', code: 'latency', message: `High latency to all targets (worst: ${worst[0]} ${worst[1].avgMs} ms)` })
