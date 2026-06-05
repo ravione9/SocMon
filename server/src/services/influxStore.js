@@ -410,9 +410,14 @@ function detectIssues(store, staleMinutes = 15) {
 const _snapshotCache = new Map()
 const CACHE_TTL_DEFAULT_MS = 90_000
 const CACHE_TTL_CUSTOM_MS  = 30_000
+/** Live store snapshot always reads recent data — never widen with UI chart range (6h/24h). */
+const SNAPSHOT_LIVE_RANGE = '-15m'
 
-function _snapshotCacheKey(metricRange, fromTs, toTs) {
-  return `${metricRange}|${fromTs ?? ''}|${toTs ?? ''}`
+function _snapshotCacheKey(fromTs, toTs) {
+  if (fromTs && Number.isFinite(Number(fromTs))) {
+    return `custom|${fromTs}|${toTs ?? ''}`
+  }
+  return 'live'
 }
 
 function _getCachedSnapshot(key) {
@@ -441,7 +446,7 @@ function _setCachedSnapshot(key, data, isCustom) {
  */
 export async function fetchStoreSnapshot(staleMinutes = 15, metricRange = '-24h', fromTs, toTs, options = {}) {
   const skipCache = options?.skipCache === true
-  const cacheKey = _snapshotCacheKey(metricRange, fromTs, toTs)
+  const cacheKey = _snapshotCacheKey(fromTs, toTs)
   if (!skipCache) {
     const cached = _getCachedSnapshot(cacheKey)
     if (cached) return cached
@@ -471,7 +476,7 @@ export async function fetchStoreSnapshot(staleMinutes = 15, metricRange = '-24h'
   const isCustom = rangeClause !== `start: ${metricRange}`
   const bucket = fluxEscape(cfg().bucket)
 
-  const fetchPromise = _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, rangeClause, isCustom, bucket)
+  const fetchPromise = _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, isCustom, bucket)
   if (!skipCache) _snapshotCache.set(inflightKey, fetchPromise)
   try {
     const result = await fetchPromise
@@ -482,29 +487,30 @@ export async function fetchStoreSnapshot(staleMinutes = 15, metricRange = '-24h'
   }
 }
 
-async function _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, rangeClause, isCustom, bucket) {
+async function _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, isCustom, bucket) {
+  const liveRange = SNAPSHOT_LIVE_RANGE
 
   /* Run a tagged-latest or measurement-latest query using the resolved range clause */
   async function runTagged(measurement, tagColumns) {
-    if (!isCustom) return fetchTaggedLatest(measurement, tagColumns, metricRange)
+    if (!isCustom) return fetchTaggedLatest(measurement, tagColumns, liveRange)
     const cols = ['store_tag', 'hostname', 'serial', ...tagColumns, '_field'].map((c) => `"${c}"`).join(', ')
     const flux = `from(bucket: "${bucket}") |> range(${rangeClause}) |> filter(fn: (r) => r._measurement == "${fluxEscape(measurement)}") |> group(columns: [${cols}]) |> last()`
     try { return await queryFlux(flux) } catch (e) { console.warn(`[influxStore] runTagged(${measurement}):`, e.message); return [] }
   }
 
   async function runMeasurement(measurement) {
-    if (!isCustom) return fetchMeasurementLatest(measurement, metricRange)
+    if (!isCustom) return fetchMeasurementLatest(measurement, liveRange)
     const flux = `from(bucket: "${bucket}") |> range(${rangeClause}) |> filter(fn: (r) => r._measurement == "${fluxEscape(measurement)}") |> group(columns: ["store_tag", "hostname", "serial", "_field"]) |> last()`
     try { return await queryFlux(flux) } catch (e) { console.warn(`[influxStore] runMeasurement(${measurement}):`, e.message); return [] }
   }
 
   async function runHeartbeats() {
-    if (!isCustom) return fetchHeartbeats(metricRange)
+    if (!isCustom) return fetchHeartbeats(liveRange)
     const flux = `from(bucket: "${bucket}") |> range(${rangeClause}) |> filter(fn: (r) => r._measurement == "heartbeat" and r._field == "online") |> group(columns: ["store_tag", "hostname", "serial"]) |> last()`
     try { return await queryFlux(flux) } catch (e) { console.warn('[influxStore] runHeartbeats:', e.message); return [] }
   }
 
-  const speedRange = metricRange === '-7d' ? '-7d' : '-24h'
+  const speedRange = '-24h'
   const [identityRows, heartbeats, connectivity, pingRows, dnsRows, httpRows, systemRows, speedRows] = await Promise.all([
     fetchStoreIdentityLatest(discoveryRange),
     runHeartbeats(),

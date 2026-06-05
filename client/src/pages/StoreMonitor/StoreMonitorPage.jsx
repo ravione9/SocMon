@@ -68,6 +68,17 @@ const TIME_RANGES = [
 ]
 const HISTORY_SECS = { '-15m': 900, '-1h': 3600, '-3h': 10800, '-6h': 21600, '-12h': 43200, '-24h': 86400, '-2d': 172800, '-7d': 604800, '-30d': 30 * 86400 }
 
+function isBenignFetchError(e) {
+  const msg = String(e?.message || '').toLowerCase()
+  const code = String(e?.code || '')
+  return (
+    e?.name === 'AbortError' ||
+    e?.name === 'CanceledError' ||
+    code === 'ERR_CANCELED' ||
+    /aborted|cancelled|canceled|terminated/.test(msg)
+  )
+}
+
 function toLocalInput(date) {
   const d = date instanceof Date ? date : new Date(date)
   if (Number.isNaN(d.getTime())) return ''
@@ -632,6 +643,7 @@ export default function StoreMonitorPage() {
   const [alertHistLoading, setAlertHistLoading] = useState(false)
   const socketRef = useRef(null)
   const loadOverviewRef = useRef(null)
+  const overviewRef = useRef(null)
 
   /* alerts */
   const [alertRules, setAlertRules]     = useState([])
@@ -727,6 +739,8 @@ export default function StoreMonitorPage() {
       .catch(() => {})
   }, [])
 
+  useEffect(() => { overviewRef.current = overview }, [overview])
+
   /* ── load overview ── */
   const loadOverview = useCallback(async () => {
     setError('')
@@ -738,13 +752,15 @@ export default function StoreMonitorPage() {
       setOverview(data)
       if (data.stores?.length) setSelectedTag((prev) => prev || data.stores[0].storeTag)
     } catch (e) {
+      if (isBenignFetchError(e)) return
       const isTimeout = e.code === 'ECONNABORTED' || /timeout/i.test(e.message)
       const isGatewayTimeout = e.response?.status === 504
-      setError(isGatewayTimeout
+      const msg = isGatewayTimeout
         ? 'Gateway timeout (504) — nginx cut off the request before InfluxDB finished. Reload nginx with the updated store-monitor timeout, or ask admin to extend proxy_read_timeout for /api/store-monitor/.'
         : isTimeout
         ? 'Request timed out — InfluxDB is taking too long. Try a shorter time range or click Retry.'
-        : e.response?.data?.error || e.message || 'Failed to fetch data')
+        : e.response?.data?.error || e.message || 'Failed to fetch data'
+      if (!overviewRef.current?.stores?.length) setError(msg)
     } finally { setLoading(false) }
   }, [range, globalCustom])
 
