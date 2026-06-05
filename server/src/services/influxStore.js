@@ -318,7 +318,7 @@ function ensureStore(map, row) {
   return map.get(storeTag)
 }
 
-function detectIssues(store, staleMinutes = 10) {
+function detectIssues(store, staleMinutes = 15) {
   const issues = []
   // Only flag offline if we have never seen a heartbeat in the stale window.
   // Don't penalise stores that simply haven't been discovered via heartbeat yet.
@@ -418,7 +418,7 @@ function _setCachedSnapshot(key, data, isCustom) {
  * @param {number}  [fromTs]      Custom window start (Unix sec) — overrides metricRange
  * @param {number}  [toTs]        Custom window end   (Unix sec)
  */
-export async function fetchStoreSnapshot(staleMinutes = 10, metricRange = '-24h', fromTs, toTs, options = {}) {
+export async function fetchStoreSnapshot(staleMinutes = 15, metricRange = '-24h', fromTs, toTs, options = {}) {
   const skipCache = options?.skipCache === true
   const cacheKey = _snapshotCacheKey(metricRange, fromTs, toTs)
   if (!skipCache) {
@@ -627,7 +627,7 @@ export function getAnyCachedStoreSnapshot(maxAgeMs = CACHE_TTL_DEFAULT_MS) {
  * Lightweight store list for issue ranking — heartbeats + connectivity only (2 Influx queries).
  * Used when the full 8-query snapshot times out under load.
  */
-export async function fetchStoreIssuesLite(staleMinutes = 10, metricRange = '-12h') {
+export async function fetchStoreIssuesLite(staleMinutes = 15, metricRange = '-12h') {
   const now = Date.now()
   const staleMs = staleMinutes * 60 * 1000
   const VENDOR_FALLBACKS = new Set(['unknown', 'unidentified', '', 'n/a', 'none'])

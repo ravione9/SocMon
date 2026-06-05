@@ -114,7 +114,7 @@ export async function buildStoreMonitorFull(query = {}) {
     }
   }
 
-  const staleMinutes = Math.min(Math.max(parseInt(String(query.staleMinutes || '10'), 10) || 10, 2), 60)
+  const staleMinutes = Math.min(Math.max(parseInt(String(query.staleMinutes || '15'), 10) || 15, 2), 60)
   const rawRange = String(query.range || '-24h')
   const metricRange = VALID_RANGES.has(rawRange) ? rawRange : '-24h'
   const crashRange = VALID_RANGES.has(String(query.crashRange || ''))

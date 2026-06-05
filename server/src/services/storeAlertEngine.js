@@ -100,7 +100,7 @@ export async function runStoreAlertEval() {
   if (!rules.length) return { fired: 0, skipped: 0, results: [] }
 
   const [stores, crashCounts] = await Promise.all([
-    fetchStoreSnapshot(10, '-15m'),
+    fetchStoreSnapshot(15, '-15m'),
     fetchCrashCountsPerStore('-15m').catch(() => new Map()),
   ])
   // Attach crash counts map to each store so evaluateCondition can filter by app/type

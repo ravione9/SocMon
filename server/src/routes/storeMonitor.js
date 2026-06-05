@@ -79,7 +79,7 @@ router.get('/overview', async (req, res, next) => {
     if (!isInfluxStoreConfigured()) {
       return res.status(503).json({ error: 'InfluxDB not configured', ...getInfluxStoreMeta() })
     }
-    const staleMinutes = Math.min(Math.max(parseInt(String(req.query.staleMinutes || '10'), 10) || 10, 2), 60)
+    const staleMinutes = Math.min(Math.max(parseInt(String(req.query.staleMinutes || '15'), 10) || 15, 2), 60)
     const rawRange    = String(req.query.range || '-24h')
     const metricRange = VALID_RANGES.has(rawRange) ? rawRange : '-24h'
     const fromTs      = req.query.from ? parseInt(String(req.query.from), 10) : undefined
@@ -119,7 +119,7 @@ router.get('/stores', async (req, res, next) => {
     if (!isInfluxStoreConfigured()) {
       return res.status(503).json({ error: 'InfluxDB not configured' })
     }
-    const staleMinutes = Math.min(Math.max(parseInt(String(req.query.staleMinutes || '10'), 10) || 10, 2), 60)
+    const staleMinutes = Math.min(Math.max(parseInt(String(req.query.staleMinutes || '15'), 10) || 15, 2), 60)
     const stores = await fetchStoreSnapshot(staleMinutes)
     const q = String(req.query.q || '').trim().toLowerCase()
     const conn = String(req.query.connState || '').trim()
@@ -166,7 +166,7 @@ router.get('/problems', async (req, res, next) => {
     if (!isInfluxStoreConfigured()) {
       return res.status(503).json({ error: 'InfluxDB not configured' })
     }
-    const staleMinutes = Math.min(Math.max(parseInt(String(req.query.staleMinutes || '10'), 10) || 10, 2), 60)
+    const staleMinutes = Math.min(Math.max(parseInt(String(req.query.staleMinutes || '15'), 10) || 15, 2), 60)
     const rawRange    = String(req.query.range || '-24h')
     const metricRange = VALID_RANGES.has(rawRange) ? rawRange : '-24h'
     const stores = await fetchStoreSnapshot(staleMinutes, metricRange)
@@ -348,7 +348,7 @@ router.get('/reports/:type', async (req, res, next) => {
     }
     const rawRange = String(req.query.range || '-24h')
     const metricRange = VALID_RANGES.has(rawRange) ? rawRange : '-24h'
-    const staleMinutes = Math.min(Math.max(parseInt(String(req.query.staleMinutes || '10'), 10) || 10, 2), 60)
+    const staleMinutes = Math.min(Math.max(parseInt(String(req.query.staleMinutes || '15'), 10) || 15, 2), 60)
     const groupFilter = String(req.query.group || '').trim()
     let stores = await fetchStoreSnapshot(staleMinutes, metricRange)
     if (groupFilter) {

@@ -571,7 +571,7 @@ export default function StoreMonitorPage() {
     from: toLocalInput(new Date(_nowDef.getTime() - 1 * 3600 * 1000)),
     to:   toLocalInput(_nowDef),
   })
-  const [meta, setMeta] = useState(null)
+  const [meta, setMeta] = useState(undefined)  // undefined = loading, null = failed, object = loaded
   const [overview, setOverview] = useState(null)
   const [problems, setProblems] = useState([])
   const [loading, setLoading] = useState(true)
@@ -706,7 +706,11 @@ export default function StoreMonitorPage() {
   }, [])
 
   /* ── load meta once ── */
-  useEffect(() => { api.get('/api/store-monitor/meta').then((r) => setMeta(r.data)).catch(() => {}) }, [])
+  useEffect(() => {
+    api.get('/api/store-monitor/meta')
+      .then((r) => setMeta(r.data))
+      .catch(() => setMeta(null))  // null = load failed, won't show stale warning
+  }, [])
 
   /* ── load server-side store settings (manual ROP codes shared for all users) ── */
   useEffect(() => {
@@ -1418,7 +1422,9 @@ export default function StoreMonitorPage() {
         </div>
       )}
       {meta?.configured && !meta?.connected && meta?.error && <div className="sm-err">{meta.error}</div>}
-      {!meta?.configured && <div className="sm-info">Set INFLUX_URL, INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET in server env</div>}
+      {meta !== undefined && meta !== null && !meta?.configured && !overview?.totalStores && (
+        <div className="sm-info">Set INFLUX_URL, INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET in server env</div>
+      )}
 
       {/* ── tabs ── */}
       <div className="sm-tabs">

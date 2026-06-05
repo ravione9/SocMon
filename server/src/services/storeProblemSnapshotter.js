@@ -37,7 +37,7 @@ export async function runProblemSnapshot() {
 
   try {
     const now = new Date()
-    const stores = await fetchStoreSnapshot(10, '-1h')
+    const stores = await fetchStoreSnapshot(15, '-1h')
 
     // Build a map of currently-active (storeTag+code) → store/issue
     const currentMap = new Map()
