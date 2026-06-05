@@ -618,12 +618,15 @@ async function _doFetchStoreSnapshot(staleMinutes, metricRange, discoveryRange, 
   }
 
   // Secondary online heuristic: if heartbeat is stale but ANY other metric arrived
-  // within staleMs, the agent is clearly running — treat the store as online.
-  // This prevents false "OFFLINE" when only the heartbeat module has an issue.
+  // within activityMs, the PS agent is clearly running — treat the store as online.
+  // activityMs is 2× the stale window (min 30 min) because the PS agent writes all
+  // measurements together; if even heartbeat is a few cycles late the other data is
+  // also the same age, so we need a wider window to rescue it from false-OFFLINE.
+  const activityMs = Math.max(staleMs * 2, 30 * 60 * 1000)
   for (const [, s] of stores) {
-    if (!s.online && s._latestActivityTs && now - s._latestActivityTs <= staleMs) {
+    if (!s.online && s._latestActivityTs && now - s._latestActivityTs <= activityMs) {
       s.online = true
-      s.onlineReason = 'activity'  // heartbeat stale but metrics active
+      s.onlineReason = 'activity'  // heartbeat stale but metrics active within activityMs
     }
   }
 
@@ -699,8 +702,9 @@ export async function fetchStoreIssuesLite(staleMinutes = 15, metricRange = '-12
   }
 
   // Secondary online heuristic: recent connectivity data → store is alive
+  const activityMs = Math.max(staleMs * 2, 30 * 60 * 1000)
   for (const [, s] of stores) {
-    if (!s.online && s._latestActivityTs && now - s._latestActivityTs <= staleMs) {
+    if (!s.online && s._latestActivityTs && now - s._latestActivityTs <= activityMs) {
       s.online = true
       s.onlineReason = 'activity'
     }
