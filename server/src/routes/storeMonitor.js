@@ -125,7 +125,10 @@ router.get('/overview', async (req, res, next) => {
       fetchedAt: new Date().toISOString(),
     })
   } catch (e) {
-    next(e)
+    res.status(503).json({
+      error: e.message || 'InfluxDB unavailable',
+      configured: isInfluxStoreConfigured(),
+    })
   }
 })
 

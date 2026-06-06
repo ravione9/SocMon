@@ -68,6 +68,14 @@ const TIME_RANGES = [
 ]
 const HISTORY_SECS = { '-15m': 900, '-1h': 3600, '-3h': 10800, '-6h': 21600, '-12h': 43200, '-24h': 86400, '-2d': 172800, '-7d': 604800, '-30d': 30 * 86400 }
 
+function friendlyApiError(e) {
+  const raw = String(e?.response?.data?.error || e?.message || 'Failed to fetch data')
+  if (/fetch failed|cannot connect to influxdb|ECONNREFUSED|ENOTFOUND/i.test(raw)) {
+    return 'Cannot reach InfluxDB from the Netpulse server — check INFLUX_URL (http://192.168.10.204:8086) and firewall/port 8086.'
+  }
+  return raw
+}
+
 function isBenignFetchError(e) {
   const msg = String(e?.message || '').toLowerCase()
   const code = String(e?.code || '')
@@ -754,9 +762,12 @@ export default function StoreMonitorPage() {
         : {}
       const { data } = await api.get('/api/store-monitor/overview', { params, timeout: OVERVIEW_TIMEOUT_MS })
       setOverview(data)
+      overviewRef.current = data
       if (data.stores?.length) setSelectedTag((prev) => prev || data.stores[0].storeTag)
       if (data.stale) {
         setError('Showing cached data — InfluxDB was slow. Data will refresh automatically.')
+      } else {
+        setError('')
       }
     } catch (e) {
       if (isBenignFetchError(e)) {
@@ -771,8 +782,10 @@ export default function StoreMonitorPage() {
         ? 'Gateway timeout (504) — nginx cut off the request before InfluxDB finished. Reload nginx with the updated store-monitor timeout, or ask admin to extend proxy_read_timeout for /api/store-monitor/.'
         : isTimeout
         ? 'InfluxDB is slow or unreachable (timed out after ~90s). Check INFLUX_URL on the server and click Retry.'
-        : e.response?.data?.error || e.message || 'Failed to fetch data'
-      if (!overviewRef.current?.stores?.length) setError(msg)
+        : friendlyApiError(e)
+      // Background refresh failed — keep showing last good data without a scary banner
+      if (overviewRef.current?.stores?.length) return
+      setError(msg)
     } finally { setLoading(false) }
   }, [globalCustom])
 
@@ -1451,9 +1464,9 @@ export default function StoreMonitorPage() {
       </div>
 
       {error && (
-        <div className="sm-err" style={{display:'flex',alignItems:'center',gap:10}}>
-          <span>⚠ {error}</span>
-          <button className="sm-btn sm-sm" style={{marginLeft:'auto',flexShrink:0}} onClick={() => { setLoading(true); loadOverview() }}>↺ Retry</button>
+        <div className={overview?.stores?.length ? 'sm-info' : 'sm-err'} style={{display:'flex',alignItems:'center',gap:10}}>
+          <span>{overview?.stores?.length ? 'ℹ' : '⚠'} {error}</span>
+          <button className="sm-btn sm-sm" style={{marginLeft:'auto',flexShrink:0}} onClick={() => loadOverview()}>↺ Retry</button>
         </div>
       )}
       {meta?.configured && !meta?.connected && meta?.error && <div className="sm-err">{meta.error}</div>}

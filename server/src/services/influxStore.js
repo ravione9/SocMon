@@ -154,7 +154,11 @@ function httpPost(url, headers, body, tlsInsecure) {
 
 async function httpPostFetch(url, headers, body, tlsInsecure) {
   const timeoutMs = cfg().queryTimeoutMs
-  if (typeof fetch === 'function') {
+  const doHttp = () => httpPost(url, headers, body, tlsInsecure)
+
+  if (typeof fetch !== 'function') return doHttp()
+
+  try {
     const res = await fetch(url, {
       method: 'POST',
       headers,
@@ -169,8 +173,23 @@ async function httpPostFetch(url, headers, body, tlsInsecure) {
       throw err
     }
     return text
+  } catch (e) {
+    const detail = e.cause?.code || e.cause?.message || e.message || 'unknown'
+    const connErr = /fetch failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|ENETUNREACH/i.test(String(detail))
+    if (connErr) {
+      try {
+        console.warn('[influxStore] fetch() failed, retrying via http/https:', detail)
+        return await doHttp()
+      } catch (e2) {
+        const c = cfg()
+        throw new Error(
+          `Cannot connect to InfluxDB at ${c.url} (${e2.message || detail}). ` +
+          'Verify INFLUX_URL is reachable from the Netpulse server and port 8086 is open.',
+        )
+      }
+    }
+    throw e
   }
-  return httpPost(url, headers, body, tlsInsecure)
 }
 
 export async function queryFluxRaw(flux) {
@@ -1083,7 +1102,7 @@ export async function pingInflux() {
   try {
     const flux = `
 from(bucket: "${fluxEscape(cfg().bucket)}")
-  |> range(start: -30d)
+  |> range(start: -15m)
   |> limit(n: 1)
 `
     const rows = await queryFlux(flux)
