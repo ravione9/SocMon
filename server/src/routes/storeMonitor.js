@@ -85,15 +85,19 @@ router.get('/overview', async (req, res, next) => {
     const metricRange = VALID_RANGES.has(rawRange) ? rawRange : '-24h'
     const fromTs      = req.query.from ? parseInt(String(req.query.from), 10) : undefined
     const toTs        = req.query.to   ? parseInt(String(req.query.to),   10) : undefined
+    const budgetMs    = Math.min(Math.max(parseInt(String(process.env.STORE_SNAPSHOT_BUDGET_MS || '90000'), 10) || 90000, 30000), 300000)
     let stores
     let stale = false
     try {
-      stores = await fetchStoreSnapshot(staleMinutes, metricRange, fromTs, toTs)
+      stores = await Promise.race([
+        fetchStoreSnapshot(staleMinutes, metricRange, fromTs, toTs),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Store snapshot budget exceeded')), budgetMs)),
+      ])
     } catch (e) {
-      stores = getAnyCachedStoreSnapshot(5 * 60_000)
+      stores = getAnyCachedStoreSnapshot(10 * 60_000)
       if (!stores?.length) throw e
       stale = true
-      console.warn('[storeMonitor] overview using cached snapshot after Influx error:', e.message)
+      console.warn('[storeMonitor] overview using cached snapshot after slow/ failed fetch:', e.message)
     }
     const q = String(req.query.q || '').trim().toLowerCase()
     const conn = String(req.query.connState || '').trim()

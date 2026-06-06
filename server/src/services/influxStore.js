@@ -468,7 +468,7 @@ export async function fetchStoreSnapshot(staleMinutes = 15, metricRange = '-24h'
     return _snapshotCache.get(inflightKey)
   }
 
-  const discoveryRange = '-7d'
+  const discoveryRange = '-24h'
 
   // When custom from/to is provided build an explicit Flux range clause
   let rangeClause

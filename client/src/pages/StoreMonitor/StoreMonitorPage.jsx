@@ -742,27 +742,35 @@ export default function StoreMonitorPage() {
   useEffect(() => { overviewRef.current = overview }, [overview])
 
   /* ── load overview ── */
+  const OVERVIEW_TIMEOUT_MS = 95000
+
   const loadOverview = useCallback(async () => {
     setError('')
+    setLoading(true)
     try {
       // Live overview always reads last ~15m from Influx — UI range is for charts/reports only.
       const params = globalCustom.enabled && globalCustom.from
         ? { from: fromLocalInput(globalCustom.from), to: fromLocalInput(globalCustom.to) || Math.floor(Date.now()/1000) }
         : {}
-      const { data } = await api.get('/api/store-monitor/overview', { params })
+      const { data } = await api.get('/api/store-monitor/overview', { params, timeout: OVERVIEW_TIMEOUT_MS })
       setOverview(data)
       if (data.stores?.length) setSelectedTag((prev) => prev || data.stores[0].storeTag)
       if (data.stale) {
-        setError('Showing cached data — InfluxDB was slow. Retrying in background…')
+        setError('Showing cached data — InfluxDB was slow. Data will refresh automatically.')
       }
     } catch (e) {
-      if (isBenignFetchError(e)) return
-      const isTimeout = e.code === 'ECONNABORTED' || /timeout|aborted due to timeout/i.test(String(e.message || ''))
+      if (isBenignFetchError(e)) {
+        if (!overviewRef.current?.stores?.length) {
+          setError('Request was cancelled — click Retry if data does not appear.')
+        }
+        return
+      }
+      const isTimeout = e.code === 'ECONNABORTED' || /timeout|aborted due to timeout|budget exceeded/i.test(String(e.message || ''))
       const isGatewayTimeout = e.response?.status === 504
       const msg = isGatewayTimeout
         ? 'Gateway timeout (504) — nginx cut off the request before InfluxDB finished. Reload nginx with the updated store-monitor timeout, or ask admin to extend proxy_read_timeout for /api/store-monitor/.'
         : isTimeout
-        ? 'InfluxDB query timed out — live store data uses last 15 minutes only. Increase INFLUX_QUERY_TIMEOUT_MS on the server or check InfluxDB load.'
+        ? 'InfluxDB is slow or unreachable (timed out after ~90s). Check INFLUX_URL on the server and click Retry.'
         : e.response?.data?.error || e.message || 'Failed to fetch data'
       if (!overviewRef.current?.stores?.length) setError(msg)
     } finally { setLoading(false) }
@@ -1336,13 +1344,19 @@ export default function StoreMonitorPage() {
 
   if (loading && !overview) return (
     <div style={{padding:40,textAlign:'center',color:'var(--text3)'}}>
+      <div style={{marginBottom:12}}>Loading Store Network Monitor…</div>
+      <div style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--text3)',marginBottom:16}}>
+        Fetching ~3000 stores from InfluxDB (usually 10–30s)
+      </div>
       {error ? (
         <div>
           <div style={{color:'#f97316',marginBottom:12,fontSize:14}}>⚠ {error}</div>
-          <button className="sm-btn sm-sm primary" onClick={() => { setLoading(true); loadOverview() }}>↺ Retry</button>
+          <button className="sm-btn sm-sm primary" onClick={() => loadOverview()}>↺ Retry</button>
         </div>
       ) : (
-        <div>Loading Store Network Monitor…</div>
+        <button className="sm-btn sm-sm" onClick={() => { setLoading(false); setError('Load skipped — click Retry when InfluxDB is ready.') }}>
+          Skip waiting
+        </button>
       )}
     </div>
   )
