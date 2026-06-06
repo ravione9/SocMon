@@ -1361,15 +1361,11 @@ export default function StoreMonitorPage() {
       <div style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--text3)',marginBottom:16}}>
         Fetching ~3000 stores from InfluxDB (usually 10–30s)
       </div>
-      {error ? (
+      {error && (
         <div>
           <div style={{color:'#f97316',marginBottom:12,fontSize:14}}>⚠ {error}</div>
           <button className="sm-btn sm-sm primary" onClick={() => loadOverview()}>↺ Retry</button>
         </div>
-      ) : (
-        <button className="sm-btn sm-sm" onClick={() => { setLoading(false); setError('Load skipped — click Retry when InfluxDB is ready.') }}>
-          Skip waiting
-        </button>
       )}
     </div>
   )
