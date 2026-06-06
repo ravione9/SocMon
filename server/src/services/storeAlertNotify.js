@@ -4,7 +4,7 @@
 import nodemailer from 'nodemailer'
 import http from 'http'
 import https from 'https'
-import { crashTypeLabel } from './influxStore.js'
+import { crashTypeLabel, isStoreOfflineForAlert } from './influxStore.js'
 
 const SEV_EMOJI = { critical: '🔴', high: '🟠', warning: '🟡' }
 
@@ -27,7 +27,7 @@ const OP_LABELS = { gt: '>', gte: '≥', lt: '<', lte: '≤', eq: '=' }
 
 function getConditionValue(cond, store) {
   const { metric, target } = cond
-  if (metric === 'offline')   return store.online ? 0 : 1
+  if (metric === 'offline')   return isStoreOfflineForAlert(store) ? 1 : 0
   if (metric === 'isp_down')    return store.connState === 'isp_down' ? 1 : 0
   if (metric === 'hotspot')     return (store.isHotspot || store.connState === 'hotspot') ? 1 : 0
   if (metric === 'dns_fail')    return Object.values(store.dns  || {}).some((d) => d.success === false) ? 1 : 0
@@ -137,7 +137,9 @@ function formatStoreLine(store, rule) {
     lines.push(`  *Crashes: ${value ?? 0}* (threshold ${OP_LABELS[cond.operator || 'gt'] || '>'} ${cond.threshold ?? 0})`)
     for (const b of formatCrashBreakdown(store, cond)) lines.push(`  ${b}`)
   } else if (metric === 'offline') {
-    if (store.lastSeen) lines.push(`  Last heartbeat: ${store.lastSeen}`)
+    if (store.heartbeatValue != null) lines.push(`  Heartbeat: ${store.heartbeatValue === 1 ? 'online' : 'offline'} (${store.heartbeatValue})`)
+    if (store.lastHeartbeatAt || store.lastSeen) lines.push(`  Last heartbeat: ${store.lastHeartbeatAt || store.lastSeen}`)
+    if (store.onlineReason === 'activity') lines.push('  Note: dashboard shows online via recent metrics (alert still fired on agent/offline signal)')
   } else if (metric === 'packet_loss' || metric === 'latency') {
     const target = cond.target || '8.8.8.8'
     lines.push(`  *${METRIC_LABELS[metric]}:* ${formatValue(metric, value)} (target ${target})`)
@@ -179,7 +181,19 @@ function buildMessage(rule, stores) {
 
   const storeLines = stores.slice(0, 10).map((s) => formatStoreLine(s, rule))
   const more = stores.length > 10 ? `\n_…and ${stores.length - 10} more store(s)_` : ''
-  const storeSection = ['*Affected Stores:*', ...storeLines].join('\n\n') + more
+  let storeSection
+  if (metric === 'offline' && stores.length > 25) {
+    const names = stores.slice(0, 20).map((s) => s.hostname || s.storeTag || '—')
+    storeSection = [
+      '*Affected Stores (compact):*',
+      names.join(', '),
+      stores.length > 20 ? `_…and ${stores.length - 20} more_` : '',
+      '',
+      '_Open Store Monitor for full offline list._',
+    ].filter(Boolean).join('\n')
+  } else {
+    storeSection = ['*Affected Stores:*', ...storeLines].join('\n\n') + more
+  }
   const footer = `Netpulse Store Monitor · ${new Date().toISOString()}`
 
   const body = [summary, '', storeSection, '', footer].join('\n')
@@ -283,6 +297,9 @@ export async function dispatchAlertNotifications(rule, affectedStores) {
     } else if (ch.type === 'email' && ch.emails?.length) {
       results.push({ channel: 'email', ...(await sendEmail(ch.emails, msg)) })
     }
+  }
+  if (!results.length) {
+    results.push({ channel: 'none', ok: false, error: 'no valid notification channels on rule' })
   }
   return results
 }

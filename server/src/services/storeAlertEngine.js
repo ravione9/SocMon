@@ -8,7 +8,7 @@
 import StoreAlertRule from '../models/StoreAlertRule.js'
 import StoreAlertEvent from '../models/StoreAlertEvent.js'
 import { dispatchAlertNotifications } from './storeAlertNotify.js'
-import { fetchStoreSnapshot, fetchCrashCountsPerStore, isInfluxStoreConfigured } from './influxStore.js'
+import { fetchStoreSnapshot, fetchCrashCountsPerStore, isInfluxStoreConfigured, isStoreOfflineForAlert } from './influxStore.js'
 
 const EVAL_INTERVAL_MS = parseInt(process.env.STORE_ALERT_INTERVAL_MS || '120000', 10) // 2 min default
 
@@ -26,7 +26,7 @@ export function deriveGroupsServer(hostname, gatewayVendor, isFortinet) {
 export function evaluateCondition(cond, store) {
   const { metric, operator, threshold, target } = cond
   let value = null
-  if (metric === 'offline')   return !store.online
+  if (metric === 'offline')   return isStoreOfflineForAlert(store)
   if (metric === 'isp_down')  return store.connState === 'isp_down'
   if (metric === 'hotspot')   return store.isHotspot || store.connState === 'hotspot'
   if (metric === 'dns_fail')    return Object.values(store.dns  || {}).some((d) => d.success === false)
@@ -125,14 +125,25 @@ export async function runStoreAlertEval() {
 
       if (!affected.length) continue
 
-      // 2. Check trigger schedule
+      // 2. Must have at least one notification channel configured
+      const channels = (rule.channels || []).filter((ch) =>
+        (ch.type === 'slack' || ch.type === 'google_chat') ? Boolean(ch.webhookUrl)
+          : ch.type === 'email' ? Boolean(ch.emails?.length) : false,
+      )
+      if (!channels.length) {
+        results.push({ rule: rule.name, skipped: true, reason: 'no notification channels configured', affected: affected.length })
+        skipped++
+        continue
+      }
+
+      // 3. Check trigger schedule
       if (!isWithinSchedule(rule.schedule)) {
         results.push({ rule: rule.name, skipped: true, reason: 'outside schedule', affected: affected.length })
         skipped++
         continue
       }
 
-      // 3. Check cooldown
+      // 4. Check cooldown
       const cooldownMs = (rule.cooldownMinutes || 30) * 60 * 1000
       const lastFired  = rule.lastFiredAt ? new Date(rule.lastFiredAt).getTime() : 0
       if (Date.now() - lastFired < cooldownMs) {
@@ -142,8 +153,16 @@ export async function runStoreAlertEval() {
         continue
       }
 
-      // 4. Fire!
+      // 5. Fire!
       const dispatch = await dispatchAlertNotifications(rule, affected)
+      const anyOk = dispatch.some((d) => d.ok)
+      if (!anyOk) {
+        const errDetail = dispatch.map((d) => `${d.channel}: ${d.error || d.status || 'failed'}`).join('; ')
+        console.error(`[storeAlertEngine] Notification failed for "${rule.name}": ${errDetail}`)
+        results.push({ rule: rule.name, fired: false, affected: affected.length, dispatch, error: errDetail || 'all channels failed' })
+        continue
+      }
+
       await StoreAlertRule.findByIdAndUpdate(rule._id, { lastFiredAt: new Date() })
 
       const topStores = affected.slice(0, 10).map((s) => {

@@ -326,6 +326,9 @@ function ensureStore(map, row) {
       serial: serial,
       online: false,
       lastSeen: null,
+      heartbeatOnline: null,
+      heartbeatValue: null,
+      lastHeartbeatAt: null,
       connState: 'unknown',
       activeInterface: '',
       activeSsid: '',
@@ -344,6 +347,17 @@ function ensureStore(map, row) {
     })
   }
   return map.get(storeTag)
+}
+
+/** True when a store should trigger an offline alert (stricter than dashboard display online). */
+export function isStoreOfflineForAlert(store) {
+  // Agent explicitly reported offline (heartbeat field = 0) — alert even if metrics still flowing
+  if (store.heartbeatValue === 0 && store.heartbeatOnline === false) return true
+  // Dashboard offline (not rescued by activity heuristic)
+  if (!store.online && store.onlineReason !== 'activity') return true
+  // Stale heartbeat with no recent agent contact at all
+  if (store.hadHeartbeat && store.heartbeatOnline === false && !store._latestActivityTs) return true
+  return false
 }
 
 function detectIssues(store, staleMinutes = 15) {
@@ -563,6 +577,7 @@ async function _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, 
       // Fallback online heuristic when heartbeat is unavailable.
       s.online = now - t <= staleMs
     }
+    s.hadHeartbeat = true
     s.hostname = row.hostname || s.hostname
     s.serial = row.serial || s.serial
   }
@@ -572,13 +587,20 @@ async function _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, 
     if (!s) continue
     const t = row._time ? new Date(row._time).getTime() : 0
     s.lastSeen = rowTime(row)
-    s.online = num(row._value) === 1 && t > 0 && now - t <= staleMs
+    const hbVal = num(row._value)
+    s.heartbeatValue = hbVal
+    s.lastHeartbeatAt = rowTime(row)
+    s.heartbeatOnline = hbVal === 1 && t > 0 && now - t <= staleMs
+    s.online = s.heartbeatOnline
     s.hadHeartbeat = true
     s.hostname = row.hostname || s.hostname
     s.serial = row.serial || s.serial
     // A heartbeat (even with value=0) proves the PS agent is running — count as activity.
-    // This rescues stores whose internet check fails (online=0) but agent is clearly alive.
     if (t > 0 && (!s._latestActivityTs || t > s._latestActivityTs)) s._latestActivityTs = t
+  }
+
+  for (const [, s] of stores) {
+    if (s.heartbeatOnline == null) s.heartbeatOnline = false
   }
 
   // Placeholder values written by the PS agent when detection fails — not real vendors
