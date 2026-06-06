@@ -745,26 +745,30 @@ export default function StoreMonitorPage() {
   const loadOverview = useCallback(async () => {
     setError('')
     try {
+      // Live overview always reads last ~15m from Influx — UI range is for charts/reports only.
       const params = globalCustom.enabled && globalCustom.from
         ? { from: fromLocalInput(globalCustom.from), to: fromLocalInput(globalCustom.to) || Math.floor(Date.now()/1000) }
-        : { range }
+        : {}
       const { data } = await api.get('/api/store-monitor/overview', { params })
       setOverview(data)
       if (data.stores?.length) setSelectedTag((prev) => prev || data.stores[0].storeTag)
+      if (data.stale) {
+        setError('Showing cached data — InfluxDB was slow. Retrying in background…')
+      }
     } catch (e) {
       if (isBenignFetchError(e)) return
-      const isTimeout = e.code === 'ECONNABORTED' || /timeout/i.test(e.message)
+      const isTimeout = e.code === 'ECONNABORTED' || /timeout|aborted due to timeout/i.test(String(e.message || ''))
       const isGatewayTimeout = e.response?.status === 504
       const msg = isGatewayTimeout
         ? 'Gateway timeout (504) — nginx cut off the request before InfluxDB finished. Reload nginx with the updated store-monitor timeout, or ask admin to extend proxy_read_timeout for /api/store-monitor/.'
         : isTimeout
-        ? 'Request timed out — InfluxDB is taking too long. Try a shorter time range or click Retry.'
+        ? 'InfluxDB query timed out — live store data uses last 15 minutes only. Increase INFLUX_QUERY_TIMEOUT_MS on the server or check InfluxDB load.'
         : e.response?.data?.error || e.message || 'Failed to fetch data'
       if (!overviewRef.current?.stores?.length) setError(msg)
     } finally { setLoading(false) }
-  }, [range, globalCustom])
+  }, [globalCustom])
 
-  useSmartPolling(loadOverview, 60_000, [range, globalCustom])
+  useSmartPolling(loadOverview, 60_000, [globalCustom])
   // keep ref always current so socket handler can call it without stale closure
   useEffect(() => { loadOverviewRef.current = loadOverview }, [loadOverview])
 

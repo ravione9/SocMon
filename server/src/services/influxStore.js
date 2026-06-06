@@ -10,6 +10,12 @@ const TOKEN_ENV = 'INFLUX_TOKEN'
 const ORG_ENV = 'INFLUX_ORG'
 const BUCKET_ENV = 'INFLUX_BUCKET'
 const TLS_ENV = 'INFLUX_TLS_INSECURE'
+const QUERY_TIMEOUT_ENV = 'INFLUX_QUERY_TIMEOUT_MS'
+
+function queryTimeoutMs() {
+  const n = parseInt(process.env[QUERY_TIMEOUT_ENV] || '180000', 10)
+  return Number.isFinite(n) && n >= 30000 ? n : 180000
+}
 
 function cfg() {
   return {
@@ -18,6 +24,7 @@ function cfg() {
     org: String(process.env[ORG_ENV] || 'lenskart').trim(),
     bucket: String(process.env[BUCKET_ENV] || 'store-monitoring').trim(),
     tlsInsecure: ['1', 'true', 'yes'].includes(String(process.env[TLS_ENV] || '').toLowerCase()),
+    queryTimeoutMs: queryTimeoutMs(),
   }
 }
 
@@ -109,6 +116,7 @@ export function parseFluxCsv(text) {
 }
 
 function httpPost(url, headers, body, tlsInsecure) {
+  const timeoutMs = cfg().queryTimeoutMs
   return new Promise((resolve, reject) => {
     const u = new URL(url)
     const lib = u.protocol === 'https:' ? https : http
@@ -118,7 +126,7 @@ function httpPost(url, headers, body, tlsInsecure) {
       port: u.port || (u.protocol === 'https:' ? 443 : 80),
       path: `${u.pathname}${u.search}`,
       headers: { ...headers, 'Content-Length': Buffer.byteLength(body) },
-      timeout: 90000,
+      timeout: timeoutMs,
     }
     if (tlsInsecure && u.protocol === 'https:') {
       opts.rejectUnauthorized = false
@@ -138,19 +146,20 @@ function httpPost(url, headers, body, tlsInsecure) {
       })
     })
     req.on('error', reject)
-    req.on('timeout', () => req.destroy(new Error('InfluxDB query timeout')))
+    req.on('timeout', () => req.destroy(new Error(`InfluxDB query timeout after ${timeoutMs}ms`)))
     req.write(body)
     req.end()
   })
 }
 
 async function httpPostFetch(url, headers, body, tlsInsecure) {
+  const timeoutMs = cfg().queryTimeoutMs
   if (typeof fetch === 'function') {
     const res = await fetch(url, {
       method: 'POST',
       headers,
       body,
-      signal: AbortSignal.timeout(90000),
+      signal: AbortSignal.timeout(timeoutMs),
       ...(tlsInsecure && url.startsWith('https:') ? { dispatcher: undefined } : {}),
     })
     const text = await res.text()
@@ -234,15 +243,15 @@ from(bucket: "${fluxEscape(cfg().bucket)}")
   }
 }
 
-/** Latest row per store tag from any measurement (fallback discovery). */
+/** Latest heartbeat per store for discovery — heartbeat only (never scan all measurements). */
 async function fetchStoreIdentityLatest(range = '-7d') {
   const flux = `
 from(bucket: "${fluxEscape(cfg().bucket)}")
   |> range(start: ${range})
+  |> filter(fn: (r) => r._measurement == "heartbeat")
   |> filter(fn: (r) => exists r.store_tag or exists r.hostname or exists r.serial)
-  |> keep(columns: ["_time", "store_tag", "hostname", "serial"])
   |> group(columns: ["store_tag", "hostname", "serial"])
-  |> max(column: "_time")
+  |> last()
 `
   try { return await queryFlux(flux) } catch (e) {
     console.warn('[influxStore] fetchStoreIdentityLatest failed:', e.message)

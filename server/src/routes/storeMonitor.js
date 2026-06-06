@@ -8,6 +8,7 @@ import {
   fetchStoreSnapshot,
   fetchStoreHistory,
   buildOverviewSummary,
+  getAnyCachedStoreSnapshot,
   queryFlux,
   queryFluxRaw,
   parseFluxCsv,
@@ -84,7 +85,16 @@ router.get('/overview', async (req, res, next) => {
     const metricRange = VALID_RANGES.has(rawRange) ? rawRange : '-24h'
     const fromTs      = req.query.from ? parseInt(String(req.query.from), 10) : undefined
     const toTs        = req.query.to   ? parseInt(String(req.query.to),   10) : undefined
-    let stores = await fetchStoreSnapshot(staleMinutes, metricRange, fromTs, toTs)
+    let stores
+    let stale = false
+    try {
+      stores = await fetchStoreSnapshot(staleMinutes, metricRange, fromTs, toTs)
+    } catch (e) {
+      stores = getAnyCachedStoreSnapshot(5 * 60_000)
+      if (!stores?.length) throw e
+      stale = true
+      console.warn('[storeMonitor] overview using cached snapshot after Influx error:', e.message)
+    }
     const q = String(req.query.q || '').trim().toLowerCase()
     const conn = String(req.query.connState || '').trim()
     const issuesOnly = ['1', 'true', 'yes'].includes(String(req.query.issuesOnly || '').toLowerCase())
@@ -105,6 +115,7 @@ router.get('/overview', async (req, res, next) => {
       stores,
       staleMinutes,
       metricRange,
+      stale,
       customFrom: fromTs ? new Date(fromTs * 1000).toISOString() : null,
       customTo:   toTs   ? new Date(toTs   * 1000).toISOString() : null,
       fetchedAt: new Date().toISOString(),
