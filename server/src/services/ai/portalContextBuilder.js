@@ -1101,14 +1101,18 @@ export async function tryDirectStoreDowntimeAnswer(question, allowedPages, ctx =
   const lines = [
     `Store Monitor — downtime report (HISTORICAL — fetched ${formatPortalTimestamp(fetchedAt)})`,
     `Window: ${rangeLabel} (${summary.windowHours} hours)`,
-    'Source: InfluxDB heartbeat history (5-minute buckets where online=0)',
+    'Source: InfluxDB heartbeat history (5-minute buckets with no heartbeat or online=0 — same rule as dashboard)',
     '',
     '── Totals (all store machines) ──',
     `Stores reporting heartbeat in window: ${summary.storesReporting}`,
     `Stores with any offline time: ${summary.storesWithOffline}`,
     `Total downtime (machine-hours): ${summary.totalOfflineHours.toLocaleString()} hours`,
     `Total downtime (machine-minutes): ${summary.totalOfflineMinutes.toLocaleString()} minutes`,
+    `Total uptime (machine-hours): ${(summary.totalUptimeHours ?? 0).toLocaleString()} hours`,
   ]
+  if (summary.uptimePct != null) {
+    lines.push(`Fleet uptime in window: ${summary.uptimePct}%`)
+  }
   if (summary.storesWithOffline > 0) {
     lines.push(`Average offline per affected store: ${summary.avgOfflineHoursAffected} hours`)
   }
@@ -1116,12 +1120,13 @@ export async function tryDirectStoreDowntimeAnswer(question, allowedPages, ctx =
     lines.push(`Downtime vs max possible (${summary.storesReporting} stores × ${summary.windowHours} h): ${summary.downtimePct}%`)
   }
   lines.push('')
-  lines.push('Note: this is summed offline time across all machines in the window — not the current live offline count.')
+  lines.push('Note: this is summed offline/uptime time across all machines in the window — not the current live offline count.')
   if (summary.topOffline.length) {
     lines.push('')
     lines.push('── Top offline stores in window ──')
     for (const s of summary.topOffline.slice(0, 10)) {
-      lines.push(`• ${s.hostname || s.storeTag}: ${s.offlineHours} h offline (${s.sampleBuckets} heartbeat buckets)`)
+      const up = s.uptimePct != null ? ` · ${s.uptimePct}% uptime` : ''
+      lines.push(`• ${s.hostname || s.storeTag}: ${s.offlineHours} h offline${up}`)
     }
   }
   lines.push('', '(Historical Influx heartbeat — SocMon.)')
@@ -1144,7 +1149,9 @@ export async function tryDirectStoreDowntimeAnswer(question, allowedPages, ctx =
         storesWithOffline: summary.storesWithOffline,
         totalOfflineHours: summary.totalOfflineHours,
         totalOfflineMinutes: summary.totalOfflineMinutes,
+        totalUptimeHours: summary.totalUptimeHours,
         downtimePct: summary.downtimePct,
+        uptimePct: summary.uptimePct,
         topOffline: summary.topOffline.slice(0, 10),
       },
     },
