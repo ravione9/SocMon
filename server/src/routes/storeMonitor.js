@@ -34,6 +34,7 @@ import {
   buildIssuesReport,
   buildConnectivityReport,
   buildSpeedtestReport,
+  buildGroupStoreDailyDisconnectionReport,
 } from '../services/storeReports.js'
 import { getManualRopSdwanStoreCodes } from '../utils/manualRopStoreCodes.js'
 import StoreMonitorSetting from '../models/StoreMonitorSetting.js'
@@ -568,6 +569,125 @@ router.get('/reports/:type', async (req, res, next) => {
 
     const wb = await REPORT_BUILDERS[type](stores, metricRange)
     const filename = `${REPORT_NAMES[type]}_${new Date().toISOString().slice(0, 10)}.xlsx`
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+    await wb.xlsx.write(res)
+    res.end()
+  } catch (e) {
+    next(e)
+  }
+})
+
+/**
+ * POST /api/store-monitor/reports/group-disconnect-daily
+ * Download one workbook with per-store day-wise disconnections for one group,
+ * optionally constrained to business hours.
+ *
+ * Query:
+ *   - from / to (unix sec) OR rangeSec
+ *
+ * Body:
+ *   - groupName (required)
+ *   - customGroups: [{ name, storeTags[] }]
+ *   - businessHours: { startHour, endHour, weekdays[], tzOffsetMinutes }
+ */
+router.post('/reports/group-disconnect-daily', async (req, res, next) => {
+  try {
+    if (!isInfluxStoreConfigured()) {
+      return res.status(503).json({ error: 'InfluxDB not configured' })
+    }
+
+    const groupName = String(req.body?.groupName || '').trim().slice(0, 80)
+    if (!groupName) return res.status(400).json({ error: 'groupName required' })
+
+    const fromSec = req.query.from ? parseInt(String(req.query.from), 10) : undefined
+    const toSec   = req.query.to   ? parseInt(String(req.query.to),   10) : undefined
+    const rangeSec = Math.min(
+      Math.max(parseInt(String(req.query.rangeSec || '86400'), 10) || 86400, 300),
+      30 * 86400,
+    )
+
+    const body = req.body && typeof req.body === 'object' ? req.body : {}
+    const rawGroups = Array.isArray(body.customGroups) ? body.customGroups : []
+    const customGroups = rawGroups
+      .map((g) => ({
+        name: String(g?.name || '').slice(0, 80),
+        storeTags: Array.isArray(g?.storeTags)
+          ? g.storeTags.map((t) => String(t || '')).filter(Boolean).slice(0, 4000)
+          : [],
+      }))
+      .filter((g) => g.name && g.storeTags.length > 0)
+      .slice(0, 10)
+
+    // Always default timezone to IST (UTC+5:30 = 330 min). Caller may override
+    // via body.tzOffsetMinutes or body.businessHours.tzOffsetMinutes.
+    const rawTz = Number(
+      body?.tzOffsetMinutes
+      ?? body?.businessHours?.tzOffsetMinutes
+      ?? 330,
+    )
+    const reportTzMinutes = Number.isFinite(rawTz)
+      ? Math.max(-840, Math.min(840, rawTz))
+      : 330
+
+    let businessHours = null
+    if (body.businessHours && typeof body.businessHours === 'object') {
+      const bh = body.businessHours
+      const startHour = Math.min(Math.max(parseInt(String(bh.startHour), 10) || 0, 0), 23)
+      const endHour   = Math.min(Math.max(parseInt(String(bh.endHour),   10) || 0, 1), 24)
+      const weekdays  = Array.isArray(bh.weekdays)
+        ? [...new Set(bh.weekdays.map((d) => parseInt(String(d), 10)).filter((d) => d >= 0 && d <= 6))]
+        : [1, 2, 3, 4, 5]
+      businessHours = {
+        startHour,
+        endHour,
+        weekdays,
+        tzOffsetMinutes: reportTzMinutes,
+      }
+    }
+
+    const nowSec = Math.floor(Date.now() / 1000)
+    const requestedFromSec = Number.isFinite(Number(fromSec)) ? Number(fromSec) : (nowSec - rangeSec)
+    const requestedToSec = Number.isFinite(Number(toSec)) ? Number(toSec) : nowSec
+
+    const groupStoreTags = customGroups.find((g) => g.name === groupName)?.storeTags || []
+    const groupStoreCount = groupStoreTags.length || null
+
+    // Pull RAW offline rows from StoreProblemHistory so the per-store/day count
+    // matches the Problem History tab 1:1 (no blip filter, no flap-coalescing).
+    const fromDate = new Date(requestedFromSec * 1000)
+    const toDate   = new Date(requestedToSec * 1000)
+    const rawRecords = groupStoreTags.length
+      ? await StoreProblemHistory.find({
+          code: 'offline',
+          storeTag: { $in: groupStoreTags },
+          firstSeenAt: { $gte: fromDate, $lt: toDate },
+        })
+          .select({ storeTag: 1, hostname: 1, firstSeenAt: 1, resolvedAt: 1 })
+          .lean()
+      : []
+
+    const events = rawRecords.map((r) => ({
+      storeTag: r.storeTag,
+      hostname: r.hostname || '',
+      disconnectTs: Math.floor(new Date(r.firstSeenAt).getTime() / 1000),
+      reconnectTs: r.resolvedAt ? Math.floor(new Date(r.resolvedAt).getTime() / 1000) : null,
+    }))
+
+    const wb = await buildGroupStoreDailyDisconnectionReport({
+      groupName,
+      fromIso: fromDate.toISOString(),
+      toIso:   toDate.toISOString(),
+      source: `StoreProblemHistory (code='offline', MongoDB) · raw rows`,
+      events,
+      businessHours,
+      groupStoreCount,
+      groupStoreTags,
+      tzOffsetMinutes: reportTzMinutes,
+    })
+
+    const safeGroup = groupName.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/_+/g, '_')
+    const filename = `Store_Disconnections_${safeGroup}_${new Date().toISOString().slice(0, 10)}.xlsx`
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
     await wb.xlsx.write(res)

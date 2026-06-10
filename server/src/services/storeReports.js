@@ -378,3 +378,247 @@ export async function buildFullReport(stores, range) {
   }
   return wb
 }
+
+const IST_OFFSET_MIN = 330
+
+function makeBhChecker(bh, tzMinutes) {
+  if (!bh || !Array.isArray(bh.weekdays) || !bh.weekdays.length) return null
+  const weekdays = new Set(bh.weekdays.map(Number))
+  const startH = Number(bh.startHour)
+  const endH = Number(bh.endHour)
+  const tzOff = Number(tzMinutes ?? bh.tzOffsetMinutes ?? IST_OFFSET_MIN) * 60_000
+  return (tsMs) => {
+    const local = new Date(tsMs + tzOff)
+    const day = local.getUTCDay()
+    if (!weekdays.has(day)) return false
+    const hour = local.getUTCHours()
+    if (startH <= endH) return hour >= startH && hour < endH
+    return hour >= startH || hour < endH
+  }
+}
+
+/** YYYY-MM-DD in the requested timezone (default IST). */
+function dayLabelInTz(tsMs, tzMinutes = IST_OFFSET_MIN) {
+  return new Date(tsMs + tzMinutes * 60_000).toISOString().slice(0, 10)
+}
+
+/** Inclusive list of YYYY-MM-DD calendar days in the requested timezone. */
+function buildDayLabels(fromMs, toMs, tzMinutes = IST_OFFSET_MIN) {
+  const startLabel = dayLabelInTz(fromMs, tzMinutes)
+  const endLabel = dayLabelInTz(toMs,   tzMinutes)
+  const out = []
+  let cur = new Date(`${startLabel}T00:00:00.000Z`).getTime()
+  const end = new Date(`${endLabel}T00:00:00.000Z`).getTime()
+  while (cur <= end) {
+    out.push(new Date(cur).toISOString().slice(0, 10))
+    cur += 86_400_000
+  }
+  return out
+}
+
+/** "10 Jun 2026" style label in the requested timezone. */
+function fmtTzDateTime(iso, tzMinutes = IST_OFFSET_MIN) {
+  if (!iso) return ''
+  const t = new Date(iso).getTime()
+  if (!Number.isFinite(t)) return iso
+  const local = new Date(t + tzMinutes * 60_000)
+  const date = local.toISOString().slice(0, 10)
+  const time = local.toISOString().slice(11, 16)
+  const tzLabel = tzMinutes === IST_OFFSET_MIN ? 'IST' : `UTC${tzMinutes >= 0 ? '+' : '-'}${Math.floor(Math.abs(tzMinutes) / 60)}:${String(Math.abs(tzMinutes) % 60).padStart(2, '0')}`
+  return `${date} ${time} ${tzLabel}`
+}
+
+/**
+ * Daily disconnection workbook for one logical group.
+ * Input events are flap-coalesced offline sessions (one per outage chain
+ * per store, with a `disconnectTs` Unix-second timestamp).
+ *
+ * Sheets:
+ *   1. Summary             — group metadata + roll-up totals (matches dashboard)
+ *   2. Daily Summary       — Date | Unique Stores Disconnected | Total Events | Avg/Day
+ *   3. Store-wise Daily    — every store in the group with per-day disconnect counts
+ */
+export async function buildGroupStoreDailyDisconnectionReport({
+  groupName,
+  fromIso,
+  toIso,
+  source,
+  events = [],
+  businessHours = null,
+  groupStoreCount = null,
+  groupStoreTags = [],
+  tzOffsetMinutes = IST_OFFSET_MIN,
+}) {
+  const wb = new ExcelJS.Workbook()
+  wb.creator = 'Netpulse'
+  wb.created = new Date()
+  const tzMinutes = Number.isFinite(Number(tzOffsetMinutes)) ? Number(tzOffsetMinutes) : IST_OFFSET_MIN
+  const rangeLabel = `${fmtTzDateTime(fromIso, tzMinutes)} → ${fmtTzDateTime(toIso, tzMinutes)}`
+  addSummaryHeader(
+    wb,
+    `${groupName} — Store-wise Daily Disconnections`,
+    rangeLabel,
+    new Date().toISOString(),
+  )
+
+  const fromMs = new Date(fromIso).getTime()
+  const toMs = new Date(toIso).getTime()
+  const dayLabels = buildDayLabels(fromMs, toMs, tzMinutes)
+  const daySet = new Set(dayLabels)
+  const isBh = makeBhChecker(businessHours, tzMinutes)
+  const seedStoreTags = Array.isArray(groupStoreTags)
+    ? [...new Set(groupStoreTags.map((t) => String(t || '').trim()).filter(Boolean))]
+    : []
+
+  // Per-day rollups (event-count + unique-store-count) — the latter aligns with
+  // the dashboard's "Disconnects" column on the Net Health tab.
+  const dayEventTotals  = new Map(dayLabels.map((d) => [d, 0]))
+  const dayUniqueStores = new Map(dayLabels.map((d) => [d, new Set()]))
+
+  const byStore = new Map()
+  for (const tag of seedStoreTags) {
+    byStore.set(tag, {
+      storeTag: tag,
+      hostname: '',
+      counts: new Map(dayLabels.map((d) => [d, 0])),
+    })
+  }
+
+  for (const ev of events || []) {
+    const tsMs = Number(ev?.disconnectTs || 0) * 1000
+    if (!Number.isFinite(tsMs) || tsMs <= 0) continue
+    if (isBh && !isBh(tsMs)) continue
+
+    const dayLabel = dayLabelInTz(tsMs, tzMinutes)
+    if (!daySet.has(dayLabel)) continue
+
+    const storeTag = String(ev?.storeTag || '').trim()
+    if (!storeTag) continue
+
+    if (!byStore.has(storeTag)) {
+      byStore.set(storeTag, {
+        storeTag,
+        hostname: String(ev?.hostname || ''),
+        counts: new Map(dayLabels.map((d) => [d, 0])),
+      })
+    }
+    const row = byStore.get(storeTag)
+    row.counts.set(dayLabel, (row.counts.get(dayLabel) || 0) + 1)
+    if (!row.hostname && ev?.hostname) row.hostname = String(ev.hostname)
+
+    dayEventTotals.set(dayLabel, (dayEventTotals.get(dayLabel) || 0) + 1)
+    dayUniqueStores.get(dayLabel).add(storeTag)
+  }
+
+  const daysCount = Math.max(1, dayLabels.length)
+  const storeRows = [...byStore.values()]
+  storeRows.sort((a, b) => {
+    const aTotal = [...a.counts.values()].reduce((sum, v) => sum + v, 0)
+    const bTotal = [...b.counts.values()].reduce((sum, v) => sum + v, 0)
+    return bTotal - aTotal || a.storeTag.localeCompare(b.storeTag)
+  })
+
+  const totalEvents = [...dayEventTotals.values()].reduce((sum, v) => sum + v, 0)
+  const avgEventsPerDay = totalEvents / daysCount
+  const totalUniqueStoreDays = [...dayUniqueStores.values()].reduce((sum, s) => sum + s.size, 0)
+  const avgUniqueStoresPerDay = totalUniqueStoreDays / daysCount
+  const impactedRows = storeRows.filter(
+    (s) => [...s.counts.values()].some((v) => v > 0),
+  )
+  const impactedStoreCount = impactedRows.length
+
+  // ── Summary sheet ───────────────────────────────────────────────────────
+  const wsSummary = wb.getWorksheet('Summary')
+  wsSummary.addRow(['Group', groupName])
+  wsSummary.addRow(['Source', source || `StoreProblemHistory (code='offline', MongoDB)`])
+  wsSummary.addRow(['Date range', rangeLabel])
+  wsSummary.addRow(['Time zone', tzMinutes === IST_OFFSET_MIN ? 'IST (UTC+5:30)' : `UTC${tzMinutes >= 0 ? '+' : '-'}${Math.floor(Math.abs(tzMinutes) / 60)}:${String(Math.abs(tzMinutes) % 60).padStart(2, '0')}`])
+  wsSummary.addRow(['Days in range', dayLabels.length])
+  wsSummary.addRow(['Stores in group', Number(groupStoreCount ?? storeRows.length)])
+  wsSummary.addRow(['Stores with at least 1 disconnect', impactedStoreCount])
+  wsSummary.addRow(['Total disconnect events', totalEvents])
+  wsSummary.addRow(['Avg events / day', Number(avgEventsPerDay.toFixed(2))])
+  wsSummary.addRow(['Avg unique stores impacted / day', Number(avgUniqueStoresPerDay.toFixed(2))])
+  wsSummary.addRow([
+    'Business hours',
+    businessHours
+      ? `${String(businessHours.startHour).padStart(2, '0')}:00-${String(businessHours.endHour).padStart(2, '0')}:00 ${tzMinutes === IST_OFFSET_MIN ? 'IST' : ''} · weekdays ${businessHours.weekdays.join(',')}`
+      : 'Disabled (24x7)',
+  ])
+
+  // ── Daily Summary sheet (matches dashboard "Disconnects" column) ────────
+  const wsDaily = wb.addWorksheet('Daily Summary')
+  mkHeaderRow(wsDaily, [
+    { header: 'Date', width: 14 },
+    { header: 'Unique Stores Disconnected', width: 26 },
+    { header: 'Total Events', width: 14 },
+    { header: 'Avg Events / Day', width: 16 },
+  ], COLORS.blue)
+  for (const d of dayLabels) {
+    wsDaily.addRow([
+      d,
+      dayUniqueStores.get(d)?.size || 0,
+      dayEventTotals.get(d) || 0,
+      Number(avgEventsPerDay.toFixed(2)),
+    ])
+  }
+  // Total row
+  const totalRow = wsDaily.addRow([
+    'Total',
+    totalUniqueStoreDays,
+    totalEvents,
+    Number(avgEventsPerDay.toFixed(2)),
+  ])
+  totalRow.eachCell((cell) => {
+    cell.font = { bold: true }
+    cell.border = { top: { style: 'thin', color: { argb: COLORS.border } } }
+  })
+
+  // ── Store-wise Daily sheet ─────────────────────────────────────────────
+  const wsStore = wb.addWorksheet('Store-wise Daily')
+  const storeCols = [
+    { header: 'Store Tag', width: 18 },
+    { header: 'Hostname', width: 24 },
+    ...dayLabels.map((d) => ({ header: d, width: 12 })),
+    { header: 'Total', width: 10 },
+    { header: 'Avg/Day', width: 10 },
+  ]
+  mkHeaderRow(wsStore, storeCols, COLORS.purple)
+
+  // List every store in the group with its base offline-event count per day.
+  // Impacted rows are sorted to the top; non-impacted stores follow with zeroes.
+  for (const s of storeRows) {
+    const perDay = dayLabels.map((d) => s.counts.get(d) || 0)
+    const total = perDay.reduce((sum, v) => sum + v, 0)
+    const avg = total / daysCount
+    const row = wsStore.addRow([
+      s.storeTag,
+      s.hostname || '',
+      ...perDay,
+      total,
+      Number(avg.toFixed(2)),
+    ])
+    if (total > 0) {
+      const totalCell = row.getCell(2 + dayLabels.length + 1)
+      totalCell.font = { bold: true, color: { argb: COLORS.red } }
+    }
+  }
+
+  if (!storeRows.length) {
+    wsStore.addRow([
+      'No stores in group',
+      '',
+      ...dayLabels.map(() => 0),
+      0,
+      0,
+    ])
+  }
+
+  wsDaily.views = [{ state: 'frozen', ySplit: 1 }]
+  wsStore.views = [{ state: 'frozen', ySplit: 1, xSplit: 2 }]
+  wsStore.autoFilter = {
+    from: { row: 1, column: 1 },
+    to:   { row: 1, column: storeCols.length },
+  }
+  return wb
+}

@@ -314,8 +314,31 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
     d.setHours(0, 0, 0, 0)
     return d.getTime()
   }
+  function ensureEventShape(g) {
+    if (!g) return
+    if (!(g.newEventTagsByDay instanceof Map)) {
+      g.newEventTagsByDay = new Map(dayMsList.map((d) => [d, new Set()]))
+    }
+    if (!(g.rawEventsByDay instanceof Map)) {
+      g.rawEventsByDay = new Map(dayMsList.map((d) => [d, 0]))
+    }
+    if (!(g.newEventTagsTotal instanceof Set)) {
+      g.newEventTagsTotal = new Set()
+    }
+  }
   for (const g of perGroup.values()) {
-    for (const recs of g.recordsByStore.values()) {
+    ensureEventShape(g)
+    const recordSessionStart = (storeTag, sessionStartMs) => {
+      if (sessionStartMs == null || sessionStartMs < fromMs || sessionStartMs >= toMs) return
+      const dayMs = dayMsContaining(sessionStartMs)
+      if (!g.newEventTagsByDay.has(dayMs)) return
+      g.newEventTagsByDay.get(dayMs).add(storeTag)
+      g.newEventTagsTotal.add(storeTag)
+      g.rawEventsByDay.set(dayMs, g.rawEventsByDay.get(dayMs) + 1)
+      g.totals.rawEvents += 1
+    }
+
+    for (const [tag, recs] of g.recordsByStore.entries()) {
       recs.sort((a, b) => a.startMs - b.startMs)
       let sessionStart = null
       let sessionEnd = null
@@ -331,26 +354,12 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
           if (sessionEnd == null || r.endMs == null) sessionEnd = null
           else if (r.endMs > sessionEnd) sessionEnd = r.endMs
         } else {
-          if (sessionStart >= fromMs && sessionStart < toMs) {
-            const dayMs = dayMsContaining(sessionStart)
-            if (g.eventCountByDay.has(dayMs)) {
-              g.eventCountByDay.set(dayMs, g.eventCountByDay.get(dayMs) + 1)
-              g.totals.events += 1
-            }
-          }
+          recordSessionStart(tag, sessionStart)
           sessionStart = r.startMs
           sessionEnd = r.endMs
         }
       }
-      if (sessionStart != null && sessionStart >= fromMs && sessionStart < toMs) {
-        const dayMs = dayMsContaining(sessionStart)
-        if (g.newEventTagsByDay.has(dayMs)) {
-          g.newEventTagsByDay.get(dayMs).add(tag)
-          g.newEventTagsTotal.add(tag)
-          g.rawEventsByDay.set(dayMs, g.rawEventsByDay.get(dayMs) + 1)
-          g.totals.rawEvents += 1
-        }
-      }
+      recordSessionStart(tag, sessionStart)
     }
   }
 
@@ -364,9 +373,10 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
 
   const groupsPayload = groupDefs.map((def) => {
     const g = perGroup.get(def.name)
+    ensureEventShape(g)
     const daysOut = dayMsList.map((dayMs) => {
-      const s = g.dayStats.get(dayMs)
-      const impacted = g.impactedTagsByDay.get(dayMs)?.size || 0
+      const s = g.dayStats?.get?.(dayMs) || { offlineMinutes: 0 }
+      const impacted = g.impactedTagsByDay?.get?.(dayMs)?.size || 0
       const eventStores = g.newEventTagsByDay.get(dayMs)?.size || 0
       const rawEvents = g.rawEventsByDay.get(dayMs) || 0
       return {
@@ -385,15 +395,15 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
     const sumRawEvents = daysOut.reduce((sum, d) => sum + (d.rawEvents || 0), 0)
     return {
       name: def.name,
-      storeCount: g.reportingTags.size,
+      storeCount: g.reportingTags?.size || 0,
       days: daysOut,
       totals: {
         disconnections: sumDisconnections,
         rawEvents: sumRawEvents,
-        uniqueStoresWithNewEvents: g.newEventTagsTotal.size,
-        uniqueStoresImpacted: g.impactedTagsTotal.size,
-        offlineMinutes: g.totals.offlineMinutes,
-        offlineHours: Math.round((g.totals.offlineMinutes / 60) * 100) / 100,
+        uniqueStoresWithNewEvents: g.newEventTagsTotal?.size || 0,
+        uniqueStoresImpacted: g.impactedTagsTotal?.size || 0,
+        offlineMinutes: g.totals?.offlineMinutes || 0,
+        offlineHours: Math.round((((g.totals?.offlineMinutes) || 0) / 60) * 100) / 100,
       },
     }
   })

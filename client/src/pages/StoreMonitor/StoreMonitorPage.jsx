@@ -54,7 +54,13 @@ const REPORT_TYPES = [
   { key: 'issues',       label: 'Issues Report',        icon: '⚠',  desc: 'All active issues with severity, issue code, affected store and last-seen time.' },
   { key: 'connectivity', label: 'Connectivity Report',  icon: '🌐', desc: 'Connectivity state breakdown (LAN/Wi-Fi/ISP Down/Hotspot) per store and as summary.' },
   { key: 'speedtest',    label: 'Speedtest Report',     icon: '⚡', desc: 'Download & upload speeds sorted by performance. Group averages included.' },
+  { key: 'manual_sdwan_daily_disconnect', label: 'Manual ROP + SD-WAN Daily Disconnects', icon: '📋', desc: 'Per-store day-wise disconnection counts for Manual ROP + SD-WAN in business hours.' },
+  { key: 'rop_no_sdwan_daily_disconnect', label: 'ROP without SD-WAN Daily Disconnects',  icon: '🔗', desc: 'Per-store day-wise disconnection counts for ROP without SD-WAN in business hours.' },
 ]
+const DAILY_DISCONNECT_REPORT_GROUP = {
+  manual_sdwan_daily_disconnect: 'Manual ROP + SD-WAN',
+  rop_no_sdwan_daily_disconnect: 'ROP without SD-WAN',
+}
 
 const TIME_RANGES = [
   { key: '-15m', label: '15 Min' },
@@ -220,6 +226,14 @@ function buildSingleGroupDisconnectChart(group, days, groupName, tc) {
   const labels = days.map((d) =>
     new Date(d.dayMs).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }),
   )
+  const disconnectSeries = days.map((d) => {
+    const day = group.days.find((x) => x.dayMs === d.dayMs)
+    return day?.disconnections ?? 0
+  })
+  const avgDisconnects = disconnectSeries.length
+    ? disconnectSeries.reduce((sum, v) => sum + v, 0) / disconnectSeries.length
+    : 0
+  const avgSeries = disconnectSeries.map(() => Number(avgDisconnects.toFixed(2)))
   return {
     data: {
       labels,
@@ -227,13 +241,23 @@ function buildSingleGroupDisconnectChart(group, days, groupName, tc) {
         {
           type: 'bar',
           label: 'Disconnect Events',
-          data: days.map((d) => {
-            const day = group.days.find((x) => x.dayMs === d.dayMs)
-            return day?.disconnections ?? 0
-          }),
+          data: disconnectSeries,
           backgroundColor: color + '88',
           borderColor: color,
           borderWidth: 1.5,
+          yAxisID: 'y',
+        },
+        {
+          type: 'line',
+          label: 'Average / Day',
+          data: avgSeries,
+          borderColor: color,
+          backgroundColor: color,
+          borderDash: [6, 4],
+          borderWidth: 1.5,
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          tension: 0,
           yAxisID: 'y',
         },
       ],
@@ -1469,6 +1493,29 @@ export default function StoreMonitorPage() {
     if (noSdwanTags.length) groups.push({ name: 'ROP without SD-WAN', storeTags: noSdwanTags })
     return groups
   }, [ropManualTagsCsv, ropNoSdwanTagsCsv])
+  // Reports must always have a usable "Manual ROP + SD-WAN" group:
+  // when manual code list is empty/unmatched, fall back to RP + SD-WAN stores.
+  const reportManualSdwanStores = useMemo(() => {
+    const manualMatched = (ropManualStores || []).filter((s) => !s.isPlaceholder)
+    if (manualMatched.length) return manualMatched
+    return (ropSdwanStores || []).filter((s) => !s.isPlaceholder)
+  }, [ropManualStores, ropSdwanStores])
+  const reportManualSdwanTagsCsv = useMemo(
+    () => (reportManualSdwanStores || [])
+      .filter((s) => s && s.storeTag)
+      .map((s) => s.storeTag)
+      .sort()
+      .join(','),
+    [reportManualSdwanStores],
+  )
+  const reportDailyCustomGroups = useMemo(() => {
+    const manualTags = reportManualSdwanTagsCsv ? reportManualSdwanTagsCsv.split(',') : []
+    const noSdwanTags = ropNoSdwanTagsCsv ? ropNoSdwanTagsCsv.split(',') : []
+    const groups = []
+    if (manualTags.length) groups.push({ name: 'Manual ROP + SD-WAN', storeTags: manualTags })
+    if (noSdwanTags.length) groups.push({ name: 'ROP without SD-WAN', storeTags: noSdwanTags })
+    return groups
+  }, [reportManualSdwanTagsCsv, ropNoSdwanTagsCsv])
 
   /* Snapshot cards shown on the Net Health tab.
      Excludes "General Group" and adds the two ROP-tab rollups so the numbers
@@ -1606,7 +1653,9 @@ export default function StoreMonitorPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [range, globalCustom, netHealthCustomGroups, bhSig, disconnectGroupIdsSig])
 
-  useEffect(() => { if (tab === 'netHealth') loadGroupDisconnect() }, [tab, loadGroupDisconnect])
+  useEffect(() => {
+    if (tab === 'netHealth' || tab === 'reports') loadGroupDisconnect()
+  }, [tab, loadGroupDisconnect])
 
   /* ── per-store disconnect events for the currently expanded group ── */
   const loadDisconnectEventsForGroup = useCallback(async (groupId, { force = false } = {}) => {
@@ -2308,9 +2357,52 @@ export default function StoreMonitorPage() {
     setDownloading(type)
     try {
       const token = useAuthStore.getState().token
+      const base = resolvedApiBase()
+      const fixedGroup = DAILY_DISCONNECT_REPORT_GROUP[type]
+      if (fixedGroup) {
+        const q = new URLSearchParams()
+        if (globalCustom.enabled && globalCustom.from) {
+          const fromSec = fromLocalInput(globalCustom.from)
+          const toSec = globalCustom.to ? fromLocalInput(globalCustom.to) : Math.floor(Date.now() / 1000)
+          if (fromSec) q.set('from', String(fromSec))
+          if (toSec) q.set('to', String(toSec))
+        } else {
+          q.set('rangeSec', String(HISTORY_SECS[range] || 86400))
+        }
+        const tzOffsetMinutes = -new Date().getTimezoneOffset()
+        const body = {
+          groupName: fixedGroup,
+          customGroups: reportDailyCustomGroups,
+          tzOffsetMinutes,
+        }
+        if (bh.enabled) {
+          body.businessHours = {
+            startHour: bh.startHour,
+            endHour: bh.endHour,
+            weekdays: bh.weekdays,
+            tzOffsetMinutes,
+          }
+        }
+        const res = await fetch(`${base}/api/store-monitor/reports/group-disconnect-daily?${q.toString()}`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body),
+        })
+        if (!res.ok) { const j = await res.json().catch(()=>({})); throw new Error(j.error||`HTTP ${res.status}`) }
+        const blob = await res.blob()
+        const a = document.createElement('a')
+        a.href = URL.createObjectURL(blob)
+        a.download = `${type}_${new Date().toISOString().slice(0,10)}.xlsx`
+        a.click()
+        URL.revokeObjectURL(a.href)
+        return
+      }
+
       const groupParam = reportGroup !== 'all' ? `&group=${encodeURIComponent(reportGroup)}` : ''
       const url = `/api/store-monitor/reports/${type}?range=${encodeURIComponent(range)}${groupParam}`
-      const base = resolvedApiBase()
       const res = await fetch(`${base}${url}`, { headers: { Authorization: `Bearer ${token}` } })
       if (!res.ok) { const j = await res.json().catch(()=>({})); throw new Error(j.error||`HTTP ${res.status}`) }
       const blob = await res.blob()
@@ -3244,6 +3336,9 @@ export default function StoreMonitorPage() {
                             {payload.bucketMin || 5}m buckets ·{' '}
                             <strong style={{color:'var(--text2)'}}>{group?.storeCount ?? 0}</strong>
                             {' '}reporting / <strong style={{color:'var(--text2)'}}>{card.total ?? 0}</strong> total stores
+                            {' '}· avg/day <strong style={{color:'var(--text2)'}}>
+                              {days.length ? ((group?.totals?.disconnections || 0) / days.length).toFixed(2) : '0.00'}
+                            </strong>
                             {card.total > 0 && (
                               <>
                                 {' '}·{' '}
@@ -4835,6 +4930,65 @@ export default function StoreMonitorPage() {
                           </div>
                         ))}
                       </div>
+                    )
+                  })()}
+                  {(rt.key==='manual_sdwan_daily_disconnect' || rt.key==='rop_no_sdwan_daily_disconnect') && (() => {
+                    const targetStores = rt.key === 'manual_sdwan_daily_disconnect'
+                      ? reportManualSdwanStores
+                      : (ropOnlyWithoutManualStores || []).filter((s) => !s.isPlaceholder)
+                    const previewGroup = DAILY_DISCONNECT_REPORT_GROUP[rt.key]
+                    const previewPayload = previewGroup ? groupDisconnectById[previewGroup] : null
+                    const previewDays = previewPayload?.days || []
+                    const previewData = previewPayload?.groups?.find((g) => g.name === previewGroup) || previewPayload?.groups?.[0]
+                    const previewChart = previewData && previewDays.length
+                      ? buildSingleGroupDisconnectChart(previewData, previewDays, previewGroup, tc)
+                      : null
+                    const previewLoading = previewGroup ? !!groupDisconnectLoadingById[previewGroup] : false
+                    return (
+                      <>
+                        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>
+                          {[
+                            ['Group stores', targetStores.length, 'var(--text)'],
+                            ['BH filter', bh.enabled ? 'ON' : 'OFF', bh.enabled ? 'var(--amber)' : 'var(--text3)'],
+                          ].map(([l,v,c])=>(
+                            <div key={l} style={{textAlign:'center',background:'var(--bg3)',borderRadius:6,padding:'6px 4px'}}>
+                              <div style={{fontSize:14,fontWeight:700,color:c}}>{v}</div>
+                              <div style={{fontSize:9,fontFamily:'var(--mono)',color:'var(--text3)',textTransform:'uppercase'}}>{l}</div>
+                            </div>
+                          ))}
+                        </div>
+                        <div style={{border:'1px solid var(--border)',borderRadius:6,background:'var(--bg2)',padding:'6px 8px'}}>
+                          <div style={{fontSize:9.5,fontFamily:'var(--mono)',textTransform:'uppercase',letterSpacing:'.05em',color:'var(--text3)',marginBottom:5}}>
+                            Daily disconnections graph
+                          </div>
+                          {previewLoading ? (
+                            <div style={{height:120,display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,color:'var(--text3)',fontFamily:'var(--mono)'}}>
+                              Loading graph…
+                            </div>
+                          ) : previewChart ? (
+                            <div style={{height:120}}>
+                              <Chart
+                                type="bar"
+                                data={previewChart.data}
+                                options={{
+                                  ...previewChart.options,
+                                  plugins: {
+                                    ...(previewChart.options?.plugins || {}),
+                                    legend: {
+                                      ...(previewChart.options?.plugins?.legend || {}),
+                                      display: false,
+                                    },
+                                  },
+                                }}
+                              />
+                            </div>
+                          ) : (
+                            <div style={{height:120,display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,color:'var(--text3)',fontFamily:'var(--mono)'}}>
+                              No graph data
+                            </div>
+                          )}
+                        </div>
+                      </>
                     )
                   })()}
 
