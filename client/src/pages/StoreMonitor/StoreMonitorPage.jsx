@@ -962,6 +962,7 @@ export default function StoreMonitorPage() {
   /* ── day-wise group disconnections/offline report (one API call per group) ── */
   const [groupDisconnectById, setGroupDisconnectById] = useState({})
   const [groupDisconnectLoadingById, setGroupDisconnectLoadingById] = useState({})
+  const groupDisconnectReqSeqRef = useRef(0)
 
   /* ── problem history tab ── */
   const [probHist, setProbHist] = useState(null)
@@ -1411,6 +1412,12 @@ export default function StoreMonitorPage() {
     return out
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupSummary, ropManualStores, ropOnlyWithoutManualStores])
+  // Keep a stable signature based only on group IDs so disconnect loaders do not
+  // refire every overview poll when only counts/health values change.
+  const disconnectGroupIdsSig = useMemo(
+    () => displayedGroupCards.map((g) => g.id).join('|'),
+    [displayedGroupCards],
+  )
 
   /* ── load per-group time series (fuels the Group × Day matrix) ──
      POSTs the manual ROP store-tag lists so the backend can include them
@@ -1451,14 +1458,19 @@ export default function StoreMonitorPage() {
     [bh.enabled, bh.startHour, bh.endHour, bh.weekdays],
   )
   const loadGroupDisconnect = useCallback(async () => {
-    const groupIds = displayedGroupCards.map((g) => g.id)
+    const groupIds = disconnectGroupIdsSig ? disconnectGroupIdsSig.split('|') : []
     if (!groupIds.length) {
       setGroupDisconnectById({})
       setGroupDisconnectLoadingById({})
       return
     }
 
-    setGroupDisconnectLoadingById(Object.fromEntries(groupIds.map((id) => [id, true])))
+    // Ignore stale responses from previous invocations.
+    const reqSeq = ++groupDisconnectReqSeqRef.current
+    setGroupDisconnectLoadingById((prev) => ({
+      ...prev,
+      ...Object.fromEntries(groupIds.map((id) => [id, true])),
+    }))
 
     let params
     if (globalCustom.enabled && globalCustom.from) {
@@ -1487,15 +1499,18 @@ export default function StoreMonitorPage() {
           body,
           { params: { ...params, groupName: groupId }, timeout: 180000 },
         )
+        if (reqSeq !== groupDisconnectReqSeqRef.current) return
         setGroupDisconnectById((prev) => ({ ...prev, [groupId]: data }))
       } catch {
+        if (reqSeq !== groupDisconnectReqSeqRef.current) return
         setGroupDisconnectById((prev) => ({ ...prev, [groupId]: null }))
       } finally {
+        if (reqSeq !== groupDisconnectReqSeqRef.current) return
         setGroupDisconnectLoadingById((prev) => ({ ...prev, [groupId]: false }))
       }
     }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [range, globalCustom, netHealthCustomGroups, bhSig, displayedGroupCards])
+  }, [range, globalCustom, netHealthCustomGroups, bhSig, disconnectGroupIdsSig])
 
   useEffect(() => { if (tab === 'netHealth') loadGroupDisconnect() }, [tab, loadGroupDisconnect])
   const ropActiveStores = useMemo(() => {
@@ -2934,11 +2949,10 @@ export default function StoreMonitorPage() {
                   </span>
                 )}
                 <span style={{marginLeft:'auto',fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
-                  {displayedGroupCards.length} groups · batched server queries (2 groups at a time)
+                  {displayedGroupCards.length} groups · parallel per-group queries
                 </span>
                 <button type="button" className="sm-btn sm-sm"
-                  onClick={loadGroupDisconnect}
-                  disabled={Object.values(groupDisconnectLoadingById).some(Boolean)}>
+                  onClick={loadGroupDisconnect}>
                   {Object.values(groupDisconnectLoadingById).some(Boolean) ? '⏳ Loading…' : '↻ Refresh'}
                 </button>
               </div>

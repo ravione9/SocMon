@@ -1394,8 +1394,15 @@ export async function fetchGroupHealthHistory(rangeSec = 86400, fromSec, toSec, 
     try { cached = await fetchStoreSnapshot(15, '-24h') } catch { cached = null }
   }
   const sdwanTags = []
+  const rpTags = []
+  const posTags = []
   if (Array.isArray(cached)) {
     for (const s of cached) {
+      if (s.storeTag) {
+        const h = String(s.hostname || '').toUpperCase()
+        if (h.startsWith('RP')) rpTags.push(s.storeTag)
+        else if (h.startsWith('LK')) posTags.push(s.storeTag)
+      }
       if (
         vendorIsFortinet(s.gatewayVendor, s.isFortinet) ||
         vendorIsFortinet(s.lastGatewayVendor, s.lastIsFortinet)
@@ -1726,7 +1733,10 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
       }
     }
   }
-  const sdwanTagSet = new Set(sdwanTags)
+  const rpUniqueTags = [...new Set(rpTags)]
+  const posUniqueTags = [...new Set(posTags)]
+  const sdwanUniqueTags = [...new Set(sdwanTags)]
+  const sdwanTagSet = new Set(sdwanUniqueTags)
 
   const customGroups = Array.isArray(opts.customGroups) ? opts.customGroups : []
   const customGroupTagSets = new Map()
@@ -1750,22 +1760,22 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
   const groupDefs = [
     {
       name: 'RP Group',
-      filterLines: '  |> filter(fn: (r) => exists r.hostname and r.hostname =~ /^[Rr][Pp]/)',
-      tags: null,
+      filterLines: rpUniqueTags.length ? null : '  |> filter(fn: (r) => exists r.hostname and r.hostname =~ /^[Rr][Pp]/)',
+      tags: rpUniqueTags.length ? rpUniqueTags : null,
       belongs: (tag, snap) => String(snap?.hostname || '').toUpperCase().startsWith('RP'),
     },
     {
       name: 'POS System Group',
-      filterLines: '  |> filter(fn: (r) => exists r.hostname and r.hostname =~ /^[Ll][Kk]/)',
-      tags: null,
+      filterLines: posUniqueTags.length ? null : '  |> filter(fn: (r) => exists r.hostname and r.hostname =~ /^[Ll][Kk]/)',
+      tags: posUniqueTags.length ? posUniqueTags : null,
       belongs: (tag, snap) => String(snap?.hostname || '').toUpperCase().startsWith('LK'),
     },
   ]
-  if (sdwanTags.length > 0 && sdwanTags.length <= 4000) {
+  if (sdwanUniqueTags.length > 0 && sdwanUniqueTags.length <= 4000) {
     groupDefs.push({
       name: 'SD-WAN Group',
       filterLines: null,
-      tags: sdwanTags,
+      tags: sdwanUniqueTags,
       belongs: (tag) => sdwanTagSet.has(tag),
     })
   }
@@ -2018,7 +2028,7 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
       storesReporting,
       groupQueryCount: activeGroupDefs.length,
       groupName: onlyGroup || null,
-      sdwanStoreCount: sdwanTags.length,
+      sdwanStoreCount: sdwanUniqueTags.length,
       businessHours: bh ? {
         startHour: bh.startHour,
         endHour: bh.endHour,
