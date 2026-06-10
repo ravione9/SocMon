@@ -1713,27 +1713,28 @@ export default function StoreMonitorPage() {
   /* ── net health ── */
   const netHealth = useMemo(() => {
     let healthy=0, dnsOk=0, dnsT=0, httpOk=0, httpT=0, latSum=0, latC=0, lossSum=0, lossC=0
-    const pingAgg={}, dnsAgg={}, httpAgg={}
     for (const s of stores) {
       if (s.connState==='lan_healthy'||s.connState==='wifi_healthy') healthy++
-      for (const [t,p] of Object.entries(s.ping||{})) {
-        const c=pingAgg[t]||{lat:0,latC:0,loss:0,lossC:0}
-        if(p.avgMs!=null&&Number.isFinite(p.avgMs)){c.lat+=p.avgMs;c.latC++;latSum+=p.avgMs;latC++}
-        if(p.packetLossPct!=null&&Number.isFinite(p.packetLossPct)){c.loss+=p.packetLossPct;c.lossC++;lossSum+=p.packetLossPct;lossC++}
-        pingAgg[t]=c
+      for (const p of Object.values(s.ping||{})) {
+        if(p.avgMs!=null&&Number.isFinite(p.avgMs)){latSum+=p.avgMs;latC++}
+        if(p.packetLossPct!=null&&Number.isFinite(p.packetLossPct)){lossSum+=p.packetLossPct;lossC++}
       }
-      for (const [d,v] of Object.entries(s.dns||{})) {
-        const c=dnsAgg[d]||{ok:0,t:0}; c.t++;dnsT++; if(v.success===true){c.ok++;dnsOk++} dnsAgg[d]=c
+      for (const v of Object.values(s.dns||{})) {
+        dnsT++
+        if (v.success === true) dnsOk++
       }
-      for (const [u,v] of Object.entries(s.http||{})) {
-        const c=httpAgg[u]||{ok:0,t:0}; c.t++;httpT++; if(v.success===true&&(v.statusCode==null||Number(v.statusCode)<500)){c.ok++;httpOk++} httpAgg[u]=c
+      for (const v of Object.values(s.http||{})) {
+        httpT++
+        if (v.success === true && (v.statusCode == null || Number(v.statusCode) < 500)) httpOk++
       }
     }
-    // latRows/lossRows removed — replaced by aggregate time-series charts (see netLatencyTimeChart / netLossTimeChart)
-    const dnsRows=Object.entries(dnsAgg).map(([d,c])=>({domain:d,pct:pct(c.ok,c.t),t:c.t}))
-    const httpRows=Object.entries(httpAgg).map(([u,c])=>({url:u,pct:pct(c.ok,c.t),t:c.t}))
-    return { uptimePct:pct(healthy,stores.length||1), dnsOkPct:pct(dnsOk,dnsT||1), httpOkPct:pct(httpOk,httpT||1),
-      avgLatency:latC?latSum/latC:null, avgLoss:lossC?lossSum/lossC:null, dnsRows, httpRows }
+    return {
+      uptimePct: pct(healthy, stores.length || 1),
+      dnsOkPct: pct(dnsOk, dnsT || 1),
+      httpOkPct: pct(httpOk, httpT || 1),
+      avgLatency: latC ? latSum / latC : null,
+      avgLoss: lossC ? lossSum / lossC : null,
+    }
   }, [stores])
 
   /* ── charts ── */
@@ -1883,17 +1884,6 @@ export default function StoreMonitorPage() {
   const netLossTimeChart = useMemo(() => buildAggregateLineChart(
     netHist?.lossSeries || [], tc,
     { yLabel: '%', yMinFloor: 0, yMaxCeiling: 100, bhFilter: bhTickFilter, decimals: 2 }
-  ), [netHist, tc, bhTickFilter])
-
-  // DNS/HTTP success% — usually 95–100%, so zoom in but cap at 100
-  const netDnsTimeChart = useMemo(() => buildAggregateLineChart(
-    netHist?.dnsSeries || [], tc,
-    { yLabel: '%', yMinFloor: 0, yMaxCeiling: 100, bhFilter: bhTickFilter, decimals: 1 }
-  ), [netHist, tc, bhTickFilter])
-
-  const netHttpTimeChart = useMemo(() => buildAggregateLineChart(
-    netHist?.httpSeries || [], tc,
-    { yLabel: '%', yMinFloor: 0, yMaxCeiling: 100, bhFilter: bhTickFilter, decimals: 1 }
   ), [netHist, tc, bhTickFilter])
 
   /* ── Daily rollups across the fleet (best-practice multi-day view) ──
@@ -3820,71 +3810,9 @@ export default function StoreMonitorPage() {
                     </div>
                   </div>
                 </div>
-
-                <div className="sm-g2 sm-section-mb">
-                  <div className="sm-tr">
-                    <div className="sm-tr-hd">
-                      <span className="sm-tr-title">🌐 DNS Success Rate by Domain</span>
-                      <span style={{fontSize:9.5,fontFamily:'var(--mono)',color:'var(--text3)'}}>% · 100 = all queries OK</span>
-                    </div>
-                    {renderStatsStrip(netDnsTimeChart)}
-                    <div className="sm-tr-body sm-chart-tall">
-                      {renderAggChart(netDnsTimeChart, 'No DNS data in this range')}
-                    </div>
-                  </div>
-                  <div className="sm-tr">
-                    <div className="sm-tr-hd">
-                      <span className="sm-tr-title">🔗 HTTP Success Rate by URL</span>
-                      <span style={{fontSize:9.5,fontFamily:'var(--mono)',color:'var(--text3)'}}>% · 100 = all requests OK</span>
-                    </div>
-                    {renderStatsStrip(netHttpTimeChart)}
-                    <div className="sm-tr-body sm-chart-tall">
-                      {renderAggChart(netHttpTimeChart, 'No HTTP data in this range')}
-                    </div>
-                  </div>
-                </div>
               </>
             )
           })()}
-
-          <div className="sm-g2">
-            <div className="sm-tr">
-              <div className="sm-tr-hd"><span className="sm-tr-title">DNS Health</span></div>
-              <div className="sm-tr-body sm-tbl-wrap">
-                <table className="sm-tbl">
-                  <thead><tr><th>Domain</th><th>Success %</th><th>Samples</th></tr></thead>
-                  <tbody>
-                    {netHealth.dnsRows.map((d)=>(
-                      <tr key={d.domain}>
-                        <td>{d.domain}</td>
-                        <td style={{color:d.pct>=99?'var(--green)':d.pct>=95?'var(--amber)':'var(--red)',fontWeight:600,fontFamily:'var(--mono)'}}>{d.pct.toFixed(1)}%</td>
-                        <td style={{color:'var(--text3)',fontFamily:'var(--mono)',fontSize:11}}>{d.t}</td>
-                      </tr>
-                    ))}
-                    {!netHealth.dnsRows.length && <tr><td colSpan={3} className="sm-empty">No data</td></tr>}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-            <div className="sm-tr">
-              <div className="sm-tr-hd"><span className="sm-tr-title">HTTP Health</span></div>
-              <div className="sm-tr-body sm-tbl-wrap">
-                <table className="sm-tbl">
-                  <thead><tr><th>URL</th><th>Success %</th><th>Samples</th></tr></thead>
-                  <tbody>
-                    {netHealth.httpRows.map((h)=>(
-                      <tr key={h.url}>
-                        <td style={{wordBreak:'break-all',maxWidth:220,fontSize:11}}>{h.url}</td>
-                        <td style={{color:h.pct>=99?'var(--green)':h.pct>=95?'var(--amber)':'var(--red)',fontWeight:600,fontFamily:'var(--mono)'}}>{h.pct.toFixed(1)}%</td>
-                        <td style={{color:'var(--text3)',fontFamily:'var(--mono)',fontSize:11}}>{h.t}</td>
-                      </tr>
-                    ))}
-                    {!netHealth.httpRows.length && <tr><td colSpan={3} className="sm-empty">No data</td></tr>}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
 
           {/* ── 🕒 Store Disconnect Events Timeline ──
               Click a group to load per-store disconnect → reconnect events for the
@@ -3893,7 +3821,7 @@ export default function StoreMonitorPage() {
             <div className="sm-tr-hd">
               <span className="sm-tr-title">🕒 Store Disconnect Events Timeline</span>
               <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
-                real heartbeat gaps only (5m) · matches graph disconnect counts · currently-offline inventory is on NOC Overview
+                real heartbeat gaps + rollups + last-heartbeat · aligns with day-wise graph
               </span>
             </div>
             <div style={{padding:'10px 12px'}}>
