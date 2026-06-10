@@ -116,12 +116,12 @@ const NGINX_APP_LOCATIONS = `
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
     }
+    # /mcp uses Docker's embedded DNS (127.0.0.11) and a variable upstream so
+    # name resolution is deferred to request time. With a static upstream, a
+    # missing mcp container fails the whole nginx config at load time and takes
+    # the UI down; with the variable form, only /mcp returns 502 while mcp is
+    # absent.
     location /mcp {
-        # Use Docker's embedded DNS and a variable upstream so nginx defers
-        # resolution to request time. Without this, plain `proxy_pass http://mcp:5050`
-        # fails the WHOLE config at startup if the mcp container isn't running yet
-        # (host not found in upstream "mcp"), taking down the entire UI. With this
-        # form, only /mcp returns 502 while mcp is down — UI/API stay alive.
         resolver 127.0.0.11 ipv6=off valid=10s;
         set $netpulse_mcp_upstream mcp:5050;
         proxy_pass http://$netpulse_mcp_upstream;
