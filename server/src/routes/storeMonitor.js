@@ -10,6 +10,7 @@ import {
   fetchNetHealthHistory,
   fetchGroupHealthHistory,
   fetchGroupDisconnectDaily,
+  fetchGroupDisconnectEvents,
   buildOverviewSummary,
   getAnyCachedStoreSnapshot,
   queryFlux,
@@ -306,6 +307,55 @@ async function handleGroupDisconnectReport(req, res, next) {
 }
 router.get('/net-health/group-disconnect-report',  handleGroupDisconnectReport)
 router.post('/net-health/group-disconnect-report', handleGroupDisconnectReport)
+
+/**
+ * GET/POST /api/store-monitor/net-health/group-disconnect-events
+ * Per-store disconnect/reconnect event timeline for ONE group.
+ *
+ * Query:
+ *   - groupName  (required) — built-in ('RP Group' / 'POS System Group' / 'SD-WAN Group') or custom group name
+ *   - from / to  (unix sec) or rangeSec (default 86400)
+ *
+ * POST body (optional):
+ *   { customGroups: [{ name, storeTags: [] }, ...] }
+ */
+async function handleGroupDisconnectEvents(req, res, next) {
+  try {
+    if (!isInfluxStoreConfigured()) {
+      return res.status(503).json({ error: 'InfluxDB not configured' })
+    }
+    const groupName = String(req.query.groupName || req.query.group || '').trim().slice(0, 80)
+    if (!groupName) {
+      return res.status(400).json({ error: 'groupName required' })
+    }
+    const fromSec = req.query.from ? parseInt(String(req.query.from), 10) : undefined
+    const toSec   = req.query.to   ? parseInt(String(req.query.to),   10) : undefined
+    const rangeSec = Math.min(
+      Math.max(parseInt(String(req.query.rangeSec || '86400'), 10) || 86400, 300),
+      30 * 86400,
+    )
+    const body = req.body && typeof req.body === 'object' ? req.body : {}
+    const rawGroups = Array.isArray(body.customGroups) ? body.customGroups : []
+    const customGroups = rawGroups
+      .map((g) => ({
+        name: String(g?.name || '').slice(0, 80),
+        storeTags: Array.isArray(g?.storeTags)
+          ? g.storeTags.map((t) => String(t || '')).filter(Boolean).slice(0, 4000)
+          : [],
+      }))
+      .filter((g) => g.name && g.storeTags.length > 0)
+      .slice(0, 10)
+
+    const payload = await fetchGroupDisconnectEvents(rangeSec, fromSec, toSec, {
+      groupName, customGroups,
+    })
+    res.json(payload)
+  } catch (e) {
+    next(e)
+  }
+}
+router.get('/net-health/group-disconnect-events',  handleGroupDisconnectEvents)
+router.post('/net-health/group-disconnect-events', handleGroupDisconnectEvents)
 
 router.get('/problems', async (req, res, next) => {
   try {

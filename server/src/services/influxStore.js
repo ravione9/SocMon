@@ -2190,6 +2190,265 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
   }
 }
 
+/**
+ * Resolve a group name to a Flux filter spec (preferring tag-set for performance).
+ * Used by the per-store disconnect events endpoint.
+ */
+function resolveGroupDefForName(groupName, snapshot, customGroups = []) {
+  const name = String(groupName || '').trim()
+  if (!name) return null
+
+  const builtinMatchers = {
+    'RP Group': {
+      regexFilter: '  |> filter(fn: (r) => exists r.hostname and r.hostname =~ /^[Rr][Pp]/)',
+      belongs: (_tag, snap) => String(snap?.hostname || '').toUpperCase().startsWith('RP'),
+    },
+    'POS System Group': {
+      regexFilter: '  |> filter(fn: (r) => exists r.hostname and r.hostname =~ /^[Ll][Kk]/)',
+      belongs: (_tag, snap) => String(snap?.hostname || '').toUpperCase().startsWith('LK'),
+    },
+  }
+
+  if (name === 'SD-WAN Group' && Array.isArray(snapshot)) {
+    const tags = []
+    for (const s of snapshot) {
+      if (!s?.storeTag) continue
+      if (
+        vendorIsFortinet(s.gatewayVendor, s.isFortinet)
+        || vendorIsFortinet(s.lastGatewayVendor, s.lastIsFortinet)
+      ) tags.push(s.storeTag)
+    }
+    const set = new Set(tags)
+    if (!set.size) return null
+    return { tags: [...set], belongs: (tag) => set.has(tag) }
+  }
+
+  if (builtinMatchers[name] && Array.isArray(snapshot)) {
+    const tags = []
+    for (const s of snapshot) {
+      if (!s?.storeTag) continue
+      if (builtinMatchers[name].belongs(s.storeTag, s)) tags.push(s.storeTag)
+    }
+    const set = new Set(tags)
+    if (set.size && set.size <= 4000) {
+      return { tags: [...set], belongs: (tag) => set.has(tag) }
+    }
+    return { filterLines: builtinMatchers[name].regexFilter, belongs: builtinMatchers[name].belongs }
+  }
+
+  for (const g of customGroups || []) {
+    if (String(g?.name || '').trim() === name) {
+      const tags = Array.isArray(g.storeTags)
+        ? g.storeTags.map((t) => String(t || '').trim()).filter(Boolean)
+        : []
+      const set = new Set(tags)
+      if (!set.size) return null
+      return { tags: [...set], belongs: (tag) => set.has(tag) }
+    }
+  }
+
+  return null
+}
+
+const GROUP_DISCONNECT_EVENTS_CACHE_MS = 60_000
+const _groupDisconnectEventsCache = new Map()
+
+/**
+ * Per-store disconnect/reconnect events for a single group within a window.
+ *
+ * Uses 5-min gap detection on heartbeat.online (which production stores never set
+ * to false — they just stop sending). Each transition where a window had a
+ * heartbeat and the next one didn't = "disconnect"; reverse = "reconnect".
+ *
+ * Stores currently silent past the end of the window keep reconnectTs === null
+ * and stillOffline === true. Stores already silent before the window starts are
+ * back-filled from the snapshot using their lastSeen timestamp.
+ *
+ * @returns {Promise<{
+ *   groupName: string,
+ *   fromIso: string, toIso: string,
+ *   bucketMin: number, storeCount: number, eventCount: number,
+ *   stillOfflineCount: number, source: string,
+ *   events: Array<{
+ *     storeTag: string, hostname: string,
+ *     disconnectTs: number, reconnectTs: number|null,
+ *     durationMin: number|null, stillOffline: boolean,
+ *   }>,
+ * }>}
+ */
+export async function fetchGroupDisconnectEvents(rangeSec = 86400, fromSec, toSec, opts = {}) {
+  if (!isInfluxStoreConfigured()) {
+    return { events: [], error: 'InfluxDB not configured' }
+  }
+  const groupName = String(opts.groupName || '').trim()
+  if (!groupName) {
+    return { events: [], error: 'groupName required' }
+  }
+  const customGroups = Array.isArray(opts.customGroups) ? opts.customGroups : []
+  const nowSec = Math.floor(Date.now() / 1000)
+  const requestedFromSec = fromSec && Number.isFinite(Number(fromSec)) ? Number(fromSec) : nowSec - rangeSec
+  const requestedToSec   = toSec && Number.isFinite(Number(toSec))     ? Number(toSec)   : nowSec
+  if (!(requestedToSec > requestedFromSec)) {
+    return { events: [], error: 'invalid time window' }
+  }
+  const rangeClause = buildFluxRangeClause(null, requestedFromSec, requestedToSec)
+  const bucketMin = HEARTBEAT_BUCKET_MIN
+  const bucketEvery = `${bucketMin}m`
+
+  const liveWindow = !(fromSec && toSec)
+  const customGroupKey = customGroups
+    .map((g) => `${g?.name || ''}=${(Array.isArray(g?.storeTags) ? g.storeTags : []).slice().sort().join(',')}`)
+    .sort()
+    .join('|')
+  const cacheBucket = liveWindow
+    ? Math.floor(nowSec / Math.floor(GROUP_DISCONNECT_EVENTS_CACHE_MS / 1000))
+    : `${requestedFromSec}:${requestedToSec}`
+  const cacheKey = `${groupName}|${cacheBucket}|${customGroupKey}`
+  const cached = _groupDisconnectEventsCache.get(cacheKey)
+  if (cached && Date.now() - cached.ts < GROUP_DISCONNECT_EVENTS_CACHE_MS) return cached.data
+
+  let snapshot = getAnyCachedStoreSnapshot(15 * 60 * 1000)
+  if (!snapshot) {
+    try { snapshot = await fetchStoreSnapshot(15, '-24h') } catch { snapshot = null }
+  }
+  const groupDef = resolveGroupDefForName(groupName, snapshot, customGroups)
+  if (!groupDef) {
+    return { events: [], error: `Unknown group: ${groupName}` }
+  }
+
+  const filterLine = Array.isArray(groupDef.tags) && groupDef.tags.length
+    ? fluxStoreTagSetFilter(groupDef.tags)
+    : (groupDef.filterLines || '')
+
+  const bucket = fluxEscape(cfg().bucket)
+  const flux = `
+from(bucket: "${bucket}")
+  |> range(${rangeClause})
+  |> filter(fn: (r) => r._measurement == "heartbeat" and r._field == "online")
+${filterLine}
+  |> aggregateWindow(every: ${bucketEvery}, fn: count, createEmpty: true)
+  |> map(fn: (r) => ({ r with seen: if r._value > 0 then 1 else 0 }))
+  |> difference(columns: ["seen"], keepFirst: false)
+  |> filter(fn: (r) => r.seen != 0)
+  |> keep(columns: ["_time", "store_tag", "hostname", "seen"])
+`
+  const t0 = Date.now()
+  let rows = []
+  try {
+    rows = await queryFlux(flux)
+  } catch (e) {
+    console.warn(`[influxStore] fetchGroupDisconnectEvents (${groupName}) failed:`, e.message)
+    return { events: [], error: e.message }
+  }
+  const queryMs = Date.now() - t0
+
+  const byStore = new Map()
+  for (const r of rows) {
+    const tag = r.store_tag || buildSyntheticStoreTag(r.hostname, r.serial)
+    if (!tag) continue
+    const ts = r._time ? Math.floor(new Date(r._time).getTime() / 1000) : null
+    if (ts == null) continue
+    const seen = num(r.seen) || 0
+    if (!seen) continue
+    if (!byStore.has(tag)) {
+      byStore.set(tag, { storeTag: tag, hostname: r.hostname || '', edges: [] })
+    }
+    byStore.get(tag).edges.push({ ts, kind: seen < 0 ? 'down' : 'up' })
+  }
+
+  const events = []
+  for (const store of byStore.values()) {
+    store.edges.sort((a, b) => a.ts - b.ts)
+    let pendingDown = null
+    for (const edge of store.edges) {
+      if (edge.kind === 'down') {
+        if (pendingDown != null) {
+          // Two downs in a row (shouldn't happen, but be defensive)
+          events.push({
+            storeTag: store.storeTag,
+            hostname: store.hostname,
+            disconnectTs: pendingDown,
+            reconnectTs: edge.ts,
+            durationMin: Math.round((edge.ts - pendingDown) / 60),
+            stillOffline: false,
+          })
+        }
+        pendingDown = edge.ts
+      } else if (pendingDown != null) {
+        events.push({
+          storeTag: store.storeTag,
+          hostname: store.hostname,
+          disconnectTs: pendingDown,
+          reconnectTs: edge.ts,
+          durationMin: Math.round((edge.ts - pendingDown) / 60),
+          stillOffline: false,
+        })
+        pendingDown = null
+      }
+    }
+    if (pendingDown != null) {
+      events.push({
+        storeTag: store.storeTag,
+        hostname: store.hostname,
+        disconnectTs: pendingDown,
+        reconnectTs: null,
+        durationMin: Math.max(0, Math.round((requestedToSec - pendingDown) / 60)),
+        stillOffline: true,
+      })
+    }
+  }
+
+  // Back-fill stores that were already silent before the window started.
+  const sevenDaysSec = 7 * 86400
+  if (Array.isArray(snapshot)) {
+    for (const s of snapshot) {
+      if (!s?.storeTag || s.online || s.onlineReason === 'activity') continue
+      if (!groupDef.belongs(s.storeTag, s)) continue
+      if (byStore.has(s.storeTag)) continue
+      const lastSeenSec = s.lastSeen ? Math.floor(new Date(s.lastSeen).getTime() / 1000) : null
+      if (!lastSeenSec) continue
+      if (lastSeenSec < requestedFromSec - sevenDaysSec) continue
+      events.push({
+        storeTag: s.storeTag,
+        hostname: s.hostname || '',
+        disconnectTs: lastSeenSec,
+        reconnectTs: null,
+        durationMin: Math.max(0, Math.round((nowSec - lastSeenSec) / 60)),
+        stillOffline: true,
+      })
+    }
+  }
+
+  events.sort((a, b) => (b.disconnectTs || 0) - (a.disconnectTs || 0))
+
+  const data = {
+    groupName,
+    fromIso: new Date(requestedFromSec * 1000).toISOString(),
+    toIso: new Date(requestedToSec * 1000).toISOString(),
+    rangeSec: requestedToSec - requestedFromSec,
+    bucketMin,
+    storeCount: byStore.size,
+    eventCount: events.length,
+    stillOfflineCount: events.filter((e) => e.stillOffline).length,
+    source: 'heartbeat gap detection (raw, 5m windows)',
+    meta: { queryMs, edgeRowCount: rows.length },
+    events,
+  }
+
+  console.log(
+    `[groupDisconnectEvents] ${groupName}: ${rows.length} edges in ${queryMs}ms → `
+    + `${events.length} events (${data.stillOfflineCount} still offline)`,
+  )
+
+  _groupDisconnectEventsCache.set(cacheKey, { data, ts: Date.now() })
+  if (_groupDisconnectEventsCache.size > 32) {
+    const oldest = [..._groupDisconnectEventsCache.entries()]
+      .sort((a, b) => (a[1].ts || 0) - (b[1].ts || 0))[0]
+    if (oldest) _groupDisconnectEventsCache.delete(oldest[0])
+  }
+  return data
+}
+
 function parseInfluxErrorMessage(err) {
   const raw = String(err?.message || err || '')
   try {

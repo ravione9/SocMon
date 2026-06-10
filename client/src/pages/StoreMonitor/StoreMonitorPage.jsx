@@ -132,6 +132,49 @@ function fmtOfflineMinutes(mins) {
   const m = n % 60
   return h > 0 ? `${h}h ${m}m` : `${m}m`
 }
+function fmtDurationMin(mins) {
+  if (mins == null) return '—'
+  const n = Math.max(0, Math.round(Number(mins) || 0))
+  if (n < 60) return `${n}m`
+  const h = Math.floor(n / 60)
+  const m = n % 60
+  if (h < 24) return m ? `${h}h ${m}m` : `${h}h`
+  const d = Math.floor(h / 24)
+  const rh = h % 24
+  return rh ? `${d}d ${rh}h` : `${d}d`
+}
+function fmtTs(ts) {
+  if (!ts) return '—'
+  return new Date(ts * 1000).toLocaleString(undefined, {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  })
+}
+function downloadDisconnectEventsCsv(groupId, events) {
+  if (!events?.length) return
+  const header = ['store_tag', 'hostname', 'disconnect_at', 'reconnect_at', 'duration_minutes', 'still_offline']
+  const rows = events.map((e) => [
+    e.storeTag,
+    e.hostname || '',
+    e.disconnectTs ? new Date(e.disconnectTs * 1000).toISOString() : '',
+    e.reconnectTs ? new Date(e.reconnectTs * 1000).toISOString() : '',
+    e.durationMin ?? '',
+    e.stillOffline ? 'true' : 'false',
+  ])
+  const csv = [header, ...rows].map((r) => r.map((c) => {
+    const s = String(c ?? '')
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }).join(',')).join('\n')
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  const safe = String(groupId || 'group').replace(/[^A-Za-z0-9._-]+/g, '_')
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+  a.download = `disconnect_events_${safe}_${stamp}.csv`
+  document.body.appendChild(a)
+  a.click()
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url) }, 250)
+}
 function buildSingleGroupDisconnectChart(group, days, groupName, tc) {
   if (!group || !days?.length) return null
   const color = groupMetaFor(groupName).color
@@ -965,6 +1008,15 @@ export default function StoreMonitorPage() {
   const [groupDisconnectErrorById, setGroupDisconnectErrorById] = useState({})
   const groupDisconnectReqSeqRef = useRef(0)
 
+  /* ── per-store disconnect events timeline (one group at a time) ── */
+  const [disconnectEventsExpandedGroup, setDisconnectEventsExpandedGroup] = useState(null)
+  const [disconnectEventsByGroup, setDisconnectEventsByGroup] = useState({})
+  const [disconnectEventsLoadingByGroup, setDisconnectEventsLoadingByGroup] = useState({})
+  const [disconnectEventsErrorByGroup, setDisconnectEventsErrorByGroup] = useState({})
+  const [disconnectEventsSearch, setDisconnectEventsSearch] = useState('')
+  const [disconnectEventsFilter, setDisconnectEventsFilter] = useState('all') /* all | offline | reconnected */
+  const disconnectEventsReqSeqRef = useRef(0)
+
   /* ── problem history tab ── */
   const [probHist, setProbHist] = useState(null)
   const [probHistLoading, setProbHistLoading] = useState(false)
@@ -1527,6 +1579,68 @@ export default function StoreMonitorPage() {
   }, [range, globalCustom, netHealthCustomGroups, bhSig, disconnectGroupIdsSig])
 
   useEffect(() => { if (tab === 'netHealth') loadGroupDisconnect() }, [tab, loadGroupDisconnect])
+
+  /* ── per-store disconnect events for the currently expanded group ── */
+  const loadDisconnectEventsForGroup = useCallback(async (groupId, { force = false } = {}) => {
+    if (!groupId) return
+    if (!force && disconnectEventsByGroup[groupId]) return /* already loaded */
+
+    const reqSeq = ++disconnectEventsReqSeqRef.current
+    setDisconnectEventsLoadingByGroup((prev) => ({ ...prev, [groupId]: true }))
+    setDisconnectEventsErrorByGroup((prev) => ({ ...prev, [groupId]: '' }))
+
+    let params
+    if (globalCustom.enabled && globalCustom.from) {
+      const fromSec = fromLocalInput(globalCustom.from)
+      const toSec   = globalCustom.to ? fromLocalInput(globalCustom.to) : Math.floor(Date.now() / 1000)
+      params = { from: fromSec, to: toSec }
+    } else {
+      params = { rangeSec: HISTORY_SECS[range] || 86400 }
+    }
+    const body = { customGroups: netHealthCustomGroups }
+    try {
+      const { data } = await api.post(
+        '/api/store-monitor/net-health/group-disconnect-events',
+        body,
+        { params: { ...params, groupName: groupId }, timeout: 180000 },
+      )
+      if (reqSeq !== disconnectEventsReqSeqRef.current) return
+      setDisconnectEventsByGroup((prev) => ({ ...prev, [groupId]: data }))
+    } catch (err) {
+      if (reqSeq !== disconnectEventsReqSeqRef.current) return
+      const msg = err?.response?.data?.error
+        || err?.message
+        || (err?.code === 'ECONNABORTED' ? 'Request timed out' : 'Request failed')
+      setDisconnectEventsErrorByGroup((prev) => ({ ...prev, [groupId]: String(msg) }))
+    } finally {
+      if (reqSeq === disconnectEventsReqSeqRef.current) {
+        setDisconnectEventsLoadingByGroup((prev) => ({ ...prev, [groupId]: false }))
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range, globalCustom, netHealthCustomGroups, disconnectEventsByGroup])
+
+  const toggleDisconnectEventsGroup = useCallback((groupId) => {
+    setDisconnectEventsExpandedGroup((prev) => {
+      if (prev === groupId) return null
+      loadDisconnectEventsForGroup(groupId)
+      return groupId
+    })
+    setDisconnectEventsSearch('')
+    setDisconnectEventsFilter('all')
+  }, [loadDisconnectEventsForGroup])
+
+  /* Invalidate cached event lists when the global window/custom-groups change so
+     the next expand triggers a fresh fetch. */
+  useEffect(() => {
+    setDisconnectEventsByGroup({})
+    setDisconnectEventsErrorByGroup({})
+    if (disconnectEventsExpandedGroup) {
+      loadDisconnectEventsForGroup(disconnectEventsExpandedGroup, { force: true })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range, globalCustom, netHealthCustomGroups])
+
   const ropActiveStores = useMemo(() => {
     if (ropSubTab === 'sdwan')        return ropSdwanStores
     if (ropSubTab === 'no_sdwan')     return ropOnlyWithoutManualStores
@@ -3768,6 +3882,208 @@ export default function StoreMonitorPage() {
                   </tbody>
                 </table>
               </div>
+            </div>
+          </div>
+
+          {/* ── 🕒 Store Disconnect Events Timeline ──
+              Click a group to load per-store disconnect → reconnect events for the
+              selected range. Stores that are still offline show "—" in Reconnected. */}
+          <div className="sm-tr sm-section-mb">
+            <div className="sm-tr-hd">
+              <span className="sm-tr-title">🕒 Store Disconnect Events Timeline</span>
+              <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                per-store disconnect &amp; reconnect timestamps · click a group to load
+              </span>
+            </div>
+            <div style={{padding:'10px 12px'}}>
+              <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:10}}>
+                {displayedGroupCards.map((card) => {
+                  const meta = groupMetaFor(card.id)
+                  const active = disconnectEventsExpandedGroup === card.id
+                  const loading = disconnectEventsLoadingByGroup[card.id]
+                  const payload = disconnectEventsByGroup[card.id]
+                  const cnt = payload?.eventCount
+                  return (
+                    <button key={card.id} type="button"
+                      onClick={() => toggleDisconnectEventsGroup(card.id)}
+                      title={active ? 'Click to collapse' : 'Click to load disconnect events'}
+                      style={{
+                        display:'inline-flex',alignItems:'center',gap:6,
+                        padding:'6px 12px',borderRadius:6,fontSize:12,fontWeight:active?700:500,
+                        cursor:'pointer',transition:'all 120ms ease',
+                        background:active?meta.color:'transparent',
+                        color:active?'#fff':meta.color,
+                        border:`1px solid ${meta.color}`,
+                      }}>
+                      <span>{meta.icon}</span>
+                      <span>{shortGroupLabel(card.id)}</span>
+                      {loading && <span style={{fontFamily:'var(--mono)',fontSize:10,opacity:.85}}>⏳</span>}
+                      {!loading && cnt != null && (
+                        <span style={{
+                          fontFamily:'var(--mono)',fontSize:10,
+                          background: active ? 'rgba(255,255,255,.2)' : `${meta.color}22`,
+                          padding:'1px 6px',borderRadius:3,
+                        }}>{cnt}</span>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+
+              {disconnectEventsExpandedGroup && (() => {
+                const groupId = disconnectEventsExpandedGroup
+                const meta = groupMetaFor(groupId)
+                const payload = disconnectEventsByGroup[groupId]
+                const loading = disconnectEventsLoadingByGroup[groupId]
+                const errorMsg = disconnectEventsErrorByGroup[groupId] || ''
+                const allEvents = payload?.events || []
+                const q = disconnectEventsSearch.trim().toLowerCase()
+                const filtered = allEvents.filter((e) => {
+                  if (disconnectEventsFilter === 'offline' && !e.stillOffline) return false
+                  if (disconnectEventsFilter === 'reconnected' && e.stillOffline) return false
+                  if (!q) return true
+                  return String(e.hostname || '').toLowerCase().includes(q)
+                    || String(e.storeTag || '').toLowerCase().includes(q)
+                })
+                const rowCap = 500
+                const shown = filtered.slice(0, rowCap)
+                const truncated = filtered.length > rowCap
+
+                return (
+                  <div style={{
+                    border:`1px solid ${meta.color}40`,
+                    borderLeft:`3px solid ${meta.color}`,
+                    borderRadius:'var(--sm-r)',background:'var(--bg)',overflow:'hidden',
+                  }}>
+                    <div style={{
+                      display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',
+                      padding:'8px 12px',background:`${meta.color}10`,borderBottom:'1px solid var(--border)',
+                    }}>
+                      <span style={{display:'inline-flex',alignItems:'center',gap:6,color:meta.color,fontWeight:700,fontSize:12}}>
+                        <span>{meta.icon}</span>
+                        <span>{shortGroupLabel(groupId)}</span>
+                      </span>
+                      {payload && (
+                        <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                          {payload.eventCount} event{payload.eventCount === 1 ? '' : 's'}
+                          {' · '}<strong style={{color:'#ef4444'}}>{payload.stillOfflineCount}</strong> still offline
+                          {payload.source && <> · source: {payload.source}</>}
+                        </span>
+                      )}
+                      <div style={{marginLeft:'auto',display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                        <input
+                          type="text" placeholder="Search hostname / store_tag…"
+                          value={disconnectEventsSearch}
+                          onChange={(e) => setDisconnectEventsSearch(e.target.value)}
+                          style={{
+                            background:'var(--bg2)',border:'1px solid var(--border)',color:'var(--text)',
+                            padding:'4px 8px',borderRadius:4,fontSize:11,fontFamily:'var(--mono)',width:200,
+                          }}
+                        />
+                        <select
+                          value={disconnectEventsFilter}
+                          onChange={(e) => setDisconnectEventsFilter(e.target.value)}
+                          style={{
+                            background:'var(--bg2)',border:'1px solid var(--border)',color:'var(--text)',
+                            padding:'4px 6px',borderRadius:4,fontSize:11,fontFamily:'var(--mono)',
+                          }}
+                        >
+                          <option value="all">All events</option>
+                          <option value="offline">Still offline</option>
+                          <option value="reconnected">Reconnected</option>
+                        </select>
+                        <button type="button" className="sm-btn sm-sm"
+                          onClick={() => downloadDisconnectEventsCsv(groupId, filtered)}
+                          disabled={!filtered.length}
+                          title="Download visible rows as CSV">
+                          ⬇ CSV
+                        </button>
+                        <button type="button" className="sm-btn sm-sm"
+                          onClick={() => loadDisconnectEventsForGroup(groupId, { force: true })}
+                          disabled={loading}>
+                          {loading ? '⏳ Loading…' : '↻ Refresh'}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div style={{padding:'10px 12px'}}>
+                      {loading && !payload ? (
+                        <div style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                          Loading per-store disconnect events…
+                        </div>
+                      ) : errorMsg ? (
+                        <div style={{fontSize:11,fontFamily:'var(--mono)',color:'#ef4444'}}>
+                          ⚠ Failed to load: {errorMsg}
+                        </div>
+                      ) : !filtered.length ? (
+                        <div style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                          {allEvents.length
+                            ? 'No events match the current filter.'
+                            : 'No disconnect events recorded for this group in the selected range.'}
+                        </div>
+                      ) : (
+                        <>
+                          <div style={{overflowX:'auto',maxHeight:520,overflowY:'auto'}}>
+                            <table className="sm-tbl" style={{margin:0,minWidth:780}}>
+                              <thead style={{position:'sticky',top:0,background:'var(--bg)',zIndex:1}}>
+                                <tr>
+                                  <th style={{width:34}}>#</th>
+                                  <th>Hostname</th>
+                                  <th>Store Tag</th>
+                                  <th style={{whiteSpace:'nowrap'}}>Disconnected</th>
+                                  <th style={{whiteSpace:'nowrap'}}>Reconnected</th>
+                                  <th style={{whiteSpace:'nowrap'}}>Duration</th>
+                                  <th>Status</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {shown.map((e, idx) => (
+                                  <tr key={`${e.storeTag}|${e.disconnectTs}`}>
+                                    <td style={{color:'var(--text3)',fontFamily:'var(--mono)',fontSize:10}}>{idx + 1}</td>
+                                    <td style={{fontWeight:600}}>{e.hostname || '—'}</td>
+                                    <td style={{fontFamily:'var(--mono)',fontSize:10,color:'var(--text3)'}}>{e.storeTag}</td>
+                                    <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--text2)',whiteSpace:'nowrap'}}>
+                                      {fmtTs(e.disconnectTs)}
+                                    </td>
+                                    <td style={{fontFamily:'var(--mono)',fontSize:11,whiteSpace:'nowrap',
+                                                color: e.reconnectTs ? '#22c55e' : 'var(--text3)'}}>
+                                      {e.reconnectTs ? fmtTs(e.reconnectTs) : '—'}
+                                    </td>
+                                    <td style={{fontFamily:'var(--mono)',fontWeight:700,whiteSpace:'nowrap',
+                                                color: e.stillOffline ? '#ef4444' : '#f59e0b'}}>
+                                      {fmtDurationMin(e.durationMin)}
+                                    </td>
+                                    <td>
+                                      {e.stillOffline ? (
+                                        <span style={{display:'inline-flex',alignItems:'center',gap:4,
+                                          fontSize:10,fontWeight:700,padding:'2px 8px',borderRadius:3,
+                                          background:'#ef444422',color:'#ef4444',fontFamily:'var(--mono)'}}>
+                                          ● STILL OFFLINE
+                                        </span>
+                                      ) : (
+                                        <span style={{display:'inline-flex',alignItems:'center',gap:4,
+                                          fontSize:10,fontWeight:700,padding:'2px 8px',borderRadius:3,
+                                          background:'#22c55e22',color:'#22c55e',fontFamily:'var(--mono)'}}>
+                                          ✓ RECONNECTED
+                                        </span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                          {truncated && (
+                            <div style={{marginTop:8,fontSize:10,fontFamily:'var(--mono)',color:'var(--amber)'}}>
+                              Showing first {rowCap} of {filtered.length} rows · narrow the search or download CSV for the full list.
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )
+              })()}
             </div>
           </div>
         </>
