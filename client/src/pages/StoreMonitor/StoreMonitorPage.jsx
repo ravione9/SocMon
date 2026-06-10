@@ -962,6 +962,7 @@ export default function StoreMonitorPage() {
   /* ── day-wise group disconnections/offline report (one API call per group) ── */
   const [groupDisconnectById, setGroupDisconnectById] = useState({})
   const [groupDisconnectLoadingById, setGroupDisconnectLoadingById] = useState({})
+  const [groupDisconnectErrorById, setGroupDisconnectErrorById] = useState({})
   const groupDisconnectReqSeqRef = useRef(0)
 
   /* ── problem history tab ── */
@@ -1490,25 +1491,38 @@ export default function StoreMonitorPage() {
       }
     }
 
-    // Per-group parallel requests — each widget updates the moment its own query
-    // returns, instead of waiting for the slowest group to finish.
-    await Promise.all(groupIds.map(async (groupId) => {
-      try {
-        const { data } = await api.post(
-          '/api/store-monitor/net-health/group-disconnect-report',
-          body,
-          { params: { ...params, groupName: groupId }, timeout: 180000 },
-        )
+    // Avoid hammering Influx with 5 heavy group queries at once.
+    // Two concurrent workers keep progressive UI updates while improving success rate.
+    const queue = [...groupIds]
+    const workerCount = Math.min(2, queue.length)
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (queue.length) {
+        const groupId = queue.shift()
+        if (!groupId) return
         if (reqSeq !== groupDisconnectReqSeqRef.current) return
-        setGroupDisconnectById((prev) => ({ ...prev, [groupId]: data }))
-      } catch {
-        if (reqSeq !== groupDisconnectReqSeqRef.current) return
-        setGroupDisconnectById((prev) => ({ ...prev, [groupId]: null }))
-      } finally {
-        if (reqSeq !== groupDisconnectReqSeqRef.current) return
-        setGroupDisconnectLoadingById((prev) => ({ ...prev, [groupId]: false }))
+        try {
+          const { data } = await api.post(
+            '/api/store-monitor/net-health/group-disconnect-report',
+            body,
+            { params: { ...params, groupName: groupId }, timeout: 180000 },
+          )
+          if (reqSeq !== groupDisconnectReqSeqRef.current) return
+          setGroupDisconnectById((prev) => ({ ...prev, [groupId]: data }))
+          setGroupDisconnectErrorById((prev) => ({ ...prev, [groupId]: '' }))
+        } catch (err) {
+          if (reqSeq !== groupDisconnectReqSeqRef.current) return
+          setGroupDisconnectById((prev) => ({ ...prev, [groupId]: null }))
+          const msg = err?.response?.data?.error
+            || err?.message
+            || (err?.code === 'ECONNABORTED' ? 'Request timed out' : 'Request failed')
+          setGroupDisconnectErrorById((prev) => ({ ...prev, [groupId]: String(msg) }))
+        } finally {
+          if (reqSeq !== groupDisconnectReqSeqRef.current) return
+          setGroupDisconnectLoadingById((prev) => ({ ...prev, [groupId]: false }))
+        }
       }
-    }))
+    })
+    await Promise.all(workers)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [range, globalCustom, netHealthCustomGroups, bhSig, disconnectGroupIdsSig])
 
@@ -2962,6 +2976,7 @@ export default function StoreMonitorPage() {
                   const meta = groupMetaFor(card.id)
                   const payload = groupDisconnectById[card.id]
                   const loading = groupDisconnectLoadingById[card.id]
+                  const errorMsg = groupDisconnectErrorById[card.id] || ''
                   const days = payload?.days || []
                   const group = payload?.groups?.find((g) => g.name === card.id) || payload?.groups?.[0]
                   const chart = group && days.length ? buildSingleGroupDisconnectChart(group, days, card.id, tc) : null
@@ -3080,8 +3095,16 @@ export default function StoreMonitorPage() {
                           </div>
                         </div>
                       ) : (
-                        <div style={{padding:'12px', fontSize:11, fontFamily:'var(--mono)', color:'var(--text3)'}}>
-                          {loading ? 'Loading day-wise disconnection report…' : 'No disconnection/offline data for this range.'}
+                        <div style={{padding:'12px', fontSize:11, fontFamily:'var(--mono)'}}>
+                          {loading ? (
+                            <span style={{color:'var(--text3)'}}>Loading day-wise disconnection report…</span>
+                          ) : errorMsg ? (
+                            <span style={{color:'#ef4444'}}>
+                              ⚠ Failed to load: {errorMsg}
+                            </span>
+                          ) : (
+                            <span style={{color:'var(--text3)'}}>No disconnection/offline data for this range.</span>
+                          )}
                         </div>
                       )}
                     </div>

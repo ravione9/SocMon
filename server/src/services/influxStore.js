@@ -1737,6 +1737,11 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
   const posUniqueTags = [...new Set(posTags)]
   const sdwanUniqueTags = [...new Set(sdwanTags)]
   const sdwanTagSet = new Set(sdwanUniqueTags)
+  // Very large contains(set:[...]) filters can become slower/fragile in Influx.
+  // Use tag-set filtering only for moderate lists; fallback to hostname prefix regex
+  // for large RP/POS groups.
+  const rpUseTagSet = rpUniqueTags.length > 0 && rpUniqueTags.length <= 800
+  const posUseTagSet = posUniqueTags.length > 0 && posUniqueTags.length <= 800
 
   const customGroups = Array.isArray(opts.customGroups) ? opts.customGroups : []
   const customGroupTagSets = new Map()
@@ -1760,14 +1765,14 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
   const groupDefs = [
     {
       name: 'RP Group',
-      filterLines: rpUniqueTags.length ? null : '  |> filter(fn: (r) => exists r.hostname and r.hostname =~ /^[Rr][Pp]/)',
-      tags: rpUniqueTags.length ? rpUniqueTags : null,
+      filterLines: rpUseTagSet ? null : '  |> filter(fn: (r) => exists r.hostname and r.hostname =~ /^[Rr][Pp]/)',
+      tags: rpUseTagSet ? rpUniqueTags : null,
       belongs: (tag, snap) => String(snap?.hostname || '').toUpperCase().startsWith('RP'),
     },
     {
       name: 'POS System Group',
-      filterLines: posUniqueTags.length ? null : '  |> filter(fn: (r) => exists r.hostname and r.hostname =~ /^[Ll][Kk]/)',
-      tags: posUniqueTags.length ? posUniqueTags : null,
+      filterLines: posUseTagSet ? null : '  |> filter(fn: (r) => exists r.hostname and r.hostname =~ /^[Ll][Kk]/)',
+      tags: posUseTagSet ? posUniqueTags : null,
       belongs: (tag, snap) => String(snap?.hostname || '').toUpperCase().startsWith('LK'),
     },
   ]
@@ -1883,6 +1888,7 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
     const storesWithHbDisconnect = new Set()
     const reportingTags = new Set()
 
+    const t0 = Date.now()
     // All sub-queries for this group fire in parallel.
     const [offlineRows, disconnectRows, connDownRows] = await Promise.all([
       runFilteredDisconnectQuery(
@@ -1897,6 +1903,12 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
             fetchConnDownByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit,
           ),
     ])
+    const queryMs = Date.now() - t0
+    console.log(
+      `[groupDisconnect] ${name}: queried ${queryMs}ms · `
+      + `offline=${offlineRows.length} disconnects=${disconnectRows.length} connDown=${connDownRows.length} `
+      + `· bucket=${groupBucketMin}m · estimate=${storeEstimate} stores`
+    )
 
     for (const row of disconnectRows) {
       const tag = row.store_tag || buildSyntheticStoreTag(row.hostname, row.serial)
@@ -1977,7 +1989,22 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
     }), { disconnections: 0, offlineMinutes: 0 })
     totals.offlineHours = Math.round((totals.offlineMinutes / 60) * 100) / 100
 
-    return { name, days, totals, storeCount: reportingTags.size }
+    return {
+      name,
+      days,
+      totals,
+      storeCount: reportingTags.size,
+      meta: {
+        bucketMin: groupBucketMin,
+        skipConnDown,
+        rowCounts: {
+          offline: offlineRows.length,
+          disconnects: disconnectRows.length,
+          connDown: connDownRows.length,
+        },
+        queryMs,
+      },
+    }
   }
 
   // When the request asks for a single group (the common path now — frontend fires one
