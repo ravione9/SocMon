@@ -116,6 +116,21 @@ const NGINX_APP_LOCATIONS = `
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
     }
+    location /mcp {
+        proxy_pass http://mcp:5050;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        gzip off;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 86400s;
+        proxy_read_timeout 86400s;
+    }
     location /health {
         proxy_pass http://server:5000;
         proxy_http_version 1.1;
