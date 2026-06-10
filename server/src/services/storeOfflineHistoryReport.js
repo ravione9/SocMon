@@ -247,16 +247,16 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
       if (!g) continue
       g.reportingTags.add(tag)
 
-      // Disconnect count: 1 per record whose firstSeenAt falls into the window
-      // and (if BH enabled) inside business hours.
+      // Disconnect count: 1 per record whose firstSeenAt falls into the window,
+      // attributed to the calendar day it started on. BH filter does NOT apply
+      // here — a store going down at 22:00 is still a real disconnect; the BH
+      // filter only changes how its downtime is billed against business hours.
       if (startMs >= fromMs && startMs < toMs) {
-        if (!isBh || isBh(startMs)) {
-          const dayStart = new Date(startMs); dayStart.setHours(0, 0, 0, 0)
-          const dayMs = dayStart.getTime()
-          const stat = g.dayStats.get(dayMs)
-          if (stat) stat.disconnections += 1
-          g.totals.disconnections += 1
-        }
+        const dayStart = new Date(startMs); dayStart.setHours(0, 0, 0, 0)
+        const dayMs = dayStart.getTime()
+        const stat = g.dayStats.get(dayMs)
+        if (stat) stat.disconnections += 1
+        g.totals.disconnections += 1
       }
 
       // Offline minutes: distribute clipped duration across calendar days,
