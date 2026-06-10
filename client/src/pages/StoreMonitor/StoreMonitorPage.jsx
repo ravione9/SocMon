@@ -897,7 +897,7 @@ export default function StoreMonitorPage() {
   const [selectedTag, setSelectedTag] = useState('')
   const [history, setHistory] = useState(null)
   const [histLoading, setHistLoading] = useState(false)
-  const [bh, setBh] = useState({ enabled: false, startHour: 9, endHour: 18, weekdays: [1,2,3,4,5] })
+  const [bh, setBh] = useState({ enabled: false, startHour: 11, endHour: 20, weekdays: [0,1,2,3,4,5,6] })
   const [bhPanelOpen, setBhPanelOpen] = useState(false)
 
   /* custom time range for charts */
