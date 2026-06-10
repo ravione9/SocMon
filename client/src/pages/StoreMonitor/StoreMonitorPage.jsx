@@ -3320,7 +3320,11 @@ export default function StoreMonitorPage() {
                                   return (
                                     <tr style={{borderTop:'2px solid var(--border)'}}>
                                       <td style={{fontWeight:700, color:'var(--text2)'}}>Total</td>
-                                      <td style={{fontFamily:'var(--mono)', fontWeight:700, color: group.totals.disconnections > 0 ? '#ef4444' : 'var(--text3)'}}>
+                                      <td
+                                        title={group.totals.uniqueStoresImpacted != null
+                                          ? `Column sum · ${group.totals.uniqueStoresImpacted} unique stores impacted across the window`
+                                          : undefined}
+                                        style={{fontFamily:'var(--mono)', fontWeight:700, color: group.totals.disconnections > 0 ? '#ef4444' : 'var(--text3)'}}>
                                         {group.totals.disconnections}
                                       </td>
                                       <td title={totalTitle}

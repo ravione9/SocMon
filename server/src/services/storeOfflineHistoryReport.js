@@ -298,14 +298,17 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
         offlineHours: Math.round((s.offlineMinutes / 60) * 100) / 100,
       }
     })
+    // Total row should sum the column for intuitive tabular math. The unique
+    // store count is exposed separately as `uniqueStoresImpacted` for the
+    // tooltip / consumers that want it.
+    const sumDisconnections = daysOut.reduce((sum, d) => sum + d.disconnections, 0)
     return {
       name: def.name,
       storeCount: g.reportingTags.size,
       days: daysOut,
       totals: {
-        // Total = unique stores impacted across the whole window (not the sum
-        // of per-day, which would double-count multi-day outages).
-        disconnections: g.impactedTagsTotal.size,
+        disconnections: sumDisconnections,
+        uniqueStoresImpacted: g.impactedTagsTotal.size,
         offlineMinutes: g.totals.offlineMinutes,
         offlineHours: Math.round((g.totals.offlineMinutes / 60) * 100) / 100,
       },
