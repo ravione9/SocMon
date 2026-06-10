@@ -1478,31 +1478,22 @@ export default function StoreMonitorPage() {
       }
     }
 
-    try {
-      // Single batched request — server runs groups 2 at a time (avoids 15 concurrent Influx queries).
-      const { data } = await api.post(
-        '/api/store-monitor/net-health/group-disconnect-report',
-        body,
-        { params, timeout: 120000 },
-      )
-      const byId = {}
-      const loadingDone = {}
-      for (const g of data?.groups || []) {
-        byId[g.name] = { ...data, groups: [g] }
-        loadingDone[g.name] = false
+    // Per-group parallel requests — each widget updates the moment its own query
+    // returns, instead of waiting for the slowest group to finish.
+    await Promise.all(groupIds.map(async (groupId) => {
+      try {
+        const { data } = await api.post(
+          '/api/store-monitor/net-health/group-disconnect-report',
+          body,
+          { params: { ...params, groupName: groupId }, timeout: 180000 },
+        )
+        setGroupDisconnectById((prev) => ({ ...prev, [groupId]: data }))
+      } catch {
+        setGroupDisconnectById((prev) => ({ ...prev, [groupId]: null }))
+      } finally {
+        setGroupDisconnectLoadingById((prev) => ({ ...prev, [groupId]: false }))
       }
-      for (const id of groupIds) {
-        if (!byId[id]) {
-          byId[id] = null
-        }
-        loadingDone[id] = false
-      }
-      setGroupDisconnectById(byId)
-      setGroupDisconnectLoadingById(loadingDone)
-    } catch {
-      setGroupDisconnectById(Object.fromEntries(groupIds.map((id) => [id, null])))
-      setGroupDisconnectLoadingById(Object.fromEntries(groupIds.map((id) => [id, false])))
-    }
+    }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [range, globalCustom, netHealthCustomGroups, bhSig, displayedGroupCards])
 

@@ -1540,12 +1540,6 @@ function fluxStoreTagSetFilter(tags) {
   return `  |> filter(fn: (r) => exists r.store_tag and contains(value: r.store_tag, set: [${setLiteral}]))`
 }
 
-function chunkArray(arr, size) {
-  const out = []
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
-  return out
-}
-
 /** Pick coarser heartbeat buckets for long windows / large fleets (fewer aggregateWindow steps). */
 function pickDisconnectBucketMin(rangeSec, storeEstimate = 0, requested = HEARTBEAT_BUCKET_MIN) {
   const req = Math.min(Math.max(parseInt(String(requested || HEARTBEAT_BUCKET_MIN), 10) || HEARTBEAT_BUCKET_MIN, 1), 60)
@@ -1559,31 +1553,14 @@ function offlineTruncateUnit(bh) {
   return bh ? '1h' : '1d'
 }
 
-async function runPool(items, limit, fn) {
-  if (!items.length) return []
-  const results = new Array(items.length)
-  let next = 0
-  async function worker() {
-    while (next < items.length) {
-      const i = next++
-      results[i] = await fn(items[i], i)
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()))
-  return results
-}
-
 /**
- * Run a filtered Flux fetch, chunking large store_tag sets so Influx queries stay bounded.
+ * Run a filtered Flux fetch — one Influx query, no client-side chunking.
+ * Influx handles `contains(set: [...])` with thousands of entries fine; chunking
+ * into multiple sequential queries was actually *slower* because each query has
+ * its own bucket scan + connection overhead.
  */
 async function runFilteredDisconnectQuery(fetchFn, rangeClause, bucketEvery, groupDef, logLabel, truncateUnit) {
   const { filterLines, tags } = groupDef
-  if (Array.isArray(tags) && tags.length > 120) {
-    const parts = await runPool(chunkArray(tags, 120), 2, async (tagChunk) =>
-      fetchFn(rangeClause, bucketEvery, fluxStoreTagSetFilter(tagChunk), logLabel, truncateUnit),
-    )
-    return parts.flat()
-  }
   const filter = Array.isArray(tags) && tags.length
     ? fluxStoreTagSetFilter(tags)
     : (filterLines || '')
@@ -1896,18 +1873,20 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
     const storesWithHbDisconnect = new Set()
     const reportingTags = new Set()
 
-    // Run offline first (most important), then disconnects; skip conn_down on huge groups.
-    const offlineRows = await runFilteredDisconnectQuery(
-      fetchHeartbeatOfflineByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit,
-    )
-    const disconnectRows = await runFilteredDisconnectQuery(
-      fetchHeartbeatDisconnectByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit,
-    )
-    const connDownRows = skipConnDown
-      ? []
-      : await runFilteredDisconnectQuery(
-          fetchConnDownByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit,
-        )
+    // All sub-queries for this group fire in parallel.
+    const [offlineRows, disconnectRows, connDownRows] = await Promise.all([
+      runFilteredDisconnectQuery(
+        fetchHeartbeatOfflineByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit,
+      ),
+      runFilteredDisconnectQuery(
+        fetchHeartbeatDisconnectByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit,
+      ),
+      skipConnDown
+        ? Promise.resolve([])
+        : runFilteredDisconnectQuery(
+            fetchConnDownByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit,
+          ),
+    ])
 
     for (const row of disconnectRows) {
       const tag = row.store_tag || buildSyntheticStoreTag(row.hostname, row.serial)
@@ -1991,9 +1970,12 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
     return { name, days, totals, storeCount: reportingTags.size }
   }
 
-  // Process at most 2 groups at a time so Influx is not flooded (5 groups × 3 queries was timing out).
+  // When the request asks for a single group (the common path now — frontend fires one
+  // request per group in parallel), there's only one entry in activeGroupDefs anyway.
+  // For the full-fleet path, run all groups in parallel — Influx + the inflight cache
+  // handle concurrency far better than us serialising on the Node side.
   const groupResults = activeGroupDefs.length
-    ? await runPool(activeGroupDefs, 2, (gd) => computeGroupDisconnectStats(gd))
+    ? await Promise.all(activeGroupDefs.map((gd) => computeGroupDisconnectStats(gd)))
     : onlyGroup
       ? [{
           name: onlyGroup,

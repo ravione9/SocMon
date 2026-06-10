@@ -131,11 +131,19 @@ app.use(
     windowMs: 15 * 60 * 1000,
     max: 500,
     validate: { xForwardedForHeader: false },
-    skip: (req) =>
-      req.path.startsWith('/web-mgmt/p/') ||
-      req.path.startsWith('/solarwinds/p/') ||
-      (req.originalUrl || req.url || '').includes('idcs/export') ||
-      (req.originalUrl || req.url || '').includes('/email-sim/pub'),
+    skip: (req) => {
+      const url = (req.originalUrl || req.url || '')
+      return (
+        req.path.startsWith('/web-mgmt/p/') ||
+        req.path.startsWith('/solarwinds/p/') ||
+        url.includes('idcs/export') ||
+        url.includes('/email-sim/pub') ||
+        // Internal monitoring dashboards make many parallel requests (per-group
+        // disconnect widgets, snapshot polls, etc). 500 req / 15 min was choking
+        // the Net Health tab.
+        url.startsWith('/api/store-monitor')
+      )
+    },
   }),
 )
 
