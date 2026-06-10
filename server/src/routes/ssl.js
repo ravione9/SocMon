@@ -117,7 +117,14 @@ const NGINX_APP_LOCATIONS = `
         proxy_read_timeout 60s;
     }
     location /mcp {
-        proxy_pass http://mcp:5050;
+        # Use Docker's embedded DNS and a variable upstream so nginx defers
+        # resolution to request time. Without this, plain `proxy_pass http://mcp:5050`
+        # fails the WHOLE config at startup if the mcp container isn't running yet
+        # (host not found in upstream "mcp"), taking down the entire UI. With this
+        # form, only /mcp returns 502 while mcp is down — UI/API stay alive.
+        resolver 127.0.0.11 ipv6=off valid=10s;
+        set $netpulse_mcp_upstream mcp:5050;
+        proxy_pass http://$netpulse_mcp_upstream;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
         proxy_set_header Host $host;
