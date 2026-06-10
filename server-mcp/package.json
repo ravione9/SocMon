@@ -1,0 +1,22 @@
+{
+  "name": "netpulse-mcp",
+  "version": "0.1.0",
+  "description": "Model Context Protocol server exposing NetPulse data to LLM clients (Claude Desktop, Cursor, n8n, custom agents)",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "netpulse-mcp": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "start:stdio": "MCP_TRANSPORT=stdio node src/index.js",
+    "start:http": "MCP_TRANSPORT=http node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "express": "^4.19.2",
+    "undici": "^6.19.8",
+    "zod": "^3.23.8"
+  }
+}

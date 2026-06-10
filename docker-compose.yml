@@ -70,6 +70,46 @@ services:
       - netpulse
     restart: unless-stopped
 
+  # MCP (Model Context Protocol) sidecar — exposes NetPulse data to LLM clients
+  # (Claude Desktop, Cursor, n8n, custom agents). Talks to the main server over
+  # the internal docker network and never touches Mongo/Redis directly.
+  #
+  # Auth: MCP clients send the SAME NetPulse JWT they would send to /api/...
+  #   `Authorization: Bearer <jwt>`
+  # The JWT can be a session token (browser login) OR an API token created via
+  # /api/auth/api-tokens (typ=api, revocable, default 90d). The MCP server
+  # forwards the bearer to NetPulse, which validates it with the existing
+  # `authenticateUserOrAgent` middleware. No JWT secret is shared with this
+  # container, so revocations and account disables take effect immediately.
+  mcp:
+    build:
+      context: ./server-mcp
+      dockerfile: Dockerfile
+      args:
+        NPM_STRICT_SSL: "false"
+    container_name: netpulse-mcp
+    ports:
+      - "5050:5050"
+    volumes:
+      - ./server-mcp:/app
+      # Isolated from the bind mount: install deps inside the container when package.json changes.
+      - /app/node_modules
+    command: sh -c "npm config get strict-ssl | grep -q false || npm config set strict-ssl false; npm install --no-audit --no-fund --progress=false && node --watch src/index.js"
+    environment:
+      MCP_TRANSPORT: http
+      PORT: "5050"
+      # Inside compose this is the service name; behind nginx use the public URL.
+      NETPULSE_API_BASE: http://server:5000
+      # How often to re-poll AI_CONTEXT_MODULES so newly added dashboards
+      # become MCP tools without a server restart. 0 disables auto-refresh
+      # (initial registration only). 5 s floor enforced in code.
+      NETPULSE_MCP_REFRESH_MS: "60000"
+    depends_on:
+      - server
+    networks:
+      - netpulse
+    restart: unless-stopped
+
   # Apache Guacamole RDP bridge — logs speak TCP-level lifecycle only unless FreeRDP errors surface here.
   # Interpretation:
   #   • Two adjacent "Creating new client" before removals → two parallel sessions (two browser tabs,
