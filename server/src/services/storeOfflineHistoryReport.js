@@ -37,6 +37,7 @@ const MIN_OFFLINE_MIN = (() => {
   return Number.isFinite(n) && n >= 0 ? n : 5
 })()
 const MIN_OFFLINE_MS = MIN_OFFLINE_MIN * 60_000
+const FLAP_GAP_MS = 30 * 60_000
 
 function recordIsBlip(rec, nowMs) {
   const startMs = new Date(rec.firstSeenAt).getTime()
@@ -237,26 +238,30 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
   const days = buildDayList(fromMs, toMs)
   const dayMsList = days.map((d) => d.dayMs)
 
-  // Per-group state. `impactedTagsByDay` keeps the per-day set of distinct
-  // stores so we can report "stores impacted" instead of raw transition counts
-  // (the snapshotter creates a new record on every offline→online→offline flap;
-  // counting those directly produces 20k+ per day for a 700-store fleet).
+  // Per-group state:
+  // - impactedTagsByDay: state view (stores with any offline overlap that day)
+  // - eventCountByDay: event view (new offline sessions that START that day),
+  //   flap-coalesced per store using FLAP_GAP_MS.
   const perGroup = new Map()
   for (const def of groupDefs) {
     const dayStats = new Map()
     const impactedTagsByDay = new Map()
+    const eventCountByDay = new Map()
     for (const d of dayMsList) {
       dayStats.set(d, { offlineMinutes: 0 })
       impactedTagsByDay.set(d, new Set())
+      eventCountByDay.set(d, 0)
     }
     perGroup.set(def.name, {
       name: def.name,
       tagsInGroup: new Set(def.tags),
       dayStats,
       impactedTagsByDay,
+      eventCountByDay,
+      recordsByStore: new Map(),
       impactedTagsTotal: new Set(),
       reportingTags: new Set(),
-      totals: { offlineMinutes: 0 },
+      totals: { offlineMinutes: 0, events: 0 },
     })
   }
 
@@ -274,6 +279,9 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
       const g = perGroup.get(groupName)
       if (!g) continue
       g.reportingTags.add(tag)
+
+      if (!g.recordsByStore.has(tag)) g.recordsByStore.set(tag, [])
+      g.recordsByStore.get(tag).push({ startMs, endMs })
 
       let storeImpactedAnyDay = false
       for (const dayMs of dayMsList) {
@@ -294,6 +302,51 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
     }
   }
 
+  // Event view (new sessions/day): coalesce flap sequences per store so rapid
+  // offline<->online oscillations count as one event.
+  function dayMsContaining(tsMs) {
+    const d = new Date(tsMs)
+    d.setHours(0, 0, 0, 0)
+    return d.getTime()
+  }
+  for (const g of perGroup.values()) {
+    for (const recs of g.recordsByStore.values()) {
+      recs.sort((a, b) => a.startMs - b.startMs)
+      let sessionStart = null
+      let sessionEnd = null
+      for (const r of recs) {
+        if (sessionStart == null) {
+          sessionStart = r.startMs
+          sessionEnd = r.endMs
+          continue
+        }
+        const gapMs = (sessionEnd == null) ? 0 : (r.startMs - sessionEnd)
+        if (gapMs <= FLAP_GAP_MS) {
+          // Same outage chain; extend end.
+          if (sessionEnd == null || r.endMs == null) sessionEnd = null
+          else if (r.endMs > sessionEnd) sessionEnd = r.endMs
+        } else {
+          if (sessionStart >= fromMs && sessionStart < toMs) {
+            const dayMs = dayMsContaining(sessionStart)
+            if (g.eventCountByDay.has(dayMs)) {
+              g.eventCountByDay.set(dayMs, g.eventCountByDay.get(dayMs) + 1)
+              g.totals.events += 1
+            }
+          }
+          sessionStart = r.startMs
+          sessionEnd = r.endMs
+        }
+      }
+      if (sessionStart != null && sessionStart >= fromMs && sessionStart < toMs) {
+        const dayMs = dayMsContaining(sessionStart)
+        if (g.eventCountByDay.has(dayMs)) {
+          g.eventCountByDay.set(dayMs, g.eventCountByDay.get(dayMs) + 1)
+          g.totals.events += 1
+        }
+      }
+    }
+  }
+
   // Also include tags from the snapshot that are currently online but in the
   // group — they count toward storeCount even though they have no offline records.
   for (const def of groupDefs) {
@@ -307,26 +360,25 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
     const daysOut = dayMsList.map((dayMs) => {
       const s = g.dayStats.get(dayMs)
       const impacted = g.impactedTagsByDay.get(dayMs)?.size || 0
+      const events = g.eventCountByDay.get(dayMs) || 0
       return {
         dayMs,
-        // "disconnections" now means "distinct stores impacted that day" so a
-        // flap doesn't get counted 30 times and a multi-day outage shows up on
-        // each day it touches.
-        disconnections: impacted,
+        // Event-based count: new offline sessions that started this day.
+        disconnections: events,
+        // Keep state-view value for diagnostics/tooltips.
+        storesDown: impacted,
         offlineMinutes: s.offlineMinutes,
         offlineHours: Math.round((s.offlineMinutes / 60) * 100) / 100,
       }
     })
-    // Total row should sum the column for intuitive tabular math. The unique
-    // store count is exposed separately as `uniqueStoresImpacted` for the
-    // tooltip / consumers that want it.
-    const sumDisconnections = daysOut.reduce((sum, d) => sum + d.disconnections, 0)
+    // Total row uses event-count total across the selected window. Keep the
+    // unique impacted-store count separately for diagnostics/tooltips.
     return {
       name: def.name,
       storeCount: g.reportingTags.size,
       days: daysOut,
       totals: {
-        disconnections: sumDisconnections,
+        disconnections: g.totals.events,
         uniqueStoresImpacted: g.impactedTagsTotal.size,
         offlineMinutes: g.totals.offlineMinutes,
         offlineHours: Math.round((g.totals.offlineMinutes / 60) * 100) / 100,

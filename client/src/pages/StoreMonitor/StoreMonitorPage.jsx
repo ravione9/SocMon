@@ -226,7 +226,7 @@ function buildSingleGroupDisconnectChart(group, days, groupName, tc) {
       datasets: [
         {
           type: 'bar',
-          label: 'Stores Down',
+          label: 'Disconnect Events',
           data: days.map((d) => {
             const day = group.days.find((x) => x.dayMs === d.dayMs)
             return day?.disconnections ?? 0
@@ -262,7 +262,7 @@ function buildSingleGroupDisconnectChart(group, days, groupName, tc) {
               const h = Math.floor(m / 60)
               const r = m % 60
               const dur = h > 0 ? `${h}h ${r}m` : `${m}m`
-              return `Offline: ${dur}`
+              return `Offline: ${dur} · Stores down: ${day.storesDown ?? day.disconnections ?? 0}`
             },
           },
         },
@@ -275,7 +275,7 @@ function buildSingleGroupDisconnectChart(group, days, groupName, tc) {
         y: {
           type: 'linear',
           position: 'left',
-          title: { display: true, text: 'Stores Down', color: tc.text3, font: { family: 'var(--mono)', size: 10 } },
+          title: { display: true, text: 'Disconnect Events', color: tc.text3, font: { family: 'var(--mono)', size: 10 } },
           ticks: { color: tc.text3, font: { family: 'var(--mono)', size: 9 }, precision: 0 },
           grid: { color: tc.border + '40' },
           beginAtZero: true,
@@ -3186,7 +3186,7 @@ export default function StoreMonitorPage() {
                   🌐 Group Internet Disconnections & Offline Time (Day-wise)
                 </span>
                 <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
-                  disconnects = distinct stores impacted that day (flap-deduped) · uptime % = online machine-minutes ÷ possible machine-minutes
+                  disconnect events = new offline sessions that started this day (flap-coalesced) · uptime % = online machine-minutes ÷ possible machine-minutes
                 </span>
                 {bh.enabled && (
                   <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--amber)'}}>
@@ -3271,7 +3271,7 @@ export default function StoreMonitorPage() {
                               <thead>
                                 <tr>
                                   <th>Day</th>
-                                  <th title="Distinct stores impacted that day (each store counted once per day, no matter how many flaps)">Stores Down</th>
+                                  <th title="New offline sessions that started this day (flap-coalesced per store)">Disconnects</th>
                                   <th>Uptime %</th>
                                 </tr>
                               </thead>
@@ -3311,7 +3311,7 @@ export default function StoreMonitorPage() {
                                       <td style={{fontWeight:700, color:'var(--text2)'}}>Total</td>
                                       <td
                                         title={group.totals.uniqueStoresImpacted != null
-                                          ? `Column sum · ${group.totals.uniqueStoresImpacted} unique stores impacted across the window`
+                                          ? `${group.totals.uniqueStoresImpacted} unique stores impacted across the window`
                                           : undefined}
                                         style={{fontFamily:'var(--mono)', fontWeight:700, color: group.totals.disconnections > 0 ? '#ef4444' : 'var(--text3)'}}>
                                         {group.totals.disconnections}
@@ -3332,7 +3332,7 @@ export default function StoreMonitorPage() {
                             padding:'8px 10px', minHeight:220, display:'flex', flexDirection:'column',
                           }}>
                             <div style={{fontSize:10, fontFamily:'var(--mono)', color:'var(--text3)', marginBottom:6, textTransform:'uppercase', letterSpacing:'.06em'}}>
-                              Stores Down per day (bars) · hover for offline duration
+                              Disconnect events per day (bars) · hover for offline duration + stores down
                             </div>
                             {chart ? (
                               <div style={{flex:1, minHeight:180, position:'relative'}}>
