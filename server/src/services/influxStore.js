@@ -1037,8 +1037,26 @@ export async function fetchWifiConnectivityHistory(metricRange = '-24h', fromTs,
 }
 
 const HEARTBEAT_BUCKET_MIN = 5
+// heartbeat.online may be bool or int in the same bucket; never compare bool to int directly.
+const FLUX_HEARTBEAT_IS_OFFLINE = `  |> map(fn: (r) => ({ r with isOffline:
+      string(v: r._value) == "false" or string(v: r._value) == "0" or string(v: r._value) == "0.0"
+    }))
+  |> filter(fn: (r) => r.isOffline)
+`
+const FLUX_HEARTBEAT_DISCONNECT_STEPS = `  |> map(fn: (r) => ({ r with onlineNum:
+      if string(v: r._value) == "true" or string(v: r._value) == "1" or string(v: r._value) == "1.0" then 1
+      else 0
+    }))
+  |> difference(columns: ["onlineNum"], keepFirst: false)
+  |> filter(fn: (r) => r.onlineNum < 0)
+`
 const _downtimeCache = new Map()
 const DOWNTIME_CACHE_MS = 120_000
+
+function rollupRowsHaveSignal(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return false
+  return rows.some((r) => (num(r._value) || 0) > 0)
+}
 
 async function fetchHeartbeatBucketCounts(rangeClause, bucketEvery, offlineOnly) {
   const bucket = fluxEscape(cfg().bucket)
@@ -1049,7 +1067,7 @@ from(bucket: "${bucket}")
   |> aggregateWindow(every: ${bucketEvery}, fn: last, createEmpty: false)
 `
   if (offlineOnly) {
-    flux += `  |> filter(fn: (r) => r._value == 0.0 or r._value == 0)\n`
+    flux += FLUX_HEARTBEAT_IS_OFFLINE
   }
   flux += `  |> group(columns: ["store_tag", "hostname", "serial"])
   |> count()
@@ -1594,10 +1612,16 @@ ${groupFilterLines}
   |> sum()
   |> keep(columns: ["_time", "store_tag", "hostname", "_value"])
 `
-    return queryFlux(flux).catch((e) => {
+    try {
+      const rollupRows = await queryFlux(flux)
+      if (rollupRowsHaveSignal(rollupRows)) return { rows: rollupRows, fromRollups: true }
+      console.warn(
+        `[influxStore] disconnect rollups empty or all-zero${logLabel ? ` (${logLabel})` : ''}; `
+        + 'falling back to raw heartbeat (check Influx tasks handle boolean online field)',
+      )
+    } catch (e) {
       console.warn(`[influxStore] fetchHeartbeatDisconnectByDay (rollups${logLabel ? `, ${logLabel}` : ''}) failed:`, e.message)
-      return []
-    })
+    }
   }
 
   const bucket = fluxEscape(c.bucket)
@@ -1608,17 +1632,16 @@ from(bucket: "${bucket}")
 ${groupFilterLines}
   |> group(columns: ["store_tag", "hostname", "serial"])
   |> aggregateWindow(every: ${bucketEvery}, fn: last, createEmpty: false)
-  |> difference(columns: ["_value"], keepFirst: false)
-  |> filter(fn: (r) => r._value < 0.0)
-  |> truncateTimeColumn(unit: ${truncateUnit})
+${FLUX_HEARTBEAT_DISCONNECT_STEPS}  |> truncateTimeColumn(unit: ${truncateUnit})
   |> group(columns: ["store_tag", "hostname", "_time"])
   |> count()
   |> keep(columns: ["_time", "store_tag", "hostname", "_value"])
 `
-  return queryFlux(flux).catch((e) => {
+  const rows = await queryFlux(flux).catch((e) => {
     console.warn(`[influxStore] fetchHeartbeatDisconnectByDay${logLabel ? ` (${logLabel})` : ''} failed:`, e.message)
     return []
   })
+  return { rows, fromRollups: false }
 }
 
 async function fetchHeartbeatOfflineByDayFiltered(rangeClause, bucketEvery, groupFilterLines = '', logLabel = '', truncateUnit = '1d') {
@@ -1638,10 +1661,16 @@ ${groupFilterLines}
   |> sum()
   |> keep(columns: ["_time", "store_tag", "hostname", "_value"])
 `
-    return queryFlux(flux).catch((e) => {
+    try {
+      const rollupRows = await queryFlux(flux)
+      if (rollupRowsHaveSignal(rollupRows)) return { rows: rollupRows, fromRollups: true }
+      console.warn(
+        `[influxStore] offline rollups empty or all-zero${logLabel ? ` (${logLabel})` : ''}; `
+        + 'falling back to raw heartbeat (check Influx tasks handle boolean online field)',
+      )
+    } catch (e) {
       console.warn(`[influxStore] fetchHeartbeatOfflineByDay (rollups${logLabel ? `, ${logLabel}` : ''}) failed:`, e.message)
-      return []
-    })
+    }
   }
 
   const bucket = fluxEscape(c.bucket)
@@ -1651,16 +1680,16 @@ from(bucket: "${bucket}")
   |> filter(fn: (r) => r._measurement == "heartbeat" and r._field == "online")
 ${groupFilterLines}
   |> aggregateWindow(every: ${bucketEvery}, fn: last, createEmpty: false)
-  |> filter(fn: (r) => r._value == 0.0 or r._value == 0)
-  |> truncateTimeColumn(unit: ${truncateUnit})
+${FLUX_HEARTBEAT_IS_OFFLINE}  |> truncateTimeColumn(unit: ${truncateUnit})
   |> group(columns: ["store_tag", "hostname", "_time"])
   |> count()
   |> keep(columns: ["_time", "store_tag", "hostname", "_value"])
 `
-  return queryFlux(flux).catch((e) => {
+  const rows = await queryFlux(flux).catch((e) => {
     console.warn(`[influxStore] fetchHeartbeatOfflineByDay${logLabel ? ` (${logLabel})` : ''} failed:`, e.message)
     return []
   })
+  return { rows, fromRollups: false }
 }
 
 async function fetchConnDownByDayFiltered(rangeClause, bucketEvery, groupFilterLines = '', logLabel = '', truncateUnit = '1d') {
@@ -1923,11 +1952,7 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
     const groupBucketEvery = `${groupBucketMin}m`
     const groupBucketSec = groupBucketMin * 60
     const skipConnDown = storeEstimate > 800
-    const usingRollups = Boolean(cfg().rollupsBucket)
-    // When rollups are used each offline `_value` unit equals 5 minutes (the
-    // base aggregation in the Flux Task). On the raw path each unit equals
-    // the adaptive group bucket size.
-    const offlineUnitMin = usingRollups ? HEARTBEAT_BUCKET_MIN : groupBucketMin
+    const rollupsConfigured = Boolean(cfg().rollupsBucket)
 
     const dayMap = new Map()
     function ensureDay(dayMs) {
@@ -1938,7 +1963,7 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
       if (mins <= 0) return
       const s = ensureDay(dayMs)
       s.offlineMinutes += mins
-      s.offlineBuckets += Math.round(mins / offlineUnitMin)
+      s.offlineBuckets += Math.round(mins / groupBucketMin)
     }
 
     const offlineBucketKeys = new Set()
@@ -1948,7 +1973,7 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
 
     const t0 = Date.now()
     // All sub-queries for this group fire in parallel.
-    const [offlineRows, disconnectRows, connDownRows] = await Promise.all([
+    const [offlineResult, disconnectResult, connDownRows] = await Promise.all([
       runFilteredDisconnectQuery(
         fetchHeartbeatOfflineByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit,
       ),
@@ -1961,6 +1986,11 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
             fetchConnDownByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit,
           ),
     ])
+    const offlineRows = offlineResult.rows
+    const disconnectRows = disconnectResult.rows
+    const offlineFromRollups = offlineResult.fromRollups
+    const disconnectFromRollups = disconnectResult.fromRollups
+    const offlineUnitMin = offlineFromRollups ? HEARTBEAT_BUCKET_MIN : groupBucketMin
     const queryMs = Date.now() - t0
     console.log(
       `[groupDisconnect] ${name}: queried ${queryMs}ms · `
@@ -1983,7 +2013,7 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
       ensureDay(dayMsFromTs(ts)).disconnections += num(row._value) || 1
     }
 
-    for (const row of [...offlineRows, ...connDownRows]) {
+    for (const row of offlineRows) {
       const tag = row.store_tag || buildSyntheticStoreTag(row.hostname, row.serial)
       if (!tag) continue
       reportingTags.add(tag)
@@ -1992,6 +2022,21 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
       const buckets = num(row._value) || 0
       if (buckets <= 0) continue
       const mins = buckets * offlineUnitMin
+      const key = `${tag}|${ts}`
+      if (offlineBucketKeys.has(key)) continue
+      offlineBucketKeys.add(key)
+      addOffline(dayMsFromTs(ts), mins)
+    }
+
+    for (const row of connDownRows) {
+      const tag = row.store_tag || buildSyntheticStoreTag(row.hostname, row.serial)
+      if (!tag) continue
+      reportingTags.add(tag)
+      const ts = row._time ? Math.floor(new Date(row._time).getTime() / 1000) : null
+      if (ts == null || !inBusinessHours(ts)) continue
+      const buckets = num(row._value) || 0
+      if (buckets <= 0) continue
+      const mins = buckets * groupBucketMin
       const key = `${tag}|${ts}`
       if (offlineBucketKeys.has(key)) continue
       offlineBucketKeys.add(key)
@@ -2055,7 +2100,9 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
       meta: {
         bucketMin: groupBucketMin,
         skipConnDown,
-        usingRollups,
+        rollupsConfigured,
+        offlineFromRollups,
+        disconnectFromRollups,
         rowCounts: {
           offline: offlineRows.length,
           disconnects: disconnectRows.length,
