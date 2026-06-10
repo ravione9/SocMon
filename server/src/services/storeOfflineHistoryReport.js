@@ -28,6 +28,21 @@ import {
 const OFFLINE_CODE = 'offline'
 const SUMMARY_CACHE_MS = 60_000
 const EVENTS_CACHE_MS = 60_000
+
+// Records shorter than this are filtered out as snapshotter blips/jitter. The
+// snapshotter ticks every 2 min; a single missed snapshot for a fast-recovering
+// store should not appear as a "store down" event. Configurable via env.
+const MIN_OFFLINE_MIN = (() => {
+  const n = parseInt(process.env.STORE_OFFLINE_MIN_DURATION_MIN || '5', 10)
+  return Number.isFinite(n) && n >= 0 ? n : 5
+})()
+const MIN_OFFLINE_MS = MIN_OFFLINE_MIN * 60_000
+
+function recordIsBlip(rec, nowMs) {
+  const startMs = new Date(rec.firstSeenAt).getTime()
+  const endMs = rec.resolvedAt ? new Date(rec.resolvedAt).getTime() : nowMs
+  return (endMs - startMs) < MIN_OFFLINE_MS
+}
 const _summaryCache = new Map()
 const _eventsCache = new Map()
 
@@ -212,7 +227,11 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
     }
   }
   const allTags = [...tagToGroups.keys()]
-  const records = await fetchOfflineRecords(allTags, fromMs, toMs)
+  const allRecords = await fetchOfflineRecords(allTags, fromMs, toMs)
+  // Drop short blips so brief monitoring hiccups don't inflate "Stores Down"
+  // counts. Tunable via STORE_OFFLINE_MIN_DURATION_MIN (default 5 min).
+  const records = allRecords.filter((r) => !recordIsBlip(r, nowMs))
+  const blipCount = allRecords.length - records.length
 
   const isBh = makeBhChecker(bh)
   const days = buildDayList(fromMs, toMs)
@@ -333,12 +352,17 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
       tzOffsetMinutes: bh.tzOffsetMinutes || 0,
     } : null,
     groups: groupsPayload,
-    meta: { recordsConsidered: records.length, tagsQueried: allTags.length },
+    meta: {
+      recordsConsidered: records.length,
+      tagsQueried: allTags.length,
+      blipsFiltered: blipCount,
+      minDurationMin: MIN_OFFLINE_MIN,
+    },
   }
 
   console.log(
     `[offlineHistorySummary] groups=${groupDefs.length} tags=${allTags.length} `
-    + `records=${records.length} window=${fromMs}-${toMs}`,
+    + `records=${records.length} blipsFiltered=${blipCount} (<${MIN_OFFLINE_MIN}m) window=${fromMs}-${toMs}`,
   )
 
   _summaryCache.set(cacheKey, { data, ts: Date.now() })
@@ -379,7 +403,9 @@ export async function fetchGroupOfflineEventsList(rangeSec = 86400, fromSec, toS
   const tagSet = new Set(def.tags)
   const tagsArr = [...tagSet]
 
-  const records = await fetchOfflineRecords(tagsArr, fromMs, toMs)
+  const allRecordsRaw = await fetchOfflineRecords(tagsArr, fromMs, toMs)
+  const records = allRecordsRaw.filter((r) => !recordIsBlip(r, nowMs))
+  const blipCountEvents = allRecordsRaw.length - records.length
   const hostByTag = snapshotIndex(snapshot)
 
   // Coalesce short flap sequences per store so a 30-min "offline -> back -> offline
@@ -448,11 +474,13 @@ export async function fetchGroupOfflineEventsList(rangeSec = 86400, fromSec, toS
     storeCount: new Set(finalized.map((e) => e.storeTag)).size,
     eventCount: finalized.length,
     stillOfflineCount: finalized.filter((e) => e.stillOffline).length,
-    source: `StoreProblemHistory (code='offline', MongoDB) · flap-coalesced (<= 30m gap)`,
+    source: `StoreProblemHistory (code='offline', MongoDB) · ≥${MIN_OFFLINE_MIN}m + flap-coalesced (<=30m gap)`,
     meta: {
       recordsConsidered: records.length,
       tagsQueried: tagsArr.length,
       flapsCoalesced: records.length - finalized.length,
+      blipsFiltered: blipCountEvents,
+      minDurationMin: MIN_OFFLINE_MIN,
     },
     events: finalized,
   }
