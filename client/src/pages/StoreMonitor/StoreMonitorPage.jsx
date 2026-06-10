@@ -3186,7 +3186,7 @@ export default function StoreMonitorPage() {
                   🌐 Group Internet Disconnections & Offline Time (Day-wise)
                 </span>
                 <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
-                  disconnect events = new offline sessions that started this day (flap-coalesced) · uptime % = online machine-minutes ÷ possible machine-minutes
+                  disconnect events = stores with >=1 new offline session that day (per-store/day dedup) · uptime % = online machine-minutes ÷ possible machine-minutes
                 </span>
                 {bh.enabled && (
                   <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--amber)'}}>
@@ -3271,7 +3271,7 @@ export default function StoreMonitorPage() {
                               <thead>
                                 <tr>
                                   <th>Day</th>
-                                  <th title="New offline sessions that started this day (flap-coalesced per store)">Disconnects</th>
+                                  <th title="Stores with >=1 new offline session that started this day (flap-coalesced, per-store/day dedup)">Disconnects</th>
                                   <th>Uptime %</th>
                                 </tr>
                               </thead>
@@ -3310,8 +3310,8 @@ export default function StoreMonitorPage() {
                                     <tr style={{borderTop:'2px solid var(--border)'}}>
                                       <td style={{fontWeight:700, color:'var(--text2)'}}>Total</td>
                                       <td
-                                        title={group.totals.uniqueStoresImpacted != null
-                                          ? `${group.totals.uniqueStoresImpacted} unique stores impacted across the window`
+                                        title={group.totals.uniqueStoresWithNewEvents != null
+                                          ? `${group.totals.uniqueStoresWithNewEvents} unique stores with new events · raw events: ${group.totals.rawEvents || 0} · impacted stores: ${group.totals.uniqueStoresImpacted || 0}`
                                           : undefined}
                                         style={{fontFamily:'var(--mono)', fontWeight:700, color: group.totals.disconnections > 0 ? '#ef4444' : 'var(--text3)'}}>
                                         {group.totals.disconnections}

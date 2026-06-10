@@ -240,28 +240,33 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
 
   // Per-group state:
   // - impactedTagsByDay: state view (stores with any offline overlap that day)
-  // - eventCountByDay: event view (new offline sessions that START that day),
-  //   flap-coalesced per store using FLAP_GAP_MS.
+  // - newEventTagsByDay: event view (stores with >=1 new session that STARTED
+  //   that day), flap-coalesced first; then de-duplicated per store per day.
+  //   This keeps event semantics while preventing noisy >storeCount spikes.
   const perGroup = new Map()
   for (const def of groupDefs) {
     const dayStats = new Map()
     const impactedTagsByDay = new Map()
-    const eventCountByDay = new Map()
+    const newEventTagsByDay = new Map()
+    const rawEventsByDay = new Map()
     for (const d of dayMsList) {
       dayStats.set(d, { offlineMinutes: 0 })
       impactedTagsByDay.set(d, new Set())
-      eventCountByDay.set(d, 0)
+      newEventTagsByDay.set(d, new Set())
+      rawEventsByDay.set(d, 0)
     }
     perGroup.set(def.name, {
       name: def.name,
       tagsInGroup: new Set(def.tags),
       dayStats,
       impactedTagsByDay,
-      eventCountByDay,
+      newEventTagsByDay,
+      rawEventsByDay,
       recordsByStore: new Map(),
       impactedTagsTotal: new Set(),
+      newEventTagsTotal: new Set(),
       reportingTags: new Set(),
-      totals: { offlineMinutes: 0, events: 0 },
+      totals: { offlineMinutes: 0, rawEvents: 0 },
     })
   }
 
@@ -339,9 +344,11 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
       }
       if (sessionStart != null && sessionStart >= fromMs && sessionStart < toMs) {
         const dayMs = dayMsContaining(sessionStart)
-        if (g.eventCountByDay.has(dayMs)) {
-          g.eventCountByDay.set(dayMs, g.eventCountByDay.get(dayMs) + 1)
-          g.totals.events += 1
+        if (g.newEventTagsByDay.has(dayMs)) {
+          g.newEventTagsByDay.get(dayMs).add(tag)
+          g.newEventTagsTotal.add(tag)
+          g.rawEventsByDay.set(dayMs, g.rawEventsByDay.get(dayMs) + 1)
+          g.totals.rawEvents += 1
         }
       }
     }
@@ -360,25 +367,30 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
     const daysOut = dayMsList.map((dayMs) => {
       const s = g.dayStats.get(dayMs)
       const impacted = g.impactedTagsByDay.get(dayMs)?.size || 0
-      const events = g.eventCountByDay.get(dayMs) || 0
+      const eventStores = g.newEventTagsByDay.get(dayMs)?.size || 0
+      const rawEvents = g.rawEventsByDay.get(dayMs) || 0
       return {
         dayMs,
-        // Event-based count: new offline sessions that started this day.
-        disconnections: events,
+        // Event-based + per-store/day dedup: stores that had >=1 new session
+        // starting this day.
+        disconnections: eventStores,
         // Keep state-view value for diagnostics/tooltips.
         storesDown: impacted,
+        rawEvents,
         offlineMinutes: s.offlineMinutes,
         offlineHours: Math.round((s.offlineMinutes / 60) * 100) / 100,
       }
     })
-    // Total row uses event-count total across the selected window. Keep the
-    // unique impacted-store count separately for diagnostics/tooltips.
+    const sumDisconnections = daysOut.reduce((sum, d) => sum + d.disconnections, 0)
+    const sumRawEvents = daysOut.reduce((sum, d) => sum + (d.rawEvents || 0), 0)
     return {
       name: def.name,
       storeCount: g.reportingTags.size,
       days: daysOut,
       totals: {
-        disconnections: g.totals.events,
+        disconnections: sumDisconnections,
+        rawEvents: sumRawEvents,
+        uniqueStoresWithNewEvents: g.newEventTagsTotal.size,
         uniqueStoresImpacted: g.impactedTagsTotal.size,
         offlineMinutes: g.totals.offlineMinutes,
         offlineHours: Math.round((g.totals.offlineMinutes / 60) * 100) / 100,
