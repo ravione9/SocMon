@@ -132,6 +132,44 @@ function fmtOfflineMinutes(mins) {
   const m = n % 60
   return h > 0 ? `${h}h ${m}m` : `${m}m`
 }
+function dayWindowMinutes(dayMs, bh) {
+  const day = new Date(dayMs)
+  day.setHours(0, 0, 0, 0)
+  const now = new Date()
+  const isToday = day.toDateString() === now.toDateString()
+  const dow = day.getDay()
+
+  if (bh?.enabled) {
+    if (!bh.weekdays.includes(dow)) return 0
+    const totalMins = Math.max(0, (bh.endHour - bh.startHour) * 60)
+    if (!isToday) return totalMins
+    const curMins = now.getHours() * 60 + now.getMinutes()
+    const bhStartMins = bh.startHour * 60
+    const bhEndMins = bh.endHour * 60
+    if (curMins <= bhStartMins) return 0
+    return Math.min(totalMins, curMins - bhStartMins)
+  }
+
+  if (!isToday) return 1440
+  return now.getHours() * 60 + now.getMinutes()
+}
+function uptimePctForDay(offlineMinutes, storeCount, windowMins) {
+  const possible = (storeCount || 0) * (windowMins || 0)
+  if (possible <= 0) return null
+  const off = Math.max(0, Number(offlineMinutes) || 0)
+  return Math.max(0, Math.min(100, ((possible - off) / possible) * 100))
+}
+function uptimeColor(pct) {
+  if (pct == null) return 'var(--text3)'
+  if (pct >= 99) return '#22c55e'
+  if (pct >= 95) return '#f59e0b'
+  return '#ef4444'
+}
+function fmtUptimePct(pct) {
+  if (pct == null) return '—'
+  if (pct >= 99.95) return '100%'
+  return `${pct.toFixed(2)}%`
+}
 function fmtDurationMin(mins) {
   if (mins == null) return '—'
   const n = Math.max(0, Math.round(Number(mins) || 0))
@@ -3159,7 +3197,7 @@ export default function StoreMonitorPage() {
                   🌐 Group Internet Disconnections & Offline Time (Day-wise)
                 </span>
                 <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
-                  disconnections = store went offline (heartbeat 1→0 or agent silent) · offline = total offline minutes in range
+                  disconnections = store went offline (heartbeat 1→0 or agent silent) · uptime % = online machine-minutes ÷ possible machine-minutes (per reporting store)
                 </span>
                 {bh.enabled && (
                   <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--amber)'}}>
@@ -3245,7 +3283,7 @@ export default function StoreMonitorPage() {
                                 <tr>
                                   <th>Day</th>
                                   <th>Disconnects</th>
-                                  <th>Offline</th>
+                                  <th>Uptime %</th>
                                 </tr>
                               </thead>
                               <tbody>
@@ -3253,6 +3291,11 @@ export default function StoreMonitorPage() {
                                   const day = group.days.find((x) => x.dayMs === d.dayMs) || { disconnections: 0, offlineMinutes: 0 }
                                   const dt = new Date(d.dayMs)
                                   const isToday = dt.toDateString() === new Date().toDateString()
+                                  const winMins = dayWindowMinutes(d.dayMs, bh)
+                                  const upPct = uptimePctForDay(day.offlineMinutes, group.storeCount, winMins)
+                                  const upTitle = winMins > 0
+                                    ? `${fmtOfflineMinutes(day.offlineMinutes)} offline · ${group.storeCount} stores × ${winMins}m window`
+                                    : (bh?.enabled ? 'Outside business hours' : 'No window')
                                   return (
                                     <tr key={d.dayMs}>
                                       <td style={{whiteSpace:'nowrap', fontWeight: isToday ? 700 : 500, color: isToday ? 'var(--accent)' : 'var(--text2)'}}>
@@ -3261,21 +3304,32 @@ export default function StoreMonitorPage() {
                                       <td style={{fontFamily:'var(--mono)', fontWeight:700, color: day.disconnections > 0 ? '#ef4444' : 'var(--text3)'}}>
                                         {day.disconnections}
                                       </td>
-                                      <td style={{fontFamily:'var(--mono)', fontWeight:700, color: day.offlineMinutes > 0 ? '#f59e0b' : 'var(--text3)'}}>
-                                        {fmtOfflineMinutes(day.offlineMinutes)}
+                                      <td title={upTitle}
+                                        style={{fontFamily:'var(--mono)', fontWeight:700, color: uptimeColor(upPct)}}>
+                                        {fmtUptimePct(upPct)}
                                       </td>
                                     </tr>
                                   )
                                 })}
-                                <tr style={{borderTop:'2px solid var(--border)'}}>
-                                  <td style={{fontWeight:700, color:'var(--text2)'}}>Total</td>
-                                  <td style={{fontFamily:'var(--mono)', fontWeight:700, color: group.totals.disconnections > 0 ? '#ef4444' : 'var(--text3)'}}>
-                                    {group.totals.disconnections}
-                                  </td>
-                                  <td style={{fontFamily:'var(--mono)', fontWeight:700, color: group.totals.offlineMinutes > 0 ? '#f59e0b' : 'var(--text3)'}}>
-                                    {fmtOfflineMinutes(group.totals.offlineMinutes)}
-                                  </td>
-                                </tr>
+                                {(() => {
+                                  const totalWin = days.reduce((sum, d) => sum + dayWindowMinutes(d.dayMs, bh), 0)
+                                  const totalUp = uptimePctForDay(group.totals.offlineMinutes, group.storeCount, totalWin)
+                                  const totalTitle = totalWin > 0
+                                    ? `${fmtOfflineMinutes(group.totals.offlineMinutes)} offline · ${group.storeCount} stores × ${totalWin}m window`
+                                    : 'No window'
+                                  return (
+                                    <tr style={{borderTop:'2px solid var(--border)'}}>
+                                      <td style={{fontWeight:700, color:'var(--text2)'}}>Total</td>
+                                      <td style={{fontFamily:'var(--mono)', fontWeight:700, color: group.totals.disconnections > 0 ? '#ef4444' : 'var(--text3)'}}>
+                                        {group.totals.disconnections}
+                                      </td>
+                                      <td title={totalTitle}
+                                        style={{fontFamily:'var(--mono)', fontWeight:700, color: uptimeColor(totalUp)}}>
+                                        {fmtUptimePct(totalUp)}
+                                      </td>
+                                    </tr>
+                                  )
+                                })()}
                               </tbody>
                             </table>
                           </div>
