@@ -1723,13 +1723,19 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
   }
 
   const sdwanTags = []
+  const rpTags = []
+  const posTags = []
   if (Array.isArray(cached)) {
     for (const s of cached) {
+      if (!s?.storeTag) continue
+      const h = String(s.hostname || '').toUpperCase()
+      if (h.startsWith('RP')) rpTags.push(s.storeTag)
+      else if (h.startsWith('LK')) posTags.push(s.storeTag)
       if (
         vendorIsFortinet(s.gatewayVendor, s.isFortinet) ||
         vendorIsFortinet(s.lastGatewayVendor, s.lastIsFortinet)
       ) {
-        if (s.storeTag) sdwanTags.push(s.storeTag)
+        sdwanTags.push(s.storeTag)
       }
     }
   }
