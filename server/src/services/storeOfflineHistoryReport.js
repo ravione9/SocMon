@@ -218,17 +218,26 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
   const days = buildDayList(fromMs, toMs)
   const dayMsList = days.map((d) => d.dayMs)
 
-  // Per-group state
+  // Per-group state. `impactedTagsByDay` keeps the per-day set of distinct
+  // stores so we can report "stores impacted" instead of raw transition counts
+  // (the snapshotter creates a new record on every offline→online→offline flap;
+  // counting those directly produces 20k+ per day for a 700-store fleet).
   const perGroup = new Map()
   for (const def of groupDefs) {
     const dayStats = new Map()
-    for (const d of dayMsList) dayStats.set(d, { disconnections: 0, offlineMinutes: 0 })
+    const impactedTagsByDay = new Map()
+    for (const d of dayMsList) {
+      dayStats.set(d, { offlineMinutes: 0 })
+      impactedTagsByDay.set(d, new Set())
+    }
     perGroup.set(def.name, {
       name: def.name,
       tagsInGroup: new Set(def.tags),
       dayStats,
+      impactedTagsByDay,
+      impactedTagsTotal: new Set(),
       reportingTags: new Set(),
-      totals: { disconnections: 0, offlineMinutes: 0 },
+      totals: { offlineMinutes: 0 },
     })
   }
 
@@ -247,20 +256,7 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
       if (!g) continue
       g.reportingTags.add(tag)
 
-      // Disconnect count: 1 per record whose firstSeenAt falls into the window,
-      // attributed to the calendar day it started on. BH filter does NOT apply
-      // here — a store going down at 22:00 is still a real disconnect; the BH
-      // filter only changes how its downtime is billed against business hours.
-      if (startMs >= fromMs && startMs < toMs) {
-        const dayStart = new Date(startMs); dayStart.setHours(0, 0, 0, 0)
-        const dayMs = dayStart.getTime()
-        const stat = g.dayStats.get(dayMs)
-        if (stat) stat.disconnections += 1
-        g.totals.disconnections += 1
-      }
-
-      // Offline minutes: distribute clipped duration across calendar days,
-      // honouring BH if enabled.
+      let storeImpactedAnyDay = false
       for (const dayMs of dayMsList) {
         const dayStartMs = dayMs
         const dayEndMs = dayMs + 86_400_000
@@ -272,7 +268,10 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
         const stat = g.dayStats.get(dayMs)
         if (stat) stat.offlineMinutes += mins
         g.totals.offlineMinutes += mins
+        g.impactedTagsByDay.get(dayMs).add(tag)
+        storeImpactedAnyDay = true
       }
+      if (storeImpactedAnyDay) g.impactedTagsTotal.add(tag)
     }
   }
 
@@ -288,9 +287,13 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
     const g = perGroup.get(def.name)
     const daysOut = dayMsList.map((dayMs) => {
       const s = g.dayStats.get(dayMs)
+      const impacted = g.impactedTagsByDay.get(dayMs)?.size || 0
       return {
         dayMs,
-        disconnections: s.disconnections,
+        // "disconnections" now means "distinct stores impacted that day" so a
+        // flap doesn't get counted 30 times and a multi-day outage shows up on
+        // each day it touches.
+        disconnections: impacted,
         offlineMinutes: s.offlineMinutes,
         offlineHours: Math.round((s.offlineMinutes / 60) * 100) / 100,
       }
@@ -300,7 +303,9 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
       storeCount: g.reportingTags.size,
       days: daysOut,
       totals: {
-        disconnections: g.totals.disconnections,
+        // Total = unique stores impacted across the whole window (not the sum
+        // of per-day, which would double-count multi-day outages).
+        disconnections: g.impactedTagsTotal.size,
         offlineMinutes: g.totals.offlineMinutes,
         offlineHours: Math.round((g.totals.offlineMinutes / 60) * 100) / 100,
       },

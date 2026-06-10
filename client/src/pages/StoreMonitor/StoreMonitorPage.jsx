@@ -3197,7 +3197,7 @@ export default function StoreMonitorPage() {
                   🌐 Group Internet Disconnections & Offline Time (Day-wise)
                 </span>
                 <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
-                  disconnections = store went offline (heartbeat 1→0 or agent silent) · uptime % = online machine-minutes ÷ possible machine-minutes (per reporting store)
+                  disconnects = distinct stores impacted that day (flap-deduped) · uptime % = online machine-minutes ÷ possible machine-minutes
                 </span>
                 {bh.enabled && (
                   <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--amber)'}}>
@@ -3282,7 +3282,7 @@ export default function StoreMonitorPage() {
                               <thead>
                                 <tr>
                                   <th>Day</th>
-                                  <th>Disconnects</th>
+                                  <th title="Distinct stores impacted that day (each store counted once per day, no matter how many flaps)">Stores Down</th>
                                   <th>Uptime %</th>
                                 </tr>
                               </thead>
