@@ -5,6 +5,7 @@ import StoreAlertRule from '../models/StoreAlertRule.js'
 import StoreAlertEvent from '../models/StoreAlertEvent.js'
 import { testChannel } from '../services/storeAlertNotify.js'
 import { runStoreAlertEval, getEvalStatus } from '../services/storeAlertEngine.js'
+import { getKafkaStatus, publishAlertEvent, TOPICS } from '../services/kafkaProducer.js'
 
 const router = Router()
 router.use(authenticate, requireAppPage('storeMonitor'))
@@ -81,6 +82,32 @@ router.delete('/events', async (_req, res, next) => {
   try {
     const result = await StoreAlertEvent.deleteMany({})
     res.json({ deleted: result.deletedCount })
+  } catch (e) { next(e) }
+})
+
+/* ── Kafka connector status ────────────────────────────── */
+router.get('/kafka-status', (_req, res) => {
+  res.json(getKafkaStatus())
+})
+
+/* Replay a stored alert event to Kafka (re-publish by ID) */
+router.post('/events/:id/publish-kafka', async (req, res, next) => {
+  try {
+    const event = await StoreAlertEvent.findById(req.params.id).lean()
+    if (!event) return res.status(404).json({ error: 'Event not found' })
+    const ok = await publishAlertEvent({
+      _id:           event._id,
+      ruleId:        event.ruleId,
+      ruleName:      event.ruleName,
+      severity:      event.severity,
+      group:         event.group,
+      condition:     event.condition,
+      affectedCount: event.affectedCount,
+      stores:        event.stores,
+      hasMore:       event.hasMore,
+      firedAt:       event.firedAt?.toISOString?.() ?? event.firedAt,
+    })
+    res.json({ ok, topic: TOPICS.ALERTS })
   } catch (e) { next(e) }
 })
 

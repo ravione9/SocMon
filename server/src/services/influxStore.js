@@ -262,20 +262,47 @@ from(bucket: "${fluxEscape(cfg().bucket)}")
   }
 }
 
-/** Latest heartbeat per store for discovery — heartbeat only (never scan all measurements). */
-async function fetchStoreIdentityLatest(range = '-7d') {
+/** One lightweight identity query — last row per store for a single measurement. */
+async function fetchStoreIdentityByMeasurement(measurement, range) {
   const flux = `
 from(bucket: "${fluxEscape(cfg().bucket)}")
   |> range(start: ${range})
-  |> filter(fn: (r) => r._measurement == "heartbeat")
+  |> filter(fn: (r) => r._measurement == "${fluxEscape(measurement)}")
   |> filter(fn: (r) => exists r.store_tag or exists r.hostname or exists r.serial)
   |> group(columns: ["store_tag", "hostname", "serial"])
   |> last()
 `
   try { return await queryFlux(flux) } catch (e) {
-    console.warn('[influxStore] fetchStoreIdentityLatest failed:', e.message)
+    console.warn(`[influxStore] fetchStoreIdentityByMeasurement(${measurement}) failed:`, e.message)
     return []
   }
+}
+
+/**
+ * Discover all known stores for the dashboard total.
+ *
+ * Uses two fast parallel queries instead of one heavy multi-measurement scan:
+ *   1. heartbeat  → 7-day catalog (~3000 stores; primary source)
+ *   2. connectivity → 24h supplement (agents without heartbeat module)
+ *
+ * `_measurement` is tagged on each row so the merge loop sets `hadHeartbeat`
+ * only for genuine heartbeat rows (offline alert rule).
+ */
+async function fetchStoreIdentityLatest(supplementRange = '-24h') {
+  const [heartbeatRows, connectivityRows] = await Promise.all([
+    fetchStoreIdentityByMeasurement('heartbeat', '-7d'),
+    fetchStoreIdentityByMeasurement('connectivity', supplementRange),
+  ])
+  if (heartbeatRows.length < 500) {
+    console.warn(
+      `[influxStore] heartbeat identity returned only ${heartbeatRows.length} stores (7d window) — ` +
+      `connectivity supplement: ${connectivityRows.length}`,
+    )
+  }
+  return [
+    ...heartbeatRows.map((r) => ({ ...r, _measurement: 'heartbeat' })),
+    ...connectivityRows.map((r) => ({ ...r, _measurement: 'connectivity' })),
+  ]
 }
 
 async function fetchMeasurementLatest(measurement, range = '-15m', extraFilter = '') {
@@ -299,6 +326,49 @@ from(bucket: "${fluxEscape(cfg().bucket)}")
  * The caller merges multiple rows per store — this lets the JS layer prefer
  * the most-meaningful value (e.g. non-"unknown" gateway_vendor).
  */
+const VENDOR_FALLBACKS = new Set(['unknown', 'unidentified', '', 'n/a', 'none'])
+/** Lookback for last-known gateway vendor (SD-WAN classification for offline stores). */
+const LAST_GATEWAY_RANGE = '-7d'
+
+function isMeaningfulVendor(v) {
+  return v && !VENDOR_FALLBACKS.has(String(v).toLowerCase().trim())
+}
+
+/** True when vendor name or is_fortinet flag indicates Fortinet / FortiGate. */
+export function vendorIsFortinet(vendor, flag = false) {
+  return flag === true || /fortinet|fortigate/i.test(String(vendor || ''))
+}
+
+/** Merge one connectivity row into last-known gateway fields (7d lookback). */
+function mergeLastGatewayRow(s, row) {
+  if (row._field === 'is_fortinet' && String(row._value).toLowerCase() === 'true') {
+    s.lastIsFortinet = true
+  }
+  const rowVendor = row.gateway_vendor
+  if (vendorIsFortinet(rowVendor)) s.lastIsFortinet = true
+  if (!isMeaningfulVendor(rowVendor)) return
+  const t = row._time ? new Date(row._time).getTime() : 0
+  if (t > 0 && t >= (s._lastGwTsMs || 0)) {
+    s._lastGwTsMs = t
+    if (vendorIsFortinet(rowVendor) || !vendorIsFortinet(s.lastGatewayVendor)) {
+      s.lastGatewayVendor = rowVendor
+    }
+  }
+}
+
+/**
+ * SD-WAN group = current gateway is Fortinet OR last-known gateway (7d) was Fortinet.
+ * Offline stores keep SD-WAN membership via lastGatewayVendor / lastIsFortinet.
+ */
+function applySdWanClassification(s) {
+  const currentFortinet = vendorIsFortinet(s.gatewayVendor, s.isFortinet)
+  const lastFortinet = vendorIsFortinet(s.lastGatewayVendor, s.lastIsFortinet)
+  s.isFortinet = currentFortinet || lastFortinet
+  if (!isMeaningfulVendor(s.gatewayVendor) && isMeaningfulVendor(s.lastGatewayVendor)) {
+    s.gatewayVendor = s.lastGatewayVendor
+  }
+}
+
 async function fetchTaggedLatest(measurement, tagColumns, range = '-15m') {
   const cols = ['store_tag', 'hostname', 'serial', ...tagColumns, '_field'].map((c) => `"${c}"`).join(', ')
   const flux = `
@@ -334,8 +404,10 @@ function ensureStore(map, row) {
       activeSsid: '',
       gatewayIp: '',
       gatewayVendor: '',
+      lastGatewayVendor: '',
       isHotspot: false,
       isFortinet: false,
+      lastIsFortinet: false,
       ping: {},
       dns: {},
       http: {},
@@ -455,11 +527,12 @@ const CACHE_TTL_CUSTOM_MS  = 30_000
 /** Live store snapshot always reads recent data — never widen with UI chart range (6h/24h). */
 const SNAPSHOT_LIVE_RANGE = '-15m'
 
-function _snapshotCacheKey(fromTs, toTs) {
+function _snapshotCacheKey(fromTs, toTs, lite = false) {
+  const liteSuffix = lite ? '|lite' : ''
   if (fromTs && Number.isFinite(Number(fromTs))) {
-    return `custom|${fromTs}|${toTs ?? ''}`
+    return `custom|${fromTs}|${toTs ?? ''}${liteSuffix}`
   }
-  return 'live'
+  return `live${liteSuffix}`
 }
 
 function _getCachedSnapshot(key) {
@@ -488,7 +561,8 @@ function _setCachedSnapshot(key, data, isCustom) {
  */
 export async function fetchStoreSnapshot(staleMinutes = 15, metricRange = '-24h', fromTs, toTs, options = {}) {
   const skipCache = options?.skipCache === true
-  const cacheKey = _snapshotCacheKey(fromTs, toTs)
+  const lite = options?.lite === true
+  const cacheKey = _snapshotCacheKey(fromTs, toTs, lite)
   if (!skipCache) {
     const cached = _getCachedSnapshot(cacheKey)
     if (cached) return cached
@@ -518,18 +592,25 @@ export async function fetchStoreSnapshot(staleMinutes = 15, metricRange = '-24h'
   const isCustom = rangeClause !== `start: ${metricRange}`
   const bucket = fluxEscape(cfg().bucket)
 
-  const fetchPromise = _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, isCustom, bucket)
+  const fetchPromise = _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, isCustom, bucket, { lite })
   if (!skipCache) _snapshotCache.set(inflightKey, fetchPromise)
   try {
     const result = await fetchPromise
-    if (!skipCache) _setCachedSnapshot(cacheKey, result, isCustom)
+    // Avoid caching partial snapshots (identity query failed → only ~15m live stores).
+    const minCache = parseInt(process.env.STORE_SNAPSHOT_MIN_CACHE || '1500', 10)
+    if (!skipCache && Array.isArray(result) && result.length >= minCache) {
+      _setCachedSnapshot(cacheKey, result, isCustom)
+    } else if (!skipCache && Array.isArray(result) && result.length > 0 && result.length < minCache) {
+      console.warn(`[influxStore] snapshot has only ${result.length} stores (< ${minCache}) — not caching partial result`)
+    }
     return result
   } finally {
     if (!skipCache) _snapshotCache.delete(inflightKey)
   }
 }
 
-async function _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, isCustom, bucket) {
+async function _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, isCustom, bucket, opts = {}) {
+  const lite = opts?.lite === true
   const liveRange = SNAPSHOT_LIVE_RANGE
 
   /* Run a tagged-latest or measurement-latest query using the resolved range clause */
@@ -553,15 +634,17 @@ async function _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, 
   }
 
   const speedRange = '-24h'
-  const [identityRows, heartbeats, connectivity, pingRows, dnsRows, httpRows, systemRows, speedRows] = await Promise.all([
+  // Lite overview skips ping/dns/http/speedtest — 4 fewer heavy Influx queries (~3k stores).
+  const [identityRows, heartbeats, connectivity, connectivity7d, systemRows, pingRows, dnsRows, httpRows, speedRows] = await Promise.all([
     fetchStoreIdentityLatest(discoveryRange),
     runHeartbeats(),
     runTagged('connectivity', ['conn_state', 'active_interface', 'active_ssid', 'gateway_ip', 'gateway_vendor']),
-    runTagged('ping', ['target']),
-    runTagged('dns_query', ['domain']),
-    runTagged('http_response', ['url']),
+    fetchTaggedLatest('connectivity', ['gateway_vendor'], LAST_GATEWAY_RANGE),
     runMeasurement('system'),
-    isCustom ? runMeasurement('speedtest') : fetchMeasurementLatest('speedtest', speedRange),
+    lite ? Promise.resolve([]) : runTagged('ping', ['target']),
+    lite ? Promise.resolve([]) : runTagged('dns_query', ['domain']),
+    lite ? Promise.resolve([]) : runTagged('http_response', ['url']),
+    lite ? Promise.resolve([]) : (isCustom ? runMeasurement('speedtest') : fetchMeasurementLatest('speedtest', speedRange)),
   ])
 
   const stores = new Map()
@@ -573,11 +656,18 @@ async function _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, 
     if (!s) continue
     const t = row._time ? new Date(row._time).getTime() : 0
     if (t > 0) {
-      s.lastSeen = rowTime(row)
-      // Fallback online heuristic when heartbeat is unavailable.
-      s.online = now - t <= staleMs
+      // Multiple identity rows per store (one per measurement) — keep the newest.
+      const prevT = s.lastSeen ? new Date(s.lastSeen).getTime() : 0
+      if (t > prevT) {
+        s.lastSeen = rowTime(row)
+        // Fallback online heuristic when heartbeat is unavailable.
+        s.online = now - t <= staleMs
+      }
     }
-    s.hadHeartbeat = true
+    // hadHeartbeat must reflect actual heartbeat presence — used by the offline
+    // alert rule. Stores discovered via connectivity/system/ping etc. should not
+    // raise a "no heartbeat" alert just because the discovery query found them.
+    if (row._measurement === 'heartbeat') s.hadHeartbeat = true
     s.hostname = row.hostname || s.hostname
     s.serial = row.serial || s.serial
   }
@@ -603,13 +693,6 @@ async function _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, 
     if (s.heartbeatOnline == null) s.heartbeatOnline = false
   }
 
-  // Placeholder values written by the PS agent when detection fails — not real vendors
-  const VENDOR_FALLBACKS = new Set(['unknown', 'unidentified', '', 'n/a', 'none'])
-
-  function isMeaningfulVendor(v) {
-    return v && !VENDOR_FALLBACKS.has(String(v).toLowerCase().trim())
-  }
-
   // Helper: bump the "latest any-data" timestamp for a store.
   // Used below so a store is considered online if ANY metric arrived within staleMs,
   // even if its heartbeat is stale (e.g. heartbeat module crashed but other probes run fine).
@@ -632,18 +715,41 @@ async function _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, 
 
     if (row.gateway_ip && row.gateway_ip !== 'n/a') s.gatewayIp = row.gateway_ip
 
-    // Prefer any known vendor over "unknown"/"unidentified"
+    // Prefer any known vendor over "unknown"/"unidentified".
+    // SD-WAN stickiness: once Fortinet/FortiGate is detected within the lookback
+    // window, never downgrade to a different vendor — a transient non-Fortinet
+    // reading (failover to backup uplink, ARP-detection miss) must not flip the
+    // store out of the SD-WAN group.
     const rowVendor = row.gateway_vendor
+    const currentIsFortinet =
+      s.isFortinet === true ||
+      /fortinet|fortigate/.test(String(s.gatewayVendor || '').toLowerCase())
+    const rowIsFortinet = /fortinet|fortigate/.test(String(rowVendor || '').toLowerCase())
     if (isMeaningfulVendor(rowVendor)) {
-      s.gatewayVendor = rowVendor
+      if (rowIsFortinet || !currentIsFortinet) {
+        s.gatewayVendor = rowVendor
+      }
     } else if (!isMeaningfulVendor(s.gatewayVendor)) {
       s.gatewayVendor = rowVendor || s.gatewayVendor
     }
 
     if (row._field === 'is_hotspot') s.isHotspot = String(row._value).toLowerCase() === 'true'
-    if (row._field === 'is_fortinet') s.isFortinet = String(row._value).toLowerCase() === 'true'
+    // Sticky SD-WAN flag: any positive Fortinet reading in the window keeps the
+    // store classified as SD-WAN. Only a complete absence of positive readings
+    // demotes it (the flag stays at its initial `false` from ensureStore).
+    if (row._field === 'is_fortinet') {
+      if (String(row._value).toLowerCase() === 'true') s.isFortinet = true
+    }
+    if (rowIsFortinet) s.isFortinet = true
     if (!s.lastSeen && row._time) s.lastSeen = rowTime(row)
     bumpActivity(s, row)
+  }
+
+  // Last-known gateway (7d) — classifies offline stores into SD-WAN when last gateway was Fortinet.
+  for (const row of connectivity7d) {
+    const s = ensureStore(stores, row)
+    if (!s) continue
+    mergeLastGatewayRow(s, row)
   }
 
   for (const row of pingRows) {
@@ -706,6 +812,8 @@ async function _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, 
       s.online = true
       s.onlineReason = 'activity'  // heartbeat stale but metrics active within activityMs
     }
+    applySdWanClassification(s)
+    delete s._lastGwTsMs
   }
 
   const list = [...stores.values()]
@@ -719,14 +827,17 @@ async function _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, 
   return list
 }
 
-/** Return the newest non-empty cached snapshot (any range) when a fresh fetch fails or times out. */
+/** Return the best non-empty cached snapshot when a fresh fetch fails or times out. */
 export function getAnyCachedStoreSnapshot(maxAgeMs = CACHE_TTL_DEFAULT_MS) {
   let best = null
   for (const [key, entry] of _snapshotCache.entries()) {
     if (key.startsWith('inflight:')) continue
     if (Date.now() - entry.ts > Math.min(entry.ttl, maxAgeMs)) continue
     if (!Array.isArray(entry.data) || entry.data.length === 0) continue
-    if (!best || entry.ts > best.ts) best = { data: entry.data, ts: entry.ts }
+    // Prefer the largest snapshot so a partial ~900-store fetch doesn't mask a full ~3000-store cache.
+    if (!best || entry.data.length > best.data.length || (entry.data.length === best.data.length && entry.ts > best.ts)) {
+      best = { data: entry.data, ts: entry.ts }
+    }
   }
   return best?.data || null
 }
@@ -738,12 +849,10 @@ export function getAnyCachedStoreSnapshot(maxAgeMs = CACHE_TTL_DEFAULT_MS) {
 export async function fetchStoreIssuesLite(staleMinutes = 15, metricRange = '-12h') {
   const now = Date.now()
   const staleMs = staleMinutes * 60 * 1000
-  const VENDOR_FALLBACKS = new Set(['unknown', 'unidentified', '', 'n/a', 'none'])
-  const isMeaningfulVendor = (v) => v && !VENDOR_FALLBACKS.has(String(v).toLowerCase().trim())
-
-  const [heartbeats, connectivity] = await Promise.all([
+  const [heartbeats, connectivity, connectivity7d] = await Promise.all([
     fetchHeartbeats(metricRange),
     fetchTaggedLatest('connectivity', ['conn_state', 'active_interface', 'active_ssid', 'gateway_ip', 'gateway_vendor'], metricRange),
+    fetchTaggedLatest('connectivity', ['gateway_vendor'], LAST_GATEWAY_RANGE),
   ])
 
   const stores = new Map()
@@ -767,17 +876,34 @@ export async function fetchStoreIssuesLite(staleMinutes = 15, metricRange = '-12
     if (row.active_interface) s.activeInterface = row.active_interface
     if (row.active_ssid && row.active_ssid !== 'n/a') s.activeSsid = row.active_ssid
     if (row.gateway_ip && row.gateway_ip !== 'n/a') s.gatewayIp = row.gateway_ip
+    // SD-WAN stickiness — see _doFetchStoreSnapshot for the rationale.
     const rowVendor = row.gateway_vendor
-    if (isMeaningfulVendor(rowVendor)) s.gatewayVendor = rowVendor
-    else if (!isMeaningfulVendor(s.gatewayVendor)) s.gatewayVendor = rowVendor || s.gatewayVendor
+    const currentIsFortinet =
+      s.isFortinet === true ||
+      /fortinet|fortigate/.test(String(s.gatewayVendor || '').toLowerCase())
+    const rowIsFortinet = /fortinet|fortigate/.test(String(rowVendor || '').toLowerCase())
+    if (isMeaningfulVendor(rowVendor)) {
+      if (rowIsFortinet || !currentIsFortinet) s.gatewayVendor = rowVendor
+    } else if (!isMeaningfulVendor(s.gatewayVendor)) {
+      s.gatewayVendor = rowVendor || s.gatewayVendor
+    }
     if (row._field === 'is_hotspot') s.isHotspot = String(row._value).toLowerCase() === 'true'
-    if (row._field === 'is_fortinet') s.isFortinet = String(row._value).toLowerCase() === 'true'
+    if (row._field === 'is_fortinet') {
+      if (String(row._value).toLowerCase() === 'true') s.isFortinet = true
+    }
+    if (rowIsFortinet) s.isFortinet = true
     if (!s.lastSeen && row._time) s.lastSeen = rowTime(row)
     // Track latest connectivity data time for activity heuristic
     if (row._time) {
       const t = new Date(row._time).getTime()
       if (t > 0 && (!s._latestActivityTs || t > s._latestActivityTs)) s._latestActivityTs = t
     }
+  }
+
+  for (const row of connectivity7d) {
+    const s = ensureStore(stores, row)
+    if (!s) continue
+    mergeLastGatewayRow(s, row)
   }
 
   // Secondary online heuristic: recent connectivity data → store is alive
@@ -787,6 +913,8 @@ export async function fetchStoreIssuesLite(staleMinutes = 15, metricRange = '-12
       s.online = true
       s.onlineReason = 'activity'
     }
+    applySdWanClassification(s)
+    delete s._lastGwTsMs
   }
 
   const list = [...stores.values()]
@@ -1082,6 +1210,856 @@ from(bucket: "${fluxEscape(cfg().bucket)}")
     dataTo:     maxClock ? new Date(maxClock * 1000).toISOString() : null,
     pointCount: allPoints.length,
     series:     [...seriesMap.values()],
+  }
+}
+
+/**
+ * Auto-pick an aggregation bucket size based on window span.
+ * Aim for ~80–200 points per series.
+ */
+function pickAggregateBucket(rangeSec) {
+  if (rangeSec <= 6 * 3600)     return '5m'    // 6h → 72 pts
+  if (rangeSec <= 24 * 3600)    return '15m'   // 24h → 96 pts
+  if (rangeSec <= 3 * 86400)    return '30m'   // 3d → 144 pts
+  if (rangeSec <= 7 * 86400)    return '1h'    // 7d → 168 pts
+  if (rangeSec <= 30 * 86400)   return '6h'    // 30d → 120 pts
+  return '1d'
+}
+
+/**
+ * Aggregate network-health time series across the entire store fleet for the
+ * requested window. Returns mean per (target, _field) at each bucket.
+ *
+ * Series:
+ *  - ping latency  (measurement=ping, field=average_response_ms, group by target)
+ *  - packet loss   (measurement=ping, field=packet_loss_pct,    group by target)
+ *  - DNS success%  (measurement=dns,  field=success,            group by domain)
+ *  - HTTP success% (measurement=http, field=success,            group by url)
+ *
+ * @param {number} rangeSec  fallback window in seconds when from/to omitted
+ * @param {number} [fromSec] Unix seconds (inclusive)
+ * @param {number} [toSec]   Unix seconds (exclusive)
+ */
+export async function fetchNetHealthHistory(rangeSec = 86400, fromSec, toSec) {
+  const bucket = fluxEscape(cfg().bucket)
+  let rangeClause
+  let effectiveRangeSec = rangeSec
+  if (fromSec && Number.isFinite(Number(fromSec))) {
+    const startISO = new Date(Number(fromSec) * 1000).toISOString()
+    const stopISO  = toSec && Number.isFinite(Number(toSec))
+      ? new Date(Number(toSec) * 1000).toISOString()
+      : new Date().toISOString()
+    rangeClause = `start: ${startISO}, stop: ${stopISO}`
+    effectiveRangeSec = toSec ? Number(toSec) - Number(fromSec) : Math.floor((Date.now() / 1000) - Number(fromSec))
+  } else {
+    rangeClause = `start: -${rangeSec}s`
+  }
+
+  const every = pickAggregateBucket(Math.max(effectiveRangeSec, 300))
+
+  // One Flux per measurement; cheaper than a single mega-query, and lets each
+  // group differ in tag column (target vs domain vs url).
+  const pingFlux = `
+from(bucket: "${bucket}")
+  |> range(${rangeClause})
+  |> filter(fn: (r) => r._measurement == "ping" and (r._field == "average_response_ms" or r._field == "packet_loss_pct"))
+  |> filter(fn: (r) => exists r.target)
+  |> group(columns: ["_field", "target"])
+  |> aggregateWindow(every: ${every}, fn: mean, createEmpty: false)
+  |> keep(columns: ["_time", "_value", "_field", "target"])
+`
+
+  const dnsFlux = `
+from(bucket: "${bucket}")
+  |> range(${rangeClause})
+  |> filter(fn: (r) => r._measurement == "dns" and r._field == "success")
+  |> filter(fn: (r) => exists r.domain)
+  |> map(fn: (r) => ({ r with _value: if r._value == true or r._value == 1 or r._value == 1.0 then 1.0 else 0.0 }))
+  |> group(columns: ["domain"])
+  |> aggregateWindow(every: ${every}, fn: mean, createEmpty: false)
+  |> map(fn: (r) => ({ r with _value: r._value * 100.0 }))
+  |> keep(columns: ["_time", "_value", "domain"])
+`
+
+  const httpFlux = `
+from(bucket: "${bucket}")
+  |> range(${rangeClause})
+  |> filter(fn: (r) => r._measurement == "http" and r._field == "success")
+  |> filter(fn: (r) => exists r.url)
+  |> map(fn: (r) => ({ r with _value: if r._value == true or r._value == 1 or r._value == 1.0 then 1.0 else 0.0 }))
+  |> group(columns: ["url"])
+  |> aggregateWindow(every: ${every}, fn: mean, createEmpty: false)
+  |> map(fn: (r) => ({ r with _value: r._value * 100.0 }))
+  |> keep(columns: ["_time", "_value", "url"])
+`
+
+  const [pingRows, dnsRows, httpRows] = await Promise.all([
+    queryFlux(pingFlux).catch((e) => { console.warn('[influxStore] netHealth ping query failed:', e.message); return [] }),
+    queryFlux(dnsFlux).catch((e) => { console.warn('[influxStore] netHealth dns query failed:',  e.message); return [] }),
+    queryFlux(httpFlux).catch((e) => { console.warn('[influxStore] netHealth http query failed:', e.message); return [] }),
+  ])
+
+  function rowsToSeries(rows, tagKey, fieldOverride) {
+    const map = new Map()
+    for (const row of rows) {
+      const tagVal = row[tagKey]
+      const field  = fieldOverride || row._field
+      if (!tagVal || !field) continue
+      const key = `${field}|${tagVal}`
+      if (!map.has(key)) {
+        map.set(key, {
+          measurement: tagKey === 'target' ? 'ping' : tagKey === 'domain' ? 'dns' : 'http',
+          field,
+          target: tagVal,
+          name: `${field} (${tagVal})`,
+          points: [],
+        })
+      }
+      const ts = row._time ? Math.floor(new Date(row._time).getTime() / 1000) : null
+      const val = num(row._value)
+      if (ts != null && val != null) map.get(key).points.push({ clock: ts, value: val })
+    }
+    return [...map.values()]
+  }
+
+  const latencySeries = rowsToSeries(pingRows.filter((r) => r._field === 'average_response_ms'), 'target')
+  const lossSeries    = rowsToSeries(pingRows.filter((r) => r._field === 'packet_loss_pct'),    'target')
+  const dnsSeries     = rowsToSeries(dnsRows,  'domain', 'success_pct')
+  const httpSeries    = rowsToSeries(httpRows, 'url',    'success_pct')
+
+  const allClocks = [latencySeries, lossSeries, dnsSeries, httpSeries]
+    .flat()
+    .flatMap((s) => s.points.map((p) => p.clock))
+  const minClock = allClocks.length ? Math.min(...allClocks) : null
+  const maxClock = allClocks.length ? Math.max(...allClocks) : null
+
+  const nowSec = Math.floor(Date.now() / 1000)
+  const requestedFromSec = fromSec ? Number(fromSec) : nowSec - rangeSec
+  const requestedToSec   = toSec   ? Number(toSec)   : nowSec
+
+  return {
+    rangeSec: effectiveRangeSec,
+    aggregateEvery: every,
+    requestedFrom: new Date(requestedFromSec * 1000).toISOString(),
+    requestedTo:   new Date(requestedToSec   * 1000).toISOString(),
+    dataFrom:   minClock ? new Date(minClock * 1000).toISOString() : null,
+    dataTo:     maxClock ? new Date(maxClock * 1000).toISOString() : null,
+    pointCount: allClocks.length,
+    latencySeries,
+    lossSeries,
+    dnsSeries,
+    httpSeries,
+  }
+}
+
+/**
+ * Aggregate per-group time series across the fleet for the requested window.
+ * Groups are derived in Flux from the hostname tag using the same rules the
+ * frontend uses (RP*, LK*, fallback to General).
+ *
+ * Returns ping latency + packet loss series per group. The client groups
+ * these into per-day rollups + computes a health score so a multi-day matrix
+ * (Group × Day) can be rendered.
+ */
+/**
+ * @param {object} [opts]
+ * @param {{name:string, storeTags:string[]}[]} [opts.customGroups]
+ *        Extra ad-hoc groups defined by an explicit list of store_tags
+ *        (e.g. "Manual ROP + SD-WAN"). Each becomes a separate row in the
+ *        returned `groupSeries`.
+ */
+export async function fetchGroupHealthHistory(rangeSec = 86400, fromSec, toSec, opts = {}) {
+  const bucket = fluxEscape(cfg().bucket)
+  let rangeClause
+  let effectiveRangeSec = rangeSec
+  if (fromSec && Number.isFinite(Number(fromSec))) {
+    const startISO = new Date(Number(fromSec) * 1000).toISOString()
+    const stopISO  = toSec && Number.isFinite(Number(toSec))
+      ? new Date(Number(toSec) * 1000).toISOString()
+      : new Date().toISOString()
+    rangeClause = `start: ${startISO}, stop: ${stopISO}`
+    effectiveRangeSec = toSec ? Number(toSec) - Number(fromSec) : Math.floor((Date.now() / 1000) - Number(fromSec))
+  } else {
+    rangeClause = `start: -${rangeSec}s`
+  }
+  const every = pickAggregateBucket(Math.max(effectiveRangeSec, 300))
+
+  // ── Identify SD-WAN store_tags from the most recent snapshot ────────────
+  // SD-WAN classification is vendor-based (Fortinet) not hostname-based, so
+  // we look it up from the latest cached store snapshot (which already has
+  // isFortinet / gatewayVendor populated). Falls back to running a fresh
+  // snapshot fetch if no cache is available.
+  let cached = getAnyCachedStoreSnapshot(15 * 60 * 1000) // 15 min tolerance
+  if (!cached) {
+    try { cached = await fetchStoreSnapshot(15, '-24h') } catch { cached = null }
+  }
+  const sdwanTags = []
+  if (Array.isArray(cached)) {
+    for (const s of cached) {
+      if (
+        vendorIsFortinet(s.gatewayVendor, s.isFortinet) ||
+        vendorIsFortinet(s.lastGatewayVendor, s.lastIsFortinet)
+      ) {
+        if (s.storeTag) sdwanTags.push(s.storeTag)
+      }
+    }
+  }
+
+  // ── Query 1: hostname-based groups (RP / POS System / General) ──────────
+  const hostnameFlux = `
+from(bucket: "${bucket}")
+  |> range(${rangeClause})
+  |> filter(fn: (r) => r._measurement == "ping" and (r._field == "average_response_ms" or r._field == "packet_loss_pct"))
+  |> filter(fn: (r) => exists r.hostname)
+  |> map(fn: (r) => ({ r with grp:
+       if r.hostname =~ /^[Rr][Pp]/ then "RP Group"
+       else if r.hostname =~ /^[Ll][Kk]/ then "POS System Group"
+       else "General Group"
+     }))
+  |> group(columns: ["_field", "grp"])
+  |> aggregateWindow(every: ${every}, fn: mean, createEmpty: false)
+  |> keep(columns: ["_time", "_value", "_field", "grp"])
+`
+
+  // ── Query 2: SD-WAN — filter by the store_tag set, then aggregate ───────
+  // Cap at 4000 tags to avoid pathological query sizes. (A few hundred
+  // SD-WAN devices generate a ~15KB query, well within Influx limits.)
+  let sdwanFlux = null
+  if (sdwanTags.length > 0 && sdwanTags.length <= 4000) {
+    const setLiteral = sdwanTags
+      .map((t) => `"${fluxEscape(String(t))}"`)
+      .join(', ')
+    sdwanFlux = `
+from(bucket: "${bucket}")
+  |> range(${rangeClause})
+  |> filter(fn: (r) => r._measurement == "ping" and (r._field == "average_response_ms" or r._field == "packet_loss_pct"))
+  |> filter(fn: (r) => exists r.store_tag and contains(value: r.store_tag, set: [${setLiteral}]))
+  |> group(columns: ["_field"])
+  |> aggregateWindow(every: ${every}, fn: mean, createEmpty: false)
+  |> keep(columns: ["_time", "_value", "_field"])
+`
+  }
+
+  // ── Query 3..N: custom groups (Manual ROP + SD-WAN, Manual ROP w/o SD-WAN, …) ─
+  const customGroups = Array.isArray(opts.customGroups) ? opts.customGroups : []
+  const customQueries = customGroups
+    .map((g) => {
+      const tags = Array.isArray(g.storeTags) ? g.storeTags.filter(Boolean) : []
+      if (!g.name || !tags.length || tags.length > 4000) return null
+      const setLiteral = tags.map((t) => `"${fluxEscape(String(t))}"`).join(', ')
+      const flux = `
+from(bucket: "${bucket}")
+  |> range(${rangeClause})
+  |> filter(fn: (r) => r._measurement == "ping" and (r._field == "average_response_ms" or r._field == "packet_loss_pct"))
+  |> filter(fn: (r) => exists r.store_tag and contains(value: r.store_tag, set: [${setLiteral}]))
+  |> group(columns: ["_field"])
+  |> aggregateWindow(every: ${every}, fn: mean, createEmpty: false)
+  |> keep(columns: ["_time", "_value", "_field"])
+`
+      return { name: g.name, flux, storeCount: tags.length }
+    })
+    .filter(Boolean)
+
+  const [hostRows, sdwanRows, ...customResults] = await Promise.all([
+    queryFlux(hostnameFlux).catch((e) => { console.warn('[influxStore] groupHealth host query failed:', e.message); return [] }),
+    sdwanFlux
+      ? queryFlux(sdwanFlux).catch((e) => { console.warn('[influxStore] groupHealth sdwan query failed:', e.message); return [] })
+      : Promise.resolve([]),
+    ...customQueries.map((cq) =>
+      queryFlux(cq.flux).catch((e) => { console.warn(`[influxStore] groupHealth custom "${cq.name}" failed:`, e.message); return [] })
+    ),
+  ])
+
+  const seriesMap = new Map()
+
+  // Merge hostname-based rows
+  for (const row of hostRows) {
+    const grp   = row.grp
+    const field = row._field
+    if (!grp || !field) continue
+    const key = `${grp}|${field}`
+    if (!seriesMap.has(key)) seriesMap.set(key, { group: grp, field, points: [] })
+    const ts = row._time ? Math.floor(new Date(row._time).getTime() / 1000) : null
+    const val = num(row._value)
+    if (ts != null && val != null) seriesMap.get(key).points.push({ clock: ts, value: val })
+  }
+
+  // Merge SD-WAN rows (group = 'SD-WAN Group')
+  for (const row of sdwanRows) {
+    const field = row._field
+    if (!field) continue
+    const key = `SD-WAN Group|${field}`
+    if (!seriesMap.has(key)) seriesMap.set(key, { group: 'SD-WAN Group', field, points: [] })
+    const ts = row._time ? Math.floor(new Date(row._time).getTime() / 1000) : null
+    const val = num(row._value)
+    if (ts != null && val != null) seriesMap.get(key).points.push({ clock: ts, value: val })
+  }
+
+  // Merge custom-group rows
+  for (let i = 0; i < customQueries.length; i++) {
+    const cq = customQueries[i]
+    const rows = customResults[i] || []
+    for (const row of rows) {
+      const field = row._field
+      if (!field) continue
+      const key = `${cq.name}|${field}`
+      if (!seriesMap.has(key)) seriesMap.set(key, { group: cq.name, field, points: [] })
+      const ts = row._time ? Math.floor(new Date(row._time).getTime() / 1000) : null
+      const val = num(row._value)
+      if (ts != null && val != null) seriesMap.get(key).points.push({ clock: ts, value: val })
+    }
+  }
+
+  const allClocks = [...seriesMap.values()].flatMap((s) => s.points.map((p) => p.clock))
+  const minClock = allClocks.length ? Math.min(...allClocks) : null
+  const maxClock = allClocks.length ? Math.max(...allClocks) : null
+
+  const nowSec = Math.floor(Date.now() / 1000)
+  const requestedFromSec = fromSec ? Number(fromSec) : nowSec - rangeSec
+  const requestedToSec   = toSec   ? Number(toSec)   : nowSec
+
+  return {
+    rangeSec: effectiveRangeSec,
+    aggregateEvery: every,
+    requestedFrom: new Date(requestedFromSec * 1000).toISOString(),
+    requestedTo:   new Date(requestedToSec   * 1000).toISOString(),
+    dataFrom:   minClock ? new Date(minClock * 1000).toISOString() : null,
+    dataTo:     maxClock ? new Date(maxClock * 1000).toISOString() : null,
+    pointCount: allClocks.length,
+    sdwanStoreCount: sdwanTags.length,
+    customGroupCounts: Object.fromEntries(customQueries.map((cq) => [cq.name, cq.storeCount])),
+    groupSeries: [...seriesMap.values()],
+  }
+}
+
+/** Flux filter line(s) restricting rows to an explicit store_tag set. */
+function fluxStoreTagSetFilter(tags) {
+  if (!Array.isArray(tags) || !tags.length) return ''
+  const capped = tags.slice(0, 4000)
+  const setLiteral = capped.map((t) => `"${fluxEscape(String(t))}"`).join(', ')
+  return `  |> filter(fn: (r) => exists r.store_tag and contains(value: r.store_tag, set: [${setLiteral}]))`
+}
+
+function chunkArray(arr, size) {
+  const out = []
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
+  return out
+}
+
+/** Pick coarser heartbeat buckets for long windows / large fleets (fewer aggregateWindow steps). */
+function pickDisconnectBucketMin(rangeSec, storeEstimate = 0, requested = HEARTBEAT_BUCKET_MIN) {
+  const req = Math.min(Math.max(parseInt(String(requested || HEARTBEAT_BUCKET_MIN), 10) || HEARTBEAT_BUCKET_MIN, 1), 60)
+  if (rangeSec > 14 * 86400) return Math.max(req, 60)
+  if (rangeSec > 3 * 86400 || storeEstimate > 1200) return Math.max(req, 15)
+  if (storeEstimate > 800) return Math.max(req, 10)
+  return req
+}
+
+function offlineTruncateUnit(bh) {
+  return bh ? '1h' : '1d'
+}
+
+async function runPool(items, limit, fn) {
+  if (!items.length) return []
+  const results = new Array(items.length)
+  let next = 0
+  async function worker() {
+    while (next < items.length) {
+      const i = next++
+      results[i] = await fn(items[i], i)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()))
+  return results
+}
+
+/**
+ * Run a filtered Flux fetch, chunking large store_tag sets so Influx queries stay bounded.
+ */
+async function runFilteredDisconnectQuery(fetchFn, rangeClause, bucketEvery, groupDef, logLabel, truncateUnit) {
+  const { filterLines, tags } = groupDef
+  if (Array.isArray(tags) && tags.length > 120) {
+    const parts = await runPool(chunkArray(tags, 120), 2, async (tagChunk) =>
+      fetchFn(rangeClause, bucketEvery, fluxStoreTagSetFilter(tagChunk), logLabel, truncateUnit),
+    )
+    return parts.flat()
+  }
+  const filter = Array.isArray(tags) && tags.length
+    ? fluxStoreTagSetFilter(tags)
+    : (filterLines || '')
+  return fetchFn(rangeClause, bucketEvery, filter, logLabel, truncateUnit)
+}
+
+async function fetchHeartbeatDisconnectByDayFiltered(rangeClause, bucketEvery, groupFilterLines = '', logLabel = '', truncateUnit = '1d') {
+  const bucket = fluxEscape(cfg().bucket)
+  const flux = `
+from(bucket: "${bucket}")
+  |> range(${rangeClause})
+  |> filter(fn: (r) => r._measurement == "heartbeat" and r._field == "online")
+${groupFilterLines}
+  |> group(columns: ["store_tag", "hostname", "serial"])
+  |> aggregateWindow(every: ${bucketEvery}, fn: last, createEmpty: false)
+  |> difference(columns: ["_value"], keepFirst: false)
+  |> filter(fn: (r) => r._value < 0.0)
+  |> truncateTimeColumn(unit: ${truncateUnit})
+  |> group(columns: ["store_tag", "hostname", "_time"])
+  |> count()
+  |> keep(columns: ["_time", "store_tag", "hostname", "_value"])
+`
+  return queryFlux(flux).catch((e) => {
+    console.warn(`[influxStore] fetchHeartbeatDisconnectByDay${logLabel ? ` (${logLabel})` : ''} failed:`, e.message)
+    return []
+  })
+}
+
+async function fetchHeartbeatOfflineByDayFiltered(rangeClause, bucketEvery, groupFilterLines = '', logLabel = '', truncateUnit = '1d') {
+  const bucket = fluxEscape(cfg().bucket)
+  const flux = `
+from(bucket: "${bucket}")
+  |> range(${rangeClause})
+  |> filter(fn: (r) => r._measurement == "heartbeat" and r._field == "online")
+${groupFilterLines}
+  |> aggregateWindow(every: ${bucketEvery}, fn: last, createEmpty: false)
+  |> filter(fn: (r) => r._value == 0.0 or r._value == 0)
+  |> truncateTimeColumn(unit: ${truncateUnit})
+  |> group(columns: ["store_tag", "hostname", "_time"])
+  |> count()
+  |> keep(columns: ["_time", "store_tag", "hostname", "_value"])
+`
+  return queryFlux(flux).catch((e) => {
+    console.warn(`[influxStore] fetchHeartbeatOfflineByDay${logLabel ? ` (${logLabel})` : ''} failed:`, e.message)
+    return []
+  })
+}
+
+async function fetchConnDownByDayFiltered(rangeClause, bucketEvery, groupFilterLines = '', logLabel = '', truncateUnit = '1d') {
+  const bucket = fluxEscape(cfg().bucket)
+  const flux = `
+from(bucket: "${bucket}")
+  |> range(${rangeClause})
+  |> filter(fn: (r) => r._measurement == "connectivity" and (r.conn_state == "isp_down" or r.conn_state == "no_connectivity"))
+${groupFilterLines}
+  |> aggregateWindow(every: ${bucketEvery}, fn: count, createEmpty: false)
+  |> truncateTimeColumn(unit: ${truncateUnit})
+  |> group(columns: ["store_tag", "hostname", "_time"])
+  |> count()
+  |> keep(columns: ["_time", "store_tag", "hostname", "_value"])
+`
+  return queryFlux(flux).catch((e) => {
+    console.warn(`[influxStore] fetchConnDownByDay${logLabel ? ` (${logLabel})` : ''} failed:`, e.message)
+    return []
+  })
+}
+
+/**
+ * Day-wise store disconnections + offline duration per group.
+ *
+ * Uses the same heartbeat history approach as fetchStoreDowntimeSummary:
+ * - Offline bucket  = heartbeat.online == 0 in a 5m window
+ * - Disconnection   = heartbeat online value drops (1 → 0) within the window
+ * - Internet down   = connectivity isp_down / no_connectivity buckets (merged)
+ * - Silent stores   = currently offline in snapshot with stale lastSeen → offline
+ *   duration since lastSeen (matches dashboard cards)
+ *
+ * @param {number} rangeSec
+ * @param {number} [fromSec]
+ * @param {number} [toSec]
+ * @param {object} [opts]
+ * @param {number} [opts.bucketMin=5]
+ * @param {{name:string, storeTags:string[]}[]} [opts.customGroups]
+ * @param {string} [opts.groupName]  When set, only run queries for this one group.
+ */
+const _groupDisconnectCache = new Map()
+// Live windows: serve cached for up to ~10 min so polling clients hit cache
+// even across users. Historical (custom from/to) windows are cached separately.
+const GROUP_DISCONNECT_CACHE_MS = 600_000
+
+export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec, opts = {}) {
+  const nowSec = Math.floor(Date.now() / 1000)
+  const requestedFromSec = fromSec && Number.isFinite(Number(fromSec)) ? Number(fromSec) : nowSec - rangeSec
+  const requestedToSec   = toSec && Number.isFinite(Number(toSec))     ? Number(toSec)   : nowSec
+  const effectiveRangeSec = requestedToSec - requestedFromSec
+  const rangeClause = buildFluxRangeClause(null, requestedFromSec, requestedToSec)
+  const requestedBucketMin = opts.bucketMin
+
+  // Business Hours filter — applied at bucket level after data is loaded.
+  // tzOffsetMinutes lets us convert UTC bucket timestamps to the user's
+  // local clock before checking the hour/weekday.
+  const bh = opts.businessHours && typeof opts.businessHours === 'object'
+    ? {
+        startHour: opts.businessHours.startHour,
+        endHour: opts.businessHours.endHour,
+        weekdays: new Set((opts.businessHours.weekdays || []).map(Number)),
+        tzOffsetMinutes: Number(opts.businessHours.tzOffsetMinutes) || 0,
+      }
+    : null
+  function inBusinessHours(tsSec) {
+    if (!bh) return true
+    const localMs = (tsSec * 1000) + (bh.tzOffsetMinutes * 60 * 1000)
+    const d = new Date(localMs)
+    const day = d.getUTCDay()
+    if (!bh.weekdays.has(day)) return false
+    const hour = d.getUTCHours()
+    if (bh.startHour <= bh.endHour) return hour >= bh.startHour && hour < bh.endHour
+    return hour >= bh.startHour || hour < bh.endHour
+  }
+
+  // Bucket the "to" timestamp by the cache TTL so live windows still hit cache
+  // for repeated polls but don't go stale.
+  const customGroupKey = Array.isArray(opts.customGroups)
+    ? opts.customGroups
+        .map((g) => `${g.name}=${(g.storeTags || []).slice().sort().join(',')}`)
+        .sort()
+        .join('|')
+    : ''
+  const onlyGroup = opts.groupName ? String(opts.groupName).trim().slice(0, 80) : ''
+  const bhKey = bh
+    ? `bh:${bh.startHour}-${bh.endHour}|${[...bh.weekdays].sort().join(',')}|${bh.tzOffsetMinutes}`
+    : ''
+  const liveWindow = !(fromSec && toSec)
+  const cacheBucket = liveWindow
+    ? Math.floor(nowSec / Math.floor(GROUP_DISCONNECT_CACHE_MS / 1000))
+    : `${requestedFromSec}:${requestedToSec}`
+  // Actual bucketMin is picked inside work() based on fleet size, so key on the requested value (or 'auto').
+  const bucketKeyPart = requestedBucketMin ? `b${requestedBucketMin}` : 'bauto'
+  const cacheKey = `${effectiveRangeSec}|${bucketKeyPart}|${cacheBucket}|${customGroupKey}|${bhKey}|${onlyGroup || 'all'}`
+  const cachedEntry = _groupDisconnectCache.get(cacheKey)
+  if (cachedEntry && Date.now() - cachedEntry.ts < GROUP_DISCONNECT_CACHE_MS) return cachedEntry.data
+  const inflightKey = `inflight:${cacheKey}`
+  if (_groupDisconnectCache.has(inflightKey)) {
+    return _groupDisconnectCache.get(inflightKey)
+  }
+
+  const work = (async () => {
+
+  // Snapshot for SD-WAN/custom membership + silent-offline overlay (shared across groups).
+  let cached = getAnyCachedStoreSnapshot(15 * 60 * 1000)
+  if (!cached) {
+    try { cached = await fetchStoreSnapshot(15, '-24h') } catch { cached = null }
+  }
+
+  const sdwanTags = []
+  if (Array.isArray(cached)) {
+    for (const s of cached) {
+      if (
+        vendorIsFortinet(s.gatewayVendor, s.isFortinet) ||
+        vendorIsFortinet(s.lastGatewayVendor, s.lastIsFortinet)
+      ) {
+        if (s.storeTag) sdwanTags.push(s.storeTag)
+      }
+    }
+  }
+  const sdwanTagSet = new Set(sdwanTags)
+
+  const customGroups = Array.isArray(opts.customGroups) ? opts.customGroups : []
+  const customGroupTagSets = new Map()
+  for (const g of customGroups) {
+    const name = String(g?.name || '').trim()
+    const tags = Array.isArray(g?.storeTags) ? g.storeTags.map((t) => String(t || '').trim()).filter(Boolean) : []
+    if (!name || !tags.length) continue
+    customGroupTagSets.set(name, new Set(tags))
+  }
+
+  function estimateGroupStores(belongs) {
+    if (!Array.isArray(cached)) return 0
+    let n = 0
+    for (const s of cached) {
+      if (s?.storeTag && belongs(s.storeTag, s)) n++
+    }
+    return n
+  }
+
+  /** Per-group Flux queries (hostname, SD-WAN tag-set, or custom tag-set). */
+  const groupDefs = [
+    {
+      name: 'RP Group',
+      filterLines: '  |> filter(fn: (r) => exists r.hostname and r.hostname =~ /^[Rr][Pp]/)',
+      tags: null,
+      belongs: (tag, snap) => String(snap?.hostname || '').toUpperCase().startsWith('RP'),
+    },
+    {
+      name: 'POS System Group',
+      filterLines: '  |> filter(fn: (r) => exists r.hostname and r.hostname =~ /^[Ll][Kk]/)',
+      tags: null,
+      belongs: (tag, snap) => String(snap?.hostname || '').toUpperCase().startsWith('LK'),
+    },
+  ]
+  if (sdwanTags.length > 0 && sdwanTags.length <= 4000) {
+    groupDefs.push({
+      name: 'SD-WAN Group',
+      filterLines: null,
+      tags: sdwanTags,
+      belongs: (tag) => sdwanTagSet.has(tag),
+    })
+  }
+  for (const [name, tagSet] of customGroupTagSets.entries()) {
+    groupDefs.push({
+      name,
+      filterLines: null,
+      tags: [...tagSet],
+      belongs: (tag) => tagSet.has(tag),
+    })
+  }
+  for (const gd of groupDefs) {
+    gd.storeEstimate = estimateGroupStores(gd.belongs)
+  }
+
+  const maxStoreEstimate = groupDefs.reduce((m, g) => Math.max(m, g.storeEstimate || 0), 0)
+  const bucketMin = pickDisconnectBucketMin(effectiveRangeSec, maxStoreEstimate, requestedBucketMin)
+  const bucketEvery = `${bucketMin}m`
+  const bucketSec = bucketMin * 60
+  const truncateUnit = offlineTruncateUnit(bh)
+
+  function dayMsFromTs(tsSec) {
+    const d = new Date(tsSec * 1000)
+    d.setHours(0, 0, 0, 0)
+    return d.getTime()
+  }
+
+  const start = new Date(requestedFromSec * 1000); start.setHours(0, 0, 0, 0)
+  const end   = new Date(requestedToSec   * 1000); end.setHours(0, 0, 0, 0)
+  const dayMsList = []
+  for (let d = new Date(start); d.getTime() <= end.getTime(); d = new Date(d.getTime() + 86_400_000)) {
+    dayMsList.push(d.getTime())
+  }
+  const dayStartLocalSec = dayMsList.map((dayMs) => Math.floor(dayMs / 1000))
+
+  // Precompute BH minutes per (day-of-week × hour) since they're constant.
+  const bhDayHourMinutes = bh ? new Array(7).fill(0).map(() => new Array(24).fill(0)) : null
+  if (bh) {
+    for (let dow = 0; dow < 7; dow++) {
+      if (!bh.weekdays.has(dow)) continue
+      for (let hour = 0; hour < 24; hour++) {
+        const inHour = bh.startHour <= bh.endHour
+          ? (hour >= bh.startHour && hour < bh.endHour)
+          : (hour >= bh.startHour || hour < bh.endHour)
+        if (inHour) bhDayHourMinutes[dow][hour] = 60
+      }
+    }
+  }
+
+  function overlapMinutes(startSec, endSec, dayStartLocalSecVal) {
+    const dayEnd = dayStartLocalSecVal + 86400
+    const a = Math.max(startSec, dayStartLocalSecVal)
+    const b = Math.min(endSec, dayEnd)
+    if (b <= a) return 0
+    if (!bh) return Math.floor((b - a) / 60)
+
+    const localOffsetMs = bh.tzOffsetMinutes * 60 * 1000
+    const localA = (a * 1000) + localOffsetMs
+    const localB = (b * 1000) + localOffsetMs
+    const localDayStart = (dayStartLocalSecVal * 1000) + localOffsetMs
+    const dow = new Date(localDayStart).getUTCDay()
+    const dowRow = bhDayHourMinutes[dow]
+    if (!dowRow.some((m) => m > 0)) return 0
+
+    let mins = 0
+    const firstHour = Math.floor((localA - localDayStart) / 3_600_000)
+    const lastHour = Math.min(23, Math.floor((localB - localDayStart - 1) / 3_600_000))
+    for (let h = Math.max(0, firstHour); h <= lastHour; h++) {
+      const bhMins = dowRow[h]
+      if (bhMins <= 0) continue
+      const hourStart = localDayStart + h * 3_600_000
+      const hourEnd = hourStart + 3_600_000
+      const overlap = Math.min(localB, hourEnd) - Math.max(localA, hourStart)
+      if (overlap <= 0) continue
+      mins += Math.floor(overlap / 60_000)
+    }
+    return mins
+  }
+
+  const activeGroupDefs = onlyGroup
+    ? groupDefs.filter((g) => g.name === onlyGroup)
+    : groupDefs
+
+  async function computeGroupDisconnectStats(groupDef) {
+    const { name, belongs, storeEstimate = 0 } = groupDef
+    const groupBucketMin = pickDisconnectBucketMin(effectiveRangeSec, storeEstimate, requestedBucketMin)
+    const groupBucketEvery = `${groupBucketMin}m`
+    const groupBucketSec = groupBucketMin * 60
+    const skipConnDown = storeEstimate > 800
+
+    const dayMap = new Map()
+    function ensureDay(dayMs) {
+      if (!dayMap.has(dayMs)) dayMap.set(dayMs, { disconnections: 0, offlineBuckets: 0, offlineMinutes: 0 })
+      return dayMap.get(dayMs)
+    }
+    function addOffline(dayMs, mins) {
+      if (mins <= 0) return
+      const s = ensureDay(dayMs)
+      s.offlineMinutes += mins
+      s.offlineBuckets += Math.round(mins / groupBucketMin)
+    }
+
+    const offlineBucketKeys = new Set()
+    const disconnectKeys = new Set()
+    const storesWithHbDisconnect = new Set()
+    const reportingTags = new Set()
+
+    // Run offline first (most important), then disconnects; skip conn_down on huge groups.
+    const offlineRows = await runFilteredDisconnectQuery(
+      fetchHeartbeatOfflineByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit,
+    )
+    const disconnectRows = await runFilteredDisconnectQuery(
+      fetchHeartbeatDisconnectByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit,
+    )
+    const connDownRows = skipConnDown
+      ? []
+      : await runFilteredDisconnectQuery(
+          fetchConnDownByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit,
+        )
+
+    for (const row of disconnectRows) {
+      const tag = row.store_tag || buildSyntheticStoreTag(row.hostname, row.serial)
+      if (!tag) continue
+      reportingTags.add(tag)
+      const ts = row._time ? Math.floor(new Date(row._time).getTime() / 1000) : null
+      if (ts == null || !inBusinessHours(ts)) continue
+      const dayMs = dayMsFromTs(ts)
+      const key = `${tag}|${dayMs}`
+      if (disconnectKeys.has(key)) continue
+      disconnectKeys.add(key)
+      storesWithHbDisconnect.add(tag)
+      ensureDay(dayMs).disconnections += num(row._value) || 1
+    }
+
+    for (const row of [...offlineRows, ...connDownRows]) {
+      const tag = row.store_tag || buildSyntheticStoreTag(row.hostname, row.serial)
+      if (!tag) continue
+      reportingTags.add(tag)
+      const ts = row._time ? Math.floor(new Date(row._time).getTime() / 1000) : null
+      if (ts == null || !inBusinessHours(ts)) continue
+      const buckets = num(row._value) || 0
+      if (buckets <= 0) continue
+      const mins = buckets * groupBucketMin
+      const dayMs = dayMsFromTs(ts)
+      const key = `${tag}|${dayMs}`
+      if (offlineBucketKeys.has(key)) continue
+      offlineBucketKeys.add(key)
+      addOffline(dayMs, mins)
+    }
+
+    if (Array.isArray(cached)) {
+      for (const s of cached) {
+        if (!s?.storeTag || s.online || s.onlineReason === 'activity') continue
+        if (!belongs(s.storeTag, s)) continue
+        const tag = s.storeTag
+        reportingTags.add(tag)
+
+        const lastSeenSec = s.lastSeen ? Math.floor(new Date(s.lastSeen).getTime() / 1000) : null
+        if (!lastSeenSec || lastSeenSec >= requestedToSec) continue
+
+        const silenceStart = Math.max(requestedFromSec, lastSeenSec + groupBucketSec)
+        const silenceEnd = Math.min(requestedToSec, nowSec)
+        if (silenceEnd <= silenceStart) continue
+
+        const wentSilentInWindow = lastSeenSec >= requestedFromSec
+        if (wentSilentInWindow && !storesWithHbDisconnect.has(tag)) {
+          if (inBusinessHours(lastSeenSec)) {
+            const dKey = `${tag}|${lastSeenSec}`
+            if (!disconnectKeys.has(dKey)) {
+              disconnectKeys.add(dKey)
+              ensureDay(dayMsFromTs(lastSeenSec)).disconnections += 1
+            }
+          }
+          storesWithHbDisconnect.add(tag)
+        }
+
+        for (let i = 0; i < dayStartLocalSec.length; i++) {
+          const mins = overlapMinutes(silenceStart, silenceEnd, dayStartLocalSec[i])
+          if (mins > 0) addOffline(dayMsList[i], mins)
+        }
+      }
+    }
+
+    const days = dayMsList.map((dayMs) => {
+      const x = dayMap.get(dayMs) || { disconnections: 0, offlineBuckets: 0, offlineMinutes: 0 }
+      return {
+        dayMs,
+        disconnections: x.disconnections,
+        offlineBuckets: x.offlineBuckets,
+        offlineMinutes: x.offlineMinutes,
+        offlineHours: Math.round((x.offlineMinutes / 60) * 100) / 100,
+      }
+    })
+    const totals = days.reduce((a, d) => ({
+      disconnections: a.disconnections + d.disconnections,
+      offlineMinutes: a.offlineMinutes + d.offlineMinutes,
+    }), { disconnections: 0, offlineMinutes: 0 })
+    totals.offlineHours = Math.round((totals.offlineMinutes / 60) * 100) / 100
+
+    return { name, days, totals, storeCount: reportingTags.size }
+  }
+
+  // Process at most 2 groups at a time so Influx is not flooded (5 groups × 3 queries was timing out).
+  const groupResults = activeGroupDefs.length
+    ? await runPool(activeGroupDefs, 2, (gd) => computeGroupDisconnectStats(gd))
+    : onlyGroup
+      ? [{
+          name: onlyGroup,
+          days: dayMsList.map((dayMs) => ({
+            dayMs,
+            disconnections: 0,
+            offlineBuckets: 0,
+            offlineMinutes: 0,
+            offlineHours: 0,
+          })),
+          totals: { disconnections: 0, offlineMinutes: 0, offlineHours: 0 },
+          storeCount: 0,
+        }]
+      : []
+
+  const expectedOrder = [
+    'SD-WAN Group',
+    'RP Group',
+    'POS System Group',
+    ...customGroupTagSets.keys(),
+  ]
+  const byName = new Map(groupResults.map((g) => [g.name, g]))
+  const groups = expectedOrder
+    .map((n) => byName.get(n))
+    .filter(Boolean)
+    .concat(groupResults.filter((g) => !expectedOrder.includes(g.name)))
+
+  const storesReporting = groupResults.reduce((sum, g) => sum + (g.storeCount || 0), 0)
+
+    return {
+      rangeSec: effectiveRangeSec,
+      bucketMin,
+      requestedFrom: new Date(requestedFromSec * 1000).toISOString(),
+      requestedTo:   new Date(requestedToSec   * 1000).toISOString(),
+      days: dayMsList.map((dayMs) => ({
+        dayMs,
+        label: new Date(dayMs).toISOString().slice(0, 10),
+      })),
+      source: 'heartbeat.online + connectivity.conn_state (per-group queries)',
+      storesReporting,
+      groupQueryCount: activeGroupDefs.length,
+      groupName: onlyGroup || null,
+      sdwanStoreCount: sdwanTags.length,
+      businessHours: bh ? {
+        startHour: bh.startHour,
+        endHour: bh.endHour,
+        weekdays: [...bh.weekdays].sort(),
+        tzOffsetMinutes: bh.tzOffsetMinutes,
+      } : null,
+      groups: groups.map(({ storeCount, ...g }) => ({ ...g, storeCount })),
+    }
+  })()
+
+  _groupDisconnectCache.set(inflightKey, work)
+  try {
+    const result = await work
+    _groupDisconnectCache.set(cacheKey, { data: result, ts: Date.now() })
+    if (_groupDisconnectCache.size > 16) {
+      const oldest = [..._groupDisconnectCache.entries()]
+        .filter(([k]) => !k.startsWith('inflight:'))
+        .sort((a, b) => (a[1].ts || 0) - (b[1].ts || 0))[0]
+      if (oldest) _groupDisconnectCache.delete(oldest[0])
+    }
+    return result
+  } finally {
+    _groupDisconnectCache.delete(inflightKey)
   }
 }
 

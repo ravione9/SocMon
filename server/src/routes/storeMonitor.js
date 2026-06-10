@@ -7,6 +7,9 @@ import {
   pingInflux,
   fetchStoreSnapshot,
   fetchStoreHistory,
+  fetchNetHealthHistory,
+  fetchGroupHealthHistory,
+  fetchGroupDisconnectDaily,
   buildOverviewSummary,
   getAnyCachedStoreSnapshot,
   queryFlux,
@@ -90,7 +93,7 @@ router.get('/overview', async (req, res, next) => {
     let stale = false
     try {
       stores = await Promise.race([
-        fetchStoreSnapshot(staleMinutes, metricRange, fromTs, toTs),
+        fetchStoreSnapshot(staleMinutes, metricRange, fromTs, toTs, { lite: true }),
         new Promise((_, reject) => setTimeout(() => reject(new Error('Store snapshot budget exceeded')), budgetMs)),
       ])
     } catch (e) {
@@ -178,6 +181,131 @@ router.get('/stores/:storeTag/history', async (req, res, next) => {
     next(e)
   }
 })
+
+/**
+ * GET /api/store-monitor/net-health/history
+ * Aggregate net-health time series (ping latency + packet loss per target,
+ * DNS success% per domain, HTTP success% per URL) across the whole fleet.
+ * Query: from (Unix sec), to (Unix sec), or rangeSec (300..30d, default 24h).
+ */
+router.get('/net-health/history', async (req, res, next) => {
+  try {
+    if (!isInfluxStoreConfigured()) {
+      return res.status(503).json({ error: 'InfluxDB not configured' })
+    }
+    const fromSec = req.query.from ? parseInt(String(req.query.from), 10) : undefined
+    const toSec   = req.query.to   ? parseInt(String(req.query.to),   10) : undefined
+    const rangeSec = Math.min(
+      Math.max(parseInt(String(req.query.rangeSec || '86400'), 10) || 86400, 300),
+      30 * 86400,
+    )
+    const payload = await fetchNetHealthHistory(rangeSec, fromSec, toSec)
+    res.json(payload)
+  } catch (e) {
+    next(e)
+  }
+})
+
+/**
+ * GET /api/store-monitor/net-health/group-history
+ * Aggregate per-group time series (latency + loss) so the client can render
+ * a Group × Day health matrix.
+ *
+ * POST accepts the same query params plus a body with `customGroups`:
+ *   { customGroups: [{ name: "Manual ROP + SD-WAN", storeTags: ["RP100", ...] }, …] }
+ */
+async function handleGroupHistory(req, res, next) {
+  try {
+    if (!isInfluxStoreConfigured()) {
+      return res.status(503).json({ error: 'InfluxDB not configured' })
+    }
+    const fromSec = req.query.from ? parseInt(String(req.query.from), 10) : undefined
+    const toSec   = req.query.to   ? parseInt(String(req.query.to),   10) : undefined
+    const rangeSec = Math.min(
+      Math.max(parseInt(String(req.query.rangeSec || '86400'), 10) || 86400, 300),
+      30 * 86400,
+    )
+    const body = req.body && typeof req.body === 'object' ? req.body : {}
+    const rawGroups = Array.isArray(body.customGroups) ? body.customGroups : []
+    const customGroups = rawGroups
+      .map((g) => ({
+        name: String(g?.name || '').slice(0, 80),
+        storeTags: Array.isArray(g?.storeTags)
+          ? g.storeTags.map((t) => String(t || '')).filter(Boolean).slice(0, 4000)
+          : [],
+      }))
+      .filter((g) => g.name && g.storeTags.length > 0)
+      .slice(0, 10)
+    const payload = await fetchGroupHealthHistory(rangeSec, fromSec, toSec, { customGroups })
+    res.json(payload)
+  } catch (e) {
+    next(e)
+  }
+}
+router.get('/net-health/group-history',  handleGroupHistory)
+router.post('/net-health/group-history', handleGroupHistory)
+
+/**
+ * GET/POST /api/store-monitor/net-health/group-disconnect-report
+ * Day-wise per-group internet disconnections and offline duration.
+ *
+ * Query:
+ *   - from (unix sec), to (unix sec) OR rangeSec
+ *   - bucketMin (optional, 1..60, default 5)
+ *   - groupName (optional) — fetch a single group only (separate Influx query set)
+ *
+ * POST body (optional):
+ *   { customGroups: [{ name, storeTags: [] }, ...] }
+ */
+async function handleGroupDisconnectReport(req, res, next) {
+  try {
+    if (!isInfluxStoreConfigured()) {
+      return res.status(503).json({ error: 'InfluxDB not configured' })
+    }
+    const fromSec = req.query.from ? parseInt(String(req.query.from), 10) : undefined
+    const toSec   = req.query.to   ? parseInt(String(req.query.to),   10) : undefined
+    const rangeSec = Math.min(
+      Math.max(parseInt(String(req.query.rangeSec || '86400'), 10) || 86400, 300),
+      30 * 86400,
+    )
+    const bucketMin = Math.min(Math.max(parseInt(String(req.query.bucketMin || '5'), 10) || 5, 1), 60)
+    const groupName = String(req.query.groupName || req.query.group || '').trim().slice(0, 80) || undefined
+    const body = req.body && typeof req.body === 'object' ? req.body : {}
+    const rawGroups = Array.isArray(body.customGroups) ? body.customGroups : []
+    const customGroups = rawGroups
+      .map((g) => ({
+        name: String(g?.name || '').slice(0, 80),
+        storeTags: Array.isArray(g?.storeTags)
+          ? g.storeTags.map((t) => String(t || '')).filter(Boolean).slice(0, 4000)
+          : [],
+      }))
+      .filter((g) => g.name && g.storeTags.length > 0)
+      .slice(0, 10)
+
+    let businessHours
+    if (body.businessHours && typeof body.businessHours === 'object') {
+      const bh = body.businessHours
+      const startHour = Math.min(Math.max(parseInt(String(bh.startHour), 10) || 0, 0), 23)
+      const endHour   = Math.min(Math.max(parseInt(String(bh.endHour),   10) || 0, 1), 24)
+      const weekdays  = Array.isArray(bh.weekdays)
+        ? [...new Set(bh.weekdays.map((d) => parseInt(String(d), 10)).filter((d) => d >= 0 && d <= 6))]
+        : [1, 2, 3, 4, 5]
+      const tzOffsetMinutes = Number.isFinite(Number(bh.tzOffsetMinutes))
+        ? Math.max(-840, Math.min(840, Number(bh.tzOffsetMinutes)))
+        : 0
+      businessHours = { startHour, endHour, weekdays, tzOffsetMinutes }
+    }
+
+    const payload = await fetchGroupDisconnectDaily(rangeSec, fromSec, toSec, {
+      bucketMin, customGroups, businessHours, groupName,
+    })
+    res.json(payload)
+  } catch (e) {
+    next(e)
+  }
+}
+router.get('/net-health/group-disconnect-report',  handleGroupDisconnectReport)
+router.post('/net-health/group-disconnect-report', handleGroupDisconnectReport)
 
 router.get('/problems', async (req, res, next) => {
   try {

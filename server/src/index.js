@@ -39,6 +39,7 @@ import storeMonitorRoutes from './routes/storeMonitor.js'
 import storeAlertsRoutes from './routes/storeAlerts.js'
 import { startStoreAlertEngine } from './services/storeAlertEngine.js'
 import { startProblemSnapshotter } from './services/storeProblemSnapshotter.js'
+import { startKafkaProducer, stopKafkaProducer } from './services/kafkaProducer.js'
 import sshSessionRoutes from './routes/sshSessions.js'
 import webMgmtRoutes, { proxyWsUpgrade } from './routes/webMgmt.js'
 import solarwindsRoutes from './routes/solarwinds.js'
@@ -193,6 +194,7 @@ async function start() {
     console.warn('[ssl] could not apply saved nginx mode:', e?.message || e)
   }
   await connectRedis()
+  await startKafkaProducer()
   initWebSocket(io)
   startAlertEngine(io)
   startStoreAlertEngine(io)
@@ -209,5 +211,14 @@ async function start() {
 }
 
 start().catch(console.error)
+
+process.on('SIGTERM', async () => {
+  await stopKafkaProducer()
+  process.exit(0)
+})
+process.on('SIGINT', async () => {
+  await stopKafkaProducer()
+  process.exit(0)
+})
 
 

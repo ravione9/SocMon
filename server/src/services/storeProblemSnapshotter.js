@@ -16,6 +16,7 @@
  */
 import StoreProblemHistory from '../models/StoreProblemHistory.js'
 import { fetchStoreSnapshot, isInfluxStoreConfigured } from './influxStore.js'
+import { publishProblemEvent, publishOverviewSnapshot } from './kafkaProducer.js'
 
 const INTERVAL_MS = parseInt(process.env.PROBLEM_TRACKER_INTERVAL_MS || '120000', 10)
 
@@ -124,6 +125,26 @@ export async function runProblemSnapshot() {
         checkedAt:  _lastRunAt,
       })
     }
+
+    // Publish problem lifecycle events to Kafka
+    if (detected.length) {
+      publishProblemEvent('problems_detected', detected, { activeCount: currentMap.size, checkedAt: _lastRunAt })
+        .catch((e) => console.error('[problemTracker] Kafka problems_detected error:', e.message))
+    }
+    if (resolved.length) {
+      publishProblemEvent('problems_resolved',
+        resolved.map((r) => ({ storeTag: r.storeTag, code: r.code, hostname: r.hostname, resolvedAt: r.resolvedAt, durationMs: r.durationMs })),
+        { activeCount: currentMap.size, checkedAt: _lastRunAt },
+      ).catch((e) => console.error('[problemTracker] Kafka problems_resolved error:', e.message))
+    }
+
+    // Always publish full store overview snapshot to Kafka (all stores + summary)
+    publishOverviewSnapshot(stores, {
+      totalStores:   stores.length,
+      activeProblems: currentMap.size,
+      detectedCount: detected.length,
+      resolvedCount: resolved.length,
+    }).catch((e) => console.error('[problemTracker] Kafka overview error:', e.message))
 
     if (detected.length || resolved.length) {
       console.log(`[problemTracker] ${detected.length} new · ${resolved.length} resolved · ${currentMap.size} active`)

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { io as ioClient } from 'socket.io-client'
-import { Bar, Doughnut, Line } from 'react-chartjs-2'
+import { Bar, Chart, Doughnut, Line } from 'react-chartjs-2'
 import {
   ArcElement,
   BarElement,
@@ -115,6 +115,104 @@ const GROUP_DEFS   = [
   { id: 'General Group',   color: '#64748b', icon: '🏢' },
 ]
 const GROUP_MAP = Object.fromEntries(GROUP_DEFS.map((g) => [g.id, g]))
+const EXTRA_GROUP_META = {
+  'Manual ROP + SD-WAN': { color: '#a855f7', icon: '📋' },
+  'ROP without SD-WAN':  { color: '#0ea5e9', icon: '📡' },
+}
+function groupMetaFor(name) {
+  return GROUP_MAP[name] || EXTRA_GROUP_META[name] || { color: '#64748b', icon: '🏷' }
+}
+function shortGroupLabel(name) {
+  return name.endsWith(' Group') ? name.replace(' Group', '') : name
+}
+function fmtOfflineMinutes(mins) {
+  const n = Number(mins || 0)
+  if (n <= 0) return '0m'
+  const h = Math.floor(n / 60)
+  const m = n % 60
+  return h > 0 ? `${h}h ${m}m` : `${m}m`
+}
+function buildSingleGroupDisconnectChart(group, days, groupName, tc) {
+  if (!group || !days?.length) return null
+  const color = groupMetaFor(groupName).color
+  const labels = days.map((d) =>
+    new Date(d.dayMs).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }),
+  )
+  return {
+    data: {
+      labels,
+      datasets: [
+        {
+          type: 'bar',
+          label: 'Offline (min)',
+          data: days.map((d) => {
+            const day = group.days.find((x) => x.dayMs === d.dayMs)
+            return day?.offlineMinutes ?? 0
+          }),
+          backgroundColor: color + '55',
+          borderColor: color,
+          borderWidth: 1.5,
+          yAxisID: 'y',
+        },
+        {
+          type: 'line',
+          label: 'Disconnects',
+          data: days.map((d) => {
+            const day = group.days.find((x) => x.dayMs === d.dayMs)
+            return day?.disconnections ?? 0
+          }),
+          borderColor: color,
+          backgroundColor: color + '22',
+          borderWidth: 2,
+          pointRadius: 3,
+          tension: 0.25,
+          yAxisID: 'y1',
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          display: true,
+          position: 'bottom',
+          labels: { color: tc.text2, font: { family: 'var(--mono)', size: 9 }, boxWidth: 10 },
+        },
+        tooltip: {
+          backgroundColor: tc.bg2,
+          titleColor: tc.text,
+          bodyColor: tc.text2,
+          borderColor: tc.border,
+          borderWidth: 1,
+        },
+      },
+      scales: {
+        x: {
+          ticks: { color: tc.text3, font: { family: 'var(--mono)', size: 9 }, maxRotation: 45 },
+          grid: { color: tc.border + '40' },
+        },
+        y: {
+          type: 'linear',
+          position: 'left',
+          title: { display: true, text: 'Offline minutes', color: tc.text3, font: { family: 'var(--mono)', size: 10 } },
+          ticks: { color: tc.text3, font: { family: 'var(--mono)', size: 9 } },
+          grid: { color: tc.border + '40' },
+          beginAtZero: true,
+        },
+        y1: {
+          type: 'linear',
+          position: 'right',
+          title: { display: true, text: 'Disconnects', color: tc.text3, font: { family: 'var(--mono)', size: 10 } },
+          ticks: { color: tc.text3, font: { family: 'var(--mono)', size: 9 }, stepSize: 1 },
+          grid: { drawOnChartArea: false },
+          beginAtZero: true,
+        },
+      },
+    },
+  }
+}
 
 const METRIC_OPTS = [
   { value: 'offline',       label: 'Device Offline' },
@@ -138,22 +236,27 @@ const BOOLEAN_METRICS = new Set(['offline', 'isp_down', 'hotspot', 'dns_fail', '
  * A device with RP prefix AND Fortinet vendor → ['RP Group', 'SD-WAN Group']
  * Rules are ADDITIVE — Fortinet never replaces the hostname-based group.
  */
-function deriveGroups(hostname, vendor, isFortinet) {
+function vendorIsFortinet(vendor, flag = false) {
+  return flag === true || /fortinet|fortigate/i.test(String(vendor || ''))
+}
+
+function deriveGroups(hostname, vendor, isFortinet, lastVendor = '', lastIsFortinet = false) {
   const h = String(hostname || '').toUpperCase()
-  const v = String(vendor || '').toLowerCase()
   const groups = []
   // Hostname-based group (primary identity)
   if (h.startsWith('RP')) groups.push('RP Group')
   else if (h.startsWith('LK')) groups.push('POS System Group')
-  // Fortinet / SD-WAN is ADDITIVE — a device can belong to both RP Group and SD-WAN Group
-  if (isFortinet || v.includes('fortinet') || v.includes('fortigate')) groups.push('SD-WAN Group')
+  // SD-WAN: current gateway OR last-known gateway (7d) was Fortinet — includes offline stores.
+  if (vendorIsFortinet(vendor, isFortinet) || vendorIsFortinet(lastVendor, lastIsFortinet)) {
+    groups.push('SD-WAN Group')
+  }
   // If nothing matched fall back to General
   if (groups.length === 0) groups.push('General Group')
   return groups
 }
 /** Convenience: primary group (first in list, used for single-badge contexts) */
-function deriveGroup(hostname, vendor, isFortinet) {
-  return deriveGroups(hostname, vendor, isFortinet)[0]
+function deriveGroup(hostname, vendor, isFortinet, lastVendor, lastIsFortinet) {
+  return deriveGroups(hostname, vendor, isFortinet, lastVendor, lastIsFortinet)[0]
 }
 
 function ropSubTabLabel(id) {
@@ -232,6 +335,7 @@ function buildTimeChart(series, tc, yLabel = '', _legacy = 350, opts = {}) {
     windowFromSec, windowToSec,
     agentIntervalSec = 60,
     maxTicks = 400,
+    bhFilter,
   } = opts
 
   const active = (series || []).filter((s) => (s.points || []).length > 0)
@@ -284,6 +388,9 @@ function buildTimeChart(series, tc, yLabel = '', _legacy = 350, opts = {}) {
       .sort((a, b) => a.t - b.t)
 
     const data = ticks.map((tick) => {
+      // If a business-hours filter is active, ticks outside BH must always be null
+      // so that BH data points near the boundary don't bleed into non-BH slots.
+      if (bhFilter && !bhFilter(tick)) return null
       // Binary-search for the nearest point within tolerance
       let lo = 0; let hi = pts.length - 1; let best = null; let bestDist = Infinity
       while (lo <= hi) {
@@ -319,6 +426,184 @@ function buildTimeChart(series, tc, yLabel = '', _legacy = 350, opts = {}) {
   if (yMax !== undefined) scaleOpts.max = yMax
 
   return { data: { labels, datasets }, yLabel, scaleOpts }
+}
+
+/**
+ * Build a smooth time-series chart for **already aggregated** data (e.g. Flux
+ * aggregateWindow output that's uniformly spaced).
+ *
+ * Differences from buildTimeChart:
+ *  - Uses the actual data timestamps as the x-axis (no tick resampling →
+ *    no proximity gaps, no dotted line look).
+ *  - spanGaps=true so the line stays continuous across short data gaps.
+ *  - Auto-picks a tight y-max for small-value series (e.g. packet-loss is
+ *    usually 0–5% so capping at 100% wastes the chart area).
+ *  - Small visible point markers + smooth tension.
+ *  - Optional bhFilter excludes points whose timestamp falls outside BH.
+ *
+ * @param {object[]} series  [{ name|field, target?, points:[{clock,value}] }]
+ * @param {object}   tc      theme colours
+ * @param {object}   [opts]
+ * @param {string}   [opts.yLabel='']
+ * @param {number}   [opts.yMin=0]
+ * @param {number}   [opts.yMax]              hard cap; defaults to auto
+ * @param {number}   [opts.yMaxCeiling]       only used when yMax is auto; clamps the auto pick
+ * @param {(clockSec:number)=>boolean} [opts.bhFilter]
+ * @param {number}   [opts.decimals=2]        tooltip decimal places
+ */
+function buildAggregateLineChart(series, tc, opts = {}) {
+  const {
+    yLabel = '',
+    yMin,                // hard lower bound (e.g. 0). When undefined, auto-scaling is used.
+    yMax,                // hard upper bound. When undefined, auto-scaling is used.
+    yMaxCeiling,         // when yMax is auto, clamp to this maximum
+    yMinFloor = 0,       // when yMin is auto, never go below this
+    bhFilter,
+    decimals = 2,
+  } = opts
+
+  // Filter + sort + collect timestamps
+  const cleaned = (series || []).map((s) => {
+    const pts = (s.points || [])
+      .filter((p) => Number.isFinite(Number(p.clock)) && Number.isFinite(Number(p.value)))
+      .filter((p) => !bhFilter || bhFilter(Number(p.clock)))
+      .map((p) => ({ t: Number(p.clock), v: Number(p.value) }))
+      .sort((a, b) => a.t - b.t)
+    return { ...s, _pts: pts }
+  }).filter((s) => s._pts.length > 0)
+
+  if (!cleaned.length) {
+    return { data: { labels: [], datasets: [] }, isEmpty: true, yLabel,
+      scaleOpts: { min: yMin ?? yMinFloor, max: yMax }, stats: [] }
+  }
+
+  // Union of timestamps across all series → one shared x-axis
+  const tsSet = new Set()
+  for (const s of cleaned) for (const p of s._pts) tsSet.add(p.t)
+  const ts = [...tsSet].sort((a, b) => a - b)
+  const labels = ts.map((t) =>
+    new Date(t * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  )
+
+  // Build per-series value arrays + per-series stats (min/max/avg/latest)
+  const stats = []
+  const datasets = cleaned.slice(0, 12).map((s, i) => {
+    const hex = PAL[i % PAL.length]
+    const map = new Map(s._pts.map((p) => [p.t, p.v]))
+    const data = ts.map((t) => (map.has(t) ? map.get(t) : null))
+    const cleanName = (s.field || s.name || '').replace(/^(ping\.|system\.|speedtest\.|connectivity\.|dns\.|http\.)/,'').replace(/_/g,' ')
+    const targetSuffix = s.target ? ` (${s.target})` : ''
+    const label = (cleanName + targetSuffix).trim()
+
+    const vals = s._pts.map((p) => p.v)
+    const sum = vals.reduce((a, v) => a + v, 0)
+    stats.push({
+      label,
+      target: s.target,
+      color: hex,
+      min: Math.min(...vals),
+      max: Math.max(...vals),
+      avg: vals.length ? sum / vals.length : 0,
+      latest: vals[vals.length - 1],
+      n: vals.length,
+    })
+
+    return {
+      label,
+      data,
+      borderColor: hex,
+      backgroundColor: `${hex}25`,
+      tension: 0.35,
+      spanGaps: true,        // keep line continuous across short data holes
+      pointRadius: 2.4,
+      pointHoverRadius: 6,
+      borderWidth: 2,
+      fill: false,
+    }
+  })
+
+  // ── y-axis auto-scaling ──
+  // Goal: zoom around (min, max) so even small fleet-wide variations are visible.
+  let observedMin = Infinity
+  let observedMax = -Infinity
+  for (const s of cleaned) for (const p of s._pts) {
+    if (p.v < observedMin) observedMin = p.v
+    if (p.v > observedMax) observedMax = p.v
+  }
+  if (!Number.isFinite(observedMin) || !Number.isFinite(observedMax)) {
+    observedMin = 0; observedMax = 1
+  }
+  const range = Math.max(observedMax - observedMin, 0.0001)
+  const pad   = range * 0.18
+
+  let resolvedYMin = yMin
+  if (resolvedYMin == null) {
+    resolvedYMin = Math.max(yMinFloor, observedMin - pad)
+    // If everything sits well above the floor, pick a snappier round value
+    if (resolvedYMin > yMinFloor) {
+      const step = niceAxisStep(range)
+      resolvedYMin = Math.floor(resolvedYMin / step) * step
+      if (resolvedYMin < yMinFloor) resolvedYMin = yMinFloor
+    }
+  }
+
+  let resolvedYMax = yMax
+  if (resolvedYMax == null) {
+    const candidate = observedMax + pad
+    const step = niceAxisStep(range)
+    resolvedYMax = Math.ceil(candidate / step) * step
+    if (yMaxCeiling != null) resolvedYMax = Math.min(resolvedYMax, yMaxCeiling)
+  }
+  if (resolvedYMax <= resolvedYMin) resolvedYMax = resolvedYMin + Math.max(range, 1)
+
+  return {
+    data: { labels, datasets },
+    yLabel,
+    scaleOpts: { min: resolvedYMin, max: resolvedYMax },
+    decimals,
+    stats,
+  }
+}
+
+/** Pick a "nice" axis step roughly proportional to the data range. */
+function niceAxisStep(range) {
+  if (range <= 0.5)   return 0.05
+  if (range <= 1)     return 0.1
+  if (range <= 2)     return 0.2
+  if (range <= 5)     return 0.5
+  if (range <= 10)    return 1
+  if (range <= 25)    return 2
+  if (range <= 50)    return 5
+  if (range <= 100)   return 10
+  if (range <= 500)   return 50
+  return 100
+}
+
+/** Build chart options tuned for aggregate line charts (rounded tooltips, dense ticks ok). */
+function buildAggregateChartOptions(tc, yLabel = '', scaleOpts = {}, decimals = 2) {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { position: 'top', labels: { color: tc.text2, boxWidth: 10, font: { size: 10 }, padding: 10 } },
+      tooltip: {
+        mode: 'index',
+        intersect: false,
+        callbacks: {
+          label: (ctx) => {
+            if (ctx.parsed.y == null) return null
+            const v = Number(ctx.parsed.y).toFixed(decimals)
+            return ` ${ctx.dataset.label}: ${v}${yLabel ? ' ' + yLabel : ''}`
+          },
+        },
+      },
+    },
+    scales: {
+      x: { ticks: { color: tc.text3, font: { size: 10 }, maxTicksLimit: 10, autoSkip: true }, grid: { color: tc.border } },
+      y: { ticks: { color: tc.text3, font: { size: 10 } }, grid: { color: tc.border }, ...scaleOpts },
+    },
+  }
 }
 
 function buildChartOptions(tc, yLabel = '', scaleOpts = {}, extras = {}) {
@@ -613,6 +898,7 @@ export default function StoreMonitorPage() {
   const [history, setHistory] = useState(null)
   const [histLoading, setHistLoading] = useState(false)
   const [bh, setBh] = useState({ enabled: false, startHour: 9, endHour: 18, weekdays: [1,2,3,4,5] })
+  const [bhPanelOpen, setBhPanelOpen] = useState(false)
 
   /* custom time range for charts */
   const now = new Date()
@@ -664,6 +950,18 @@ export default function StoreMonitorPage() {
   const [ropSearch, setRopSearch] = useState('')
   const [ropStatusFilter, setRopStatusFilter] = useState('')
   const [ropConnFilter, setRopConnFilter] = useState('')
+
+  /* ── net health time-series (aggregate across fleet for selected range) ── */
+  const [netHist, setNetHist] = useState(null)
+  const [netHistLoading, setNetHistLoading] = useState(false)
+  const [netHistError, setNetHistError] = useState('')
+
+  /* ── per-group time-series for the Group × Day health matrix ── */
+  const [groupHist, setGroupHist] = useState(null)
+  const [groupHistLoading, setGroupHistLoading] = useState(false)
+  /* ── day-wise group disconnections/offline report (one API call per group) ── */
+  const [groupDisconnectById, setGroupDisconnectById] = useState({})
+  const [groupDisconnectLoadingById, setGroupDisconnectLoadingById] = useState({})
 
   /* ── problem history tab ── */
   const [probHist, setProbHist] = useState(null)
@@ -836,6 +1134,34 @@ export default function StoreMonitorPage() {
 
   useEffect(() => { if (tab === 'detail' && selectedTag) loadHistory(selectedTag) }, [tab, selectedTag, loadHistory])
 
+  /* ── load aggregate Net Health time series for the selected range ── */
+  const loadNetHist = useCallback(async () => {
+    setNetHistLoading(true)
+    setNetHistError('')
+    try {
+      let params
+      if (globalCustom.enabled && globalCustom.from) {
+        const fromSec = fromLocalInput(globalCustom.from)
+        const toSec   = globalCustom.to ? fromLocalInput(globalCustom.to) : Math.floor(Date.now() / 1000)
+        params = { from: fromSec, to: toSec }
+      } else {
+        params = { rangeSec: HISTORY_SECS[range] || 86400 }
+      }
+      const { data } = await api.get('/api/store-monitor/net-health/history', { params })
+      setNetHist(data)
+    } catch (e) {
+      setNetHistError(e.response?.data?.error || e.message || 'Failed to load')
+      setNetHist(null)
+    } finally {
+      setNetHistLoading(false)
+    }
+  }, [range, globalCustom])
+
+  useEffect(() => { if (tab === 'netHealth') loadNetHist() }, [tab, loadNetHist])
+
+  // loadGroupHist is defined further down — after ropManualStores is in scope —
+  // because it needs to include the manual ROP tag lists in its POST body.
+
   /* ── load alert rules ── */
   const loadAlerts = useCallback(async () => {
     try { const { data } = await api.get('/api/store-alerts'); setAlertRules(data) }
@@ -924,7 +1250,7 @@ export default function StoreMonitorPage() {
   /* ── derived stores with group ── */
   const stores = useMemo(
     () => (overview?.stores || []).map((s) => {
-      const groups = deriveGroups(s.hostname, s.gatewayVendor, s.isFortinet)
+      const groups = deriveGroups(s.hostname, s.gatewayVendor, s.isFortinet, s.lastGatewayVendor, s.lastIsFortinet)
       return { ...s, systemGroups: groups, systemGroup: groups[0] }
     }),
     [overview?.stores],
@@ -984,6 +1310,27 @@ export default function StoreMonitorPage() {
     })
   }, [stores])
 
+  /** Build a snapshot summary for an arbitrary slice of stores (used for Manual ROP rollups). */
+  function summarizeStoresSlice(slice, meta) {
+    let online = 0, issues = 0, pingSum = 0, pingCount = 0
+    for (const s of slice) {
+      if (s.online) online++
+      if ((s.issueCount || 0) > 0) issues++
+      const p = primaryPing(s)
+      if (p?.avgMs != null && Number.isFinite(p.avgMs)) { pingSum += p.avgMs; pingCount++ }
+    }
+    return {
+      ...meta,
+      total: slice.length,
+      online,
+      issues,
+      health: pct(online, slice.length || 1),
+      avgPing: pingCount ? pingSum / pingCount : null,
+      avgPingMs: pingSum,
+      pingCount,
+    }
+  }
+
   /* ── ROP-oriented store slices ── */
   const ropAllStores = useMemo(
     () => stores.filter((s) => (s.systemGroups || [s.systemGroup]).includes('RP Group')),
@@ -1005,12 +1352,167 @@ export default function StoreMonitorPage() {
     () => buildManualRopStoreList(stores, manualRopCodeList),
     [stores, manualRopCodeList],
   )
+  // ROP without SD-WAN must exclude systems that are part of Manual ROP + SD-WAN.
+  const ropOnlyWithoutManualStores = useMemo(() => {
+    const manualTags = new Set((ropManualStores || []).map((s) => s.storeTag).filter(Boolean))
+    return (ropOnlyStores || []).filter((s) => !manualTags.has(s.storeTag))
+  }, [ropOnlyStores, ropManualStores])
+
+  // Shared custom-group payload for Net Health APIs so group cards/matrix/reports
+  // use exactly the same membership definitions.
+  // Stringified tag lists keep the memo identity stable across snapshot polls
+  // (so loaders don't refetch every poll cycle when the underlying content
+  // hasn't actually changed).
+  const ropManualTagsCsv = useMemo(
+    () => (ropManualStores || [])
+      .filter((s) => s && s.storeTag && !s.isPlaceholder)
+      .map((s) => s.storeTag)
+      .sort()
+      .join(','),
+    [ropManualStores],
+  )
+  const ropNoSdwanTagsCsv = useMemo(
+    () => (ropOnlyWithoutManualStores || [])
+      .filter((s) => s && s.storeTag && !s.isPlaceholder)
+      .map((s) => s.storeTag)
+      .sort()
+      .join(','),
+    [ropOnlyWithoutManualStores],
+  )
+  const netHealthCustomGroups = useMemo(() => {
+    const manualTags = ropManualTagsCsv ? ropManualTagsCsv.split(',') : []
+    const noSdwanTags = ropNoSdwanTagsCsv ? ropNoSdwanTagsCsv.split(',') : []
+    const groups = []
+    if (manualTags.length) groups.push({ name: 'Manual ROP + SD-WAN', storeTags: manualTags })
+    if (noSdwanTags.length) groups.push({ name: 'ROP without SD-WAN', storeTags: noSdwanTags })
+    return groups
+  }, [ropManualTagsCsv, ropNoSdwanTagsCsv])
+
+  /* Snapshot cards shown on the Net Health tab.
+     Excludes "General Group" and adds the two ROP-tab rollups so the numbers
+     match the counts on the ROP Groups tab exactly. */
+  const displayedGroupCards = useMemo(() => {
+    const base = groupSummary.filter((g) => g.id !== 'General Group')
+
+    const manualAll = (ropManualStores || []).filter((s) => !s.isPlaceholder)
+    const ropNoSdwan = (ropOnlyWithoutManualStores || []).filter((s) => !s.isPlaceholder)
+
+    const out = [...base]
+    if (manualAll.length > 0) {
+      out.push(summarizeStoresSlice(manualAll, {
+        id: 'Manual ROP + SD-WAN', color: '#a855f7', icon: '📋',
+      }))
+    }
+    if (ropNoSdwan.length > 0) {
+      out.push(summarizeStoresSlice(ropNoSdwan, {
+        id: 'ROP without SD-WAN', color: '#0ea5e9', icon: '📡',
+      }))
+    }
+    return out
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupSummary, ropManualStores, ropOnlyWithoutManualStores])
+
+  /* ── load per-group time series (fuels the Group × Day matrix) ──
+     POSTs the manual ROP store-tag lists so the backend can include them
+     as custom groups (Manual ROP + SD-WAN, Manual ROP w/o SD-WAN). */
+  const loadGroupHist = useCallback(async () => {
+    setGroupHistLoading(true)
+    try {
+      let params
+      if (globalCustom.enabled && globalCustom.from) {
+        const fromSec = fromLocalInput(globalCustom.from)
+        const toSec   = globalCustom.to ? fromLocalInput(globalCustom.to) : Math.floor(Date.now() / 1000)
+        params = { from: fromSec, to: toSec }
+      } else {
+        params = { rangeSec: HISTORY_SECS[range] || 86400 }
+      }
+      const { data } = await api.post(
+        '/api/store-monitor/net-health/group-history',
+        { customGroups: netHealthCustomGroups },
+        { params },
+      )
+      setGroupHist(data)
+    } catch {
+      setGroupHist(null)
+    } finally {
+      setGroupHistLoading(false)
+    }
+  }, [range, globalCustom, netHealthCustomGroups])
+
+  useEffect(() => { if (tab === 'netHealth') loadGroupHist() }, [tab, loadGroupHist])
+
+  /* ── load day-wise internet disconnection/offline report per group ── */
+  // Stable BH signature so the loader callback doesn't churn on irrelevant
+  // bh-object identity changes (the actual fields drive the payload).
+  const bhSig = useMemo(
+    () => bh.enabled
+      ? `1|${bh.startHour}|${bh.endHour}|${[...bh.weekdays].sort().join(',')}`
+      : '0',
+    [bh.enabled, bh.startHour, bh.endHour, bh.weekdays],
+  )
+  const loadGroupDisconnect = useCallback(async () => {
+    const groupIds = displayedGroupCards.map((g) => g.id)
+    if (!groupIds.length) {
+      setGroupDisconnectById({})
+      setGroupDisconnectLoadingById({})
+      return
+    }
+
+    setGroupDisconnectLoadingById(Object.fromEntries(groupIds.map((id) => [id, true])))
+
+    let params
+    if (globalCustom.enabled && globalCustom.from) {
+      const fromSec = fromLocalInput(globalCustom.from)
+      const toSec   = globalCustom.to ? fromLocalInput(globalCustom.to) : Math.floor(Date.now() / 1000)
+      params = { from: fromSec, to: toSec }
+    } else {
+      params = { rangeSec: HISTORY_SECS[range] || 86400 }
+    }
+    const body = { customGroups: netHealthCustomGroups }
+    if (bh.enabled) {
+      body.businessHours = {
+        startHour: bh.startHour,
+        endHour: bh.endHour,
+        weekdays: bh.weekdays,
+        tzOffsetMinutes: -new Date().getTimezoneOffset(),
+      }
+    }
+
+    try {
+      // Single batched request — server runs groups 2 at a time (avoids 15 concurrent Influx queries).
+      const { data } = await api.post(
+        '/api/store-monitor/net-health/group-disconnect-report',
+        body,
+        { params, timeout: 120000 },
+      )
+      const byId = {}
+      const loadingDone = {}
+      for (const g of data?.groups || []) {
+        byId[g.name] = { ...data, groups: [g] }
+        loadingDone[g.name] = false
+      }
+      for (const id of groupIds) {
+        if (!byId[id]) {
+          byId[id] = null
+        }
+        loadingDone[id] = false
+      }
+      setGroupDisconnectById(byId)
+      setGroupDisconnectLoadingById(loadingDone)
+    } catch {
+      setGroupDisconnectById(Object.fromEntries(groupIds.map((id) => [id, null])))
+      setGroupDisconnectLoadingById(Object.fromEntries(groupIds.map((id) => [id, false])))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range, globalCustom, netHealthCustomGroups, bhSig, displayedGroupCards])
+
+  useEffect(() => { if (tab === 'netHealth') loadGroupDisconnect() }, [tab, loadGroupDisconnect])
   const ropActiveStores = useMemo(() => {
     if (ropSubTab === 'sdwan')        return ropSdwanStores
-    if (ropSubTab === 'no_sdwan')     return ropOnlyStores
+    if (ropSubTab === 'no_sdwan')     return ropOnlyWithoutManualStores
     if (ropSubTab === 'manual_sdwan') return ropManualStores
     return ropAllStores
-  }, [ropSubTab, ropAllStores, ropSdwanStores, ropOnlyStores, ropManualStores])
+  }, [ropSubTab, ropAllStores, ropSdwanStores, ropOnlyWithoutManualStores, ropManualStores])
   useEffect(() => {
     if (tab === 'rop' && ropSubTab === 'manual_sdwan' && !manualRopCodeList.length) {
       setManualRopCodesOpen(true)
@@ -1092,12 +1594,11 @@ export default function StoreMonitorPage() {
         const c=httpAgg[u]||{ok:0,t:0}; c.t++;httpT++; if(v.success===true&&(v.statusCode==null||Number(v.statusCode)<500)){c.ok++;httpOk++} httpAgg[u]=c
       }
     }
-    const latRows=Object.entries(pingAgg).map(([t,c])=>({target:t,avgMs:c.latC?c.lat/c.latC:0})).sort((a,b)=>b.avgMs-a.avgMs).slice(0,8)
-    const lossRows=Object.entries(pingAgg).map(([t,c])=>({target:t,lossPct:c.lossC?c.loss/c.lossC:0})).sort((a,b)=>b.lossPct-a.lossPct).slice(0,8)
+    // latRows/lossRows removed — replaced by aggregate time-series charts (see netLatencyTimeChart / netLossTimeChart)
     const dnsRows=Object.entries(dnsAgg).map(([d,c])=>({domain:d,pct:pct(c.ok,c.t),t:c.t}))
     const httpRows=Object.entries(httpAgg).map(([u,c])=>({url:u,pct:pct(c.ok,c.t),t:c.t}))
     return { uptimePct:pct(healthy,stores.length||1), dnsOkPct:pct(dnsOk,dnsT||1), httpOkPct:pct(httpOk,httpT||1),
-      avgLatency:latC?latSum/latC:null, avgLoss:lossC?lossSum/lossC:null, latRows, lossRows, dnsRows, httpRows }
+      avgLatency:latC?latSum/latC:null, avgLoss:lossC?lossSum/lossC:null, dnsRows, httpRows }
   }, [stores])
 
   /* ── charts ── */
@@ -1159,18 +1660,44 @@ export default function StoreMonitorPage() {
     }
   }, [groupSummary, tc, chartGroupFilter, applyChartGroupFilter])
 
-  const latChart = useMemo(() => {
-    if (!netHealth.latRows.length) return null
-    return { data:{ labels:netHealth.latRows.map((r)=>r.target), datasets:[{ label:'Avg Latency (ms)', data:netHealth.latRows.map((r)=>+r.avgMs.toFixed(1)), backgroundColor:'#3b82f688', borderRadius:4 }] }, options:buildChartOptions(tc,'ms',{min:0}) }
-  }, [netHealth, tc])
-  const lossChart = useMemo(() => {
-    if (!netHealth.lossRows.length) return null
-    return { data:{ labels:netHealth.lossRows.map((r)=>r.target), datasets:[{ label:'Packet Loss (%)', data:netHealth.lossRows.map((r)=>+r.lossPct.toFixed(1)), backgroundColor:'#f59e0b88', borderRadius:4 }] }, options:buildChartOptions(tc,'%',{min:0,max:100}) }
-  }, [netHealth, tc])
+  // Aggregate net-health charts are computed AFTER bhTickFilter is defined (below).
   const histSeries = useMemo(() => {
     const raw = history?.series || []
     return applyBusinessHours(raw, bh)
   }, [history, bh])
+
+  // Memoised tick-level BH guard passed to buildTimeChart so that ticks
+  // just outside the BH boundary never "grab" nearby in-hours data points.
+  const bhTickFilter = useMemo(() => {
+    if (!bh.enabled) return null
+    const days = new Set(bh.weekdays.map(Number))
+    const { startHour, endHour } = bh
+    return (clockSec) => {
+      const d = new Date(clockSec * 1000)
+      if (!days.has(d.getDay())) return false
+      const h = d.getHours()
+      if (startHour <= endHour) return h >= startHour && h < endHour
+      return h >= startHour || h < endHour
+    }
+  }, [bh])
+
+  // Generic BH predicate that accepts a Date, ms-since-epoch, or ISO string.
+  // Returns null when BH is disabled (callers should skip filtering in that case).
+  const bhAllow = useMemo(() => {
+    if (!bh.enabled) return null
+    const days = new Set(bh.weekdays.map(Number))
+    const { startHour, endHour } = bh
+    return (dateLike) => {
+      if (dateLike == null) return false
+      const d = dateLike instanceof Date ? dateLike : new Date(dateLike)
+      const t = d.getTime()
+      if (!Number.isFinite(t)) return false
+      if (!days.has(d.getDay())) return false
+      const h = d.getHours()
+      if (startHour <= endHour) return h >= startHour && h < endHour
+      return h >= startHour || h < endHour
+    }
+  }, [bh])
 
   // Compute window anchors from the history response (so charts cover the FULL requested range)
   const histWindowFrom = useMemo(() => history?.requestedFrom ? Math.floor(new Date(history.requestedFrom).getTime() / 1000) : undefined, [history])
@@ -1178,28 +1705,322 @@ export default function StoreMonitorPage() {
 
   const pingChart = useMemo(() => buildTimeChart(
     histSeries.filter((s) => s.measurement === 'ping' && s.field === 'average_response_ms'),
-    tc, 'ms', 350, { yMin: 0, windowFromSec: histWindowFrom, windowToSec: histWindowTo }
-  ), [histSeries, tc, histWindowFrom, histWindowTo])
+    tc, 'ms', 350, { yMin: 0, windowFromSec: histWindowFrom, windowToSec: histWindowTo, bhFilter: bhTickFilter }
+  ), [histSeries, tc, histWindowFrom, histWindowTo, bhTickFilter])
 
   const lossHistChart = useMemo(() => buildTimeChart(
     histSeries.filter((s) => s.measurement === 'ping' && s.field === 'packet_loss_pct'),
-    tc, '%', 350, { yMin: 0, yMax: 100, windowFromSec: histWindowFrom, windowToSec: histWindowTo }
-  ), [histSeries, tc, histWindowFrom, histWindowTo])
+    tc, '%', 350, { yMin: 0, yMax: 100, windowFromSec: histWindowFrom, windowToSec: histWindowTo, bhFilter: bhTickFilter }
+  ), [histSeries, tc, histWindowFrom, histWindowTo, bhTickFilter])
 
   const cpuChart = useMemo(() => buildTimeChart(
     histSeries.filter((s) => s.measurement === 'system' && (s.field === 'cpu_usage_pct' || s.field === 'mem_used_pct')),
-    tc, '%', 350, { yMin: 0, yMax: 100, windowFromSec: histWindowFrom, windowToSec: histWindowTo }
-  ), [histSeries, tc, histWindowFrom, histWindowTo])
+    tc, '%', 350, { yMin: 0, yMax: 100, windowFromSec: histWindowFrom, windowToSec: histWindowTo, bhFilter: bhTickFilter }
+  ), [histSeries, tc, histWindowFrom, histWindowTo, bhTickFilter])
 
   const speedChart = useMemo(() => buildTimeChart(
     histSeries.filter((s) => s.measurement === 'speedtest'),
-    tc, 'Mbps', 350, { yMin: 0, agentIntervalSec: 600, windowFromSec: histWindowFrom, windowToSec: histWindowTo }
-  ), [histSeries, tc, histWindowFrom, histWindowTo])
+    tc, 'Mbps', 350, { yMin: 0, agentIntervalSec: 600, windowFromSec: histWindowFrom, windowToSec: histWindowTo, bhFilter: bhTickFilter }
+  ), [histSeries, tc, histWindowFrom, histWindowTo, bhTickFilter])
 
   const connHistChart = useMemo(() => buildTimeChart(
     histSeries.filter((s) => s.measurement === 'connectivity'),
-    tc, '', 350, { yMin: 0, windowFromSec: histWindowFrom, windowToSec: histWindowTo }
-  ), [histSeries, tc, histWindowFrom, histWindowTo])
+    tc, '', 350, { yMin: 0, windowFromSec: histWindowFrom, windowToSec: histWindowTo, bhFilter: bhTickFilter }
+  ), [histSeries, tc, histWindowFrom, histWindowTo, bhTickFilter])
+
+  // Points remaining after BH filtering — shown in the info bar when BH is active
+  const bhFilteredCount = useMemo(
+    () => bh.enabled ? histSeries.reduce((n, s) => n + s.points.length, 0) : null,
+    [histSeries, bh.enabled],
+  )
+
+  /* ── aggregate Net Health time-series charts ──
+     Use buildAggregateLineChart for clean continuous lines (the data from
+     Flux aggregateWindow is already uniformly spaced — no need to resample
+     onto a synthetic tick grid). BH filter (if active) drops points whose
+     timestamp falls outside BH; spanGaps keeps the line continuous visually. */
+  const netLatencyTimeChart = useMemo(() => buildAggregateLineChart(
+    netHist?.latencySeries || [], tc,
+    // yMin/yMax auto-scale around observed range so small variations are visible
+    { yLabel: 'ms', yMinFloor: 0, bhFilter: bhTickFilter, decimals: 1 }
+  ), [netHist, tc, bhTickFilter])
+
+  const netLossTimeChart = useMemo(() => buildAggregateLineChart(
+    netHist?.lossSeries || [], tc,
+    { yLabel: '%', yMinFloor: 0, yMaxCeiling: 100, bhFilter: bhTickFilter, decimals: 2 }
+  ), [netHist, tc, bhTickFilter])
+
+  // DNS/HTTP success% — usually 95–100%, so zoom in but cap at 100
+  const netDnsTimeChart = useMemo(() => buildAggregateLineChart(
+    netHist?.dnsSeries || [], tc,
+    { yLabel: '%', yMinFloor: 0, yMaxCeiling: 100, bhFilter: bhTickFilter, decimals: 1 }
+  ), [netHist, tc, bhTickFilter])
+
+  const netHttpTimeChart = useMemo(() => buildAggregateLineChart(
+    netHist?.httpSeries || [], tc,
+    { yLabel: '%', yMinFloor: 0, yMaxCeiling: 100, bhFilter: bhTickFilter, decimals: 1 }
+  ), [netHist, tc, bhTickFilter])
+
+  /* ── Daily rollups across the fleet (best-practice multi-day view) ──
+     Groups all aggregated series by calendar day (local time). For each
+     day we compute headline metrics and a 0–100 health score so the user
+     can spot a bad day at a glance instead of squinting at a 168-point chart.
+  */
+  const dailyHealth = useMemo(() => {
+    if (!netHist) return null
+
+    // Determine span in days (use the requested window, not the data window)
+    const fromMs = netHist.requestedFrom ? new Date(netHist.requestedFrom).getTime() : Date.now()
+    const toMs   = netHist.requestedTo   ? new Date(netHist.requestedTo  ).getTime() : Date.now()
+    const spanDays = Math.max(0, Math.round((toMs - fromMs) / 86_400_000))
+
+    function dayKey(clockSec) {
+      const d = new Date(clockSec * 1000)
+      d.setHours(0, 0, 0, 0)
+      return d.getTime()
+    }
+
+    // Initialise day buckets (so empty days still show)
+    const start = new Date(fromMs); start.setHours(0,0,0,0)
+    const end   = new Date(toMs);   end.setHours(0,0,0,0)
+    const buckets = new Map()
+    for (let d = new Date(start); d.getTime() <= end.getTime(); d = new Date(d.getTime() + 86_400_000)) {
+      const k = d.getTime()
+      buckets.set(k, {
+        dayMs: k,
+        latency: [], loss: [], dnsPct: [], httpPct: [],
+        // per-target breakdowns for the detail table
+        perTargetLatency: new Map(),
+        perTargetLoss:    new Map(),
+      })
+    }
+
+    function pushDay(seriesArr, bucketField, perTargetField) {
+      if (!seriesArr) return
+      for (const s of seriesArr) {
+        for (const p of (s.points || [])) {
+          const k = dayKey(Number(p.clock))
+          const b = buckets.get(k)
+          if (!b) continue
+          const v = Number(p.value)
+          if (!Number.isFinite(v)) continue
+          b[bucketField].push(v)
+          if (perTargetField && s.target) {
+            const m = b[perTargetField]
+            if (!m.has(s.target)) m.set(s.target, [])
+            m.get(s.target).push(v)
+          }
+        }
+      }
+    }
+
+    pushDay(netHist.latencySeries, 'latency', 'perTargetLatency')
+    pushDay(netHist.lossSeries,    'loss',    'perTargetLoss')
+    pushDay(netHist.dnsSeries,     'dnsPct')
+    pushDay(netHist.httpSeries,    'httpPct')
+
+    const stat = (arr, fn) => arr.length ? fn(arr) : null
+    const sum  = (arr) => arr.reduce((a, v) => a + v, 0)
+    const avg  = (arr) => arr.length ? sum(arr) / arr.length : null
+    const max  = (arr) => arr.length ? Math.max(...arr) : null
+    const min  = (arr) => arr.length ? Math.min(...arr) : null
+
+    // Health score 0-100:
+    //   start at 100, subtract penalties for each metric breaching its target
+    function healthScore({ latencyAvg, lossAvg, dnsAvg, httpAvg }) {
+      let score = 100
+      // Latency target ≤ 50 ms; ≥ 200 ms is bad
+      if (latencyAvg != null) {
+        if (latencyAvg > 200) score -= 25
+        else if (latencyAvg > 100) score -= 12
+        else if (latencyAvg > 50)  score -=  5
+      }
+      // Packet loss target ≤ 1 %; ≥ 10 % is bad
+      if (lossAvg != null) {
+        if (lossAvg > 10) score -= 35
+        else if (lossAvg >  5) score -= 20
+        else if (lossAvg >  1) score -=  8
+      }
+      // DNS target ≥ 99 %
+      if (dnsAvg  != null && dnsAvg  < 99) score -= Math.min(20, (99 - dnsAvg)  * 2)
+      // HTTP target ≥ 98 %
+      if (httpAvg != null && httpAvg < 98) score -= Math.min(25, (98 - httpAvg) * 2)
+      return Math.max(0, Math.min(100, Math.round(score)))
+    }
+
+    function healthBand(score) {
+      if (score >= 95) return { label: 'Healthy',  color: '#22c55e' }
+      if (score >= 85) return { label: 'OK',       color: '#eab308' }
+      if (score >= 70) return { label: 'Degraded', color: '#f97316' }
+      return                  { label: 'Poor',     color: '#ef4444' }
+    }
+
+    const days = []
+    for (const b of buckets.values()) {
+      const d = new Date(b.dayMs)
+      const latencyAvg = stat(b.latency, avg)
+      const latencyMax = stat(b.latency, max)
+      const lossAvg    = stat(b.loss,    avg)
+      const lossMax    = stat(b.loss,    max)
+      const dnsAvg     = stat(b.dnsPct,  avg)
+      const httpAvg    = stat(b.httpPct, avg)
+      const samples    = b.latency.length + b.loss.length + b.dnsPct.length + b.httpPct.length
+      const score      = samples > 0 ? healthScore({ latencyAvg, lossAvg, dnsAvg, httpAvg }) : null
+      const band       = score != null ? healthBand(score) : { label: 'No data', color: '#64748b' }
+
+      // Per-target detail (for the table)
+      const perTarget = []
+      const allTargets = new Set([...b.perTargetLatency.keys(), ...b.perTargetLoss.keys()])
+      for (const t of allTargets) {
+        const lat = b.perTargetLatency.get(t) || []
+        const ls  = b.perTargetLoss.get(t)    || []
+        perTarget.push({
+          target: t,
+          latencyAvg: stat(lat, avg),
+          latencyMax: stat(lat, max),
+          latencyMin: stat(lat, min),
+          lossAvg:    stat(ls,  avg),
+          lossMax:    stat(ls,  max),
+          samples:    lat.length + ls.length,
+        })
+      }
+      perTarget.sort((a, b) => (b.lossAvg || 0) - (a.lossAvg || 0) || (b.latencyAvg || 0) - (a.latencyAvg || 0))
+
+      days.push({
+        dayMs:      b.dayMs,
+        dateLabel:  d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+        weekday:    d.toLocaleDateString(undefined, { weekday: 'short' }),
+        isToday:    d.toDateString() === new Date().toDateString(),
+        latencyAvg, latencyMax,
+        lossAvg, lossMax,
+        dnsAvg, httpAvg,
+        samples,
+        score, band,
+        perTarget,
+      })
+    }
+
+    return { spanDays, days }
+  }, [netHist])
+
+  /* ── Group × Day health matrix (latency + loss per group per calendar day) ── */
+  const groupDailyMatrix = useMemo(() => {
+    if (!groupHist?.groupSeries?.length) return null
+
+    const fromMs = groupHist.requestedFrom ? new Date(groupHist.requestedFrom).getTime() : Date.now()
+    const toMs   = groupHist.requestedTo   ? new Date(groupHist.requestedTo  ).getTime() : Date.now()
+    const start = new Date(fromMs); start.setHours(0,0,0,0)
+    const end   = new Date(toMs);   end.setHours(0,0,0,0)
+
+    const dayMsList = []
+    for (let d = new Date(start); d.getTime() <= end.getTime(); d = new Date(d.getTime() + 86_400_000)) {
+      dayMsList.push(d.getTime())
+    }
+
+    function dayKey(clockSec) {
+      const d = new Date(clockSec * 1000); d.setHours(0,0,0,0)
+      return d.getTime()
+    }
+
+    function scoreFromMetrics(latencyAvg, lossAvg) {
+      let score = 100
+      if (latencyAvg != null) {
+        if (latencyAvg > 200) score -= 25
+        else if (latencyAvg > 100) score -= 12
+        else if (latencyAvg > 50)  score -= 5
+      }
+      if (lossAvg != null) {
+        if (lossAvg > 10) score -= 40
+        else if (lossAvg > 5) score -= 22
+        else if (lossAvg > 1) score -= 10
+      }
+      return Math.max(0, Math.min(100, Math.round(score)))
+    }
+    function band(score) {
+      if (score == null) return { label: 'No data', color: '#475569' }
+      if (score >= 95) return { label: 'Healthy',  color: '#22c55e' }
+      if (score >= 85) return { label: 'OK',       color: '#eab308' }
+      if (score >= 70) return { label: 'Degraded', color: '#f97316' }
+      return                   { label: 'Poor',    color: '#ef4444' }
+    }
+
+    // groupName → { dayMs → { latency:[], loss:[] } }
+    const buckets = new Map()
+    for (const s of groupHist.groupSeries) {
+      if (!buckets.has(s.group)) {
+        buckets.set(s.group, new Map(dayMsList.map((d) => [d, { latency: [], loss: [] }])))
+      }
+      const dayMap = buckets.get(s.group)
+      for (const p of (s.points || [])) {
+        const k = dayKey(Number(p.clock))
+        const slot = dayMap.get(k)
+        if (!slot) continue
+        const v = Number(p.value)
+        if (!Number.isFinite(v)) continue
+        if (s.field === 'average_response_ms') slot.latency.push(v)
+        else if (s.field === 'packet_loss_pct') slot.loss.push(v)
+      }
+    }
+
+    const avg = (arr) => arr.length ? arr.reduce((a,v) => a+v, 0) / arr.length : null
+    const max = (arr) => arr.length ? Math.max(...arr) : null
+
+    // Build the matrix rows in the canonical group order.
+    // General Group is intentionally excluded (visible elsewhere in the Stores tab).
+    // ROP-tab-derived groups appear after the three primary system groups.
+    const orderedGroups = [
+      'SD-WAN Group',
+      'RP Group',
+      'POS System Group',
+      'Manual ROP + SD-WAN',
+      'ROP without SD-WAN',
+    ].filter((g) => buckets.has(g))
+    // Append any other unexpected groups (but skip General)
+    for (const k of buckets.keys()) {
+      if (k === 'General Group') continue
+      if (!orderedGroups.includes(k)) orderedGroups.push(k)
+    }
+
+    const rows = orderedGroups.map((groupName) => {
+      const dayMap = buckets.get(groupName)
+      const cells = dayMsList.map((dayMs) => {
+        const slot = dayMap.get(dayMs) || { latency: [], loss: [] }
+        const latencyAvg = avg(slot.latency)
+        const latencyMax = max(slot.latency)
+        const lossAvg    = avg(slot.loss)
+        const lossMax    = max(slot.loss)
+        const samples    = slot.latency.length + slot.loss.length
+        const score      = samples > 0 ? scoreFromMetrics(latencyAvg, lossAvg) : null
+        const b          = band(score)
+        const date       = new Date(dayMs)
+        return {
+          dayMs,
+          date,
+          dateLabel: date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+          weekday:   date.toLocaleDateString(undefined, { weekday: 'short' }),
+          latencyAvg, latencyMax,
+          lossAvg, lossMax,
+          samples,
+          score, band: b,
+        }
+      })
+      // overall score = mean of cell scores that have data
+      const valid = cells.filter((c) => c.score != null)
+      const overall = valid.length ? Math.round(valid.reduce((a,c) => a + c.score, 0) / valid.length) : null
+      const groupAvgLatency = avg(cells.flatMap((c) => c.latencyAvg != null ? [c.latencyAvg] : []))
+      const groupAvgLoss    = avg(cells.flatMap((c) => c.lossAvg    != null ? [c.lossAvg]    : []))
+      return {
+        groupName,
+        cells,
+        overall,
+        overallBand: band(overall),
+        avgLatency: groupAvgLatency,
+        avgLoss: groupAvgLoss,
+      }
+    })
+
+    return { dayMsList, rows }
+  }, [groupHist])
 
   const selected = stores.find((s) => s.storeTag === selectedTag)
 
@@ -1389,9 +2210,30 @@ export default function StoreMonitorPage() {
             {meta?.connected && <span className="sm-live">LIVE</span>}
           </div>
 
-          {/* right: range controls */}
-          <div style={{display:'flex',alignItems:'center',gap:6,flexShrink:0}}>
-            <span style={{fontSize:10,color:'var(--text3)',fontFamily:'var(--mono)'}}>Range:</span>
+          {/* right: BH filter + range controls */}
+          <div style={{display:'flex',alignItems:'center',gap:6,flexShrink:0,flexWrap:'wrap'}}>
+            {/* Business Hours toggle — placed BEFORE Range so it acts as the primary time filter */}
+            <label
+              title="Filter time-based data (Problems, History, Crashes, Detail charts) to business hours only"
+              style={{
+                display:'flex',alignItems:'center',gap:5,fontSize:11,cursor:'pointer',
+                padding:'4px 9px',borderRadius:6,fontWeight:600,
+                background: bh.enabled ? 'rgba(245,158,11,.15)' : 'transparent',
+                border: `1px solid ${bh.enabled ? 'rgba(245,158,11,.45)' : 'var(--border)'}`,
+                color: bh.enabled ? 'var(--amber)' : 'var(--text2)',
+              }}>
+              <input type="checkbox" checked={bh.enabled}
+                onChange={(e)=>setBh((b)=>({...b,enabled:e.target.checked}))}/>
+              🕒 Business Hours
+            </label>
+            <button type="button" className="sm-btn sm-sm"
+              onClick={()=>setBhPanelOpen((v)=>!v)}
+              title="Configure business-hours days & times"
+              style={bhPanelOpen?{borderColor:'var(--accent)',color:'var(--accent)'}:undefined}>
+              ⚙ {bh.startHour.toString().padStart(2,'0')}–{bh.endHour.toString().padStart(2,'0')} · {bh.weekdays.length}d
+            </button>
+
+            <span style={{fontSize:10,color:'var(--text3)',fontFamily:'var(--mono)',marginLeft:6}}>Range:</span>
             {!globalCustom.enabled ? (
               <select className="sm-select" value={range}
                 onChange={(e)=>{ if(e.target.value==='custom') setGlobalCustom(c=>({...c,enabled:true})); else setRange(e.target.value) }}
@@ -1409,6 +2251,46 @@ export default function StoreMonitorPage() {
           </div>
         </div>
 
+        {/* BH configuration panel (collapsible) */}
+        {bhPanelOpen && (
+          <div style={{marginTop:8,display:'flex',flexWrap:'wrap',alignItems:'center',gap:10,
+            padding:'8px 12px',background:'var(--bg2)',
+            border:'1px solid rgba(245,158,11,.3)',borderRadius:'var(--sm-r)'}}>
+            <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.06em'}}>
+              Business Hours
+            </span>
+            <div style={{display:'flex',alignItems:'center',gap:3}}>
+              {BH_DAYS.map((d)=>(
+                <button key={d.val} type="button"
+                  className={`sm-bh-dayBtn${bh.weekdays.includes(d.val)?' on':''}`}
+                  onClick={()=>setBh((b)=>({
+                    ...b,
+                    weekdays: b.weekdays.includes(d.val)
+                      ? b.weekdays.filter((x)=>x!==d.val)
+                      : [...b.weekdays, d.val].sort(),
+                  }))}>
+                  {d.label}
+                </button>
+              ))}
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:5,fontSize:11}}>
+              <input type="number" min={0} max={23} value={bh.startHour} className="sm-input"
+                style={{width:54,textAlign:'center'}}
+                onChange={(e)=>setBh((b)=>({...b,startHour:+e.target.value}))}/>
+              <span style={{color:'var(--text3)'}}>:00 — </span>
+              <input type="number" min={1} max={24} value={bh.endHour} className="sm-input"
+                style={{width:54,textAlign:'center'}}
+                onChange={(e)=>setBh((b)=>({...b,endHour:+e.target.value}))}/>
+              <span style={{color:'var(--text3)'}}>:00</span>
+            </div>
+            <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',marginLeft:'auto'}}>
+              Affects: Problems · History · Crashes · Detail charts
+            </span>
+            <button type="button" className="sm-btn sm-sm"
+              onClick={()=>setBhPanelOpen(false)}>Done</button>
+          </div>
+        )}
+
         {/* row 2: subtitle */}
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:4,flexWrap:'wrap',gap:6}}>
           <p className="sm-sub" style={{margin:0}}>
@@ -1417,6 +2299,11 @@ export default function StoreMonitorPage() {
             {globalCustom.enabled && globalCustom.from
               ? <> · <strong style={{color:'var(--accent)'}}>{new Date(globalCustom.from).toLocaleString()} → {globalCustom.to ? new Date(globalCustom.to).toLocaleString() : 'now'}</strong></>
               : ` · ${TIME_RANGES.find(r=>r.key===range)?.label||range}`}
+            {bh.enabled && (
+              <> · <strong style={{color:'var(--amber)'}}>
+                🕒 BH {bh.startHour.toString().padStart(2,'0')}:00–{bh.endHour.toString().padStart(2,'0')}:00 · {bh.weekdays.length}d
+              </strong></>
+            )}
             {overview?.fetchedAt
               ? <span style={{color:'var(--text3)'}}> · updated {relAge(overview.fetchedAt)} ago</span>
               : null}
@@ -1720,10 +2607,23 @@ export default function StoreMonitorPage() {
       )}
 
       {/* ══════════ PROBLEMS ══════════ */}
-      {tab==='problems' && (
+      {tab==='problems' && (() => {
+        const visibleProblems = problems.filter((p)=>{
+          if (groupFilter && !deriveGroups(p.hostname,p.gatewayVendor,false).includes(groupFilter)) return false
+          if (bhAllow && !bhAllow(p.lastSeen)) return false
+          return true
+        })
+        return (
         <div className="sm-tr">
           <div className="sm-tr-hd">
-            <span className="sm-tr-title">Active Problems — {problems.length}</span>
+            <span className="sm-tr-title">
+              Active Problems — {visibleProblems.length}
+              {bhAllow && visibleProblems.length !== problems.length && (
+                <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--amber)',marginLeft:8,fontWeight:500}}>
+                  ● BH filter active ({problems.length - visibleProblems.length} hidden)
+                </span>
+              )}
+            </span>
             <select className="sm-select" style={{fontSize:11}} onChange={(e)=>setGroupFilter(e.target.value)} value={groupFilter}>
               <option value="">All Groups</option>
               {GROUP_DEFS.map((g)=><option key={g.id} value={g.id}>{g.icon} {g.id}</option>)}
@@ -1733,8 +2633,7 @@ export default function StoreMonitorPage() {
             <table className="sm-tbl">
               <thead><tr><th>Severity</th><th>Hostname</th><th>Group</th><th>Serial</th><th>Problem</th><th>Connectivity</th><th>Vendor</th><th>Last seen</th></tr></thead>
               <tbody>
-                {problems
-                  .filter((p)=>!groupFilter||deriveGroups(p.hostname,p.gatewayVendor,false).includes(groupFilter))
+                {visibleProblems
                   .map((p,i)=>{
                     const grps = deriveGroups(p.hostname,p.gatewayVendor,false)
                     return (
@@ -1750,12 +2649,19 @@ export default function StoreMonitorPage() {
                       </tr>
                     )
                   })}
-                {!problems.length && <tr><td colSpan={8} className="sm-empty">✅ No problems detected</td></tr>}
+                {!visibleProblems.length && (
+                  <tr><td colSpan={8} className="sm-empty">
+                    {problems.length === 0
+                      ? '✅ No problems detected'
+                      : bhAllow ? '✅ No problems detected during business hours' : '✅ No problems match filters'}
+                  </td></tr>
+                )}
               </tbody>
             </table>
           </div>
         </div>
-      )}
+        )
+      })()}
 
       {/* ══════════ NET HEALTH ══════════ */}
       {tab==='netHealth' && (
@@ -1775,44 +2681,751 @@ export default function StoreMonitorPage() {
             ))}
           </div>
 
-          {/* group health table */}
+          {/* ── Group Network Health (snapshot cards + multi-day heatmap matrix) ── */}
           <div className="sm-tr sm-section-mb">
-            <div className="sm-tr-hd"><span className="sm-tr-title">Group Network Health</span></div>
-            <div className="sm-tr-body sm-tbl-wrap">
-              <table className="sm-tbl">
-                <thead><tr><th>Group</th><th>Total</th><th>Online</th><th>Offline</th><th>Issues</th><th>Health</th><th>Avg Ping</th></tr></thead>
-                <tbody>
-                  {groupSummary.map((g)=>(
-                    <tr key={g.id}>
-                      <td><GroupBadge group={g.id}/></td>
-                      <td>{g.total}</td>
-                      <td style={{color:'var(--green)',fontWeight:600}}>{g.online}</td>
-                      <td style={{color:'var(--red)',fontWeight:600}}>{g.total-g.online}</td>
-                      <td style={{color:g.issues>0?'var(--amber)':'var(--text)'}}>{g.issues}</td>
-                      <td style={{minWidth:120}}>
-                        <div style={{display:'flex',alignItems:'center',gap:8}}>
-                          <div style={{flex:1}}><HealthBar pct={g.health}/></div>
-                          <span style={{fontSize:11,fontFamily:'var(--mono)',minWidth:38}}>{g.health.toFixed(1)}%</span>
+            <div className="sm-tr-hd">
+              <span className="sm-tr-title">🏷 Group Network Health</span>
+              <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                snapshot below · matrix shows historical breakdown for selected range
+              </span>
+            </div>
+
+            {/* ── 1. Current snapshot cards (one per group) ── */}
+            <div style={{padding:'8px 12px 4px',display:'flex',alignItems:'center',gap:6}}>
+              <span style={{
+                display:'inline-flex',alignItems:'center',gap:5,
+                padding:'2px 8px',borderRadius:4,
+                background:'rgba(34,197,94,.15)',border:'1px solid rgba(34,197,94,.35)',
+                fontSize:10,fontFamily:'var(--mono)',fontWeight:700,color:'#22c55e',
+                textTransform:'uppercase',letterSpacing:'.06em',
+              }}>● LIVE · Right now</span>
+              <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                {overview?.fetchedAt ? `Snapshot at ${new Date(overview.fetchedAt).toLocaleTimeString()}` : 'Current state'}
+                {' '}— for historical breakdown over the selected range, see the matrix below.
+              </span>
+            </div>
+            <div style={{padding:'4px 12px 10px',display:'grid',
+              gridTemplateColumns:`repeat(auto-fit, minmax(220px, 1fr))`,gap:10}}>
+              {displayedGroupCards.map((g) => {
+                const offline = g.total - g.online
+                const offlinePct = g.total > 0 ? (offline / g.total) * 100 : 0
+                const statusColor = g.health >= 95 ? '#22c55e' : g.health >= 85 ? '#eab308' : g.health >= 70 ? '#f97316' : '#ef4444'
+                const ropSubKey = g.id === 'Manual ROP + SD-WAN' ? 'manual_sdwan'
+                                : g.id === 'ROP without SD-WAN'  ? 'no_sdwan'
+                                : null
+                const handleCardClick = ropSubKey
+                  ? () => { setRopSubTab(ropSubKey); setTab('rop') }
+                  : () => { setGroupFilter(g.id); setChartGroupFilter(''); setStatusFilter(''); setIssuesOnly(false); setTab('stores') }
+                return (
+                  <div key={g.id}
+                    onClick={handleCardClick}
+                    title={ropSubKey ? `Open ROP Groups tab → ${g.id}` : `Open Stores tab filtered to ${g.id}`}
+                    style={{
+                      cursor:'pointer',
+                      padding:'10px 12px',
+                      borderRadius:8,
+                      background:'var(--bg3)',
+                      border:`1px solid ${g.color}40`,
+                      borderLeft:`4px solid ${g.color}`,
+                      transition:'transform .12s, box-shadow .12s',
+                    }}
+                    onMouseEnter={(e)=>{ e.currentTarget.style.transform='translateY(-1px)'; e.currentTarget.style.boxShadow=`0 0 0 2px ${g.color}30` }}
+                    onMouseLeave={(e)=>{ e.currentTarget.style.transform=''; e.currentTarget.style.boxShadow='' }}>
+                    <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between',gap:6,marginBottom:6}}>
+                      <div style={{display:'flex',alignItems:'center',gap:6,color:g.color,fontWeight:700,fontSize: g.id.endsWith(' Group') ? 13 : 11.5}}>
+                        <span>{g.icon}</span>
+                        <span>{g.id.endsWith(' Group') ? g.id.replace(' Group','') : g.id}</span>
+                      </div>
+                      <div style={{textAlign:'right'}}>
+                        <div style={{fontSize:18,fontWeight:800,color:statusColor,fontFamily:'var(--mono)',lineHeight:1}}>
+                          {g.health.toFixed(0)}<span style={{fontSize:11,color:'var(--text3)'}}>%</span>
                         </div>
-                      </td>
-                      <td style={{fontFamily:'var(--mono)',fontSize:11}}>{g.avgPing!=null?`${g.avgPing.toFixed(0)}ms`:'—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                        <div style={{fontSize:8.5,fontFamily:'var(--mono)',color:statusColor,textTransform:'uppercase',letterSpacing:'.06em',marginTop:2}}>
+                          {g.health >= 95 ? 'Healthy' : g.health >= 85 ? 'OK' : g.health >= 70 ? 'Degraded' : 'Poor'}
+                        </div>
+                      </div>
+                    </div>
+                    {/* Online / Offline / Issues breakdown */}
+                    <div style={{display:'grid',gridTemplateColumns:'repeat(3, 1fr)',gap:6,marginTop:4}}>
+                      <div style={{padding:'4px 6px',borderRadius:5,background:'rgba(34,197,94,.08)',textAlign:'center'}}>
+                        <div style={{fontSize:13,fontWeight:700,color:'#22c55e',fontFamily:'var(--mono)'}}>{g.online}</div>
+                        <div style={{fontSize:8.5,fontFamily:'var(--mono)',color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.05em'}}>online</div>
+                      </div>
+                      <div style={{padding:'4px 6px',borderRadius:5,background:'rgba(239,68,68,.08)',textAlign:'center'}}>
+                        <div style={{fontSize:13,fontWeight:700,color:offline > 0 ? '#ef4444' : 'var(--text3)',fontFamily:'var(--mono)'}}>{offline}</div>
+                        <div style={{fontSize:8.5,fontFamily:'var(--mono)',color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.05em'}}>offline</div>
+                      </div>
+                      <div style={{padding:'4px 6px',borderRadius:5,background:'rgba(234,179,8,.08)',textAlign:'center'}}>
+                        <div style={{fontSize:13,fontWeight:700,color: g.issues > 0 ? '#eab308' : 'var(--text3)',fontFamily:'var(--mono)'}}>{g.issues}</div>
+                        <div style={{fontSize:8.5,fontFamily:'var(--mono)',color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.05em'}}>issues</div>
+                      </div>
+                    </div>
+                    {/* Down % bar */}
+                    <div style={{marginTop:8,display:'flex',alignItems:'center',gap:6}}>
+                      <span style={{fontSize:8.5,fontFamily:'var(--mono)',color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.05em',minWidth:34}}>down</span>
+                      <div style={{flex:1,height:5,background:'var(--bg)',borderRadius:3,overflow:'hidden'}}>
+                        <div style={{
+                          width:`${Math.min(offlinePct,100)}%`,height:'100%',
+                          background: offlinePct > 10 ? '#ef4444' : offlinePct > 0 ? '#eab308' : 'var(--text3)',
+                          transition:'width .25s',
+                        }}/>
+                      </div>
+                      <span style={{fontSize:9.5,fontFamily:'var(--mono)',fontWeight:700,minWidth:40,textAlign:'right',
+                        color: offlinePct > 10 ? '#ef4444' : offlinePct > 0 ? '#eab308' : 'var(--text3)'}}>
+                        {offlinePct.toFixed(1)}%
+                      </span>
+                    </div>
+                    {/* Health % bar */}
+                    <div style={{marginTop:4,display:'flex',alignItems:'center',gap:6}}>
+                      <span style={{fontSize:8.5,fontFamily:'var(--mono)',color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.05em',minWidth:34}}>health</span>
+                      <div style={{flex:1,height:5,background:'var(--bg)',borderRadius:3,overflow:'hidden'}}>
+                        <div style={{
+                          width:`${Math.min(g.health,100)}%`,height:'100%',
+                          background:statusColor,transition:'width .25s',
+                        }}/>
+                      </div>
+                      <span style={{fontSize:9.5,fontFamily:'var(--mono)',fontWeight:700,minWidth:40,textAlign:'right',color:statusColor}}>
+                        {g.health.toFixed(1)}%
+                      </span>
+                    </div>
+                    {/* Footer line */}
+                    <div style={{marginTop:6,display:'flex',justifyContent:'space-between',fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                      <span>{g.total} stores</span>
+                      {g.avgPing != null && <span>avg ping <strong style={{color:'var(--text2)'}}>{g.avgPing.toFixed(0)}ms</strong></span>}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* ── 2. Group × Day matrix (heatmap) — when range spans multiple days ── */}
+            {groupDailyMatrix && groupDailyMatrix.dayMsList.length >= 2 && (
+              <div style={{borderTop:'1px solid var(--border)',padding:'10px 12px'}}>
+                <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,flexWrap:'wrap'}}>
+                  <span style={{
+                    display:'inline-flex',alignItems:'center',gap:5,
+                    padding:'2px 8px',borderRadius:4,
+                    background:'rgba(245,158,11,.15)',border:'1px solid rgba(245,158,11,.35)',
+                    fontSize:10,fontFamily:'var(--mono)',fontWeight:700,color:'var(--amber)',
+                    textTransform:'uppercase',letterSpacing:'.06em',
+                  }}>📅 HISTORICAL · {groupDailyMatrix.dayMsList.length} days</span>
+                  <span style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--text2)',fontWeight:700,textTransform:'uppercase',letterSpacing:'.06em'}}>
+                    Group × Day Health Matrix
+                  </span>
+                  <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                    hover any cell for avg/max latency &amp; loss
+                  </span>
+                  {groupHistLoading && <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--accent)'}}>⏳ Loading…</span>}
+                  {groupHist?.sdwanStoreCount > 0 && (
+                    <span style={{marginLeft:'auto',fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                      SD-WAN derived from {groupHist.sdwanStoreCount} Fortinet store{groupHist.sdwanStoreCount===1?'':'s'} in current snapshot
+                    </span>
+                  )}
+                </div>
+                <div style={{overflowX:'auto'}}>
+                  <table style={{borderCollapse:'separate',borderSpacing:3,fontSize:11,fontFamily:'var(--mono)',width:'100%',minWidth:600}}>
+                    <thead>
+                      <tr>
+                        <th style={{textAlign:'left',padding:'4px 8px',color:'var(--text3)',fontWeight:600,fontSize:10,textTransform:'uppercase',letterSpacing:'.06em'}}>Group</th>
+                        <th style={{textAlign:'center',padding:'4px 8px',color:'var(--text3)',fontWeight:600,fontSize:10,textTransform:'uppercase',letterSpacing:'.06em',whiteSpace:'nowrap'}}>Overall</th>
+                        {groupDailyMatrix.dayMsList.map((dayMs) => {
+                          const d = new Date(dayMs)
+                          const isToday = d.toDateString() === new Date().toDateString()
+                          return (
+                            <th key={dayMs} style={{textAlign:'center',padding:'4px 6px',color: isToday ? 'var(--accent)' : 'var(--text3)',fontWeight:600,fontSize:9.5,textTransform:'uppercase',letterSpacing:'.04em',whiteSpace:'nowrap'}}>
+                              <div>{d.toLocaleDateString(undefined, { weekday: 'short' })}</div>
+                              <div style={{fontWeight:400,fontSize:9,color:'var(--text3)'}}>{d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</div>
+                            </th>
+                          )
+                        })}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {groupDailyMatrix.rows.map((row) => {
+                        const EXTRA_GROUP_META = {
+                          'Manual ROP + SD-WAN': { color: '#a855f7', icon: '📋' },
+                          'ROP without SD-WAN':  { color: '#0ea5e9', icon: '📡' },
+                        }
+                        const meta = GROUP_MAP[row.groupName] || EXTRA_GROUP_META[row.groupName] || { color: '#64748b', icon: '🏷' }
+                        return (
+                          <tr key={row.groupName}>
+                            <td style={{padding:'5px 8px',whiteSpace:'nowrap',borderLeft:`3px solid ${meta.color}`,background:`${meta.color}10`,borderRadius:'4px 0 0 4px'}}>
+                              <span style={{display:'inline-flex',alignItems:'center',gap:5,fontWeight:700,color:meta.color,fontSize:row.groupName.endsWith(' Group') ? 11 : 10.5}}>
+                                <span>{meta.icon}</span>
+                                <span>{row.groupName.endsWith(' Group') ? row.groupName.replace(' Group','') : row.groupName}</span>
+                              </span>
+                            </td>
+                            <td style={{textAlign:'center',padding:'5px 8px',background:`${row.overallBand.color}15`,borderRadius:4}}>
+                              {row.overall != null
+                                ? <div>
+                                    <div style={{fontWeight:800,color:row.overallBand.color,fontSize:13,lineHeight:1}}>{row.overall}</div>
+                                    <div style={{fontSize:8.5,color:row.overallBand.color,textTransform:'uppercase',letterSpacing:'.05em',marginTop:1}}>{row.overallBand.label}</div>
+                                  </div>
+                                : <span style={{color:'var(--text3)'}}>—</span>}
+                            </td>
+                            {row.cells.map((c) => {
+                              const noData = c.score == null
+                              const fmt = (v, d=1) => v == null ? '—' : v.toFixed(d)
+                              const tooltip = noData
+                                ? `${row.groupName} · ${c.weekday}, ${c.dateLabel}\nNo data`
+                                : `${row.groupName} · ${c.weekday}, ${c.dateLabel}\n` +
+                                  `Score: ${c.score}/100 (${c.band.label})\n` +
+                                  `Latency: avg ${fmt(c.latencyAvg)}ms · max ${fmt(c.latencyMax)}ms\n` +
+                                  `Loss: avg ${fmt(c.lossAvg,2)}% · max ${fmt(c.lossMax,2)}%`
+                              return (
+                                <td key={c.dayMs}
+                                  title={tooltip}
+                                  style={{
+                                    textAlign:'center',
+                                    padding:'5px 4px',
+                                    borderRadius:4,
+                                    background: noData ? 'var(--bg)' : `${c.band.color}28`,
+                                    border: `1px solid ${noData ? 'var(--border)' : c.band.color + '60'}`,
+                                    minWidth:54,
+                                    cursor:'help',
+                                  }}>
+                                  {noData
+                                    ? <span style={{color:'var(--text3)',fontSize:11}}>—</span>
+                                    : <>
+                                        <div style={{fontWeight:800,color:c.band.color,fontSize:12,lineHeight:1}}>{c.score}</div>
+                                        <div style={{display:'flex',flexDirection:'column',marginTop:3,fontSize:9.5,color:'var(--text3)',lineHeight:1.3}}>
+                                          {c.latencyAvg != null && (
+                                            <span style={{color: c.latencyAvg > 100 ? '#ef4444' : c.latencyAvg > 50 ? '#eab308' : 'var(--text2)'}}>
+                                              {c.latencyAvg.toFixed(0)}ms
+                                            </span>
+                                          )}
+                                          {c.lossAvg != null && c.lossAvg > 0.5 && (
+                                            <span style={{color: c.lossAvg > 5 ? '#ef4444' : c.lossAvg > 1 ? '#eab308' : 'var(--text2)'}}>
+                                              {c.lossAvg.toFixed(1)}%
+                                            </span>
+                                          )}
+                                        </div>
+                                      </>}
+                                </td>
+                              )
+                            })}
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div style={{marginTop:8,display:'flex',flexWrap:'wrap',gap:10,fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                  <span><span style={{display:'inline-block',width:10,height:10,background:'#22c55e',borderRadius:2,marginRight:4,verticalAlign:'middle'}}/>Healthy 95+</span>
+                  <span><span style={{display:'inline-block',width:10,height:10,background:'#eab308',borderRadius:2,marginRight:4,verticalAlign:'middle'}}/>OK 85-94</span>
+                  <span><span style={{display:'inline-block',width:10,height:10,background:'#f97316',borderRadius:2,marginRight:4,verticalAlign:'middle'}}/>Degraded 70-84</span>
+                  <span><span style={{display:'inline-block',width:10,height:10,background:'#ef4444',borderRadius:2,marginRight:4,verticalAlign:'middle'}}/>Poor &lt;70</span>
+                  <span style={{marginLeft:'auto'}}>
+                    Note: SD-WAN devices may also appear within RP / POS rows (vendor-based group overlaps hostname groups)
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {!groupDailyMatrix && groupHistLoading && (
+              <div style={{padding:'12px',fontSize:11,fontFamily:'var(--mono)',color:'var(--text3)',borderTop:'1px solid var(--border)'}}>
+                ⏳ Loading per-group time series for the selected range…
+              </div>
+            )}
+
+            {/* ── 3. Day-wise disconnection + offline duration — one widget per group ── */}
+            <div style={{borderTop:'1px solid var(--border)',padding:'10px 12px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10,flexWrap:'wrap'}}>
+                <span style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--text2)',fontWeight:700,textTransform:'uppercase',letterSpacing:'.06em'}}>
+                  🌐 Group Internet Disconnections & Offline Time (Day-wise)
+                </span>
+                <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                  disconnections = store went offline (heartbeat 1→0 or agent silent) · offline = total offline minutes in range
+                </span>
+                {bh.enabled && (
+                  <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--amber)'}}>
+                    🕒 BH {String(bh.startHour).padStart(2,'0')}:00–{String(bh.endHour).padStart(2,'0')}:00 · {bh.weekdays.length}d
+                  </span>
+                )}
+                <span style={{marginLeft:'auto',fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                  {displayedGroupCards.length} groups · batched server queries (2 groups at a time)
+                </span>
+                <button type="button" className="sm-btn sm-sm"
+                  onClick={loadGroupDisconnect}
+                  disabled={Object.values(groupDisconnectLoadingById).some(Boolean)}>
+                  {Object.values(groupDisconnectLoadingById).some(Boolean) ? '⏳ Loading…' : '↻ Refresh'}
+                </button>
+              </div>
+
+              <div style={{display:'flex', flexDirection:'column', gap:12}}>
+                {displayedGroupCards.map((card) => {
+                  const meta = groupMetaFor(card.id)
+                  const payload = groupDisconnectById[card.id]
+                  const loading = groupDisconnectLoadingById[card.id]
+                  const days = payload?.days || []
+                  const group = payload?.groups?.find((g) => g.name === card.id) || payload?.groups?.[0]
+                  const chart = group && days.length ? buildSingleGroupDisconnectChart(group, days, card.id, tc) : null
+
+                  return (
+                    <div key={card.id} style={{
+                      border:`1px solid ${meta.color}40`,
+                      borderLeft:`3px solid ${meta.color}`,
+                      borderRadius:'var(--sm-r)',
+                      background:'var(--bg)',
+                      overflow:'hidden',
+                    }}>
+                      <div style={{
+                        display:'flex', alignItems:'center', gap:8, flexWrap:'wrap',
+                        padding:'8px 12px', background:`${meta.color}10`,
+                        borderBottom:'1px solid var(--border)',
+                      }}>
+                        <span style={{display:'inline-flex', alignItems:'center', gap:6, color:meta.color, fontWeight:700, fontSize:12}}>
+                          <span>{meta.icon}</span>
+                          <span>{shortGroupLabel(card.id)}</span>
+                        </span>
+                        {payload?.source && (
+                          <span style={{fontSize:10, fontFamily:'var(--mono)', color:'var(--text3)'}}>
+                            source: {payload.source}
+                          </span>
+                        )}
+                        {loading && (
+                          <span style={{marginLeft:'auto', fontSize:10, fontFamily:'var(--mono)', color:'var(--accent)'}}>
+                            ⏳ Loading…
+                          </span>
+                        )}
+                        {!loading && payload && (
+                          <span style={{marginLeft: loading ? 0 : 'auto', fontSize:10, fontFamily:'var(--mono)', color:'var(--text3)'}}>
+                            {payload.bucketMin || 5}m buckets ·{' '}
+                            <strong style={{color:'var(--text2)'}}>{group?.storeCount ?? 0}</strong>
+                            {' '}reporting / <strong style={{color:'var(--text2)'}}>{card.total ?? 0}</strong> total stores
+                            {card.total > 0 && (
+                              <>
+                                {' '}·{' '}
+                                <span style={{color: card.online === card.total ? '#22c55e' : '#22c55e'}}>{card.online} online</span>
+                                {' / '}
+                                <span style={{color: (card.total - card.online) > 0 ? '#ef4444' : 'var(--text3)'}}>
+                                  {card.total - card.online} offline
+                                </span>
+                              </>
+                            )}
+                          </span>
+                        )}
+                      </div>
+
+                      {!loading && group && days.length > 0 ? (
+                        <div style={{
+                          display:'grid',
+                          gridTemplateColumns:'minmax(240px, 1fr) minmax(260px, 1fr)',
+                          gap:12,
+                          padding:'10px 12px',
+                          alignItems:'stretch',
+                        }}>
+                          <div style={{overflowX:'auto'}}>
+                            <table className="sm-tbl" style={{minWidth:220, margin:0}}>
+                              <thead>
+                                <tr>
+                                  <th>Day</th>
+                                  <th>Disconnects</th>
+                                  <th>Offline</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {days.map((d) => {
+                                  const day = group.days.find((x) => x.dayMs === d.dayMs) || { disconnections: 0, offlineMinutes: 0 }
+                                  const dt = new Date(d.dayMs)
+                                  const isToday = dt.toDateString() === new Date().toDateString()
+                                  return (
+                                    <tr key={d.dayMs}>
+                                      <td style={{whiteSpace:'nowrap', fontWeight: isToday ? 700 : 500, color: isToday ? 'var(--accent)' : 'var(--text2)'}}>
+                                        {dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}
+                                      </td>
+                                      <td style={{fontFamily:'var(--mono)', fontWeight:700, color: day.disconnections > 0 ? '#ef4444' : 'var(--text3)'}}>
+                                        {day.disconnections}
+                                      </td>
+                                      <td style={{fontFamily:'var(--mono)', fontWeight:700, color: day.offlineMinutes > 0 ? '#f59e0b' : 'var(--text3)'}}>
+                                        {fmtOfflineMinutes(day.offlineMinutes)}
+                                      </td>
+                                    </tr>
+                                  )
+                                })}
+                                <tr style={{borderTop:'2px solid var(--border)'}}>
+                                  <td style={{fontWeight:700, color:'var(--text2)'}}>Total</td>
+                                  <td style={{fontFamily:'var(--mono)', fontWeight:700, color: group.totals.disconnections > 0 ? '#ef4444' : 'var(--text3)'}}>
+                                    {group.totals.disconnections}
+                                  </td>
+                                  <td style={{fontFamily:'var(--mono)', fontWeight:700, color: group.totals.offlineMinutes > 0 ? '#f59e0b' : 'var(--text3)'}}>
+                                    {fmtOfflineMinutes(group.totals.offlineMinutes)}
+                                  </td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+
+                          <div style={{
+                            border:'1px solid var(--border)', borderRadius:'var(--sm-r)', background:'var(--bg2)',
+                            padding:'8px 10px', minHeight:220, display:'flex', flexDirection:'column',
+                          }}>
+                            <div style={{fontSize:10, fontFamily:'var(--mono)', color:'var(--text3)', marginBottom:6, textTransform:'uppercase', letterSpacing:'.06em'}}>
+                              Offline minutes (bars) · Disconnects (line)
+                            </div>
+                            {chart ? (
+                              <div style={{flex:1, minHeight:180, position:'relative'}}>
+                                <Chart type="bar" data={chart.data} options={chart.options} />
+                              </div>
+                            ) : (
+                              <div style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, fontFamily:'var(--mono)', color:'var(--text3)'}}>
+                                No chart data
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{padding:'12px', fontSize:11, fontFamily:'var(--mono)', color:'var(--text3)'}}>
+                          {loading ? 'Loading day-wise disconnection report…' : 'No disconnection/offline data for this range.'}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
             </div>
           </div>
 
-          <div className="sm-g2 sm-section-mb">
-            <div className="sm-tr">
-              <div className="sm-tr-hd"><span className="sm-tr-title">Average Latency by Target</span></div>
-              <div className="sm-tr-body sm-chart">{latChart?<Bar data={latChart.data} options={latChart.options}/>:<div className="sm-empty">No data</div>}</div>
-            </div>
-            <div className="sm-tr">
-              <div className="sm-tr-hd"><span className="sm-tr-title">Packet Loss by Target</span></div>
-              <div className="sm-tr-body sm-chart">{lossChart?<Bar data={lossChart.data} options={lossChart.options}/>:<div className="sm-empty">No data</div>}</div>
-            </div>
+          {/* ── periodic Net Health charts (across full fleet, selected range) ── */}
+          <div style={{display:'flex',flexWrap:'wrap',alignItems:'center',gap:10,padding:'8px 12px',
+            background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:'var(--sm-r)',
+            fontSize:11,fontFamily:'var(--mono)',marginBottom:10}}>
+            <span style={{color:'var(--text3)'}}>
+              📅 Window: <strong style={{color:'var(--text2)'}}>
+                {netHist
+                  ? `${new Date(netHist.requestedFrom).toLocaleString()} → ${new Date(netHist.requestedTo).toLocaleString()}`
+                  : (globalCustom.enabled && globalCustom.from
+                      ? `${new Date(globalCustom.from).toLocaleString()} → ${globalCustom.to ? new Date(globalCustom.to).toLocaleString() : 'now'}`
+                      : (TIME_RANGES.find(r=>r.key===range)?.label || range))}
+              </strong>
+            </span>
+            {netHist?.aggregateEvery && (
+              <span style={{color:'var(--text3)'}}>
+                ⏱ Bucket: <strong style={{color:'var(--text2)'}}>{netHist.aggregateEvery}</strong>
+              </span>
+            )}
+            {netHist?.pointCount != null && (
+              <span style={{color:'var(--text3)'}}>📊 {netHist.pointCount} pts</span>
+            )}
+            {bh.enabled && <span style={{color:'var(--amber)'}}>● BH filter active</span>}
+            {netHistError && <span style={{color:'var(--red)'}}>⚠ {netHistError}</span>}
+            <button className="sm-btn sm-sm" style={{marginLeft:'auto'}}
+              onClick={loadNetHist} disabled={netHistLoading}>
+              {netHistLoading ? '⏳ Loading…' : '↻ Refresh'}
+            </button>
           </div>
+
+          {/* ── DAILY HEALTH (Pingdom / UptimeRobot / StatusCake style) ──
+              Shown when the selected range spans 2+ days. One card per day with
+              a 0-100 health score, headline metrics, and a status colour band.
+          */}
+          {dailyHealth && dailyHealth.spanDays >= 1 && dailyHealth.days.length >= 2 && (
+            <div className="sm-tr sm-section-mb">
+              <div className="sm-tr-hd">
+                <span className="sm-tr-title">📅 Daily Health Summary</span>
+                <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                  {dailyHealth.days.length} day{dailyHealth.days.length === 1 ? '' : 's'} · fleet-wide rollup
+                </span>
+              </div>
+              {/* Day cards strip */}
+              <div style={{padding:'10px 12px',display:'grid',
+                gridTemplateColumns:`repeat(auto-fit, minmax(118px, 1fr))`,gap:8}}>
+                {dailyHealth.days.map((d) => {
+                  const noData = d.samples === 0
+                  return (
+                    <div key={d.dayMs}
+                      title={`${d.weekday}, ${d.dateLabel} — ${noData ? 'no data' : `${d.band.label} (${d.score}/100)`}`}
+                      style={{
+                        position:'relative',
+                        padding:'8px 10px 9px',
+                        borderRadius:8,
+                        background:`linear-gradient(180deg, ${d.band.color}10 0%, var(--bg3) 60%)`,
+                        border:`1px solid ${d.band.color}40`,
+                        borderLeft:`4px solid ${d.band.color}`,
+                      }}>
+                      {/* Day header */}
+                      <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between',gap:6}}>
+                        <div>
+                          <div style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.06em'}}>
+                            {d.weekday}{d.isToday && <span style={{marginLeft:4,padding:'1px 5px',background:'var(--accent)',color:'#fff',borderRadius:3,fontSize:8}}>TODAY</span>}
+                          </div>
+                          <div style={{fontSize:13,fontWeight:700,color:'var(--text)',marginTop:1}}>{d.dateLabel}</div>
+                        </div>
+                        <div style={{textAlign:'right'}}>
+                          {noData
+                            ? <div style={{fontSize:10,color:'var(--text3)',fontFamily:'var(--mono)'}}>no data</div>
+                            : <>
+                                <div style={{fontSize:18,fontWeight:800,lineHeight:1,color:d.band.color,fontFamily:'var(--mono)'}}>
+                                  {d.score}
+                                </div>
+                                <div style={{fontSize:8.5,fontFamily:'var(--mono)',color:d.band.color,textTransform:'uppercase',letterSpacing:'.06em',marginTop:2}}>
+                                  {d.band.label}
+                                </div>
+                              </>}
+                        </div>
+                      </div>
+
+                      {/* Score bar */}
+                      {!noData && (
+                        <div style={{marginTop:6,height:3,background:'var(--bg)',borderRadius:2,overflow:'hidden'}}>
+                          <div style={{width:`${d.score}%`,height:'100%',background:d.band.color,transition:'width .2s'}}/>
+                        </div>
+                      )}
+
+                      {/* Headline metrics */}
+                      {!noData && (
+                        <div style={{marginTop:7,display:'flex',flexDirection:'column',gap:3,fontSize:10.5,fontFamily:'var(--mono)'}}>
+                          {d.latencyAvg != null && (
+                            <div style={{display:'flex',justifyContent:'space-between'}}>
+                              <span style={{color:'var(--text3)'}}>Latency</span>
+                              <span style={{color: d.latencyAvg > 100 ? '#ef4444' : d.latencyAvg > 50 ? '#eab308' : 'var(--text)', fontWeight:700}}>
+                                {d.latencyAvg.toFixed(0)}<span style={{color:'var(--text3)',fontWeight:400}}> ms</span>
+                              </span>
+                            </div>
+                          )}
+                          {d.lossAvg != null && (
+                            <div style={{display:'flex',justifyContent:'space-between'}}>
+                              <span style={{color:'var(--text3)'}}>Loss</span>
+                              <span style={{color: d.lossAvg > 5 ? '#ef4444' : d.lossAvg > 1 ? '#eab308' : 'var(--text)', fontWeight:700}}>
+                                {d.lossAvg.toFixed(2)}<span style={{color:'var(--text3)',fontWeight:400}}> %</span>
+                              </span>
+                            </div>
+                          )}
+                          {d.dnsAvg != null && (
+                            <div style={{display:'flex',justifyContent:'space-between'}}>
+                              <span style={{color:'var(--text3)'}}>DNS</span>
+                              <span style={{color: d.dnsAvg >= 99 ? '#22c55e' : d.dnsAvg >= 95 ? '#eab308' : '#ef4444', fontWeight:700}}>
+                                {d.dnsAvg.toFixed(1)}<span style={{color:'var(--text3)',fontWeight:400}}> %</span>
+                              </span>
+                            </div>
+                          )}
+                          {d.httpAvg != null && (
+                            <div style={{display:'flex',justifyContent:'space-between'}}>
+                              <span style={{color:'var(--text3)'}}>HTTP</span>
+                              <span style={{color: d.httpAvg >= 98 ? '#22c55e' : d.httpAvg >= 95 ? '#eab308' : '#ef4444', fontWeight:700}}>
+                                {d.httpAvg.toFixed(1)}<span style={{color:'var(--text3)',fontWeight:400}}> %</span>
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+
+              {/* Per-day detail table */}
+              <div className="sm-tbl-wrap" style={{borderTop:'1px solid var(--border)'}}>
+                <table className="sm-tbl">
+                  <thead>
+                    <tr>
+                      <th>Day</th>
+                      <th>Health</th>
+                      <th>Latency avg / max</th>
+                      <th>Loss avg / max</th>
+                      <th>DNS %</th>
+                      <th>HTTP %</th>
+                      <th>Worst target (loss)</th>
+                      <th>Samples</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dailyHealth.days.map((d) => {
+                      const worst = d.perTarget[0]
+                      const noData = d.samples === 0
+                      const cell = (val, unit, thresholds) => {
+                        if (val == null) return <span style={{color:'var(--text3)'}}>—</span>
+                        const [warn, crit] = thresholds || [Infinity, Infinity]
+                        const color = val >= crit ? '#ef4444' : val >= warn ? '#eab308' : 'var(--text)'
+                        return <span style={{color,fontFamily:'var(--mono)',fontWeight:600}}>{val.toFixed(unit === '%' ? 2 : 1)}{unit}</span>
+                      }
+                      return (
+                        <tr key={d.dayMs} style={noData ? {opacity:.6} : undefined}>
+                          <td>
+                            <div style={{display:'flex',flexDirection:'column'}}>
+                              <span style={{fontWeight:700}}>{d.weekday}</span>
+                              <span style={{fontFamily:'var(--mono)',fontSize:10,color:'var(--text3)'}}>{d.dateLabel}</span>
+                            </div>
+                          </td>
+                          <td>
+                            {noData
+                              ? <span style={{color:'var(--text3)',fontSize:11}}>—</span>
+                              : <span className="sm-pill" style={{background:`${d.band.color}22`,color:d.band.color,fontWeight:700,fontFamily:'var(--mono)'}}>
+                                  {d.score} · {d.band.label}
+                                </span>}
+                          </td>
+                          <td>
+                            {d.latencyAvg != null
+                              ? <>
+                                  {cell(d.latencyAvg, ' ms', [50, 100])}
+                                  <span style={{color:'var(--text3)',fontFamily:'var(--mono)'}}> / </span>
+                                  {cell(d.latencyMax, ' ms', [100, 200])}
+                                </>
+                              : <span style={{color:'var(--text3)'}}>—</span>}
+                          </td>
+                          <td>
+                            {d.lossAvg != null
+                              ? <>
+                                  {cell(d.lossAvg, '%', [1, 5])}
+                                  <span style={{color:'var(--text3)',fontFamily:'var(--mono)'}}> / </span>
+                                  {cell(d.lossMax, '%', [5, 10])}
+                                </>
+                              : <span style={{color:'var(--text3)'}}>—</span>}
+                          </td>
+                          <td>
+                            {d.dnsAvg != null
+                              ? <span style={{color: d.dnsAvg >= 99 ? '#22c55e' : d.dnsAvg >= 95 ? '#eab308' : '#ef4444',fontFamily:'var(--mono)',fontWeight:600}}>
+                                  {d.dnsAvg.toFixed(1)}%
+                                </span>
+                              : <span style={{color:'var(--text3)'}}>—</span>}
+                          </td>
+                          <td>
+                            {d.httpAvg != null
+                              ? <span style={{color: d.httpAvg >= 98 ? '#22c55e' : d.httpAvg >= 95 ? '#eab308' : '#ef4444',fontFamily:'var(--mono)',fontWeight:600}}>
+                                  {d.httpAvg.toFixed(1)}%
+                                </span>
+                              : <span style={{color:'var(--text3)'}}>—</span>}
+                          </td>
+                          <td>
+                            {worst && worst.lossAvg != null && worst.lossAvg > 0.5
+                              ? <span style={{fontFamily:'var(--mono)',fontSize:11}}>
+                                  <strong>{worst.target}</strong>
+                                  <span style={{color: worst.lossAvg > 5 ? '#ef4444' : '#eab308',marginLeft:6}}>
+                                    {worst.lossAvg.toFixed(2)}%
+                                  </span>
+                                </span>
+                              : <span style={{color:'var(--text3)',fontSize:11}}>—</span>}
+                          </td>
+                          <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--text3)'}}>{d.samples}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{padding:'6px 12px',borderTop:'1px solid var(--border)',
+                display:'flex',flexWrap:'wrap',gap:12,fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                Health bands:
+                <span><span style={{display:'inline-block',width:8,height:8,background:'#22c55e',borderRadius:2,marginRight:4,verticalAlign:'middle'}}/>95–100 Healthy</span>
+                <span><span style={{display:'inline-block',width:8,height:8,background:'#eab308',borderRadius:2,marginRight:4,verticalAlign:'middle'}}/>85–94 OK</span>
+                <span><span style={{display:'inline-block',width:8,height:8,background:'#f97316',borderRadius:2,marginRight:4,verticalAlign:'middle'}}/>70–84 Degraded</span>
+                <span><span style={{display:'inline-block',width:8,height:8,background:'#ef4444',borderRadius:2,marginRight:4,verticalAlign:'middle'}}/>&lt;70 Poor</span>
+                <span style={{marginLeft:'auto'}}>Score = 100 − penalties for latency &gt;50/100/200ms, loss &gt;1/5/10%, DNS &lt;99%, HTTP &lt;98%</span>
+              </div>
+            </div>
+          )}
+
+          {(() => {
+            const renderStatsStrip = (chart) => {
+              if (!chart || !chart.stats?.length) return null
+              const unit = chart.yLabel || ''
+              const dec  = chart.decimals ?? 2
+              const fmt  = (v) => Number(v).toFixed(dec)
+              return (
+                <div style={{
+                  display:'flex',flexWrap:'wrap',gap:6,padding:'6px 12px',
+                  background:'var(--bg3)',borderBottom:'1px solid var(--border)',
+                  fontSize:10.5,fontFamily:'var(--mono)',
+                }}>
+                  {chart.stats.map((st) => (
+                    <div key={st.label} style={{
+                      display:'flex',alignItems:'center',gap:6,
+                      padding:'4px 8px',borderRadius:5,
+                      background:`${st.color}14`,border:`1px solid ${st.color}30`,
+                    }}>
+                      <span style={{
+                        width:8,height:8,borderRadius:'50%',background:st.color,flexShrink:0,
+                      }}/>
+                      <span style={{color:'var(--text2)',fontWeight:700,fontSize:10}}>
+                        {st.target || st.label}
+                      </span>
+                      <span style={{color:'var(--text3)'}}>
+                        avg <strong style={{color:'var(--text)'}}>{fmt(st.avg)}{unit}</strong>
+                      </span>
+                      <span style={{color:'var(--text3)'}}>
+                        min <strong style={{color:'var(--green)'}}>{fmt(st.min)}</strong>
+                      </span>
+                      <span style={{color:'var(--text3)'}}>
+                        max <strong style={{color:'var(--red)'}}>{fmt(st.max)}</strong>
+                      </span>
+                      <span style={{color:'var(--text3)'}}>
+                        latest <strong style={{color:'var(--accent)'}}>{fmt(st.latest)}{unit}</strong>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )
+            }
+            const renderAggChart = (chart, emptyLabel) => {
+              if (netHistLoading) return <div className="sm-empty">Loading…</div>
+              if (!chart || chart.isEmpty) return <div className="sm-empty">{emptyLabel}</div>
+              return (
+                <Line
+                  data={chart.data}
+                  options={buildAggregateChartOptions(tc, chart.yLabel, chart.scaleOpts || {}, chart.decimals)}
+                />
+              )
+            }
+            return (
+              <>
+                {/* Section divider before the trend drill-down */}
+                {dailyHealth && dailyHealth.spanDays >= 1 && dailyHealth.days.length >= 2 && (
+                  <div style={{margin:'4px 0 8px',display:'flex',alignItems:'center',gap:8}}>
+                    <span style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.08em'}}>
+                      ▾ Drill-down · Trend by target
+                    </span>
+                    <div style={{flex:1,height:1,background:'var(--border)'}}/>
+                  </div>
+                )}
+
+                <div className="sm-g2 sm-section-mb">
+                  <div className="sm-tr">
+                    <div className="sm-tr-hd">
+                      <span className="sm-tr-title">📡 Avg Ping Latency by Target</span>
+                      <span style={{fontSize:9.5,fontFamily:'var(--mono)',color:'var(--text3)'}}>ms · fleet-wide mean · auto-scaled</span>
+                    </div>
+                    {renderStatsStrip(netLatencyTimeChart)}
+                    <div className="sm-tr-body sm-chart-tall">
+                      {renderAggChart(netLatencyTimeChart, 'No ping latency data in this range')}
+                    </div>
+                  </div>
+                  <div className="sm-tr">
+                    <div className="sm-tr-hd">
+                      <span className="sm-tr-title">📉 Packet Loss by Target</span>
+                      <span style={{fontSize:9.5,fontFamily:'var(--mono)',color:'var(--text3)'}}>% · fleet-wide mean · auto-scaled</span>
+                    </div>
+                    {renderStatsStrip(netLossTimeChart)}
+                    <div className="sm-tr-body sm-chart-tall">
+                      {renderAggChart(netLossTimeChart, 'No packet loss data in this range')}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="sm-g2 sm-section-mb">
+                  <div className="sm-tr">
+                    <div className="sm-tr-hd">
+                      <span className="sm-tr-title">🌐 DNS Success Rate by Domain</span>
+                      <span style={{fontSize:9.5,fontFamily:'var(--mono)',color:'var(--text3)'}}>% · 100 = all queries OK</span>
+                    </div>
+                    {renderStatsStrip(netDnsTimeChart)}
+                    <div className="sm-tr-body sm-chart-tall">
+                      {renderAggChart(netDnsTimeChart, 'No DNS data in this range')}
+                    </div>
+                  </div>
+                  <div className="sm-tr">
+                    <div className="sm-tr-hd">
+                      <span className="sm-tr-title">🔗 HTTP Success Rate by URL</span>
+                      <span style={{fontSize:9.5,fontFamily:'var(--mono)',color:'var(--text3)'}}>% · 100 = all requests OK</span>
+                    </div>
+                    {renderStatsStrip(netHttpTimeChart)}
+                    <div className="sm-tr-body sm-chart-tall">
+                      {renderAggChart(netHttpTimeChart, 'No HTTP data in this range')}
+                    </div>
+                  </div>
+                </div>
+              </>
+            )
+          })()}
 
           <div className="sm-g2">
             <div className="sm-tr">
@@ -2127,7 +3740,7 @@ export default function StoreMonitorPage() {
                 </div>
               )}
 
-              {/* ── Time Range + Custom picker + Business Hours ── */}
+              {/* ── Time Range + Custom picker (BH lives in global page header) ── */}
               <div style={{background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:'var(--sm-r-lg)',padding:'10px 14px',marginBottom:10,display:'flex',flexDirection:'column',gap:10}}>
 
                 {/* row 1: preset + custom toggle + data info */}
@@ -2191,35 +3804,6 @@ export default function StoreMonitorPage() {
                     </div>
                   </div>
                 )}
-
-                {/* row 3: business hours filter */}
-                <div style={{display:'flex',flexWrap:'wrap',alignItems:'center',gap:8,borderTop:'1px solid var(--border)',paddingTop:8}}>
-                  <label style={{display:'flex',alignItems:'center',gap:5,fontSize:11,color:'var(--text2)',cursor:'pointer',fontWeight:600}}>
-                    <input type="checkbox" checked={bh.enabled} onChange={(e)=>setBh((b)=>({...b,enabled:e.target.checked}))}/>
-                    Business Hours only
-                  </label>
-                  {bh.enabled && (
-                    <>
-                      <div style={{display:'flex',alignItems:'center',gap:3}}>
-                        {BH_DAYS.map((d)=>(
-                          <button key={d.val} type="button"
-                            className={`sm-bh-dayBtn${bh.weekdays.includes(d.val)?' on':''}`}
-                            onClick={()=>setBh((b)=>({...b,weekdays:b.weekdays.includes(d.val)?b.weekdays.filter((x)=>x!==d.val):[...b.weekdays,d.val].sort()}))}>
-                            {d.label}
-                          </button>
-                        ))}
-                      </div>
-                      <div style={{display:'flex',alignItems:'center',gap:5,fontSize:11}}>
-                        <input type="number" min={0} max={23} value={bh.startHour} className="sm-input"
-                          style={{width:48,textAlign:'center'}} onChange={(e)=>setBh((b)=>({...b,startHour:+e.target.value}))}/>
-                        <span style={{color:'var(--text3)'}}>:00 — </span>
-                        <input type="number" min={1} max={24} value={bh.endHour} className="sm-input"
-                          style={{width:48,textAlign:'center'}} onChange={(e)=>setBh((b)=>({...b,endHour:+e.target.value}))}/>
-                        <span style={{color:'var(--text3)'}}>:00</span>
-                      </div>
-                    </>
-                  )}
-                </div>
               </div>
 
               {/* ── Periodic charts ── */}
@@ -2238,7 +3822,13 @@ export default function StoreMonitorPage() {
                         📊 Data available: <strong style={{color:'var(--green)'}}>
                           {new Date(history.dataFrom).toLocaleString()} → {new Date(history.dataTo).toLocaleString()}
                         </strong>
-                        <span style={{marginLeft:8,color:'var(--text3)'}}>{history.pointCount} pts</span>
+                        <span style={{marginLeft:8,color:'var(--text3)'}}>
+                          {bhFilteredCount !== null ? (
+                            <>{bhFilteredCount} pts <span style={{color:'var(--text3)',opacity:.6}}>({history.pointCount} total)</span></>
+                          ) : (
+                            <>{history.pointCount} pts</>
+                          )}
+                        </span>
                       </span>
                     ) : (
                       <span style={{color:'var(--amber)'}}>
@@ -2274,6 +3864,12 @@ export default function StoreMonitorPage() {
                     chart: speedChart,
                     empty: 'No speedtest data in this range',
                     opts:  buildChartOptions(tc, 'Mbps', { min: 0 }),
+                  },
+                  {
+                    title: '🔗 Connectivity', sub: 'state over time — gaps = no data',
+                    chart: connHistChart,
+                    empty: 'No connectivity data in this range',
+                    opts:  buildChartOptions(tc, '', { min: 0 }),
                   },
                 ].map(({ title, sub, chart, empty, opts }) => (
                   <div key={title} className="sm-tr">
@@ -2433,7 +4029,14 @@ export default function StoreMonitorPage() {
           {/* Per-store crash table */}
           <div className="sm-tr">
             <div className="sm-tr-hd">
-              <span className="sm-tr-title">Store-wise Crash Details</span>
+              <span className="sm-tr-title">
+                Store-wise Crash Details
+                {bhAllow && (
+                  <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--amber)',marginLeft:8,fontWeight:500}}>
+                    ● BH filter active
+                  </span>
+                )}
+              </span>
               <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
                 {(crashData?.summary||[]).length} records
               </span>
@@ -2456,9 +4059,12 @@ export default function StoreMonitorPage() {
                       if (crashAppFilter  && s.appName   !== crashAppFilter)  return false
                       if (crashTypeFilter && s.crashType !== crashTypeFilter) return false
                       if (q && !`${s.hostname} ${s.serial} ${s.appName||''} ${s.crashType||''}`.toLowerCase().includes(q)) return false
+                      if (bhAllow && !bhAllow(s.lastSeen || s.lastEventAt || s.lastSeenAt)) return false
                       return true
                     })
-                    if (!filtered.length) return <tr><td colSpan={10} className="sm-empty">No crash events found</td></tr>
+                    if (!filtered.length) return <tr><td colSpan={10} className="sm-empty">
+                      {bhAllow ? 'No crash events during business hours' : 'No crash events found'}
+                    </td></tr>
                     return filtered.map((s,i)=>{
                       const groups = deriveGroups(s.hostname, '', false)
                       const cm = crashMeta(s.crashType)
@@ -2899,7 +4505,7 @@ export default function StoreMonitorPage() {
                 const count = st.id === 'all' ? ropAllStores.length
                   : st.id === 'sdwan' ? ropSdwanStores.length
                   : st.id === 'manual_sdwan' ? ropManualStores.length
-                  : ropOnlyStores.length
+                  : ropOnlyWithoutManualStores.length
                 return (
                   <button key={st.id} type="button"
                     className={`sm-subtab${ropSubTab === st.id ? ' active' : ''}`}
@@ -3367,8 +4973,21 @@ export default function StoreMonitorPage() {
             })()}
 
             {/* records table */}
-            {probHist?.records?.length > 0 && (
+            {probHist?.records?.length > 0 && (() => {
+              const visibleRecords = bhAllow
+                ? probHist.records.filter((r) => bhAllow(r.firstSeenAt))
+                : probHist.records
+              const hiddenCount = probHist.records.length - visibleRecords.length
+              return (
               <>
+                {bhAllow && hiddenCount > 0 && (
+                  <div style={{marginBottom:8,padding:'6px 10px',background:'rgba(245,158,11,.08)',
+                    border:'1px solid rgba(245,158,11,.25)',borderRadius:6,fontSize:11,
+                    fontFamily:'var(--mono)',color:'var(--amber)'}}>
+                    ● BH filter active — showing {visibleRecords.length} of {probHist.records.length} records
+                    ({hiddenCount} hidden because they started outside business hours)
+                  </div>
+                )}
                 <div className="sm-tbl-wrap">
                   <table className="sm-tbl">
                     <thead>
@@ -3379,7 +4998,7 @@ export default function StoreMonitorPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {probHist.records.map((r, i) => {
+                      {visibleRecords.map((r, i) => {
                         const durSec = r.durationMs ? Math.floor(r.durationMs / 1000) : null
                         const durLabel = durSec == null ? '—'
                           : durSec < 60 ? `${durSec}s`
@@ -3431,7 +5050,8 @@ export default function StoreMonitorPage() {
                   </div>
                 )}
               </>
-            )}
+              )
+            })()}
           </>
         )
       })()}

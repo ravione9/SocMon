@@ -9,16 +9,19 @@ import StoreAlertRule from '../models/StoreAlertRule.js'
 import StoreAlertEvent from '../models/StoreAlertEvent.js'
 import { dispatchAlertNotifications } from './storeAlertNotify.js'
 import { fetchStoreSnapshot, fetchCrashCountsPerStore, isInfluxStoreConfigured, isStoreOfflineForAlert } from './influxStore.js'
+import { publishAlertEvent } from './kafkaProducer.js'
 
 const EVAL_INTERVAL_MS = parseInt(process.env.STORE_ALERT_INTERVAL_MS || '120000', 10) // 2 min default
 
-export function deriveGroupsServer(hostname, gatewayVendor, isFortinet) {
+export function deriveGroupsServer(hostname, gatewayVendor, isFortinet, lastGatewayVendor = '', lastIsFortinet = false) {
   const h = String(hostname || '').trim().toUpperCase()
-  const v = String(gatewayVendor || '').trim().toLowerCase()
   const groups = []
   if (h.startsWith('RP'))       groups.push('RP Group')
   else if (h.startsWith('LK')) groups.push('POS System Group')
-  if (isFortinet || v.includes('fortinet') || v.includes('fortigate')) groups.push('SD-WAN Group')
+  const fortinet =
+    isFortinet || /fortinet|fortigate/i.test(String(gatewayVendor || '')) ||
+    lastIsFortinet || /fortinet|fortigate/i.test(String(lastGatewayVendor || ''))
+  if (fortinet) groups.push('SD-WAN Group')
   if (groups.length === 0) groups.push('General Group')
   return groups
 }
@@ -117,7 +120,7 @@ export async function runStoreAlertEval() {
       // 1. Find affected stores
       const affected = stores.filter((s) => {
         if (rule.group !== 'all') {
-          const grps = deriveGroupsServer(s.hostname, s.gatewayVendor, s.isFortinet)
+          const grps = deriveGroupsServer(s.hostname, s.gatewayVendor, s.isFortinet, s.lastGatewayVendor, s.lastIsFortinet)
           if (!grps.includes(rule.group)) return false
         }
         return evaluateCondition(rule.condition, s)
@@ -224,6 +227,9 @@ export async function runStoreAlertEval() {
 
       // Broadcast to all subscribed clients in real-time
       if (_io) _io.to('store-alerts').emit('store:alert', alertEvent)
+
+      // Publish to Kafka
+      publishAlertEvent(alertEvent).catch((e) => console.error('[storeAlertEngine] Kafka publish error:', e.message))
 
       results.push({ rule: rule.name, fired: true, affected: affected.length, dispatch })
       fired++
