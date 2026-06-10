@@ -226,43 +226,15 @@ function buildSingleGroupDisconnectChart(group, days, groupName, tc) {
       datasets: [
         {
           type: 'bar',
-          label: 'New disconnects',
-          data: days.map((d) => {
-            const day = group.days.find((x) => x.dayMs === d.dayMs)
-            return day?.newDisconnects ?? 0
-          }),
-          backgroundColor: '#f59e0b88',
-          borderColor: '#f59e0b',
-          borderWidth: 1.5,
-          stack: 'events',
-          yAxisID: 'y',
-        },
-        {
-          type: 'bar',
-          label: 'Recovered',
-          data: days.map((d) => {
-            const day = group.days.find((x) => x.dayMs === d.dayMs)
-            return -(day?.recoveries ?? 0)
-          }),
-          backgroundColor: '#22c55e88',
-          borderColor: '#22c55e',
-          borderWidth: 1.5,
-          stack: 'events',
-          yAxisID: 'y',
-        },
-        {
-          type: 'line',
-          label: 'Stores Down (state)',
+          label: 'Stores Down',
           data: days.map((d) => {
             const day = group.days.find((x) => x.dayMs === d.dayMs)
             return day?.disconnections ?? 0
           }),
+          backgroundColor: color + '88',
           borderColor: color,
-          backgroundColor: color + '22',
-          borderWidth: 2,
-          pointRadius: 3,
-          tension: 0.25,
-          yAxisID: 'y1',
+          borderWidth: 1.5,
+          yAxisID: 'y',
         },
       ],
     },
@@ -283,18 +255,14 @@ function buildSingleGroupDisconnectChart(group, days, groupName, tc) {
           borderColor: tc.border,
           borderWidth: 1,
           callbacks: {
-            label: (ctx) => {
-              const v = Math.abs(ctx.parsed.y)
-              return `${ctx.dataset.label}: ${v}`
-            },
-            afterBody: (items) => {
-              if (!items?.length) return ''
-              const day = group.days.find((x, i) => i === items[0].dataIndex)
+            afterLabel: (ctx) => {
+              const day = group.days.find((x, i) => i === ctx.dataIndex)
               if (!day) return ''
               const m = day.offlineMinutes || 0
               const h = Math.floor(m / 60)
               const r = m % 60
-              return [`Offline: ${h > 0 ? `${h}h ${r}m` : `${m}m`}`]
+              const dur = h > 0 ? `${h}h ${r}m` : `${m}m`
+              return `Offline: ${dur}`
             },
           },
         },
@@ -307,22 +275,9 @@ function buildSingleGroupDisconnectChart(group, days, groupName, tc) {
         y: {
           type: 'linear',
           position: 'left',
-          title: { display: true, text: 'Events / day', color: tc.text3, font: { family: 'var(--mono)', size: 10 } },
-          ticks: {
-            color: tc.text3,
-            font: { family: 'var(--mono)', size: 9 },
-            precision: 0,
-            callback: (v) => Math.abs(v),
-          },
-          grid: { color: tc.border + '40' },
-          beginAtZero: true,
-        },
-        y1: {
-          type: 'linear',
-          position: 'right',
           title: { display: true, text: 'Stores Down', color: tc.text3, font: { family: 'var(--mono)', size: 10 } },
           ticks: { color: tc.text3, font: { family: 'var(--mono)', size: 9 }, precision: 0 },
-          grid: { drawOnChartArea: false },
+          grid: { color: tc.border + '40' },
           beginAtZero: true,
         },
       },
@@ -3231,7 +3186,7 @@ export default function StoreMonitorPage() {
                   🌐 Group Internet Disconnections & Offline Time (Day-wise)
                 </span>
                 <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
-                  New = events that started this day · Stores Down = state during the day · Uptime % = online machine-minutes ÷ possible
+                  disconnects = distinct stores impacted that day (flap-deduped) · uptime % = online machine-minutes ÷ possible machine-minutes
                 </span>
                 {bh.enabled && (
                   <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--amber)'}}>
@@ -3316,14 +3271,13 @@ export default function StoreMonitorPage() {
                               <thead>
                                 <tr>
                                   <th>Day</th>
-                                  <th title="NEW disconnect events that started this day (an outage spanning multiple days only counts on its start day)">New</th>
-                                  <th title="Distinct stores still down at any point this day (multi-day outages counted each day)">Stores Down</th>
+                                  <th title="Distinct stores impacted that day (each store counted once per day, no matter how many flaps)">Stores Down</th>
                                   <th>Uptime %</th>
                                 </tr>
                               </thead>
                               <tbody>
                                 {days.map((d) => {
-                                  const day = group.days.find((x) => x.dayMs === d.dayMs) || { disconnections: 0, newDisconnects: 0, recoveries: 0, offlineMinutes: 0 }
+                                  const day = group.days.find((x) => x.dayMs === d.dayMs) || { disconnections: 0, offlineMinutes: 0 }
                                   const dt = new Date(d.dayMs)
                                   const isToday = dt.toDateString() === new Date().toDateString()
                                   const winMins = dayWindowMinutes(d.dayMs, bh)
@@ -3331,22 +3285,10 @@ export default function StoreMonitorPage() {
                                   const upTitle = winMins > 0
                                     ? `${fmtOfflineMinutes(day.offlineMinutes)} offline · ${group.storeCount} stores × ${winMins}m window`
                                     : (bh?.enabled ? 'Outside business hours' : 'No window')
-                                  const newTitle = day.recoveries
-                                    ? `${day.newDisconnects} new · ${day.recoveries} recovered`
-                                    : `${day.newDisconnects} new disconnect event${day.newDisconnects === 1 ? '' : 's'} started this day`
                                   return (
                                     <tr key={d.dayMs}>
                                       <td style={{whiteSpace:'nowrap', fontWeight: isToday ? 700 : 500, color: isToday ? 'var(--accent)' : 'var(--text2)'}}>
                                         {dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}
-                                      </td>
-                                      <td title={newTitle}
-                                        style={{fontFamily:'var(--mono)', fontWeight:700, color: day.newDisconnects > 0 ? '#f59e0b' : 'var(--text3)'}}>
-                                        {day.newDisconnects}
-                                        {day.recoveries > 0 && (
-                                          <span style={{marginLeft:6, color:'#22c55e', fontSize:10, fontWeight:600}}>
-                                            -{day.recoveries}
-                                          </span>
-                                        )}
                                       </td>
                                       <td style={{fontFamily:'var(--mono)', fontWeight:700, color: day.disconnections > 0 ? '#ef4444' : 'var(--text3)'}}>
                                         {day.disconnections}
@@ -3367,16 +3309,6 @@ export default function StoreMonitorPage() {
                                   return (
                                     <tr style={{borderTop:'2px solid var(--border)'}}>
                                       <td style={{fontWeight:700, color:'var(--text2)'}}>Total</td>
-                                      <td
-                                        title={`${group.totals.newDisconnects || 0} new disconnects · ${group.totals.recoveries || 0} recovered in the window`}
-                                        style={{fontFamily:'var(--mono)', fontWeight:700, color: (group.totals.newDisconnects || 0) > 0 ? '#f59e0b' : 'var(--text3)'}}>
-                                        {group.totals.newDisconnects || 0}
-                                        {group.totals.recoveries > 0 && (
-                                          <span style={{marginLeft:6, color:'#22c55e', fontSize:10, fontWeight:600}}>
-                                            -{group.totals.recoveries}
-                                          </span>
-                                        )}
-                                      </td>
                                       <td
                                         title={group.totals.uniqueStoresImpacted != null
                                           ? `Column sum · ${group.totals.uniqueStoresImpacted} unique stores impacted across the window`
@@ -3400,7 +3332,7 @@ export default function StoreMonitorPage() {
                             padding:'8px 10px', minHeight:220, display:'flex', flexDirection:'column',
                           }}>
                             <div style={{fontSize:10, fontFamily:'var(--mono)', color:'var(--text3)', marginBottom:6, textTransform:'uppercase', letterSpacing:'.06em'}}>
-                              New disconnects + recoveries (bars) · Stores Down state (line)
+                              Stores Down per day (bars) · hover for offline duration
                             </div>
                             {chart ? (
                               <div style={{flex:1, minHeight:180, position:'relative'}}>

@@ -218,38 +218,27 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
   const days = buildDayList(fromMs, toMs)
   const dayMsList = days.map((d) => d.dayMs)
 
-  // Per-group state:
-  //   - impactedTagsByDay = unique stores down on that day (state)
-  //   - newDisconnectsByDay = events whose firstSeenAt is on that day (deltas)
-  //   - recoveriesByDay = events whose resolvedAt is on that day (deltas)
+  // Per-group state. `impactedTagsByDay` keeps the per-day set of distinct
+  // stores so we can report "stores impacted" instead of raw transition counts
+  // (the snapshotter creates a new record on every offline→online→offline flap;
+  // counting those directly produces 20k+ per day for a 700-store fleet).
   const perGroup = new Map()
   for (const def of groupDefs) {
     const dayStats = new Map()
     const impactedTagsByDay = new Map()
-    const newDisconnectsByDay = new Map()
-    const recoveriesByDay = new Map()
     for (const d of dayMsList) {
       dayStats.set(d, { offlineMinutes: 0 })
       impactedTagsByDay.set(d, new Set())
-      newDisconnectsByDay.set(d, 0)
-      recoveriesByDay.set(d, 0)
     }
     perGroup.set(def.name, {
       name: def.name,
       tagsInGroup: new Set(def.tags),
       dayStats,
       impactedTagsByDay,
-      newDisconnectsByDay,
-      recoveriesByDay,
       impactedTagsTotal: new Set(),
       reportingTags: new Set(),
-      totals: { offlineMinutes: 0, newDisconnects: 0, recoveries: 0 },
+      totals: { offlineMinutes: 0 },
     })
-  }
-
-  function dayMsContaining(tsMs) {
-    const d = new Date(tsMs); d.setHours(0, 0, 0, 0)
-    return d.getTime()
   }
 
   for (const rec of records) {
@@ -267,28 +256,6 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
       if (!g) continue
       g.reportingTags.add(tag)
 
-      // New disconnect attribution (event-level): the day this outage started,
-      // if it falls within the window.
-      if (startMs >= fromMs && startMs < toMs) {
-        const dayMs = dayMsContaining(startMs)
-        if (g.newDisconnectsByDay.has(dayMs)) {
-          g.newDisconnectsByDay.set(dayMs, g.newDisconnectsByDay.get(dayMs) + 1)
-          g.totals.newDisconnects += 1
-        }
-      }
-      // Recovery attribution: the day the outage ended, if it's in window.
-      if (rec.resolvedAt) {
-        const resolvedMs = new Date(rec.resolvedAt).getTime()
-        if (resolvedMs >= fromMs && resolvedMs < toMs) {
-          const dayMs = dayMsContaining(resolvedMs)
-          if (g.recoveriesByDay.has(dayMs)) {
-            g.recoveriesByDay.set(dayMs, g.recoveriesByDay.get(dayMs) + 1)
-            g.totals.recoveries += 1
-          }
-        }
-      }
-
-      // State + offline minutes: which days this outage overlapped.
       let storeImpactedAnyDay = false
       for (const dayMs of dayMsList) {
         const dayStartMs = dayMs
@@ -321,19 +288,19 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
     const daysOut = dayMsList.map((dayMs) => {
       const s = g.dayStats.get(dayMs)
       const impacted = g.impactedTagsByDay.get(dayMs)?.size || 0
-      const newDis = g.newDisconnectsByDay.get(dayMs) || 0
-      const recov = g.recoveriesByDay.get(dayMs) || 0
       return {
         dayMs,
-        // "disconnections" = distinct stores impacted that day (state view).
+        // "disconnections" now means "distinct stores impacted that day" so a
+        // flap doesn't get counted 30 times and a multi-day outage shows up on
+        // each day it touches.
         disconnections: impacted,
-        // "newDisconnects" = events whose firstSeenAt was that day (event view).
-        newDisconnects: newDis,
-        recoveries: recov,
         offlineMinutes: s.offlineMinutes,
         offlineHours: Math.round((s.offlineMinutes / 60) * 100) / 100,
       }
     })
+    // Total row should sum the column for intuitive tabular math. The unique
+    // store count is exposed separately as `uniqueStoresImpacted` for the
+    // tooltip / consumers that want it.
     const sumDisconnections = daysOut.reduce((sum, d) => sum + d.disconnections, 0)
     return {
       name: def.name,
@@ -342,8 +309,6 @@ export async function fetchGroupOfflineSummary(rangeSec = 86400, fromSec, toSec,
       totals: {
         disconnections: sumDisconnections,
         uniqueStoresImpacted: g.impactedTagsTotal.size,
-        newDisconnects: g.totals.newDisconnects,
-        recoveries: g.totals.recoveries,
         offlineMinutes: g.totals.offlineMinutes,
         offlineHours: Math.round((g.totals.offlineMinutes / 60) * 100) / 100,
       },
