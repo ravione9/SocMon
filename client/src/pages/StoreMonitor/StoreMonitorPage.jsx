@@ -1923,6 +1923,105 @@ export default function StoreMonitorPage() {
     return { spanDays, days }
   }, [netHist])
 
+  /* ── Per-group Daily Health Summary ──
+     Same rollup as `dailyHealth` above but split per group using the data we
+     already fetched for the Group × Day matrix (groupHist.groupSeries).
+     Returns: { spanDays, byGroup: Map<groupName, days[]> }
+  */
+  const dailyHealthByGroup = useMemo(() => {
+    if (!groupHist?.groupSeries?.length) return null
+
+    const fromMs = groupHist.requestedFrom ? new Date(groupHist.requestedFrom).getTime() : Date.now()
+    const toMs   = groupHist.requestedTo   ? new Date(groupHist.requestedTo  ).getTime() : Date.now()
+    const spanDays = Math.max(0, Math.round((toMs - fromMs) / 86_400_000))
+    const start = new Date(fromMs); start.setHours(0,0,0,0)
+    const end   = new Date(toMs);   end.setHours(0,0,0,0)
+    const dayMsList = []
+    for (let d = new Date(start); d.getTime() <= end.getTime(); d = new Date(d.getTime() + 86_400_000)) {
+      dayMsList.push(d.getTime())
+    }
+
+    function dayKey(clockSec) {
+      const d = new Date(clockSec * 1000); d.setHours(0,0,0,0)
+      return d.getTime()
+    }
+    const avg = (arr) => arr.length ? arr.reduce((a, v) => a + v, 0) / arr.length : null
+    const max = (arr) => arr.length ? Math.max(...arr) : null
+
+    function healthScore({ latencyAvg, lossAvg }) {
+      let score = 100
+      if (latencyAvg != null) {
+        if (latencyAvg > 200) score -= 25
+        else if (latencyAvg > 100) score -= 12
+        else if (latencyAvg > 50)  score -= 5
+      }
+      if (lossAvg != null) {
+        if (lossAvg > 10) score -= 35
+        else if (lossAvg >  5) score -= 20
+        else if (lossAvg >  1) score -= 8
+      }
+      return Math.max(0, Math.min(100, Math.round(score)))
+    }
+    function healthBand(score) {
+      if (score == null) return { label: 'No data', color: '#64748b' }
+      if (score >= 95) return { label: 'Healthy',  color: '#22c55e' }
+      if (score >= 85) return { label: 'OK',       color: '#eab308' }
+      if (score >= 70) return { label: 'Degraded', color: '#f97316' }
+      return                   { label: 'Poor',    color: '#ef4444' }
+    }
+
+    // groupName -> dayMs -> { latency:[], loss:[] }
+    const buckets = new Map()
+    for (const s of groupHist.groupSeries) {
+      if (!s?.group) continue
+      if (!buckets.has(s.group)) {
+        const m = new Map()
+        for (const k of dayMsList) m.set(k, { latency: [], loss: [] })
+        buckets.set(s.group, m)
+      }
+      const dayMap = buckets.get(s.group)
+      const which = s.field === 'packet_loss_pct' ? 'loss'
+                  : s.field === 'average_response_ms' ? 'latency'
+                  : null
+      if (!which) continue
+      for (const p of (s.points || [])) {
+        const k = dayKey(Number(p.clock))
+        const b = dayMap.get(k)
+        if (!b) continue
+        const v = Number(p.value)
+        if (Number.isFinite(v)) b[which].push(v)
+      }
+    }
+
+    const byGroup = new Map()
+    for (const [name, dayMap] of buckets.entries()) {
+      const days = dayMsList.map((dayMs) => {
+        const b = dayMap.get(dayMs) || { latency: [], loss: [] }
+        const d = new Date(dayMs)
+        const latencyAvg = avg(b.latency)
+        const latencyMax = max(b.latency)
+        const lossAvg = avg(b.loss)
+        const lossMax = max(b.loss)
+        const samples = b.latency.length + b.loss.length
+        const score = samples > 0 ? healthScore({ latencyAvg, lossAvg }) : null
+        const band = healthBand(score)
+        return {
+          dayMs,
+          dateLabel: d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+          weekday: d.toLocaleDateString(undefined, { weekday: 'short' }),
+          isToday: d.toDateString() === new Date().toDateString(),
+          latencyAvg, latencyMax,
+          lossAvg, lossMax,
+          samples,
+          score, band,
+        }
+      })
+      byGroup.set(name, days)
+    }
+
+    return { spanDays, dayMsList, byGroup }
+  }, [groupHist])
+
   /* ── Group × Day health matrix (latency + loss per group per calendar day) ── */
   const groupDailyMatrix = useMemo(() => {
     if (!groupHist?.groupSeries?.length) return null
@@ -3339,6 +3438,184 @@ export default function StoreMonitorPage() {
                 <span><span style={{display:'inline-block',width:8,height:8,background:'#f97316',borderRadius:2,marginRight:4,verticalAlign:'middle'}}/>70–84 Degraded</span>
                 <span><span style={{display:'inline-block',width:8,height:8,background:'#ef4444',borderRadius:2,marginRight:4,verticalAlign:'middle'}}/>&lt;70 Poor</span>
                 <span style={{marginLeft:'auto'}}>Score = 100 − penalties for latency &gt;50/100/200ms, loss &gt;1/5/10%, DNS &lt;99%, HTTP &lt;98%</span>
+              </div>
+            </div>
+          )}
+
+          {/* ── DAILY HEALTH per group ── */}
+          {dailyHealthByGroup && dailyHealthByGroup.spanDays >= 1 && dailyHealthByGroup.dayMsList.length >= 2 && (
+            <div className="sm-tr sm-section-mb">
+              <div className="sm-tr-hd">
+                <span className="sm-tr-title">👥 Daily Health Summary · per group</span>
+                <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                  {dailyHealthByGroup.dayMsList.length} days · one section per group
+                </span>
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:10,padding:'10px 12px'}}>
+                {displayedGroupCards.map((card) => {
+                  const meta = groupMetaFor(card.id)
+                  const days = dailyHealthByGroup.byGroup.get(card.id) || []
+                  const hasData = days.some((d) => d.samples > 0)
+                  return (
+                    <div key={card.id} style={{
+                      border:`1px solid ${meta.color}40`,
+                      borderLeft:`3px solid ${meta.color}`,
+                      borderRadius:'var(--sm-r)',
+                      background:'var(--bg)',
+                      overflow:'hidden',
+                    }}>
+                      <div style={{
+                        display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',
+                        padding:'8px 12px',background:`${meta.color}10`,
+                        borderBottom:'1px solid var(--border)',
+                      }}>
+                        <span style={{display:'inline-flex',alignItems:'center',gap:6,color:meta.color,fontWeight:700,fontSize:12}}>
+                          <span>{meta.icon}</span>
+                          <span>{shortGroupLabel(card.id)}</span>
+                        </span>
+                        <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                          {card.total ?? 0} total stores
+                        </span>
+                      </div>
+
+                      {hasData ? (
+                        <>
+                          {/* Day cards strip */}
+                          <div style={{padding:'10px 12px',display:'grid',
+                            gridTemplateColumns:`repeat(auto-fit, minmax(118px, 1fr))`,gap:8}}>
+                            {days.map((d) => {
+                              const noData = d.samples === 0
+                              return (
+                                <div key={d.dayMs}
+                                  title={`${d.weekday}, ${d.dateLabel} — ${noData ? 'no data' : `${d.band.label} (${d.score}/100)`}`}
+                                  style={{
+                                    position:'relative',
+                                    padding:'8px 10px 9px',
+                                    borderRadius:8,
+                                    background:`linear-gradient(180deg, ${d.band.color}10 0%, var(--bg3) 60%)`,
+                                    border:`1px solid ${d.band.color}40`,
+                                    borderLeft:`4px solid ${d.band.color}`,
+                                  }}>
+                                  <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between',gap:6}}>
+                                    <div>
+                                      <div style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.06em'}}>
+                                        {d.weekday}{d.isToday && <span style={{marginLeft:4,padding:'1px 5px',background:'var(--accent)',color:'#fff',borderRadius:3,fontSize:8}}>TODAY</span>}
+                                      </div>
+                                      <div style={{fontSize:13,fontWeight:700,color:'var(--text)',marginTop:1}}>{d.dateLabel}</div>
+                                    </div>
+                                    <div style={{textAlign:'right'}}>
+                                      {noData
+                                        ? <div style={{fontSize:10,color:'var(--text3)',fontFamily:'var(--mono)'}}>no data</div>
+                                        : <>
+                                            <div style={{fontSize:18,fontWeight:800,lineHeight:1,color:d.band.color,fontFamily:'var(--mono)'}}>
+                                              {d.score}
+                                            </div>
+                                            <div style={{fontSize:8.5,fontFamily:'var(--mono)',color:d.band.color,textTransform:'uppercase',letterSpacing:'.06em',marginTop:2}}>
+                                              {d.band.label}
+                                            </div>
+                                          </>}
+                                    </div>
+                                  </div>
+                                  {!noData && (
+                                    <div style={{marginTop:6,height:3,background:'var(--bg)',borderRadius:2,overflow:'hidden'}}>
+                                      <div style={{width:`${d.score}%`,height:'100%',background:d.band.color,transition:'width .2s'}}/>
+                                    </div>
+                                  )}
+                                  {!noData && (
+                                    <div style={{marginTop:7,display:'flex',flexDirection:'column',gap:3,fontSize:10.5,fontFamily:'var(--mono)'}}>
+                                      {d.latencyAvg != null && (
+                                        <div style={{display:'flex',justifyContent:'space-between'}}>
+                                          <span style={{color:'var(--text3)'}}>Latency</span>
+                                          <span style={{color: d.latencyAvg > 100 ? '#ef4444' : d.latencyAvg > 50 ? '#eab308' : 'var(--text)', fontWeight:700}}>
+                                            {d.latencyAvg.toFixed(0)}<span style={{color:'var(--text3)',fontWeight:400}}> ms</span>
+                                          </span>
+                                        </div>
+                                      )}
+                                      {d.lossAvg != null && (
+                                        <div style={{display:'flex',justifyContent:'space-between'}}>
+                                          <span style={{color:'var(--text3)'}}>Loss</span>
+                                          <span style={{color: d.lossAvg > 5 ? '#ef4444' : d.lossAvg > 1 ? '#eab308' : 'var(--text)', fontWeight:700}}>
+                                            {d.lossAvg.toFixed(2)}<span style={{color:'var(--text3)',fontWeight:400}}> %</span>
+                                          </span>
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+
+                          {/* Per-day detail table */}
+                          <div className="sm-tbl-wrap" style={{borderTop:'1px solid var(--border)'}}>
+                            <table className="sm-tbl">
+                              <thead>
+                                <tr>
+                                  <th>Day</th>
+                                  <th>Health</th>
+                                  <th>Latency avg / max</th>
+                                  <th>Loss avg / max</th>
+                                  <th>Samples</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {days.map((d) => {
+                                  const noData = d.samples === 0
+                                  const cell = (val, unit, thresholds) => {
+                                    if (val == null) return <span style={{color:'var(--text3)'}}>—</span>
+                                    const [warn, crit] = thresholds || [Infinity, Infinity]
+                                    const color = val >= crit ? '#ef4444' : val >= warn ? '#eab308' : 'var(--text)'
+                                    return <span style={{color,fontFamily:'var(--mono)',fontWeight:600}}>{val.toFixed(unit === '%' ? 2 : 1)}{unit}</span>
+                                  }
+                                  return (
+                                    <tr key={d.dayMs} style={noData ? {opacity:.6} : undefined}>
+                                      <td>
+                                        <div style={{display:'flex',flexDirection:'column'}}>
+                                          <span style={{fontWeight:700}}>{d.weekday}</span>
+                                          <span style={{fontFamily:'var(--mono)',fontSize:10,color:'var(--text3)'}}>{d.dateLabel}</span>
+                                        </div>
+                                      </td>
+                                      <td>
+                                        {noData
+                                          ? <span style={{color:'var(--text3)',fontSize:11}}>—</span>
+                                          : <span className="sm-pill" style={{background:`${d.band.color}22`,color:d.band.color,fontWeight:700,fontFamily:'var(--mono)'}}>
+                                              {d.score} · {d.band.label}
+                                            </span>}
+                                      </td>
+                                      <td>
+                                        {d.latencyAvg != null
+                                          ? <>
+                                              {cell(d.latencyAvg, ' ms', [50, 100])}
+                                              <span style={{color:'var(--text3)',fontFamily:'var(--mono)'}}> / </span>
+                                              {cell(d.latencyMax, ' ms', [100, 200])}
+                                            </>
+                                          : <span style={{color:'var(--text3)'}}>—</span>}
+                                      </td>
+                                      <td>
+                                        {d.lossAvg != null
+                                          ? <>
+                                              {cell(d.lossAvg, '%', [1, 5])}
+                                              <span style={{color:'var(--text3)',fontFamily:'var(--mono)'}}> / </span>
+                                              {cell(d.lossMax, '%', [5, 10])}
+                                            </>
+                                          : <span style={{color:'var(--text3)'}}>—</span>}
+                                      </td>
+                                      <td style={{fontFamily:'var(--mono)',fontSize:11,color:'var(--text3)'}}>{d.samples}</td>
+                                    </tr>
+                                  )
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </>
+                      ) : (
+                        <div style={{padding:'12px',fontSize:11,fontFamily:'var(--mono)',color:'var(--text3)'}}>
+                          {groupHistLoading ? 'Loading per-group time series…' : 'No latency / loss samples for this group in the selected range.'}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             </div>
           )}
