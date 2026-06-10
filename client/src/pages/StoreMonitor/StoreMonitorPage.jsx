@@ -238,7 +238,7 @@ function buildSingleGroupDisconnectChart(group, days, groupName, tc) {
         },
         {
           type: 'line',
-          label: 'Disconnects',
+          label: 'Stores Down',
           data: days.map((d) => {
             const day = group.days.find((x) => x.dayMs === d.dayMs)
             return day?.disconnections ?? 0
@@ -286,8 +286,8 @@ function buildSingleGroupDisconnectChart(group, days, groupName, tc) {
         y1: {
           type: 'linear',
           position: 'right',
-          title: { display: true, text: 'Disconnects', color: tc.text3, font: { family: 'var(--mono)', size: 10 } },
-          ticks: { color: tc.text3, font: { family: 'var(--mono)', size: 9 }, stepSize: 1 },
+          title: { display: true, text: 'Stores Down', color: tc.text3, font: { family: 'var(--mono)', size: 10 } },
+          ticks: { color: tc.text3, font: { family: 'var(--mono)', size: 9 }, stepSize: 1, precision: 0 },
           grid: { drawOnChartArea: false },
           beginAtZero: true,
         },
@@ -3339,7 +3339,7 @@ export default function StoreMonitorPage() {
                             padding:'8px 10px', minHeight:220, display:'flex', flexDirection:'column',
                           }}>
                             <div style={{fontSize:10, fontFamily:'var(--mono)', color:'var(--text3)', marginBottom:6, textTransform:'uppercase', letterSpacing:'.06em'}}>
-                              Offline minutes (bars) · Disconnects (line)
+                              Offline minutes (bars) · Stores Down (line)
                             </div>
                             {chart ? (
                               <div style={{flex:1, minHeight:180, position:'relative'}}>
