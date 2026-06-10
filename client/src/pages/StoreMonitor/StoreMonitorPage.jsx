@@ -3821,7 +3821,7 @@ export default function StoreMonitorPage() {
             <div className="sm-tr-hd">
               <span className="sm-tr-title">🕒 Store Disconnect Events Timeline</span>
               <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
-                real heartbeat gaps + rollups + last-heartbeat · aligns with day-wise graph
+                10 min silence min · per-store gap windows · still-offline cross-checked against snapshot
               </span>
             </div>
             <div style={{padding:'10px 12px'}}>

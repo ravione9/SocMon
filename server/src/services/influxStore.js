@@ -229,12 +229,61 @@ function bool(v) {
 }
 
 /** Coerce heartbeat.online (bool, int, float, or string) to 0, 1, or null. */
-function heartbeatOnlineNum(v) {
+export function heartbeatOnlineNum(v) {
   if (v === true || v === 'true') return 1
   if (v === false || v === 'false') return 0
   const n = num(v)
   if (n == null) return null
   return n >= 1 ? 1 : 0
+}
+
+/** Activity rescue window — matches snapshot (2× stale, min 30 min). */
+export function activityWindowMs(staleMinutes = 15) {
+  const staleMs = staleMinutes * 60 * 1000
+  return Math.max(staleMs * 2, 30 * 60 * 1000)
+}
+
+/**
+ * Live online check — same rules as the Store Monitor dashboard cards.
+ * 1) Fresh heartbeat with online=1 within stale window, OR
+ * 2) Any agent metric within the activity rescue window.
+ */
+export function isStoreOnlineLive(store, staleMinutes = 15, nowMs = Date.now()) {
+  if (!store) return false
+  const staleMs = staleMinutes * 60 * 1000
+  const hbTs = store.lastHeartbeatAt
+    ? new Date(store.lastHeartbeatAt).getTime()
+    : (store._latestActivityTs || 0)
+  const hbVal = store.heartbeatValue != null ? heartbeatOnlineNum(store.heartbeatValue) : null
+  if (hbVal === 1 && hbTs > 0 && nowMs - hbTs <= staleMs) return true
+  const activityMs = activityWindowMs(staleMinutes)
+  if (store._latestActivityTs && nowMs - store._latestActivityTs <= activityMs) return true
+  return false
+}
+
+/** Dashboard / report online count — uses finalized store.online when present. */
+export function isStoreOnlineForCount(store, staleMinutes = 15, nowMs = Date.now()) {
+  if (!store) return false
+  if (typeof store.online === 'boolean') return store.online
+  return isStoreOnlineLive(store, staleMinutes, nowMs)
+}
+
+/** Apply dashboard online rules to a store object (sets online + onlineReason). */
+export function finalizeStoreOnlineStatus(store, staleMinutes = 15, nowMs = Date.now()) {
+  if (!store) return store
+  const staleMs = staleMinutes * 60 * 1000
+  const hbTs = store.lastHeartbeatAt ? new Date(store.lastHeartbeatAt).getTime() : 0
+  const hbVal = store.heartbeatValue != null ? heartbeatOnlineNum(store.heartbeatValue) : null
+  if (store.heartbeatOnline == null) store.heartbeatOnline = false
+  store.heartbeatOnline = hbVal === 1 && hbTs > 0 && nowMs - hbTs <= staleMs
+  store.online = store.heartbeatOnline
+  store.onlineReason = undefined
+  const activityMs = activityWindowMs(staleMinutes)
+  if (!store.online && store._latestActivityTs && nowMs - store._latestActivityTs <= activityMs) {
+    store.online = true
+    store.onlineReason = 'activity'
+  }
+  return store
 }
 
 function rowTime(row) {
@@ -436,13 +485,11 @@ function ensureStore(map, row) {
 
 /** True when a store should trigger an offline alert (stricter than dashboard display online). */
 export function isStoreOfflineForAlert(store) {
-  // Agent explicitly reported offline (heartbeat field = 0) — alert even if metrics still flowing
+  if (!store) return false
+  if (isStoreOnlineForCount(store)) return false
   if (store.heartbeatValue === 0 && store.heartbeatOnline === false) return true
-  // Dashboard offline (not rescued by activity heuristic)
-  if (!store.online && store.onlineReason !== 'activity') return true
-  // Stale heartbeat with no recent agent contact at all
   if (store.hadHeartbeat && store.heartbeatOnline === false && !store._latestActivityTs) return true
-  return false
+  return !store.online && store.onlineReason !== 'activity'
 }
 
 function detectIssues(store, staleMinutes = 15) {
@@ -693,22 +740,12 @@ async function _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, 
     const hbVal = heartbeatOnlineNum(row._value)
     s.heartbeatValue = hbVal
     s.lastHeartbeatAt = rowTime(row)
-    s.heartbeatOnline = hbVal === 1 && t > 0 && now - t <= staleMs
-    s.online = s.heartbeatOnline
     s.hadHeartbeat = true
     s.hostname = row.hostname || s.hostname
     s.serial = row.serial || s.serial
-    // A heartbeat (even with value=0) proves the PS agent is running — count as activity.
     if (t > 0 && (!s._latestActivityTs || t > s._latestActivityTs)) s._latestActivityTs = t
   }
 
-  for (const [, s] of stores) {
-    if (s.heartbeatOnline == null) s.heartbeatOnline = false
-  }
-
-  // Helper: bump the "latest any-data" timestamp for a store.
-  // Used below so a store is considered online if ANY metric arrived within staleMs,
-  // even if its heartbeat is stale (e.g. heartbeat module crashed but other probes run fine).
   function bumpActivity(s, row) {
     if (!row._time) return
     const t = new Date(row._time).getTime()
@@ -814,17 +851,9 @@ async function _doFetchStoreSnapshot(staleMinutes, discoveryRange, rangeClause, 
     bumpActivity(s, row)
   }
 
-  // Secondary online heuristic: if heartbeat is stale but ANY other metric arrived
-  // within activityMs, the PS agent is clearly running — treat the store as online.
-  // activityMs is 2× the stale window (min 30 min) because the PS agent writes all
-  // measurements together; if even heartbeat is a few cycles late the other data is
-  // also the same age, so we need a wider window to rescue it from false-OFFLINE.
-  const activityMs = Math.max(staleMs * 2, 30 * 60 * 1000)
+  // Secondary online heuristic — shared with finalizeStoreOnlineStatus().
   for (const [, s] of stores) {
-    if (!s.online && s._latestActivityTs && now - s._latestActivityTs <= activityMs) {
-      s.online = true
-      s.onlineReason = 'activity'  // heartbeat stale but metrics active within activityMs
-    }
+    finalizeStoreOnlineStatus(s, staleMinutes, now)
     applySdWanClassification(s)
     delete s._lastGwTsMs
   }
@@ -876,7 +905,7 @@ export async function fetchStoreIssuesLite(staleMinutes = 15, metricRange = '-12
     s.lastSeen = rowTime(row)
     const hbVal = heartbeatOnlineNum(row._value)
     s.heartbeatValue = hbVal
-    s.online = hbVal === 1 && t > 0 && now - t <= staleMs
+    s.lastHeartbeatAt = rowTime(row)
     s.hadHeartbeat = true
     s.hostname = row.hostname || s.hostname
     s.serial = row.serial || s.serial
@@ -921,13 +950,8 @@ export async function fetchStoreIssuesLite(staleMinutes = 15, metricRange = '-12
     mergeLastGatewayRow(s, row)
   }
 
-  // Secondary online heuristic: recent connectivity data → store is alive
-  const activityMs = Math.max(staleMs * 2, 30 * 60 * 1000)
   for (const [, s] of stores) {
-    if (!s.online && s._latestActivityTs && now - s._latestActivityTs <= activityMs) {
-      s.online = true
-      s.onlineReason = 'activity'
-    }
+    finalizeStoreOnlineStatus(s, staleMinutes, now)
     applySdWanClassification(s)
     delete s._lastGwTsMs
   }
@@ -1048,18 +1072,16 @@ export async function fetchWifiConnectivityHistory(metricRange = '-24h', fromTs,
 }
 
 const HEARTBEAT_BUCKET_MIN = 5
-// heartbeat.online may be bool or int in the same bucket; never compare bool to int directly.
-const FLUX_HEARTBEAT_IS_OFFLINE = `  |> map(fn: (r) => ({ r with isOffline:
-      string(v: r._value) == "false" or string(v: r._value) == "0" or string(v: r._value) == "0.0"
+// Historical offline = no heartbeat in bucket OR last value not online (matches live dashboard).
+const FLUX_HEARTBEAT_VALUE_IS_ONLINE = `string(v: r._value) == "true" or string(v: r._value) == "1" or string(v: r._value) == "1.0"`
+const FLUX_MAP_OFFLINE_BUCKET = `  |> map(fn: (r) => ({ r with isOffline:
+      not exists r._value or not (${FLUX_HEARTBEAT_VALUE_IS_ONLINE})
     }))
   |> filter(fn: (r) => r.isOffline)
 `
-const FLUX_HEARTBEAT_DISCONNECT_STEPS = `  |> map(fn: (r) => ({ r with onlineNum:
-      if string(v: r._value) == "true" or string(v: r._value) == "1" or string(v: r._value) == "1.0" then 1
-      else 0
-    }))
-  |> difference(columns: ["onlineNum"], keepFirst: false)
-  |> filter(fn: (r) => r.onlineNum < 0)
+const FLUX_HEARTBEAT_GAP_DOWN = `  |> map(fn: (r) => ({ r with seen: if r._value > 0 then 1 else 0 }))
+  |> difference(columns: ["seen"], keepFirst: false)
+  |> filter(fn: (r) => r.seen < 0)
 `
 const _downtimeCache = new Map()
 const DOWNTIME_CACHE_MS = 120_000
@@ -1106,13 +1128,13 @@ async function fetchHeartbeatBucketCounts(rangeClause, bucketEvery, offlineOnly)
 from(bucket: "${bucket}")
   |> range(${rangeClause})
   |> filter(fn: (r) => r._measurement == "heartbeat" and r._field == "online")
-  |> aggregateWindow(every: ${bucketEvery}, fn: last, createEmpty: false)
+  |> group(columns: ["store_tag", "hostname", "serial"])
+  |> aggregateWindow(every: ${bucketEvery}, fn: last, createEmpty: true)
 `
   if (offlineOnly) {
-    flux += FLUX_HEARTBEAT_IS_OFFLINE
+    flux += FLUX_MAP_OFFLINE_BUCKET
   }
-  flux += `  |> group(columns: ["store_tag", "hostname", "serial"])
-  |> count()
+  flux += `  |> count()
 `
   return queryFlux(flux).catch((e) => {
     console.warn('[influxStore] fetchHeartbeatBucketCounts failed:', e.message)
@@ -1159,13 +1181,22 @@ export async function fetchStoreDowntimeSummary(fromTs, toTs, bucketMin = HEARTB
     if (offlineMinutes <= 0) continue
     totalOfflineMinutes += offlineMinutes
     const meta = samplesByTag.get(tag)
+    const sampleBuckets = meta?.sampleBuckets || offlineBuckets
+    const onlineBuckets = Math.max(0, sampleBuckets - offlineBuckets)
+    const uptimeMinutes = onlineBuckets * bucketMin
     storeOffline.push({
       storeTag: tag,
       hostname: row.hostname || meta?.hostname || '',
       serial: row.serial || meta?.serial || '',
       offlineMinutes,
       offlineHours: Math.round((offlineMinutes / 60) * 100) / 100,
-      sampleBuckets: meta?.sampleBuckets || 0,
+      uptimeMinutes,
+      uptimeHours: Math.round((uptimeMinutes / 60) * 100) / 100,
+      uptimePct: sampleBuckets > 0
+        ? Math.round((onlineBuckets / sampleBuckets) * 10000) / 100
+        : null,
+      sampleBuckets,
+      offlineBuckets,
     })
   }
 
@@ -1179,8 +1210,13 @@ export async function fetchStoreDowntimeSummary(fromTs, toTs, bucketMin = HEARTB
     ? Math.round((totalOfflineHours / storesWithOffline) * 100) / 100
     : 0
   const maxPossibleHours = storesReporting * windowHours
+  const totalUptimeMinutes = Math.max(0, (storesReporting * windowMinutes) - totalOfflineMinutes)
+  const totalUptimeHours = Math.round((totalUptimeMinutes / 60) * 100) / 100
   const downtimePct = maxPossibleHours > 0
     ? Math.round((totalOfflineHours / maxPossibleHours) * 10000) / 100
+    : null
+  const uptimePct = maxPossibleHours > 0 && downtimePct != null
+    ? Math.round((100 - downtimePct) * 100) / 100
     : null
 
   const result = {
@@ -1193,8 +1229,12 @@ export async function fetchStoreDowntimeSummary(fromTs, toTs, bucketMin = HEARTB
     storesWithOffline,
     totalOfflineMinutes,
     totalOfflineHours,
+    totalUptimeMinutes,
+    totalUptimeHours,
     avgOfflineHoursAffected,
     downtimePct,
+    uptimePct,
+    onlineDefinition: 'no heartbeat or online=0 in 5m bucket (matches dashboard silence rule)',
     topOffline: storeOffline.slice(0, 15),
   }
   _downtimeCache.set(cacheKey, { data: result, ts: Date.now() })
@@ -1673,8 +1713,8 @@ from(bucket: "${bucket}")
   |> filter(fn: (r) => r._measurement == "heartbeat" and r._field == "online")
 ${groupFilterLines}
   |> group(columns: ["store_tag", "hostname", "serial"])
-  |> aggregateWindow(every: ${bucketEvery}, fn: last, createEmpty: false)
-${FLUX_HEARTBEAT_DISCONNECT_STEPS}  |> truncateTimeColumn(unit: ${truncateUnit})
+  |> aggregateWindow(every: ${bucketEvery}, fn: count, createEmpty: true)
+${FLUX_HEARTBEAT_GAP_DOWN}  |> truncateTimeColumn(unit: ${truncateUnit})
   |> group(columns: ["store_tag", "hostname", "_time"])
   |> count()
   |> keep(columns: ["_time", "store_tag", "hostname", "_value"])
@@ -1723,8 +1763,9 @@ from(bucket: "${bucket}")
   |> range(${rangeClause})
   |> filter(fn: (r) => r._measurement == "heartbeat" and r._field == "online")
 ${groupFilterLines}
-  |> aggregateWindow(every: ${bucketEvery}, fn: last, createEmpty: false)
-${FLUX_HEARTBEAT_IS_OFFLINE}  |> truncateTimeColumn(unit: ${truncateUnit})
+  |> group(columns: ["store_tag", "hostname", "serial"])
+  |> aggregateWindow(every: ${bucketEvery}, fn: last, createEmpty: true)
+${FLUX_MAP_OFFLINE_BUCKET}  |> truncateTimeColumn(unit: ${truncateUnit})
   |> group(columns: ["store_tag", "hostname", "_time"])
   |> count()
   |> keep(columns: ["_time", "store_tag", "hostname", "_value"])
@@ -1736,7 +1777,7 @@ ${FLUX_HEARTBEAT_IS_OFFLINE}  |> truncateTimeColumn(unit: ${truncateUnit})
   return { rows, fromRollups: false }
 }
 
-async function fetchConnDownByDayFiltered(rangeClause, bucketEvery, groupFilterLines = '', logLabel = '', truncateUnit = '1d') {
+async function fetchConnDownByDayFiltered(rangeClause, bucketEvery, groupFilterLines = '', logLabel = '', truncateUnit = '1d', _requestedToSec = 0) {
   const bucket = fluxEscape(cfg().bucket)
   const flux = `
 from(bucket: "${bucket}")
@@ -1758,12 +1799,11 @@ ${groupFilterLines}
 /**
  * Day-wise store disconnections + offline duration per group.
  *
- * Uses the same heartbeat history approach as fetchStoreDowntimeSummary:
- * - Offline bucket  = heartbeat.online == 0 in a 5m window
- * - Disconnection   = heartbeat online value drops (1 → 0) within the window
+ * Uses the same online/offline rules as the live dashboard:
+ * - Offline bucket  = no heartbeat in 5m window OR last online value is 0/false
+ * - Disconnection   = heartbeat silence gap (agent stopped sending)
  * - Internet down   = connectivity isp_down / no_connectivity buckets (merged)
- * - Silent stores   = currently offline in snapshot with stale lastSeen → offline
- *   duration since lastSeen (matches dashboard cards)
+ * - Silent stores   = currently offline in snapshot with stale lastHeartbeatAt
  *
  * @param {number} rangeSec
  * @param {number} [fromSec]
@@ -2019,15 +2059,15 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
     // All sub-queries for this group fire in parallel.
     const [offlineResult, disconnectResult, connDownRows] = await Promise.all([
       runFilteredDisconnectQuery(
-        fetchHeartbeatOfflineByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit,
+        fetchHeartbeatOfflineByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit, requestedToSec,
       ),
       runFilteredDisconnectQuery(
-        fetchHeartbeatDisconnectByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit,
+        fetchHeartbeatDisconnectByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit, requestedToSec,
       ),
       skipConnDown
         ? Promise.resolve([])
         : runFilteredDisconnectQuery(
-            fetchConnDownByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit,
+            fetchConnDownByDayFiltered, rangeClause, groupBucketEvery, groupDef, name, truncateUnit, requestedToSec,
           ),
     ])
     const offlineRows = offlineResult.rows
@@ -2089,12 +2129,14 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
 
     if (Array.isArray(cached)) {
       for (const s of cached) {
-        if (!s?.storeTag || s.online || s.onlineReason === 'activity') continue
+        if (!s?.storeTag || isStoreOnlineForCount(s)) continue
         if (!belongs(s.storeTag, s)) continue
         const tag = s.storeTag
         reportingTags.add(tag)
 
-        const lastSeenSec = s.lastSeen ? Math.floor(new Date(s.lastSeen).getTime() / 1000) : null
+        const lastSeenSec = s.lastHeartbeatAt
+          ? Math.floor(new Date(s.lastHeartbeatAt).getTime() / 1000)
+          : (s.lastSeen ? Math.floor(new Date(s.lastSeen).getTime() / 1000) : null)
         if (!lastSeenSec || lastSeenSec >= requestedToSec) continue
 
         const silenceStart = Math.max(requestedFromSec, lastSeenSec + groupBucketSec)
@@ -2312,12 +2354,10 @@ function mergeDisconnectEvent(into, ev) {
   }
 }
 
-/** Raw heartbeat gap edges (5m). Queries slightly before the window for clean transitions. */
-async function fetchGapEdgesForGroup(groupDef, requestedFromSec, requestedToSec, bucketEvery) {
-  const bucketMin = HEARTBEAT_BUCKET_MIN
-  const lookbackSec = bucketMin * 60 * 2
-  const queryFromSec = Math.max(0, requestedFromSec - lookbackSec)
-  const rangeClause = buildFluxRangeClause(null, queryFromSec, requestedToSec)
+/** Raw heartbeat 5m window counts per store (no difference) — JS builds edges with
+    a "min consecutive empty windows" rule to filter agent heartbeat jitter. */
+async function fetchWindowedHeartbeatCounts(groupDef, queryFromSec, queryToSec, bucketEvery) {
+  const rangeClause = buildFluxRangeClause(null, queryFromSec, queryToSec)
   const filterLine = Array.isArray(groupDef.tags) && groupDef.tags.length
     ? fluxStoreTagSetFilter(groupDef.tags)
     : (groupDef.filterLines || '')
@@ -2329,13 +2369,10 @@ from(bucket: "${bucket}")
 ${filterLine}
   |> group(columns: ["store_tag", "hostname", "serial"])
   |> aggregateWindow(every: ${bucketEvery}, fn: count, createEmpty: true)
-  |> map(fn: (r) => ({ r with seen: if r._value > 0 then 1 else 0 }))
-  |> difference(columns: ["seen"], keepFirst: false)
-  |> filter(fn: (r) => r.seen != 0)
-  |> keep(columns: ["_time", "store_tag", "hostname", "seen"])
+  |> keep(columns: ["_time", "store_tag", "hostname", "_value"])
 `
   return queryFlux(flux).catch((e) => {
-    console.warn('[influxStore] fetchGapEdgesForGroup failed:', e.message)
+    console.warn('[influxStore] fetchWindowedHeartbeatCounts failed:', e.message)
     return []
   })
 }
@@ -2363,61 +2400,78 @@ ${filterLine}
   })
 }
 
-function gapRowsToEvents(rows, requestedFromSec, requestedToSec, nowSec) {
+/**
+ * Build disconnect events from raw 5m window counts.
+ *
+ * A "disconnect" is only emitted when a store has `minConsecutiveEmpty` or more
+ * empty 5-min windows in a row (default 2 = 10 min silence). This filters out
+ * jitter from agents whose heartbeats arrive every 60-120s and occasionally
+ * miss a single 5-min window.
+ *
+ * Empty windows beyond `silenceCutoffSec` are ignored to prevent the
+ * incomplete "current" window from looking like a disconnect for every store.
+ */
+function gapWindowsToEvents(windowRows, requestedFromSec, silenceCutoffSec, nowSec, opts = {}) {
+  const minConsecutive = opts.minConsecutive || 2
+  const bucketSec = (opts.bucketMin || HEARTBEAT_BUCKET_MIN) * 60
+
   const byStore = new Map()
-  for (const r of rows) {
+  for (const r of windowRows) {
     const tag = r.store_tag || buildSyntheticStoreTag(r.hostname, r.serial)
     if (!tag) continue
     const ts = r._time ? Math.floor(new Date(r._time).getTime() / 1000) : null
     if (ts == null) continue
-    const seen = num(r.seen) || 0
-    if (!seen) continue
-    if (!byStore.has(tag)) {
-      byStore.set(tag, { storeTag: tag, hostname: r.hostname || '', edges: [] })
-    }
-    byStore.get(tag).edges.push({ ts, kind: seen < 0 ? 'down' : 'up' })
+    if (ts > silenceCutoffSec) continue
+    const count = num(r._value) || 0
+    if (!byStore.has(tag)) byStore.set(tag, { storeTag: tag, hostname: r.hostname || '', windows: [] })
+    byStore.get(tag).windows.push({ ts, count })
   }
 
   const merged = new Map()
   for (const store of byStore.values()) {
-    store.edges.sort((a, b) => a.ts - b.ts)
-    let pendingDown = null
-    for (const edge of store.edges) {
-      if (edge.kind === 'down') {
-        if (pendingDown != null && pendingDown >= requestedFromSec) {
-          mergeDisconnectEvent(merged, {
-            storeTag: store.storeTag,
-            hostname: store.hostname,
-            disconnectTs: pendingDown,
-            reconnectTs: edge.ts,
-            durationMin: Math.max(1, Math.round((edge.ts - pendingDown) / 60)),
-            stillOffline: false,
-            source: 'gap',
-          })
+    store.windows.sort((a, b) => a.ts - b.ts)
+    let emptyRunStart = null
+    let emptyRunCount = 0
+    let openDisconnect = null
+
+    const flushOpenAsReconnected = (reconnectTs) => {
+      if (openDisconnect != null && openDisconnect >= requestedFromSec) {
+        mergeDisconnectEvent(merged, {
+          storeTag: store.storeTag,
+          hostname: store.hostname,
+          disconnectTs: openDisconnect,
+          reconnectTs,
+          durationMin: Math.max(1, Math.round((reconnectTs - openDisconnect) / 60)),
+          stillOffline: false,
+          source: 'gap',
+        })
+      }
+      openDisconnect = null
+    }
+
+    for (const w of store.windows) {
+      if (w.count === 0) {
+        if (emptyRunStart === null) emptyRunStart = w.ts - bucketSec + 1
+        emptyRunCount++
+        if (emptyRunCount >= minConsecutive && openDisconnect === null) {
+          openDisconnect = emptyRunStart
         }
-        pendingDown = edge.ts
-      } else if (pendingDown != null) {
-        if (pendingDown >= requestedFromSec) {
-          mergeDisconnectEvent(merged, {
-            storeTag: store.storeTag,
-            hostname: store.hostname,
-            disconnectTs: pendingDown,
-            reconnectTs: edge.ts,
-            durationMin: Math.max(1, Math.round((edge.ts - pendingDown) / 60)),
-            stillOffline: false,
-            source: 'gap',
-          })
+      } else {
+        if (openDisconnect !== null) {
+          flushOpenAsReconnected(w.ts - bucketSec + 1)
         }
-        pendingDown = null
+        emptyRunStart = null
+        emptyRunCount = 0
       }
     }
-    if (pendingDown != null && pendingDown >= requestedFromSec) {
+
+    if (openDisconnect !== null && openDisconnect >= requestedFromSec) {
       mergeDisconnectEvent(merged, {
         storeTag: store.storeTag,
         hostname: store.hostname,
-        disconnectTs: pendingDown,
+        disconnectTs: openDisconnect,
         reconnectTs: null,
-        durationMin: Math.max(1, Math.round((Math.min(nowSec, requestedToSec) - pendingDown) / 60)),
+        durationMin: Math.max(1, Math.round((nowSec - openDisconnect) / 60)),
         stillOffline: true,
         source: 'gap',
       })
@@ -2454,7 +2508,7 @@ function snapshotOfflineByTag(snapshot) {
   if (!Array.isArray(snapshot)) return m
   for (const s of snapshot) {
     if (!s?.storeTag) continue
-    m.set(s.storeTag, !s.online && s.onlineReason !== 'activity')
+    m.set(s.storeTag, !isStoreOnlineForCount(s))
   }
   return m
 }
@@ -2463,7 +2517,7 @@ function backfillLastHeartbeatEvents(snapshot, groupDef, requestedFromSec, reque
   if (!Array.isArray(snapshot)) return 0
   let added = 0
   for (const s of snapshot) {
-    if (!s?.storeTag || s.online || s.onlineReason === 'activity') continue
+    if (!s?.storeTag || isStoreOnlineForCount(s)) continue
     if (!groupDef.belongs(s.storeTag, s)) continue
     const lastHbSec = s.lastHeartbeatAt
       ? Math.floor(new Date(s.lastHeartbeatAt).getTime() / 1000)
@@ -2551,20 +2605,44 @@ export async function fetchGroupDisconnectEvents(rangeSec = 86400, fromSec, toSe
   }
 
   const t0 = Date.now()
-  const [gapRows, rollupRows] = await Promise.all([
-    fetchGapEdgesForGroup(groupDef, requestedFromSec, requestedToSec, bucketEvery),
+  const bucketSec = bucketMin * 60
+  // Drop the most recent 2 buckets (10 min): the latest aggregateWindow bucket is
+  // partial, and the bucket before it may not yet have heartbeats from agents
+  // whose 1-2 min cadence happens to land outside it.
+  const safeStopBoundary = Math.floor(nowSec / bucketSec) * bucketSec - (2 * bucketSec)
+  const queryToSec = Math.min(requestedToSec, safeStopBoundary)
+  const silenceCutoffSec = queryToSec
+  const queryFromSec = Math.max(0, requestedFromSec - bucketSec)
+  const validRange = queryToSec > queryFromSec + bucketSec
+  const [gapWindowRows, rollupRows] = await Promise.all([
+    validRange
+      ? fetchWindowedHeartbeatCounts(groupDef, queryFromSec, queryToSec, bucketEvery)
+      : Promise.resolve([]),
     fetchDisconnectRollupRows(groupDef, requestedFromSec, requestedToSec),
   ])
   const queryMs = Date.now() - t0
 
   const merged = new Map()
   const offlineByTag = snapshotOfflineByTag(snapshot)
-  const gapResult = gapRowsToEvents(gapRows, requestedFromSec, requestedToSec, nowSec)
-  for (const ev of gapResult.events) mergeDisconnectEvent(merged, ev)
-  for (const ev of rollupRowsToEvents(
-    rollupRows, requestedFromSec, requestedToSec, nowSec, offlineByTag,
-  )) {
+  const gapResult = gapWindowsToEvents(gapWindowRows, requestedFromSec, silenceCutoffSec, nowSec, {
+    minConsecutive: 2,
+    bucketMin,
+  })
+  for (const ev of gapResult.events) {
+    // Snapshot truth wins for "is the store actually back online?" — gap can't see
+    // heartbeats inside the last 10 min cutoff, snapshot can.
+    if (ev.stillOffline && offlineByTag.get(ev.storeTag) === false) {
+      ev.stillOffline = false
+    }
     mergeDisconnectEvent(merged, ev)
+  }
+  // Hourly rollup rows overlap gap detection and inflate counts when merged together.
+  if (rollupRowsUsable(rollupRows, requestedToSec, `events, ${groupName}`) && gapResult.events.length === 0) {
+    for (const ev of rollupRowsToEvents(
+      rollupRows, requestedFromSec, requestedToSec, nowSec, offlineByTag,
+    )) {
+      mergeDisconnectEvent(merged, ev)
+    }
   }
   const backfillCount = backfillLastHeartbeatEvents(
     snapshot, groupDef, requestedFromSec, requestedToSec, nowSec, merged,
@@ -2573,7 +2651,7 @@ export async function fetchGroupDisconnectEvents(rangeSec = 86400, fromSec, toSe
   const events = [...merged.values()].sort((a, b) => (b.disconnectTs || 0) - (a.disconnectTs || 0))
   const sources = new Set(events.map((e) => e.source))
   const sourceLabel = [
-    sources.has('gap') ? '5m gaps' : null,
+    sources.has('gap') ? '5m gaps (2-window min)' : null,
     sources.has('rollup') ? `${cfg().rollupsBucket} rollups` : null,
     sources.has('lastHeartbeat') ? 'last heartbeat' : null,
   ].filter(Boolean).join(' + ') || 'none'
@@ -2590,16 +2668,18 @@ export async function fetchGroupDisconnectEvents(rangeSec = 86400, fromSec, toSe
     source: sourceLabel,
     meta: {
       queryMs,
-      gapEdgeRows: gapRows.length,
-      rollupRows: rollupRows.length,
+      windowRowCount: gapWindowRows.length,
+      rollupRowCount: rollupRows.length,
       backfillCount,
+      silenceCutoffIso: new Date(silenceCutoffSec * 1000).toISOString(),
     },
     events,
   }
 
   console.log(
-    `[groupDisconnectEvents] ${groupName}: gap=${gapRows.length} rollup=${rollupRows.length} `
-    + `backfill=${backfillCount} in ${queryMs}ms → ${events.length} events`,
+    `[groupDisconnectEvents] ${groupName}: windows=${gapWindowRows.length} `
+    + `rollup=${rollupRows.length} backfill=${backfillCount} in ${queryMs}ms `
+    + `→ ${events.length} events (cutoff=${data.meta.silenceCutoffIso})`,
   )
 
   _groupDisconnectEventsCache.set(cacheKey, { data, ts: Date.now() })
@@ -2677,7 +2757,7 @@ from(bucket: "${fluxEscape(cfg().bucket)}")
 
 export function buildOverviewSummary(stores) {
   const total = stores.length
-  const online = stores.filter((s) => s.online).length
+  const online = stores.filter((s) => isStoreOnlineForCount(s)).length
   const offline = total - online
   const withIssues = stores.filter((s) => s.issueCount > 0).length
   const connBreakdown = {}
