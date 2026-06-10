@@ -135,6 +135,7 @@ function fmtOfflineMinutes(mins) {
 function fmtDurationMin(mins) {
   if (mins == null) return '—'
   const n = Math.max(0, Math.round(Number(mins) || 0))
+  if (n <= 0) return '<1m'
   if (n < 60) return `${n}m`
   const h = Math.floor(n / 60)
   const m = n % 60
@@ -3892,7 +3893,7 @@ export default function StoreMonitorPage() {
             <div className="sm-tr-hd">
               <span className="sm-tr-title">🕒 Store Disconnect Events Timeline</span>
               <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
-                per-store disconnect &amp; reconnect timestamps · click a group to load
+                real heartbeat gaps only (5m) · matches graph disconnect counts · currently-offline inventory is on NOC Overview
               </span>
             </div>
             <div style={{padding:'10px 12px'}}>

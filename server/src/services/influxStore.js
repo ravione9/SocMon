@@ -2261,8 +2261,10 @@ const _groupDisconnectEventsCache = new Map()
  * heartbeat and the next one didn't = "disconnect"; reverse = "reconnect".
  *
  * Stores currently silent past the end of the window keep reconnectTs === null
- * and stillOffline === true. Stores already silent before the window starts are
- * back-filled from the snapshot using their lastSeen timestamp.
+ * and stillOffline === true.
+ *
+ * Does NOT back-fill from snapshot inventory — only real heartbeat gap edges in
+ * the requested window are returned (matches the day-wise graph counts).
  *
  * @returns {Promise<{
  *   groupName: string,
@@ -2357,20 +2359,23 @@ ${filterLine}
   }
 
   const events = []
+  const openDisconnectByTag = new Map()
   for (const store of byStore.values()) {
     store.edges.sort((a, b) => a.ts - b.ts)
     let pendingDown = null
     for (const edge of store.edges) {
+      // Ignore edges before the requested window (difference() can emit at range start).
+      if (edge.ts < requestedFromSec) continue
       if (edge.kind === 'down') {
         if (pendingDown != null) {
-          // Two downs in a row (shouldn't happen, but be defensive)
           events.push({
             storeTag: store.storeTag,
             hostname: store.hostname,
             disconnectTs: pendingDown,
             reconnectTs: edge.ts,
-            durationMin: Math.round((edge.ts - pendingDown) / 60),
+            durationMin: Math.max(1, Math.round((edge.ts - pendingDown) / 60)),
             stillOffline: false,
+            source: 'gap',
           })
         }
         pendingDown = edge.ts
@@ -2380,41 +2385,23 @@ ${filterLine}
           hostname: store.hostname,
           disconnectTs: pendingDown,
           reconnectTs: edge.ts,
-          durationMin: Math.round((edge.ts - pendingDown) / 60),
+          durationMin: Math.max(1, Math.round((edge.ts - pendingDown) / 60)),
           stillOffline: false,
+          source: 'gap',
         })
         pendingDown = null
       }
     }
     if (pendingDown != null) {
+      openDisconnectByTag.set(store.storeTag, pendingDown)
       events.push({
         storeTag: store.storeTag,
         hostname: store.hostname,
         disconnectTs: pendingDown,
         reconnectTs: null,
-        durationMin: Math.max(0, Math.round((requestedToSec - pendingDown) / 60)),
+        durationMin: Math.max(1, Math.round((nowSec - pendingDown) / 60)),
         stillOffline: true,
-      })
-    }
-  }
-
-  // Back-fill stores that were already silent before the window started.
-  const sevenDaysSec = 7 * 86400
-  if (Array.isArray(snapshot)) {
-    for (const s of snapshot) {
-      if (!s?.storeTag || s.online || s.onlineReason === 'activity') continue
-      if (!groupDef.belongs(s.storeTag, s)) continue
-      if (byStore.has(s.storeTag)) continue
-      const lastSeenSec = s.lastSeen ? Math.floor(new Date(s.lastSeen).getTime() / 1000) : null
-      if (!lastSeenSec) continue
-      if (lastSeenSec < requestedFromSec - sevenDaysSec) continue
-      events.push({
-        storeTag: s.storeTag,
-        hostname: s.hostname || '',
-        disconnectTs: lastSeenSec,
-        reconnectTs: null,
-        durationMin: Math.max(0, Math.round((nowSec - lastSeenSec) / 60)),
-        stillOffline: true,
+        source: 'gap',
       })
     }
   }
@@ -2430,8 +2417,12 @@ ${filterLine}
     storeCount: byStore.size,
     eventCount: events.length,
     stillOfflineCount: events.filter((e) => e.stillOffline).length,
-    source: 'heartbeat gap detection (raw, 5m windows)',
-    meta: { queryMs, edgeRowCount: rows.length },
+    source: 'heartbeat gap detection (5m windows, in-range edges only)',
+    meta: {
+      queryMs,
+      edgeRowCount: rows.length,
+      openDisconnectCount: openDisconnectByTag.size,
+    },
     events,
   }
 
