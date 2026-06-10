@@ -130,9 +130,14 @@ services:
       # Re-poll AI_CONTEXT_MODULES so newly added dashboards appear in MCP
       # clients without a restart. 0 disables; 5s floor enforced in code.
       NETPULSE_MCP_REFRESH_MS: "60000"
+    # service_started, NOT service_healthy: mcp doesn't make any upstream
+    # calls until a client opens a session, so we don't need server to be
+    # health-check healthy first. Strict service_healthy here was timing
+    # out compose's `up` whenever server's 75s start_period hadn't elapsed,
+    # which left mcp stuck "not started" while the rest of the stack
+    # was already running.
     depends_on:
-      server:
-        condition: service_healthy
+      - server
     networks:
       - netpulse
     restart: unless-stopped
