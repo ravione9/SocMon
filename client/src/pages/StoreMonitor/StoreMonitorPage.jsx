@@ -4035,6 +4035,12 @@ export default function StoreMonitorPage() {
                                     <td style={{fontFamily:'var(--mono)',fontWeight:700,whiteSpace:'nowrap',
                                                 color: e.stillOffline ? '#ef4444' : '#f59e0b'}}>
                                       {fmtDurationMin(e.durationMin)}
+                                      {e.flapCount > 1 && (
+                                        <span title={`${e.flapCount} short flaps merged (gaps <= 30 min)`}
+                                          style={{marginLeft:6, color:'#f59e0b', fontSize:9, fontWeight:600}}>
+                                          · {e.flapCount}× flap
+                                        </span>
+                                      )}
                                     </td>
                                     <td>
                                       {e.stillOffline ? (

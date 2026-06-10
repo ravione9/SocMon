@@ -379,22 +379,60 @@ export async function fetchGroupOfflineEventsList(rangeSec = 86400, fromSec, toS
   const records = await fetchOfflineRecords(tagsArr, fromMs, toMs)
   const hostByTag = snapshotIndex(snapshot)
 
-  const events = records.map((rec) => {
-    const startMs = new Date(rec.firstSeenAt).getTime()
-    const endMs = rec.resolvedAt ? new Date(rec.resolvedAt).getTime() : null
-    const effectiveEndMs = endMs ?? nowMs
-    const durationMin = Math.max(1, Math.round((effectiveEndMs - startMs) / 60_000))
-    const snap = hostByTag.get(rec.storeTag)
+  // Coalesce short flap sequences per store so a 30-min "offline -> back -> offline
+  // -> back" cycle shows up as ONE event with flapCount=2, not 4 separate rows.
+  // Records are considered the same outage if the gap between the previous resolve
+  // and the next firstSeenAt is <= FLAP_GAP_MS.
+  const FLAP_GAP_MS = 30 * 60_000
+  const recordsByStore = new Map()
+  for (const rec of records) {
+    const tag = rec.storeTag
+    if (!recordsByStore.has(tag)) recordsByStore.set(tag, [])
+    recordsByStore.get(tag).push(rec)
+  }
+  const events = []
+  for (const [tag, recs] of recordsByStore) {
+    recs.sort((a, b) => new Date(a.firstSeenAt) - new Date(b.firstSeenAt))
+    let current = null
+    for (const rec of recs) {
+      const startMs = new Date(rec.firstSeenAt).getTime()
+      const endMs = rec.resolvedAt ? new Date(rec.resolvedAt).getTime() : null
+      if (current && current.lastResolvedMs != null && startMs - current.lastResolvedMs <= FLAP_GAP_MS) {
+        // Same outage, merge.
+        current.flapCount += 1
+        current.lastResolvedMs = endMs // null wins (=> stillOffline)
+        if (endMs === null) current.stillOffline = true
+      } else {
+        if (current) events.push(current)
+        current = {
+          storeTag: tag,
+          hostname: rec.hostname || hostByTag.get(tag)?.hostname || '',
+          firstStartMs: startMs,
+          lastResolvedMs: endMs,
+          stillOffline: endMs === null,
+          flapCount: 1,
+          connState: rec.connState || hostByTag.get(tag)?.connState || null,
+          severity: rec.severity || null,
+        }
+      }
+    }
+    if (current) events.push(current)
+  }
+
+  const finalized = events.map((ev) => {
+    const effectiveEndMs = ev.stillOffline ? nowMs : (ev.lastResolvedMs ?? nowMs)
+    const durationMin = Math.max(1, Math.round((effectiveEndMs - ev.firstStartMs) / 60_000))
     return {
-      storeTag: rec.storeTag,
-      hostname: rec.hostname || snap?.hostname || '',
-      disconnectTs: Math.floor(startMs / 1000),
-      reconnectTs: endMs ? Math.floor(endMs / 1000) : null,
+      storeTag: ev.storeTag,
+      hostname: ev.hostname,
+      disconnectTs: Math.floor(ev.firstStartMs / 1000),
+      reconnectTs: ev.stillOffline ? null : Math.floor((ev.lastResolvedMs ?? nowMs) / 1000),
       durationMin,
-      stillOffline: endMs === null,
+      stillOffline: ev.stillOffline,
+      flapCount: ev.flapCount,
       source: 'history',
-      connState: rec.connState || snap?.connState || null,
-      severity: rec.severity || null,
+      connState: ev.connState,
+      severity: ev.severity,
     }
   }).sort((a, b) => (b.disconnectTs || 0) - (a.disconnectTs || 0))
 
@@ -404,12 +442,16 @@ export async function fetchGroupOfflineEventsList(rangeSec = 86400, fromSec, toS
     toIso: new Date(toMs).toISOString(),
     rangeSec: requestedToSec - requestedFromSec,
     bucketMin: 5,
-    storeCount: new Set(events.map((e) => e.storeTag)).size,
-    eventCount: events.length,
-    stillOfflineCount: events.filter((e) => e.stillOffline).length,
-    source: `StoreProblemHistory (code='offline', MongoDB)`,
-    meta: { recordsConsidered: records.length, tagsQueried: tagsArr.length },
-    events,
+    storeCount: new Set(finalized.map((e) => e.storeTag)).size,
+    eventCount: finalized.length,
+    stillOfflineCount: finalized.filter((e) => e.stillOffline).length,
+    source: `StoreProblemHistory (code='offline', MongoDB) · flap-coalesced (<= 30m gap)`,
+    meta: {
+      recordsConsidered: records.length,
+      tagsQueried: tagsArr.length,
+      flapsCoalesced: records.length - finalized.length,
+    },
+    events: finalized,
   }
 
   _eventsCache.set(cacheKey, { data, ts: Date.now() })
