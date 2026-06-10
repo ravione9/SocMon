@@ -11,6 +11,9 @@ import {
   fetchGroupHealthHistory,
   fetchGroupDisconnectDaily,
   fetchGroupDisconnectEvents,
+  // Heartbeat-derived fallbacks above are kept for reference; the active widget
+  // sources are MongoDB-backed below (matches Slack offline alerts).
+
   buildOverviewSummary,
   getAnyCachedStoreSnapshot,
   queryFlux,
@@ -21,6 +24,10 @@ import {
   crashTypeLabel,
   crashSeverity,
 } from '../services/influxStore.js'
+import {
+  fetchGroupOfflineSummary,
+  fetchGroupOfflineEventsList,
+} from '../services/storeOfflineHistoryReport.js'
 import {
   buildStoreInventoryReport,
   buildUptimeReport,
@@ -297,7 +304,7 @@ async function handleGroupDisconnectReport(req, res, next) {
       businessHours = { startHour, endHour, weekdays, tzOffsetMinutes }
     }
 
-    const payload = await fetchGroupDisconnectDaily(rangeSec, fromSec, toSec, {
+    const payload = await fetchGroupOfflineSummary(rangeSec, fromSec, toSec, {
       bucketMin, customGroups, businessHours, groupName,
     })
     res.json(payload)
@@ -346,7 +353,7 @@ async function handleGroupDisconnectEvents(req, res, next) {
       .filter((g) => g.name && g.storeTags.length > 0)
       .slice(0, 10)
 
-    const payload = await fetchGroupDisconnectEvents(rangeSec, fromSec, toSec, {
+    const payload = await fetchGroupOfflineEventsList(rangeSec, fromSec, toSec, {
       groupName, customGroups,
     })
     res.json(payload)
