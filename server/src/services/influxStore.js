@@ -9,6 +9,7 @@ const URL_ENV = 'INFLUX_URL'
 const TOKEN_ENV = 'INFLUX_TOKEN'
 const ORG_ENV = 'INFLUX_ORG'
 const BUCKET_ENV = 'INFLUX_BUCKET'
+const ROLLUPS_BUCKET_ENV = 'INFLUX_ROLLUPS_BUCKET'
 const TLS_ENV = 'INFLUX_TLS_INSECURE'
 const QUERY_TIMEOUT_ENV = 'INFLUX_QUERY_TIMEOUT_MS'
 
@@ -23,6 +24,7 @@ function cfg() {
     token: String(process.env[TOKEN_ENV] || process.env.INFLUXDB_TOKEN || '').trim(),
     org: String(process.env[ORG_ENV] || 'lenskart').trim(),
     bucket: String(process.env[BUCKET_ENV] || 'store-monitoring').trim(),
+    rollupsBucket: String(process.env[ROLLUPS_BUCKET_ENV] || '').trim(),
     tlsInsecure: ['1', 'true', 'yes'].includes(String(process.env[TLS_ENV] || '').toLowerCase()),
     queryTimeoutMs: queryTimeoutMs(),
   }
@@ -40,10 +42,12 @@ export function getInfluxStoreMeta() {
     url: c.url || null,
     org: c.org,
     bucket: c.bucket,
+    rollupsBucket: c.rollupsBucket || null,
     urlEnv: URL_ENV,
     tokenEnv: TOKEN_ENV,
     orgEnv: ORG_ENV,
     bucketEnv: BUCKET_ENV,
+    rollupsBucketEnv: ROLLUPS_BUCKET_ENV,
     tlsEnv: TLS_ENV,
   }
 }
@@ -1575,7 +1579,28 @@ async function runFilteredDisconnectQuery(fetchFn, rangeClause, bucketEvery, gro
 }
 
 async function fetchHeartbeatDisconnectByDayFiltered(rangeClause, bucketEvery, groupFilterLines = '', logLabel = '', truncateUnit = '1d') {
-  const bucket = fluxEscape(cfg().bucket)
+  const c = cfg()
+  // Rollup path: pre-aggregated hourly disconnect counts written by the
+  // `store_disconnect_hourly_rollup` Flux task. Avoids scanning every raw heartbeat.
+  if (c.rollupsBucket) {
+    const rollupBucket = fluxEscape(c.rollupsBucket)
+    const flux = `
+from(bucket: "${rollupBucket}")
+  |> range(${rangeClause})
+  |> filter(fn: (r) => r._measurement == "store_disconnect_rollup" and r._field == "disconnect_count")
+${groupFilterLines}
+  |> truncateTimeColumn(unit: ${truncateUnit})
+  |> group(columns: ["store_tag", "hostname", "_time"])
+  |> sum()
+  |> keep(columns: ["_time", "store_tag", "hostname", "_value"])
+`
+    return queryFlux(flux).catch((e) => {
+      console.warn(`[influxStore] fetchHeartbeatDisconnectByDay (rollups${logLabel ? `, ${logLabel}` : ''}) failed:`, e.message)
+      return []
+    })
+  }
+
+  const bucket = fluxEscape(c.bucket)
   const flux = `
 from(bucket: "${bucket}")
   |> range(${rangeClause})
@@ -1597,7 +1622,29 @@ ${groupFilterLines}
 }
 
 async function fetchHeartbeatOfflineByDayFiltered(rangeClause, bucketEvery, groupFilterLines = '', logLabel = '', truncateUnit = '1d') {
-  const bucket = fluxEscape(cfg().bucket)
+  const c = cfg()
+  // Rollup path: pre-aggregated hourly offline 5m-bucket counts written by the
+  // `store_offline_hourly_rollup` Flux task. _value is already the count of 5m
+  // windows where heartbeat.online == 0 within that hour.
+  if (c.rollupsBucket) {
+    const rollupBucket = fluxEscape(c.rollupsBucket)
+    const flux = `
+from(bucket: "${rollupBucket}")
+  |> range(${rangeClause})
+  |> filter(fn: (r) => r._measurement == "store_offline_rollup" and r._field == "offline_5m_buckets")
+${groupFilterLines}
+  |> truncateTimeColumn(unit: ${truncateUnit})
+  |> group(columns: ["store_tag", "hostname", "_time"])
+  |> sum()
+  |> keep(columns: ["_time", "store_tag", "hostname", "_value"])
+`
+    return queryFlux(flux).catch((e) => {
+      console.warn(`[influxStore] fetchHeartbeatOfflineByDay (rollups${logLabel ? `, ${logLabel}` : ''}) failed:`, e.message)
+      return []
+    })
+  }
+
+  const bucket = fluxEscape(c.bucket)
   const flux = `
 from(bucket: "${bucket}")
   |> range(${rangeClause})
@@ -1876,6 +1923,11 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
     const groupBucketEvery = `${groupBucketMin}m`
     const groupBucketSec = groupBucketMin * 60
     const skipConnDown = storeEstimate > 800
+    const usingRollups = Boolean(cfg().rollupsBucket)
+    // When rollups are used each offline `_value` unit equals 5 minutes (the
+    // base aggregation in the Flux Task). On the raw path each unit equals
+    // the adaptive group bucket size.
+    const offlineUnitMin = usingRollups ? HEARTBEAT_BUCKET_MIN : groupBucketMin
 
     const dayMap = new Map()
     function ensureDay(dayMs) {
@@ -1886,7 +1938,7 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
       if (mins <= 0) return
       const s = ensureDay(dayMs)
       s.offlineMinutes += mins
-      s.offlineBuckets += Math.round(mins / groupBucketMin)
+      s.offlineBuckets += Math.round(mins / offlineUnitMin)
     }
 
     const offlineBucketKeys = new Set()
@@ -1922,12 +1974,13 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
       reportingTags.add(tag)
       const ts = row._time ? Math.floor(new Date(row._time).getTime() / 1000) : null
       if (ts == null || !inBusinessHours(ts)) continue
-      const dayMs = dayMsFromTs(ts)
-      const key = `${tag}|${dayMs}`
+      // Per-timestamp dedup so multiple hourly rows for the same (store, day)
+      // are all counted (only true duplicates from the same time bucket are skipped).
+      const key = `${tag}|${ts}`
       if (disconnectKeys.has(key)) continue
       disconnectKeys.add(key)
       storesWithHbDisconnect.add(tag)
-      ensureDay(dayMs).disconnections += num(row._value) || 1
+      ensureDay(dayMsFromTs(ts)).disconnections += num(row._value) || 1
     }
 
     for (const row of [...offlineRows, ...connDownRows]) {
@@ -1938,12 +1991,11 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
       if (ts == null || !inBusinessHours(ts)) continue
       const buckets = num(row._value) || 0
       if (buckets <= 0) continue
-      const mins = buckets * groupBucketMin
-      const dayMs = dayMsFromTs(ts)
-      const key = `${tag}|${dayMs}`
+      const mins = buckets * offlineUnitMin
+      const key = `${tag}|${ts}`
       if (offlineBucketKeys.has(key)) continue
       offlineBucketKeys.add(key)
-      addOffline(dayMs, mins)
+      addOffline(dayMsFromTs(ts), mins)
     }
 
     if (Array.isArray(cached)) {
@@ -2003,6 +2055,7 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
       meta: {
         bucketMin: groupBucketMin,
         skipConnDown,
+        usingRollups,
         rowCounts: {
           offline: offlineRows.length,
           disconnects: disconnectRows.length,
@@ -2057,7 +2110,9 @@ export async function fetchGroupDisconnectDaily(rangeSec = 86400, fromSec, toSec
         dayMs,
         label: new Date(dayMs).toISOString().slice(0, 10),
       })),
-      source: 'heartbeat.online + connectivity.conn_state (per-group queries)',
+      source: cfg().rollupsBucket
+        ? `${cfg().rollupsBucket} rollups (per-group queries)`
+        : 'heartbeat.online + connectivity.conn_state (per-group queries)',
       storesReporting,
       groupQueryCount: activeGroupDefs.length,
       groupName: onlyGroup || null,
