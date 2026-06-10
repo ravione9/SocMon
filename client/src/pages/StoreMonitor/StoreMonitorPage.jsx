@@ -3278,7 +3278,7 @@ export default function StoreMonitorPage() {
                   🌐 Group Internet Disconnections & Offline Time (Day-wise)
                 </span>
                 <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--text3)'}}>
-                  disconnect events = stores with >=1 new offline session that day (per-store/day dedup) · uptime % = online machine-minutes ÷ possible machine-minutes
+                  disconnect events = stores with &gt;=1 new offline session that day (per-store/day dedup) · uptime % = online machine-minutes ÷ possible machine-minutes
                 </span>
                 {bh.enabled && (
                   <span style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--amber)'}}>
