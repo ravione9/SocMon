@@ -226,29 +226,15 @@ function buildSingleGroupDisconnectChart(group, days, groupName, tc) {
       datasets: [
         {
           type: 'bar',
-          label: 'Offline (min)',
-          data: days.map((d) => {
-            const day = group.days.find((x) => x.dayMs === d.dayMs)
-            return day?.offlineMinutes ?? 0
-          }),
-          backgroundColor: color + '55',
-          borderColor: color,
-          borderWidth: 1.5,
-          yAxisID: 'y',
-        },
-        {
-          type: 'line',
           label: 'Stores Down',
           data: days.map((d) => {
             const day = group.days.find((x) => x.dayMs === d.dayMs)
             return day?.disconnections ?? 0
           }),
+          backgroundColor: color + '88',
           borderColor: color,
-          backgroundColor: color + '22',
-          borderWidth: 2,
-          pointRadius: 3,
-          tension: 0.25,
-          yAxisID: 'y1',
+          borderWidth: 1.5,
+          yAxisID: 'y',
         },
       ],
     },
@@ -268,6 +254,17 @@ function buildSingleGroupDisconnectChart(group, days, groupName, tc) {
           bodyColor: tc.text2,
           borderColor: tc.border,
           borderWidth: 1,
+          callbacks: {
+            afterLabel: (ctx) => {
+              const day = group.days.find((x, i) => i === ctx.dataIndex)
+              if (!day) return ''
+              const m = day.offlineMinutes || 0
+              const h = Math.floor(m / 60)
+              const r = m % 60
+              const dur = h > 0 ? `${h}h ${r}m` : `${m}m`
+              return `Offline: ${dur}`
+            },
+          },
         },
       },
       scales: {
@@ -278,17 +275,9 @@ function buildSingleGroupDisconnectChart(group, days, groupName, tc) {
         y: {
           type: 'linear',
           position: 'left',
-          title: { display: true, text: 'Offline minutes', color: tc.text3, font: { family: 'var(--mono)', size: 10 } },
-          ticks: { color: tc.text3, font: { family: 'var(--mono)', size: 9 } },
-          grid: { color: tc.border + '40' },
-          beginAtZero: true,
-        },
-        y1: {
-          type: 'linear',
-          position: 'right',
           title: { display: true, text: 'Stores Down', color: tc.text3, font: { family: 'var(--mono)', size: 10 } },
-          ticks: { color: tc.text3, font: { family: 'var(--mono)', size: 9 }, stepSize: 1, precision: 0 },
-          grid: { drawOnChartArea: false },
+          ticks: { color: tc.text3, font: { family: 'var(--mono)', size: 9 }, precision: 0 },
+          grid: { color: tc.border + '40' },
           beginAtZero: true,
         },
       },
@@ -3343,7 +3332,7 @@ export default function StoreMonitorPage() {
                             padding:'8px 10px', minHeight:220, display:'flex', flexDirection:'column',
                           }}>
                             <div style={{fontSize:10, fontFamily:'var(--mono)', color:'var(--text3)', marginBottom:6, textTransform:'uppercase', letterSpacing:'.06em'}}>
-                              Offline minutes (bars) · Stores Down (line)
+                              Stores Down per day (bars) · hover for offline duration
                             </div>
                             {chart ? (
                               <div style={{flex:1, minHeight:180, position:'relative'}}>
