@@ -9,7 +9,7 @@ git pull origin main
 echo "==> Build client (required — prod nginx serves ./client/dist, not dev HMR)"
 npm run build
 
-echo "==> Recreate API + nginx"
-docker compose -f docker-compose.prod.yml up -d --build --force-recreate --no-deps server nginx
+echo "==> Recreate API + MCP + nginx"
+docker compose -f docker-compose.prod.yml up -d --build --force-recreate --no-deps server mcp nginx
 
 echo "==> Done. Hard-refresh the browser (Ctrl+Shift+R) if nav still looks stale."

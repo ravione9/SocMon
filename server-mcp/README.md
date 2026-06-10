@@ -251,7 +251,9 @@ node src/index.js
 ```
 
 For **remote** MCP (Cursor → hosted netpulse-mcp container), point Cursor at
-the URL with the JWT in the header — no separate MCP key needed:
+the URL with the JWT in the header — no separate MCP key needed. In prod the
+sidecar is reachable on the same hostname as the UI, at `/mcp`, proxied by
+nginx (see `docker/nginx/default.conf`):
 
 ```json
 {

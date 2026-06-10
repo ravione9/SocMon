@@ -12,9 +12,9 @@
 # 4) Start full stack:
 #      docker compose -f docker-compose.prod.yml up -d --build
 #
-# 5) After code/backend changes — rebuild API + nginx only (mongo/redis unchanged).
-#      Requires mongo+redis (+guacd) already running; --build picks up server source.
-#      docker compose -f docker-compose.prod.yml up -d --build --force-recreate --no-deps server nginx
+# 5) After code/backend changes — rebuild API + MCP + nginx only (mongo/redis unchanged).
+#      Requires mongo+redis (+guacd) already running; --build picks up server + server-mcp source.
+#      docker compose -f docker-compose.prod.yml up -d --build --force-recreate --no-deps server mcp nginx
 #
 # 6) After UI changes — rebuild the SPA first (step 1), then recreate nginx only:
 #      docker compose -f docker-compose.prod.yml up -d --force-recreate --no-deps nginx
@@ -98,6 +98,56 @@ services:
       timeout: 5s
       retries: 5
       start_period: 75s
+
+  # MCP (Model Context Protocol) sidecar — exposes NetPulse data to LLM clients
+  # (Claude Desktop, Cursor, n8n, custom agents). Reaches the API container over
+  # the internal docker network and is published to users via nginx at /mcp.
+  #
+  # Auth: MCP clients send the SAME NetPulse JWT they would send to /api/...
+  #   Authorization: Bearer <jwt>
+  # The MCP server forwards the bearer to /api/agent/meta on session-init so
+  # NetPulse validates it via authenticateUserOrAgent. No JWT secret is shared
+  # with this container, so revocations and account disables apply immediately.
+  #
+  # Tool surface auto-grows: each AI_CONTEXT_MODULES entry becomes
+  # netpulse_<id>; a 60s reconcile loop adds/removes tools as modules change
+  # and fires notifications/tools/list_changed.
+  mcp:
+    build:
+      context: ./server-mcp
+      dockerfile: Dockerfile.prod
+      args:
+        NPM_STRICT_SSL: "true"
+    container_name: netpulse-prod-mcp
+    expose:
+      - "5050"
+    environment:
+      NODE_ENV: production
+      MCP_TRANSPORT: http
+      PORT: "5050"
+      # Internal service name on the netpulse network — never use a public URL here.
+      NETPULSE_API_BASE: http://server:5000
+      # Re-poll AI_CONTEXT_MODULES so newly added dashboards appear in MCP
+      # clients without a restart. 0 disables; 5s floor enforced in code.
+      NETPULSE_MCP_REFRESH_MS: "60000"
+    depends_on:
+      server:
+        condition: service_healthy
+    networks:
+      - netpulse
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5050/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   # Apache Guacamole RDP bridge. Reached only from the server container over the
   # internal network (GUACD_HOST: guacd) — port 4822 is intentionally NOT published.
