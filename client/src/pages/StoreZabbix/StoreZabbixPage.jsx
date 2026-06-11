@@ -19,6 +19,7 @@ import { useThemeStore } from '../../store/themeStore.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
 import { useSmartPolling } from '../../hooks/useSmartPolling.js'
 import { useUrlTab } from '../../hooks/useUrlTab.js'
+import { RP_SEGMENT, RP_OUTAGE_LABELS } from '../../utils/storeRopGrouping.js'
 
 const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'rop']
 
@@ -1353,6 +1354,8 @@ export default function StoreZabbixPage({
   const [ropSortKey, setRopSortKey] = useState('uptimePct')
   const [ropSortDir, setRopSortDir] = useState('asc')
   const [ropDrillStore, setRopDrillStore] = useState(null)
+  const [ropOutageFilter, setRopOutageFilter] = useState(null)
+  const ropStoreTableRef = useRef(null)
 
   /* ─── data loaders (unchanged logic) ─── */
   const parseErr = useCallback((e) => {
@@ -1615,6 +1618,10 @@ export default function StoreZabbixPage({
     [netHealthGroup, netBizStart, netBizEnd, loadNetHealth],
     { enabled: tab === 'netHealth' && !!config?.configured && config?.reachable !== false, skipImmediate: true },
   )
+
+  useEffect(() => {
+    if (ropGroupKey !== 'rp') setRopOutageFilter(null)
+  }, [ropGroupKey])
 
   useEffect(() => {
     if (tab !== 'rop' || !config?.configured) return
@@ -2934,6 +2941,22 @@ export default function StoreZabbixPage({
         const topOffenders = ru?.topOffenders || []
         const perStore = ru?.perStore || []
         const days = ru?.days || []
+        const outageSummary = ru?.outageSummary || {}
+        const rpSdwanOutage = outageSummary.rpSdwan || { outageCount: 0, totalStores: 0, offlineStores: [] }
+        const rpNonSdwanOutage = outageSummary.rpNonSdwan || { outageCount: 0, totalStores: 0, offlineStores: [] }
+
+        const scrollToStoreTable = () => {
+          requestAnimationFrame(() => {
+            ropStoreTableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+          })
+        }
+        const selectOutageFilter = (segment) => {
+          setRopOutageFilter((prev) => {
+            const next = prev === segment ? null : segment
+            if (next) scrollToStoreTable()
+            return next
+          })
+        }
 
         const fmtMins = (m) => {
           if (m == null || !Number.isFinite(m)) return '—'
@@ -2967,6 +2990,10 @@ export default function StoreZabbixPage({
         const slaMet = summary.avgUptimePct != null && summary.avgUptimePct >= slaTarget
 
         const filteredStore = perStore.filter((r) => {
+          if (ropOutageFilter) {
+            if (r.rpSegment !== ropOutageFilter) return false
+            if (!r.currentlyOffline) return false
+          }
           const q = ropSearch.trim().toLowerCase()
           if (!q) return true
           return (r.hostname || '').toLowerCase().includes(q) || (r.storeTag || '').toLowerCase().includes(q)
@@ -3194,6 +3221,38 @@ export default function StoreZabbixPage({
                   <CounterTile label="Mean time to recovery" value={summary.mttrMin != null ? fmtMins(summary.mttrMin) : '—'} color="cyan" icon="↺" />
                 </div>
 
+                {ropGroupKey === 'rp' && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 }}>
+                    <CounterTile
+                      label="Total Outage in RP SD-WAN"
+                      value={rpSdwanOutage.outageCount}
+                      color={rpSdwanOutage.outageCount > 0 ? 'red' : 'green'}
+                      icon="⛔"
+                      sub={`${rpSdwanOutage.totalStores} RP SD-WAN stores · click to filter`}
+                      onClick={() => selectOutageFilter(RP_SEGMENT.SDWAN)}
+                    />
+                    <CounterTile
+                      label="Total Outage in RP Non SD-WAN"
+                      value={rpNonSdwanOutage.outageCount}
+                      color={rpNonSdwanOutage.outageCount > 0 ? 'red' : 'green'}
+                      icon="⛔"
+                      sub={`${rpNonSdwanOutage.totalStores} RP Non SD-WAN stores · click to filter`}
+                      onClick={() => selectOutageFilter(RP_SEGMENT.NON_SDWAN)}
+                    />
+                    {ropOutageFilter && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderRadius: 12, border: '1px dashed var(--border)', background: 'var(--bg2)' }}>
+                        <span style={{ fontSize: 11, color: 'var(--text2)', fontFamily: 'var(--mono)' }}>
+                          Showing <strong style={{ color: 'var(--text)' }}>{RP_OUTAGE_LABELS[ropOutageFilter]}</strong> outages only
+                        </span>
+                        <button type="button" onClick={() => setRopOutageFilter(null)}
+                          style={{ marginLeft: 'auto', padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', fontSize: 10, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 700 }}>
+                          Clear filter
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* ── Trend chart ── */}
                 {trend.length > 0 && (() => {
                   const pts = trend.map((t) => t.avgUptimePct)
@@ -3376,15 +3435,25 @@ export default function StoreZabbixPage({
                 </div>
 
                 {/* ── Per-store table ── */}
+                <div ref={ropStoreTableRef}>
                 <Widget
-                  title="All stores"
+                  title={ropOutageFilter ? `${RP_OUTAGE_LABELS[ropOutageFilter]} outages` : 'All stores'}
                   badge={`${sortedStore.length}${sortedStore.length !== perStore.length ? ` / ${perStore.length}` : ''}`}
                   badgeColor="blue"
                   noPad
                   actions={
-                    <div className="opm-search" style={{ maxWidth: 260 }}>
-                      <span className="opm-search-icon">⌕</span>
-                      <input placeholder="Search hostname or store tag…" value={ropSearch} onChange={(e) => setRopSearch(e.target.value)} />
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      {ropOutageFilter && (
+                        <button type="button" onClick={() => setRopOutageFilter(null)}
+                          className="opm-pill"
+                          style={{ background: 'rgba(239,68,68,.1)', color: '#ef4444', border: '1px solid rgba(239,68,68,.25)', fontSize: 10, cursor: 'pointer', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+                          ✕ {RP_OUTAGE_LABELS[ropOutageFilter]}
+                        </button>
+                      )}
+                      <div className="opm-search" style={{ maxWidth: 260 }}>
+                        <span className="opm-search-icon">⌕</span>
+                        <input placeholder="Search hostname or store tag…" value={ropSearch} onChange={(e) => setRopSearch(e.target.value)} />
+                      </div>
                     </div>
                   }
                 >
@@ -3414,7 +3483,13 @@ export default function StoreZabbixPage({
                       <tbody>
                         {sortedStore.length === 0 && (
                           <tr><td colSpan={9} style={{ padding: 28, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>
-                            {perStore.length === 0 ? 'No stores in this group.' : `No stores match "${ropSearch}".`}
+                            {perStore.length === 0
+                              ? 'No stores in this group.'
+                              : ropOutageFilter
+                                ? `No ${RP_OUTAGE_LABELS[ropOutageFilter]} stores are currently offline.`
+                                : ropSearch.trim()
+                                  ? `No stores match "${ropSearch}".`
+                                  : 'No stores match the current filters.'}
                           </td></tr>
                         )}
                         {sortedStore.slice(0, 800).map((s) => {
@@ -3468,6 +3543,7 @@ export default function StoreZabbixPage({
                     )}
                   </div>
                 </Widget>
+                </div>
               </>
             )}
           </div>

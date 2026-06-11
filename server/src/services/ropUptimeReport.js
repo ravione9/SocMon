@@ -24,6 +24,12 @@ import {
   fetchStoreSnapshot,
   vendorIsFortinet,
 } from './influxStore.js'
+import { getManualRopCodeList } from '../utils/manualRopStoreCodes.js'
+import {
+  classifyRpSegment,
+  partitionRpStores,
+  buildRpOutageSummary,
+} from '../utils/storeRopGrouping.js'
 
 const OFFLINE_CODE = 'offline'
 const REPORT_CACHE_MS = 60_000
@@ -91,6 +97,16 @@ async function fetchOfflineRecords(allTags, fromMs, toMs) {
     firstSeenAt: { $lt: new Date(toMs) },
     $or: [{ resolvedAt: null }, { resolvedAt: { $gt: new Date(fromMs) } }],
   }).lean()
+}
+
+/** Active outages only — indexed query, cheap for dashboard refresh. */
+async function fetchActiveOfflineRecords(storeTags) {
+  if (!storeTags?.length) return []
+  return StoreProblemHistory.find({
+    code: OFFLINE_CODE,
+    status: 'active',
+    storeTag: { $in: storeTags },
+  }).select('storeTag hostname serial firstSeenAt lastSeenAt').lean()
 }
 
 /* ─── BH minute math ───────────────────────────────────────────────── */
@@ -184,6 +200,10 @@ export async function fetchRopUptimeReport(opts = {}) {
 
   const snapshot = await ensureSnapshot()
   const tagIdx = snapshotIndex(snapshot)
+  const manualCodes = await getManualRopCodeList()
+  const rpPartition = partitionRpStores(snapshot, manualCodes)
+  const allRpTags = [...rpPartition.sdwanTags, ...rpPartition.nonSdwanTags]
+
   const tagsInGroup = buildGroupTags(snapshot, groupKey)
   const tagsSet = new Set(tagsInGroup)
   const totalStores = tagsInGroup.length
@@ -194,8 +214,11 @@ export async function fetchRopUptimeReport(opts = {}) {
   for (const d of dayMsList) bhMinPerDay.set(d, bhMinutesForDay(d, isBh, cappedTo))
   const bhMinutesPerStore = [...bhMinPerDay.values()].reduce((s, n) => s + n, 0)
 
-  /* ── pull offline records for every store in group ── */
-  const allRecordsRaw = await fetchOfflineRecords(tagsInGroup, fromMs, cappedTo)
+  /* ── history window + active outages (parallel) ── */
+  const [allRecordsRaw, activeOfflineRows] = await Promise.all([
+    fetchOfflineRecords(tagsInGroup, fromMs, cappedTo),
+    fetchActiveOfflineRecords(allRpTags),
+  ])
   const records = allRecordsRaw.filter((r) => !isBlip(r, nowMs))
   const blipsFiltered = allRecordsRaw.length - records.length
 
@@ -301,6 +324,7 @@ export async function fetchRopUptimeReport(opts = {}) {
 
   /* ── per-store summaries ── */
   const perStoreList = [...perStore.values()].map((ps) => {
+    const storeSnap = tagIdx.get(ps.storeTag)
     const upMin = Math.max(0, bhMinutesPerStore - ps.bizDownMin)
     const uptimePct = bhMinutesPerStore > 0
       ? Math.round((upMin / bhMinutesPerStore) * 10000) / 100
@@ -315,6 +339,7 @@ export async function fetchRopUptimeReport(opts = {}) {
       storeTag: ps.storeTag,
       hostname: ps.hostname,
       serial: ps.serial,
+      rpSegment: storeSnap ? classifyRpSegment(storeSnap, manualCodes) : null,
       uptimePct,
       bizDownMin: ps.bizDownMin,
       bizUpMin: upMin,
@@ -326,6 +351,15 @@ export async function fetchRopUptimeReport(opts = {}) {
       perDayDownMin: dayMsList.map((d) => ps.perDayDownMin.get(d) || 0),
       perDayDisconnects: dayMsList.map((d) => ps.perDayDisc.get(d) || 0),
     }
+  })
+
+  const activeOfflineTags = new Set(activeOfflineRows.map((r) => r.storeTag))
+  const activeOfflineByTag = new Map(activeOfflineRows.map((r) => [r.storeTag, r]))
+  const outageSummary = buildRpOutageSummary({
+    snapshot,
+    activeOfflineTags,
+    activeOfflineByTag,
+    manualCodes,
   })
 
   /* ── summary KPIs ── */
@@ -427,11 +461,16 @@ export async function fetchRopUptimeReport(opts = {}) {
     heatmap,
     topOffenders,
     perStore: perStoreList,
+    outageSummary,
     meta: {
       recordsConsidered: records.length,
       blipsFiltered,
       minDurationMin: MIN_OFFLINE_MIN,
       flapGapMin: FLAP_GAP_MS / 60_000,
+      activeOutagesQueried: activeOfflineRows.length,
+      rpSdwanStores: rpPartition.sdwan.length,
+      rpNonSdwanStores: rpPartition.nonSdwan.length,
+      manualRopCodes: manualCodes.length,
       source: `StoreProblemHistory (code='offline', MongoDB)`,
     },
   }
