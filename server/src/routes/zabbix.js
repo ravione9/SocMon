@@ -2272,7 +2272,7 @@ router.get('/rop-uptime', async (req, res) => {
     }
 
     const bizStart = parseInt(String(req.query.bizStart ?? '9'),  10)
-    const bizEnd   = parseInt(String(req.query.bizEnd   ?? '22'), 10)
+    const bizEnd   = parseInt(String(req.query.bizEnd   ?? '18'), 10)
     const bizDaysRaw = String(req.query.bizDays ?? '0,1,2,3,4,5,6')
     const weekdays = bizDaysRaw.split(',')
       .map((d) => parseInt(d.trim(), 10))

@@ -149,7 +149,7 @@ function buildDayList(fromMs, toMs) {
 /* ─── normalise inputs ─────────────────────────────────────────────── */
 
 function normaliseBh(bh) {
-  const def = { startHour: 9, endHour: 22, weekdays: [0, 1, 2, 3, 4, 5, 6], tzOffsetMinutes: 0 }
+  const def = { startHour: 9, endHour: 18, weekdays: [0, 1, 2, 3, 4, 5, 6], tzOffsetMinutes: 0 }
   if (!bh || typeof bh !== 'object') return def
   const startHour = clampHour(bh.startHour ?? def.startHour)
   const endHour = clampHour(bh.endHour ?? def.endHour)

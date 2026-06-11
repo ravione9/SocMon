@@ -1343,11 +1343,11 @@ export default function StoreZabbixPage({
   const [ropRange, setRopRange] = useState('7d')
   const [ropCustomFrom, setRopCustomFrom] = useState('')
   const [ropCustomTo, setRopCustomTo] = useState('')
+  const [ropCustomEpoch, setRopCustomEpoch] = useState(null)
   const [ropGroupKey, setRopGroupKey] = useState('rp')
   const [ropBhStart, setRopBhStart] = useState(9)
-  const [ropBhEnd, setRopBhEnd] = useState(22)
+  const [ropBhEnd, setRopBhEnd] = useState(18)
   const [ropBhDays, setRopBhDays] = useState(() => new Set([0, 1, 2, 3, 4, 5, 6]))
-  const [ropBhEditorOpen, setRopBhEditorOpen] = useState(false)
   const [ropSla, setRopSla] = useState(99.5)
   const [ropSearch, setRopSearch] = useState('')
   const [ropSortKey, setRopSortKey] = useState('uptimePct')
@@ -1470,16 +1470,16 @@ export default function StoreZabbixPage({
     }
   }, [apiBase, parseErr])
 
-  const loadRopUptime = useCallback(async ({ range, customFrom, customTo, groupKey, bhStart, bhEnd, bhDays, sla }) => {
+  const loadRopUptime = useCallback(async ({ range, customEpoch, groupKey, bhStart, bhEnd, bhDays, sla }) => {
     const qs = new URLSearchParams()
     qs.set('range', range || '7d')
-    if (range === 'custom' && customFrom && customTo) {
-      qs.set('from', String(Math.floor(new Date(customFrom).getTime() / 1000)))
-      qs.set('to',   String(Math.floor(new Date(customTo).getTime() / 1000)))
+    if (range === 'custom' && customEpoch?.from && customEpoch?.to) {
+      qs.set('from', String(Math.floor(new Date(customEpoch.from).getTime() / 1000)))
+      qs.set('to',   String(Math.floor(new Date(customEpoch.to).getTime() / 1000)))
     }
     qs.set('groupKey', groupKey || 'rp')
     qs.set('bizStart', String(bhStart ?? 9))
-    qs.set('bizEnd',   String(bhEnd ?? 22))
+    qs.set('bizEnd',   String(bhEnd ?? 18))
     qs.set('bizDays',  [...(bhDays || [0,1,2,3,4,5,6])].sort((a,b)=>a-b).join(','))
     qs.set('sla',      String(sla ?? 99.5))
     qs.set('tzOffset', String(-new Date().getTimezoneOffset()))
@@ -1618,31 +1618,33 @@ export default function StoreZabbixPage({
 
   useEffect(() => {
     if (tab !== 'rop' || !config?.configured) return
+    if (ropRange === 'custom' && !ropCustomEpoch) return
     loadRopUptime({
       range: ropRange,
-      customFrom: ropCustomFrom,
-      customTo: ropCustomTo,
+      customEpoch: ropCustomEpoch,
       groupKey: ropGroupKey,
       bhStart: ropBhStart,
       bhEnd: ropBhEnd,
       bhDays: ropBhDays,
       sla: ropSla,
     })
-  }, [tab, config?.configured, ropRange, ropCustomFrom, ropCustomTo, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla, loadRopUptime])
+  }, [tab, config?.configured, ropRange, ropCustomEpoch, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla, loadRopUptime])
 
   useSmartPolling(
-    () => loadRopUptime({
-      range: ropRange,
-      customFrom: ropCustomFrom,
-      customTo: ropCustomTo,
-      groupKey: ropGroupKey,
-      bhStart: ropBhStart,
-      bhEnd: ropBhEnd,
-      bhDays: ropBhDays,
-      sla: ropSla,
-    }),
+    () => {
+      if (ropRange === 'custom' && !ropCustomEpoch) return Promise.resolve()
+      return loadRopUptime({
+        range: ropRange,
+        customEpoch: ropCustomEpoch,
+        groupKey: ropGroupKey,
+        bhStart: ropBhStart,
+        bhEnd: ropBhEnd,
+        bhDays: ropBhDays,
+        sla: ropSla,
+      })
+    },
     120_000,
-    [ropRange, ropCustomFrom, ropCustomTo, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla, loadRopUptime],
+    [ropRange, ropCustomEpoch, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla, loadRopUptime],
     { enabled: tab === 'rop' && !!config?.configured && config?.reachable !== false, skipImmediate: true },
   )
 
@@ -1856,10 +1858,9 @@ export default function StoreZabbixPage({
       if (tab === 'events') await loadEvents(eventLimit)
       if (tab === 'topMon') await loadTopUtil(topLimit, topMonGroup)
       if (tab === 'netHealth') await loadNetHealth(netHealthGroup, netBizStart, netBizEnd)
-      if (tab === 'rop') await loadRopUptime({
+      if (tab === 'rop' && (ropRange !== 'custom' || ropCustomEpoch)) await loadRopUptime({
         range: ropRange,
-        customFrom: ropCustomFrom,
-        customTo: ropCustomTo,
+        customEpoch: ropCustomEpoch,
         groupKey: ropGroupKey,
         bhStart: ropBhStart,
         bhEnd: ropBhEnd,
@@ -1869,7 +1870,7 @@ export default function StoreZabbixPage({
       if (tab === 'hostGraphs') { await loadAllHosts(); if (selectedHost?.hostid) { const g = await loadHostGraphs(selectedHost.hostid); if (!g.length) await loadHostItemsLatest(selectedHost.hostid); else setHostItemsLatest(null); if (selectedGraphId) { const d = await fetchGraphSeries(selectedGraphId, graphRange, graphDataMode); setGraphSeries(d) } } }
     } catch (e) { const r = parseErr(e); setError(r.message); setErrorHint(r.hint) }
     finally { setLoading(false) }
-  }, [tab, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries, loadTopUtil, topLimit, topMonGroup, refetchProblems, apiBase, urlEnvVar, loadNetHealth, netHealthGroup, netBizStart, netBizEnd, loadRopUptime, ropRange, ropCustomFrom, ropCustomTo, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla])
+  }, [tab, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries, loadTopUtil, topLimit, topMonGroup, refetchProblems, apiBase, urlEnvVar, loadNetHealth, netHealthGroup, netBizStart, netBizEnd, loadRopUptime, ropRange, ropCustomEpoch, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla])
 
   /* ─── column definitions ─── */
   const hostCols = [
@@ -3002,22 +3003,54 @@ export default function StoreZabbixPage({
         }
         const presetWeekdays = () => setRopBhDays(new Set([1, 2, 3, 4, 5]))
         const presetEveryday = () => setRopBhDays(new Set([0, 1, 2, 3, 4, 5, 6]))
+        const seedCustomRange = (daysBack = 7) => {
+          const to = Math.floor(Date.now() / 1000)
+          const from = to - daysBack * 86400
+          const fromStr = toLocalInput(from)
+          const toStr = toLocalInput(to)
+          setRopCustomFrom(fromStr)
+          setRopCustomTo(toStr)
+          setRopCustomEpoch({ from: fromStr, to: toStr })
+        }
+        const selectRopRange = (id) => {
+          setRopRange(id)
+          if (id === 'custom') {
+            if (!ropCustomEpoch) seedCustomRange(7)
+            else {
+              setRopCustomFrom(ropCustomEpoch.from)
+              setRopCustomTo(ropCustomEpoch.to)
+            }
+          } else {
+            setRopCustomEpoch(null)
+          }
+        }
+        const applyRopCustomRange = () => {
+          if (!ropCustomFrom || !ropCustomTo) return
+          const fromTs = Math.floor(new Date(ropCustomFrom).getTime() / 1000)
+          const toTs = Math.floor(new Date(ropCustomTo).getTime() / 1000)
+          if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || fromTs >= toTs) return
+          setRopCustomEpoch({ from: ropCustomFrom, to: ropCustomTo })
+        }
         const bhSummary = (() => {
           const allDays = ropBhDays.size === 7
           const weekdays = ropBhDays.size === 5 && [1,2,3,4,5].every((d) => ropBhDays.has(d))
           const dayLabel = allDays ? 'Every day' : weekdays ? 'Mon–Fri' : [...ropBhDays].sort().map((d) => dayOfWeekLabels[d]).join(', ')
           return `${String(ropBhStart).padStart(2,'0')}:00 – ${String(ropBhEnd).padStart(2,'0')}:00 · ${dayLabel}`
         })()
+        const customRangeValid = ropCustomFrom && ropCustomTo
+          && Number.isFinite(new Date(ropCustomFrom).getTime())
+          && Number.isFinite(new Date(ropCustomTo).getTime())
+          && new Date(ropCustomFrom) < new Date(ropCustomTo)
 
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            {/* ── Toolbar: range chips + group + SLA + BH editor ── */}
+            {/* ── Toolbar: range + custom dates + group + business hours + SLA ── */}
             <div className="opm-toolbar" style={{ gap: 10 }}>
-              <div className="opm-toolbar-row" style={{ flexWrap: 'wrap', gap: 8 }}>
+              <div className="opm-toolbar-row" style={{ flexWrap: 'wrap', gap: 10 }}>
                 <span className="opm-toolbar-label">Range</span>
                 <div style={{ display: 'inline-flex', gap: 2, padding: 3, background: 'var(--bg2)', borderRadius: 8, border: '1px solid var(--border)' }}>
                   {rangeChips.map((c) => (
-                    <button key={c.id} type="button" onClick={() => setRopRange(c.id)}
+                    <button key={c.id} type="button" onClick={() => selectRopRange(c.id)}
                       style={{
                         padding: '5px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
                         background: ropRange === c.id ? 'var(--accent)' : 'transparent',
@@ -3030,65 +3063,80 @@ export default function StoreZabbixPage({
                 </div>
                 {ropRange === 'custom' && (
                   <>
+                    <span className="opm-toolbar-label">Custom</span>
                     <input type="datetime-local" value={ropCustomFrom} onChange={(e) => setRopCustomFrom(e.target.value)}
-                      style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 11, fontFamily: 'var(--mono)' }} />
-                    <span style={{ fontSize: 10, color: 'var(--text3)' }}>→</span>
+                      style={{ padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)' }} />
+                    <span style={{ fontSize: 11, color: 'var(--text3)' }}>–</span>
                     <input type="datetime-local" value={ropCustomTo} onChange={(e) => setRopCustomTo(e.target.value)}
-                      style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 11, fontFamily: 'var(--mono)' }} />
+                      style={{ padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)' }} />
+                    <button type="button" onClick={applyRopCustomRange} disabled={!customRangeValid}
+                      style={{
+                        padding: '5px 14px', borderRadius: 6, border: 'none', cursor: customRangeValid ? 'pointer' : 'not-allowed',
+                        background: 'var(--accent)', color: '#fff', fontSize: 11, fontWeight: 700, fontFamily: 'var(--mono)',
+                        opacity: customRangeValid ? 1 : 0.45,
+                      }}>
+                      Apply
+                    </button>
+                    {ropCustomEpoch && (
+                      <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', border: '1px solid rgba(59,130,246,.25)', fontSize: 10 }}>
+                        Active: {new Date(ropCustomEpoch.from).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                        {' – '}
+                        {new Date(ropCustomEpoch.to).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    )}
                   </>
                 )}
-                <span className="opm-toolbar-label" style={{ marginLeft: 6 }}>Group</span>
+                <span className="opm-toolbar-label" style={{ marginLeft: 4 }}>Group</span>
                 <select value={ropGroupKey} onChange={(e) => setRopGroupKey(e.target.value)}
                   style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', minWidth: 180 }}>
                   <option value="rp">{groupKeyToLabel.rp}</option>
                   <option value="pos">{groupKeyToLabel.pos}</option>
                   <option value="sdwan">{groupKeyToLabel.sdwan}</option>
                 </select>
-                <span className="opm-toolbar-label" style={{ marginLeft: 6 }}>SLA</span>
+                <span className="opm-toolbar-label" style={{ marginLeft: 4 }}>Business hours</span>
+                <select value={ropBhStart} onChange={(e) => setRopBhStart(Number(e.target.value))}
+                  style={{ padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', width: 70 }}>
+                  {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+                </select>
+                <span style={{ fontSize: 11, color: 'var(--text3)' }}>–</span>
+                <select value={ropBhEnd} onChange={(e) => setRopBhEnd(Number(e.target.value))}
+                  style={{ padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', width: 70 }}>
+                  {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+                </select>
+                <span className="opm-toolbar-label" style={{ marginLeft: 4 }}>SLA</span>
                 <input type="number" min={0} max={100} step={0.1} value={ropSla}
                   onChange={(e) => setRopSla(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
                   style={{ width: 70, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)' }} />
                 <span style={{ fontSize: 11, color: 'var(--text3)' }}>%</span>
-                <button type="button" onClick={() => setRopBhEditorOpen((v) => !v)}
-                  style={{ marginLeft: 8, padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: ropBhEditorOpen ? 'var(--bg4)' : 'var(--bg3)', color: 'var(--text)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                  <span style={{ fontSize: 13 }}>🕘</span> Business hours: <strong style={{ color: 'var(--accent)' }}>{bhSummary}</strong> {ropBhEditorOpen ? '▴' : '▾'}
-                </button>
                 {ru?.rangeFromIso && (
                   <span className="opm-pill" style={{ marginLeft: 'auto', background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
-                    Source: StoreProblemHistory · poll 2m · auto-refresh 2m
+                    Source: StoreProblemHistory · BH {bhSummary}
                   </span>
                 )}
               </div>
-              {ropBhEditorOpen && (
-                <div className="opm-toolbar-row" style={{ flexWrap: 'wrap', gap: 10, paddingTop: 8, borderTop: '1px dashed var(--border)' }}>
-                  <span className="opm-toolbar-label">Hours</span>
-                  <select value={ropBhStart} onChange={(e) => setRopBhStart(Number(e.target.value))}
-                    style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 11, fontFamily: 'var(--mono)' }}>
-                    {Array.from({ length: 25 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
-                  </select>
-                  <span style={{ fontSize: 10, color: 'var(--text3)' }}>to</span>
-                  <select value={ropBhEnd} onChange={(e) => setRopBhEnd(Number(e.target.value))}
-                    style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 11, fontFamily: 'var(--mono)' }}>
-                    {Array.from({ length: 25 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
-                  </select>
-                  <span className="opm-toolbar-label" style={{ marginLeft: 8 }}>Days</span>
-                  <div style={{ display: 'inline-flex', gap: 2 }}>
-                    {dayOfWeekLabels.map((lbl, idx) => {
-                      const on = ropBhDays.has(idx)
-                      return (
-                        <button key={idx} type="button" onClick={() => toggleBhDay(idx)}
-                          style={{ width: 36, padding: '4px 0', borderRadius: 6, border: `1px solid ${on ? 'var(--accent)' : 'var(--border)'}`, background: on ? 'rgba(59,130,246,.12)' : 'var(--bg2)', color: on ? 'var(--accent)' : 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
-                          {lbl}
-                        </button>
-                      )
-                    })}
-                  </div>
-                  <button type="button" onClick={presetWeekdays}
-                    style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text2)', fontSize: 10, fontFamily: 'var(--mono)', cursor: 'pointer' }}>Preset: Mon–Fri</button>
-                  <button type="button" onClick={presetEveryday}
-                    style={{ padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text2)', fontSize: 10, fontFamily: 'var(--mono)', cursor: 'pointer' }}>Preset: Every day</button>
+              <div className="opm-toolbar-row" style={{ flexWrap: 'wrap', gap: 10, paddingTop: 8, borderTop: '1px dashed var(--border)' }}>
+                <span className="opm-toolbar-label">Days</span>
+                <div style={{ display: 'inline-flex', gap: 2 }}>
+                  {dayOfWeekLabels.map((lbl, idx) => {
+                    const on = ropBhDays.has(idx)
+                    return (
+                      <button key={idx} type="button" onClick={() => toggleBhDay(idx)}
+                        style={{ width: 36, padding: '4px 0', borderRadius: 6, border: `1px solid ${on ? 'var(--accent)' : 'var(--border)'}`, background: on ? 'rgba(59,130,246,.12)' : 'var(--bg2)', color: on ? 'var(--accent)' : 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                        {lbl}
+                      </button>
+                    )
+                  })}
                 </div>
-              )}
+                <button type="button" onClick={presetWeekdays}
+                  style={{ padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text2)', fontSize: 10, fontFamily: 'var(--mono)', cursor: 'pointer' }}>Mon–Fri</button>
+                <button type="button" onClick={presetEveryday}
+                  style={{ padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text2)', fontSize: 10, fontFamily: 'var(--mono)', cursor: 'pointer' }}>Every day</button>
+                {ropRange === 'custom' && !ropCustomEpoch && (
+                  <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                    Pick a start/end date and click Apply to load the custom range.
+                  </span>
+                )}
+              </div>
             </div>
 
             {ropUptimeBusy && !ru && (
