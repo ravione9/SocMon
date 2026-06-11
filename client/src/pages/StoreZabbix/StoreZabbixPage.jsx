@@ -3724,7 +3724,7 @@ export default function StoreZabbixPage({
                       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                         <thead>
                           <tr style={{ background: 'var(--bg3)', borderBottom: '1px solid var(--border)' }}>
-                            {['Group', 'Total downtime (BH)', 'No. of disconnect events', 'Stores'].map((lbl) => (
+                            {['Group', 'Avg downtime (BH)', 'Disconnect events (avg / store)', 'Stores'].map((lbl) => (
                               <th key={lbl} style={{ padding: '10px 14px', textAlign: lbl === 'Group' ? 'left' : 'right', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap' }}>
                                 {lbl}
                               </th>
@@ -3734,7 +3734,14 @@ export default function StoreZabbixPage({
                         <tbody>
                           {segmentRows.map((row) => {
                             const active = ropOutageFilter === row.segment
-                            const hasIssue = (row.totalDowntimeMin || 0) > 0 || (row.totalDisconnects || 0) > 0
+                            const stores = row.totalStores || 0
+                            const totalDown = row.totalDowntimeMin || 0
+                            const avgDownMin = stores > 0 ? totalDown / stores : 0
+                            const bhWindowMin = summary.bhMinutesPerStore || 0
+                            const avgDownPct = bhWindowMin > 0 ? (avgDownMin / bhWindowMin) * 100 : null
+                            const totalDisc = row.totalDisconnects || 0
+                            const avgDisc = stores > 0 ? totalDisc / stores : 0
+                            const hasIssue = totalDown > 0 || totalDisc > 0
                             return (
                               <tr key={row.segment}
                                 onClick={() => selectSegmentFilter(row.segment)}
@@ -3748,14 +3755,24 @@ export default function StoreZabbixPage({
                                 <td style={{ padding: '12px 14px', fontWeight: 700, color: 'var(--text)', whiteSpace: 'nowrap' }}>
                                   {row.label || RP_OUTAGE_LABELS[row.segment]}
                                 </td>
-                                <td style={{ padding: '12px 14px', textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: 700, color: hasIssue ? '#ef4444' : 'var(--text2)' }}>
-                                  {fmtMins(row.totalDowntimeMin)}
+                                <td style={{ padding: '12px 14px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                  <div style={{ fontFamily: 'var(--mono)', fontWeight: 700, fontSize: 13, color: hasIssue ? '#ef4444' : 'var(--text2)' }}>
+                                    {avgDownPct != null ? `${avgDownPct.toFixed(2)}%` : '—'}
+                                  </div>
+                                  <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)', marginTop: 2 }}>
+                                    {fmtMins(avgDownMin)} / store · {fmtMins(totalDown)} total
+                                  </div>
                                 </td>
-                                <td style={{ padding: '12px 14px', textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: 700, color: (row.totalDisconnects || 0) > 0 ? '#f97316' : 'var(--text2)' }}>
-                                  {row.totalDisconnects ?? 0}
+                                <td style={{ padding: '12px 14px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                  <div style={{ fontFamily: 'var(--mono)', fontWeight: 700, fontSize: 13, color: totalDisc > 0 ? '#f97316' : 'var(--text2)' }}>
+                                    {stores > 0 ? avgDisc.toFixed(2) : '—'}
+                                  </div>
+                                  <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)', marginTop: 2 }}>
+                                    {totalDisc.toLocaleString()} total
+                                  </div>
                                 </td>
                                 <td style={{ padding: '12px 14px', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text3)', fontSize: 11 }}>
-                                  {row.totalStores ?? 0}
+                                  {stores}
                                 </td>
                               </tr>
                             )
@@ -3764,7 +3781,7 @@ export default function StoreZabbixPage({
                       </table>
                     </div>
                     <div style={{ padding: '8px 14px', borderTop: '1px dashed var(--border)', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
-                      Click a row to filter the store list below · totals respect business hours and selected range
+                      Click a row to filter the store list below · averages are per store within the configured business-hours window
                     </div>
                   </Widget>
                 )}
