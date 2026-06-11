@@ -50,6 +50,8 @@ export function classifyRpSegment(store, manualCodes = null) {
 export const RP_OUTAGE_LABELS = {
   [RP_SEGMENT.SDWAN]: 'RP SD-WAN',
   [RP_SEGMENT.NON_SDWAN]: 'RP Non SD-WAN',
+  manual_sdwan: 'Manual ROP + SD-WAN',
+  rp_no_sdwan: 'ROP without SD-WAN',
 }
 
 export const ROP_SUBTABS = [

@@ -154,6 +154,12 @@ export const RP_SEGMENT = {
   NON_SDWAN: 'rp_non_sdwan',
 }
 
+/** Keys for ROP outage summary table rows (Store Monitor manual / no-SD-WAN slices). */
+export const RP_SUMMARY_SEGMENT = {
+  MANUAL_SDWAN: 'manual_sdwan',
+  NO_SDWAN: 'rp_no_sdwan',
+}
+
 export function classifyRpSegment(store, manualCodes = null) {
   if (!isRpStore(store)) return null
   return isRpSdwanStore(store, manualCodes) ? RP_SEGMENT.SDWAN : RP_SEGMENT.NON_SDWAN
@@ -231,18 +237,18 @@ export function buildRpOutageSummary({ snapshot, activeOfflineTags, activeOfflin
 }
 
 /**
- * BH downtime + disconnect totals by RP segment for the selected range.
+ * BH downtime + disconnect totals — Manual ROP + SD-WAN vs ROP without SD-WAN.
  * @param {object[]} perStoreMetrics — { storeTag, bizDownMin, disconnects }
  */
 export function buildRpSegmentBhSummary({ perStoreMetrics, snapshot, manualCodes }) {
-  const { sdwanTags, nonSdwanTags } = partitionRpStores(snapshot, manualCodes)
+  const buckets = buildRopGroupBuckets(snapshot, manualCodes)
   const byTag = new Map((perStoreMetrics || []).map((m) => [m.storeTag, m]))
 
-  function sumForTags(tagSet) {
+  function sumForTags(tags) {
     let totalDowntimeMin = 0
     let totalDisconnects = 0
     let storeCount = 0
-    for (const tag of tagSet) {
+    for (const tag of tags || []) {
       const m = byTag.get(tag)
       if (!m) continue
       storeCount += 1
@@ -253,15 +259,17 @@ export function buildRpSegmentBhSummary({ perStoreMetrics, snapshot, manualCodes
   }
 
   return {
-    rpSdwan: {
-      segment: RP_SEGMENT.SDWAN,
-      label: 'ROP SD-WAN',
-      ...sumForTags(sdwanTags),
+    manualSdwan: {
+      segment: RP_SUMMARY_SEGMENT.MANUAL_SDWAN,
+      label: 'Manual ROP + SD-WAN',
+      storeTags: buckets.manual_sdwan,
+      ...sumForTags(buckets.manual_sdwan),
     },
-    rpNonSdwan: {
-      segment: RP_SEGMENT.NON_SDWAN,
-      label: 'ROP Non SD-WAN',
-      ...sumForTags(nonSdwanTags),
+    rpNoSdwan: {
+      segment: RP_SUMMARY_SEGMENT.NO_SDWAN,
+      label: 'ROP without SD-WAN',
+      storeTags: buckets.rp_no_sdwan,
+      ...sumForTags(buckets.rp_no_sdwan),
     },
   }
 }

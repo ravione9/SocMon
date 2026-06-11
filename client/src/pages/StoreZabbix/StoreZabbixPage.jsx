@@ -19,7 +19,7 @@ import { useThemeStore } from '../../store/themeStore.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
 import { useSmartPolling } from '../../hooks/useSmartPolling.js'
 import { useUrlTab } from '../../hooks/useUrlTab.js'
-import { RP_SEGMENT, RP_OUTAGE_LABELS, ROP_SUBTABS, isRpGroupKey } from '../../utils/storeRopGrouping.js'
+import { RP_OUTAGE_LABELS, ROP_SUBTABS, isRpGroupKey } from '../../utils/storeRopGrouping.js'
 import { parseManualStoreCodes } from '../../config/manualRopSdwanStoreCodes.js'
 
 const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'rop']
@@ -2963,12 +2963,15 @@ export default function StoreZabbixPage({
         const perStore = ru?.perStore || []
         const days = ru?.days || []
         const segmentBhSummary = ru?.segmentBhSummary || {}
-        const rpSdwanBh = segmentBhSummary.rpSdwan || { label: 'ROP SD-WAN', totalDowntimeMin: 0, totalDisconnects: 0, totalStores: 0 }
-        const rpNonSdwanBh = segmentBhSummary.rpNonSdwan || { label: 'ROP Non SD-WAN', totalDowntimeMin: 0, totalDisconnects: 0, totalStores: 0 }
+        const manualSdwanBh = segmentBhSummary.manualSdwan || { label: 'Manual ROP + SD-WAN', totalDowntimeMin: 0, totalDisconnects: 0, totalStores: 0, storeTags: [] }
+        const rpNoSdwanBh = segmentBhSummary.rpNoSdwan || { label: 'ROP without SD-WAN', totalDowntimeMin: 0, totalDisconnects: 0, totalStores: 0, storeTags: [] }
         const segmentRows = [
-          { ...rpSdwanBh, segment: RP_SEGMENT.SDWAN },
-          { ...rpNonSdwanBh, segment: RP_SEGMENT.NON_SDWAN },
+          { ...manualSdwanBh, segment: manualSdwanBh.segment || 'manual_sdwan' },
+          { ...rpNoSdwanBh, segment: rpNoSdwanBh.segment || 'rp_no_sdwan' },
         ]
+        const segmentFilterTags = ropOutageFilter
+          ? new Set(segmentRows.find((r) => r.segment === ropOutageFilter)?.storeTags || [])
+          : null
 
         const scrollToStoreTable = () => {
           requestAnimationFrame(() => {
@@ -3015,7 +3018,7 @@ export default function StoreZabbixPage({
         const slaMet = summary.avgUptimePct != null && summary.avgUptimePct >= slaTarget
 
         const filteredStore = perStore.filter((r) => {
-          if (ropOutageFilter && r.rpSegment !== ropOutageFilter) return false
+          if (segmentFilterTags?.size && !segmentFilterTags.has(r.storeTag)) return false
           const q = ropSearch.trim().toLowerCase()
           if (!q) return true
           return (r.hostname || '').toLowerCase().includes(q) || (r.storeTag || '').toLowerCase().includes(q)
