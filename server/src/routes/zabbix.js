@@ -2049,6 +2049,196 @@ router.get('/network-health', async (req, res) => {
   }
 })
 
+/* ═══════════ ROP DASHBOARD ═══════════
+ * Per-host uptime / downtime view for any host group (defaults to "RP").
+ * Returns every monitored host in the group (no worst-N cap), with live
+ * availability + ping + system.uptime so the dashboard can render a full
+ * sortable table of all ROP systems.
+ */
+router.get('/rop-dashboard', async (req, res) => {
+  try {
+    if (!isZabbixConfigured()) return res.status(503).json({ error: 'Zabbix not configured' })
+
+    const groupFilter = String(req.query.group || 'RP').trim() || 'RP'
+    const staleAfterSec = parseNetHealthStaleAfter(req.query)
+    const nowSec = Math.floor(Date.now() / 1000)
+
+    const allGroupsRaw = await (async () => {
+      try { return await zabbixRpc('hostgroup.get', { output: ['groupid', 'name'] }) } catch { return [] }
+    })()
+    const allGroups = (allGroupsRaw || []).sort((a, b) => a.name.localeCompare(b.name))
+    const gobj = allGroups.find((g) => g.name === groupFilter)
+
+    if (!gobj) {
+      return res.json({
+        allGroups: allGroups.map((g) => g.name),
+        groupFilter,
+        groupExists: false,
+        totals: { total: 0, online: 0, offline: 0, unknown: 0 },
+        uptime: { avg: null, median: null, min: null, max: null, count: 0, distribution: [] },
+        rows: [],
+        sampledAt: nowSec,
+        staleAfterSec,
+      })
+    }
+
+    const rawHosts = await zabbixRpc('host.get', {
+      groupids: [gobj.groupid],
+      monitored_hosts: true,
+      output: ['hostid', 'host', 'name', 'status', 'available', 'active_available'],
+      selectInterfaces: ['interfaceid', 'available', 'type', 'ip', 'dns', 'main'],
+      sortfield: 'name',
+      limit: HOST_FETCH_MAX,
+    })
+    const hosts = rawHosts || []
+    const hostids = hosts.map((h) => String(h.hostid))
+
+    if (!hostids.length) {
+      return res.json({
+        allGroups: allGroups.map((g) => g.name),
+        groupFilter,
+        groupExists: true,
+        totals: { total: 0, online: 0, offline: 0, unknown: 0 },
+        uptime: { avg: null, median: null, min: null, max: null, count: 0, distribution: [] },
+        rows: [],
+        sampledAt: nowSec,
+        staleAfterSec,
+      })
+    }
+
+    async function fetchItemsChunked(hids, searchKey, { hostChunk = 400, pageLimit = 500 } = {}) {
+      const out = []
+      for (let i = 0; i < hids.length; i += hostChunk) {
+        const chunkHids = hids.slice(i, i + hostChunk)
+        const batch = await zabbixRpc('item.get', {
+          hostids: chunkHids,
+          output: ['itemid', 'hostid', 'name', 'key_', 'lastvalue', 'units', 'lastclock'],
+          search: { key_: searchKey + '*' },
+          searchWildcardsEnabled: true,
+          limit: pageLimit,
+        })
+        out.push(...(batch || []))
+      }
+      return out
+    }
+
+    function pickPerHost(items, preferExactKey = null) {
+      const picked = {}
+      for (const it of items) {
+        const hid = String(it.hostid)
+        const v = parseFloat(it.lastvalue)
+        if (!Number.isFinite(v)) continue
+        const clock = Number(it.lastclock) || 0
+        const key = String(it.key_ || '')
+        const prev = picked[hid]
+        const isExact = preferExactKey ? key.includes(preferExactKey) : false
+        const prevIsExact = prev ? (preferExactKey ? String(prev.key).includes(preferExactKey) : false) : false
+        const take = !prev || (isExact && !prevIsExact) || (isExact === prevIsExact && clock >= (prev.clock || -1))
+        if (take) picked[hid] = { value: v, clock, key }
+      }
+      return picked
+    }
+
+    const [agentPingItems, pingLossItems, pingMsItems, uptimeItems] = await Promise.all([
+      fetchItemsChunked(hostids, 'agent.ping'),
+      fetchItemsChunked(hostids, 'custom.ping.loss'),
+      fetchItemsChunked(hostids, 'custom.ping.ms'),
+      fetchItemsChunked(hostids, 'system.uptime'),
+    ])
+
+    const agentPingMap = pickPerHost(agentPingItems)
+    const pingLossMap  = pickPerHost(pingLossItems, '8.8.8.8')
+    const pingMsMap    = pickPerHost(pingMsItems, '8.8.8.8')
+    const uptimeMap    = pickPerHost(uptimeItems)
+
+    const totals = { total: hosts.length, online: 0, offline: 0, unknown: 0 }
+    const uptimeVals = []
+
+    const rows = hosts.map((h) => {
+      const hid = String(h.hostid)
+      const ifaces = Array.isArray(h.interfaces) ? h.interfaces : []
+      const primary = ifaces.find((i) => String(i.main) === '1') || ifaces[0]
+      const ip = primary?.ip || primary?.dns || ''
+      const availCode = deriveHostAvail(h)
+      const availability = availLabel(availCode)
+      if (availCode === '1') totals.online++
+      else if (availCode === '2') totals.offline++
+      else totals.unknown++
+
+      const apEntry = agentPingMap[hid]
+      const apStale = !apEntry || (nowSec - apEntry.clock) > staleAfterSec
+      const agentPing = apStale ? null : apEntry.value
+
+      const lossEntry = pingLossMap[hid]
+      const lossStale = !lossEntry || (nowSec - lossEntry.clock) > staleAfterSec
+      const packetLoss = lossStale ? null : lossEntry.value
+
+      const msEntry = pingMsMap[hid]
+      const msStale = !msEntry || (nowSec - msEntry.clock) > staleAfterSec
+      const pingMs = msStale ? null : msEntry.value
+
+      const upEntry = uptimeMap[hid]
+      const uptime = upEntry && Number.isFinite(upEntry.value) && upEntry.value > 0 ? upEntry.value : null
+      if (uptime != null) uptimeVals.push(uptime)
+
+      let downSince = null
+      if (availCode === '2' && uptime == null && upEntry?.clock > 0) {
+        downSince = upEntry.clock
+      }
+
+      return {
+        hostid: hid,
+        name: h.name || h.host,
+        host: h.host,
+        ip,
+        availability,
+        availabilityCode: availCode,
+        agentPing,
+        agentPingStale: apStale,
+        agentPingPoll: apEntry?.clock || null,
+        packetLoss,
+        packetLossStale: lossStale,
+        packetLossPoll: lossEntry?.clock || null,
+        pingMs,
+        pingMsStale: msStale,
+        pingMsPoll: msEntry?.clock || null,
+        uptime,
+        uptimePoll: upEntry?.clock || null,
+        downSince,
+      }
+    })
+
+    const sortedUp = [...uptimeVals].sort((a, b) => a - b)
+    const uptimeSummary = {
+      avg:    sortedUp.length ? Math.round(sortedUp.reduce((a, b) => a + b, 0) / sortedUp.length) : null,
+      median: sortedUp.length ? sortedUp[Math.floor(sortedUp.length / 2)] : null,
+      min:    sortedUp.length ? sortedUp[0] : null,
+      max:    sortedUp.length ? sortedUp[sortedUp.length - 1] : null,
+      count:  sortedUp.length,
+      distribution: [
+        { label: '< 1 h',    count: sortedUp.filter((v) => v < 3600).length },
+        { label: '1 – 24 h', count: sortedUp.filter((v) => v >= 3600 && v < 86400).length },
+        { label: '1 – 7 d',  count: sortedUp.filter((v) => v >= 86400 && v < 7 * 86400).length },
+        { label: '7 – 30 d', count: sortedUp.filter((v) => v >= 7 * 86400 && v < 30 * 86400).length },
+        { label: '> 30 d',   count: sortedUp.filter((v) => v >= 30 * 86400).length },
+      ],
+    }
+
+    res.json({
+      allGroups: allGroups.map((g) => g.name),
+      groupFilter,
+      groupExists: true,
+      totals,
+      uptime: uptimeSummary,
+      rows,
+      sampledAt: nowSec,
+      staleAfterSec,
+    })
+  } catch (e) {
+    return sendZabbixError(res, e)
+  }
+})
+
   return router
 }
 

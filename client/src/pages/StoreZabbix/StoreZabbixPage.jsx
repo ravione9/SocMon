@@ -20,7 +20,7 @@ import { getThemeCssColors } from '../../utils/themeCssColors.js'
 import { useSmartPolling } from '../../hooks/useSmartPolling.js'
 import { useUrlTab } from '../../hooks/useUrlTab.js'
 
-const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth']
+const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'rop']
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, BarController, ArcElement, Tooltip, Legend, Filler)
 
@@ -1337,6 +1337,15 @@ export default function StoreZabbixPage({
   const nhPktRef = useRef(null)
   const nhLatRef = useRef(null)
 
+  /* ── ROP Dashboard tab state ── */
+  const [ropData, setRopData] = useState(null)
+  const [ropBusy, setRopBusy] = useState(false)
+  const [ropGroup, setRopGroup] = useState('RP')
+  const [ropSearch, setRopSearch] = useState('')
+  const [ropStatusFilter, setRopStatusFilter] = useState('all')
+  const [ropSortKey, setRopSortKey] = useState('availability')
+  const [ropSortDir, setRopSortDir] = useState('asc')
+
   /* ─── data loaders (unchanged logic) ─── */
   const parseErr = useCallback((e) => {
     const d = e.response?.data
@@ -1450,6 +1459,20 @@ export default function StoreZabbixPage({
       const { message, hint } = parseErr(e); setError(message); setErrorHint(hint)
     } finally {
       setNetHealthBusy(false)
+    }
+  }, [apiBase, parseErr])
+
+  const loadRopDashboard = useCallback(async (group) => {
+    const qs = new URLSearchParams()
+    if (group) qs.set('group', group)
+    setRopBusy(true); setError(null); setErrorHint(null)
+    try {
+      const { data } = await api.get(`${apiBase}/rop-dashboard?${qs}`)
+      setRopData(data)
+    } catch (e) {
+      const { message, hint } = parseErr(e); setError(message); setErrorHint(hint)
+    } finally {
+      setRopBusy(false)
     }
   }, [apiBase, parseErr])
 
@@ -1573,6 +1596,18 @@ export default function StoreZabbixPage({
     120_000,
     [netHealthGroup, netBizStart, netBizEnd, loadNetHealth],
     { enabled: tab === 'netHealth' && !!config?.configured && config?.reachable !== false, skipImmediate: true },
+  )
+
+  useEffect(() => {
+    if (tab !== 'rop' || !config?.configured) return
+    loadRopDashboard(ropGroup)
+  }, [tab, config?.configured, ropGroup, loadRopDashboard])
+
+  useSmartPolling(
+    () => loadRopDashboard(ropGroup),
+    60_000,
+    [ropGroup, loadRopDashboard],
+    { enabled: tab === 'rop' && !!config?.configured && config?.reachable !== false, skipImmediate: true },
   )
 
   useEffect(() => {
@@ -1785,10 +1820,11 @@ export default function StoreZabbixPage({
       if (tab === 'events') await loadEvents(eventLimit)
       if (tab === 'topMon') await loadTopUtil(topLimit, topMonGroup)
       if (tab === 'netHealth') await loadNetHealth(netHealthGroup, netBizStart, netBizEnd)
+      if (tab === 'rop') await loadRopDashboard(ropGroup)
       if (tab === 'hostGraphs') { await loadAllHosts(); if (selectedHost?.hostid) { const g = await loadHostGraphs(selectedHost.hostid); if (!g.length) await loadHostItemsLatest(selectedHost.hostid); else setHostItemsLatest(null); if (selectedGraphId) { const d = await fetchGraphSeries(selectedGraphId, graphRange, graphDataMode); setGraphSeries(d) } } }
     } catch (e) { const r = parseErr(e); setError(r.message); setErrorHint(r.hint) }
     finally { setLoading(false) }
-  }, [tab, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries, loadTopUtil, topLimit, topMonGroup, refetchProblems, apiBase, urlEnvVar, loadNetHealth, netHealthGroup, netBizStart, netBizEnd])
+  }, [tab, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries, loadTopUtil, topLimit, topMonGroup, refetchProblems, apiBase, urlEnvVar, loadNetHealth, netHealthGroup, netBizStart, netBizEnd, loadRopDashboard, ropGroup])
 
   /* ─── column definitions ─── */
   const hostCols = [
@@ -1853,6 +1889,7 @@ export default function StoreZabbixPage({
     { id: 'problems', label: 'Alarms', icon: '⚠', badge: overview?.activeProblems },
     { id: 'events', label: 'Events', icon: '◉' },
     { id: 'netHealth', label: 'Network Health', icon: '📶' },
+    { id: 'rop', label: 'ROP Dashboard', icon: '🏪', badge: ropData?.totals?.total },
   ]
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 0, minHeight: 0 }}>
@@ -2838,6 +2875,235 @@ export default function StoreZabbixPage({
                 </>
               )
             })()}
+          </div>
+        )
+      })()}
+
+      {/* ═══════════ ROP DASHBOARD TAB ═══════════ */}
+      {configured && reachable && tab === 'rop' && (() => {
+        const rd = ropData
+        const fmtUptime = (s) => {
+          if (!s || !Number.isFinite(s)) return '—'
+          if (s >= 86400) return `${(s / 86400).toFixed(1)} d`
+          if (s >= 3600)  return `${(s / 3600).toFixed(1)} h`
+          if (s >= 60)    return `${Math.floor(s / 60)} m`
+          return `${Math.floor(s)} s`
+        }
+        const pct = (v, t) => t > 0 ? Math.round(v / t * 100) : 0
+        const totals = rd?.totals || { total: 0, online: 0, offline: 0, unknown: 0 }
+        const uptime = rd?.uptime || { avg: null, median: null, min: null, max: null, count: 0, distribution: [] }
+
+        const allRows = rd?.rows || []
+        const filtered = allRows.filter((r) => {
+          if (ropStatusFilter === 'online'  && r.availability !== 'Available')   return false
+          if (ropStatusFilter === 'offline' && r.availability !== 'Unavailable') return false
+          if (ropStatusFilter === 'unknown' && r.availability !== 'Unknown')     return false
+          const q = ropSearch.trim().toLowerCase()
+          if (!q) return true
+          return (
+            (r.name || '').toLowerCase().includes(q) ||
+            (r.host || '').toLowerCase().includes(q) ||
+            (r.ip   || '').toLowerCase().includes(q)
+          )
+        })
+        const sorted = [...filtered].sort((a, b) => {
+          const dir = ropSortDir === 'desc' ? -1 : 1
+          const va = a[ropSortKey]
+          const vb = b[ropSortKey]
+          if (ropSortKey === 'availability') {
+            const order = { Unavailable: 0, Unknown: 1, Available: 2 }
+            return ((order[a.availability] ?? 3) - (order[b.availability] ?? 3)) * dir
+          }
+          if (va == null && vb == null) return 0
+          if (va == null) return 1
+          if (vb == null) return -1
+          if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dir
+          return String(va).localeCompare(String(vb)) * dir
+        })
+        const onSort = (k) => {
+          if (ropSortKey === k) setRopSortDir((d) => d === 'asc' ? 'desc' : 'asc')
+          else { setRopSortKey(k); setRopSortDir(k === 'name' || k === 'host' || k === 'ip' ? 'asc' : 'desc') }
+        }
+        const sortArrow = (k) => ropSortKey === k ? (ropSortDir === 'asc' ? ' ▲' : ' ▼') : ''
+        const maxUptimeBucket = Math.max(...(uptime.distribution || []).map((x) => x.count), 1)
+        const onlinePct = pct(totals.online, totals.total)
+
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {/* Toolbar */}
+            <div className="opm-toolbar">
+              <div className="opm-toolbar-row" style={{ flexWrap: 'wrap', gap: 10 }}>
+                <span className="opm-toolbar-label">ROP host group</span>
+                <select value={ropGroup} onChange={(e) => setRopGroup(e.target.value)}
+                  style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', minWidth: 200, maxWidth: 280 }}>
+                  {(rd?.allGroups && rd.allGroups.length
+                    ? rd.allGroups
+                    : ['RP', 'RPSystem', 'POS System Group']
+                  ).map((g) => <option key={g} value={g}>{g}</option>)}
+                </select>
+                <span className="opm-toolbar-label" style={{ marginLeft: 8 }}>Status</span>
+                <select value={ropStatusFilter} onChange={(e) => setRopStatusFilter(e.target.value)}
+                  style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)' }}>
+                  <option value="all">All ({totals.total})</option>
+                  <option value="online">Online ({totals.online})</option>
+                  <option value="offline">Offline ({totals.offline})</option>
+                  <option value="unknown">Unknown ({totals.unknown})</option>
+                </select>
+                <div className="opm-search" style={{ marginLeft: 8, maxWidth: 320 }}>
+                  <span className="opm-search-icon">⌕</span>
+                  <input placeholder="Search by name, host or IP…" value={ropSearch} onChange={(e) => setRopSearch(e.target.value)} />
+                </div>
+                {rd?.sampledAt && (
+                  <span className="opm-pill" style={{ marginLeft: 'auto', background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
+                    Polled {relAge(rd.sampledAt)} ago · auto-refresh 60s
+                  </span>
+                )}
+                {rd && rd.groupExists === false && (
+                  <span className="opm-pill" style={{ background: 'rgba(245,158,11,.12)', color: '#f59e0b', border: '1px solid rgba(245,158,11,.3)' }}>
+                    Group "{rd.groupFilter}" not found in Zabbix — pick a different group above
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {ropBusy && !rd && (
+              <div style={{ padding: 40, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center' }}>
+                <span className="np-page-loading-dot" /> Loading ROP dashboard…
+              </div>
+            )}
+
+            {rd && (
+              <>
+                {/* KPI tiles */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
+                  <CounterTile label="Total ROP Systems" value={totals.total}    color="blue"  icon="🏪" />
+                  <CounterTile label="Online Now"        value={totals.online}   color="green" icon="●"  sub={`${onlinePct}% available`} />
+                  <CounterTile label="Offline Now"       value={totals.offline}  color="red"   icon="✕"  sub={totals.total ? `${pct(totals.offline, totals.total)}% down` : undefined} />
+                  <CounterTile label="Unknown"           value={totals.unknown}  color="amber" icon="?"  sub={totals.total ? `${pct(totals.unknown, totals.total)}%` : undefined} />
+                  <CounterTile label="Avg Uptime"        value={fmtUptime(uptime.avg)}    color="cyan"   icon="⏱" sub={`${uptime.count} hosts reporting`} />
+                  <CounterTile label="Longest Uptime"    value={fmtUptime(uptime.max)}    color="purple" icon="↑" />
+                </div>
+
+                {/* Uptime distribution */}
+                {uptime.count > 0 && (
+                  <Widget title="Uptime Distribution" badge={`${uptime.count} hosts`} badgeColor="cyan">
+                    <div style={{ display: 'flex', gap: 14, alignItems: 'flex-end', padding: '8px 0', flexWrap: 'wrap' }}>
+                      {(uptime.distribution || []).map((d) => {
+                        const barH = Math.max(8, Math.round((d.count / maxUptimeBucket) * 110))
+                        return (
+                          <div key={d.label} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, flex: 1, minWidth: 80 }}>
+                            <span style={{ fontSize: 11, color: 'var(--accent)', fontWeight: 700, fontFamily: 'var(--mono)' }}>{d.count}</span>
+                            <div style={{ width: '70%', height: barH, background: 'var(--accent)', borderRadius: '4px 4px 0 0', opacity: 0.8 }} />
+                            <span style={{ fontSize: 10, color: 'var(--text3)', textAlign: 'center', lineHeight: 1.2 }}>{d.label}</span>
+                          </div>
+                        )
+                      })}
+                      <div style={{ marginLeft: 'auto', display: 'flex', flexDirection: 'column', gap: 5, minWidth: 130, background: 'var(--bg3)', padding: '10px 14px', borderRadius: 8 }}>
+                        {[['Avg', fmtUptime(uptime.avg)], ['Median', fmtUptime(uptime.median)], ['Min', fmtUptime(uptime.min)], ['Max', fmtUptime(uptime.max)]].map(([l, v]) => (
+                          <div key={l} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 11, fontFamily: 'var(--mono)' }}>
+                            <span style={{ color: 'var(--text3)' }}>{l}</span>
+                            <span style={{ color: 'var(--text)', fontWeight: 600 }}>{v}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </Widget>
+                )}
+
+                {/* Per-host table */}
+                <Widget
+                  title={`ROP Systems — ${ropGroup}`}
+                  badge={`${sorted.length}${sorted.length !== allRows.length ? ` / ${allRows.length}` : ''}`}
+                  badgeColor="blue"
+                  noPad
+                >
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ background: 'var(--bg3)', borderBottom: '1px solid var(--border)' }}>
+                          {[
+                            ['availability', 'Status'],
+                            ['name', 'Store / Host name'],
+                            ['host', 'Technical name'],
+                            ['ip', 'IP address'],
+                            ['agentPing', 'Agent ping'],
+                            ['packetLoss', 'Pkt loss'],
+                            ['pingMs', 'Latency'],
+                            ['uptime', 'Uptime'],
+                          ].map(([k, lbl]) => (
+                            <th key={k}
+                              onClick={() => onSort(k)}
+                              style={{ padding: '8px 12px', textAlign: 'left', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap', cursor: 'pointer', userSelect: 'none' }}>
+                              {lbl}{sortArrow(k)}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sorted.length === 0 && (
+                          <tr><td colSpan={8} style={{ padding: 28, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>
+                            {allRows.length === 0
+                              ? 'No ROP hosts in this group yet.'
+                              : `No hosts match the current filters (${allRows.length} total).`}
+                          </td></tr>
+                        )}
+                        {sorted.slice(0, 1000).map((h) => {
+                          const availColor = h.availability === 'Available' ? '#22c55e'
+                            : h.availability === 'Unavailable' ? '#ef4444'
+                            : '#94a3b8'
+                          const availBg = h.availability === 'Available' ? 'rgba(34,197,94,.12)'
+                            : h.availability === 'Unavailable' ? 'rgba(239,68,68,.12)'
+                            : 'rgba(100,116,139,.12)'
+                          const availBorder = h.availability === 'Available' ? 'rgba(34,197,94,.25)'
+                            : h.availability === 'Unavailable' ? 'rgba(239,68,68,.25)'
+                            : 'var(--border)'
+                          return (
+                            <tr key={h.hostid} style={{ borderBottom: '1px solid rgba(128,128,160,.06)' }}
+                              onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg3)' }}
+                              onMouseLeave={(e) => { e.currentTarget.style.background = '' }}>
+                              <td style={{ padding: '7px 12px', whiteSpace: 'nowrap' }}>
+                                <span className="opm-pill" style={{ background: availBg, color: availColor, border: `1px solid ${availBorder}` }}>
+                                  {h.availability === 'Available' ? '● ' : h.availability === 'Unavailable' ? '✕ ' : '? '}{h.availability}
+                                </span>
+                              </td>
+                              <td style={{ padding: '7px 12px', color: 'var(--text)', fontWeight: 600, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={h.name}>{h.name}</td>
+                              <td style={{ padding: '7px 12px', color: 'var(--text2)', fontFamily: 'var(--mono)', fontSize: 11, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={h.host}>{h.host}</td>
+                              <td style={{ padding: '7px 12px', color: 'var(--text2)', fontFamily: 'var(--mono)', fontSize: 11, whiteSpace: 'nowrap' }}>{h.ip || '—'}</td>
+                              <td style={{ padding: '7px 12px', whiteSpace: 'nowrap', fontFamily: 'var(--mono)' }}>
+                                {h.agentPingStale
+                                  ? <span style={{ color: '#f59e0b', fontSize: 11 }} title={h.agentPingPoll ? fmtClock(h.agentPingPoll) : undefined}>Stale{h.agentPingPoll ? ` (${relAge(h.agentPingPoll)})` : ''}</span>
+                                  : h.agentPing == null ? <span style={{ color: 'var(--text3)' }}>—</span>
+                                  : <span style={{ color: h.agentPing === 1 ? '#22c55e' : '#ef4444', fontWeight: 600 }}>{h.agentPing === 1 ? '▲ Up' : '▼ Down'}</span>}
+                              </td>
+                              <td style={{ padding: '7px 12px', whiteSpace: 'nowrap', fontFamily: 'var(--mono)' }}>
+                                {h.packetLossStale
+                                  ? <span style={{ color: '#f59e0b', fontSize: 11 }}>Stale</span>
+                                  : h.packetLoss == null ? <span style={{ color: 'var(--text3)' }}>—</span>
+                                  : <span style={{ color: h.packetLoss === 0 ? '#22c55e' : h.packetLoss < 5 ? '#f59e0b' : '#ef4444', fontWeight: 600 }}>{h.packetLoss}%</span>}
+                              </td>
+                              <td style={{ padding: '7px 12px', whiteSpace: 'nowrap', fontFamily: 'var(--mono)', color: h.pingMsStale ? '#f59e0b' : h.pingMs != null ? (h.pingMs < 50 ? '#22c55e' : h.pingMs < 150 ? '#f59e0b' : '#ef4444') : 'var(--text3)' }}>
+                                {h.pingMsStale ? <span style={{ fontSize: 11 }}>Stale</span>
+                                  : h.pingMs != null ? `${Math.round(h.pingMs)} ms` : '—'}
+                              </td>
+                              <td style={{ padding: '7px 12px', whiteSpace: 'nowrap', fontFamily: 'var(--mono)', color: 'var(--text2)', fontSize: 11 }}>
+                                {h.uptime != null ? fmtUptime(h.uptime)
+                                  : h.availability === 'Unavailable' ? <span style={{ color: '#ef4444', fontWeight: 600 }}>Down</span>
+                                  : '—'}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                    {sorted.length > 1000 && (
+                      <div style={{ padding: '10px 12px', textAlign: 'center', fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', borderTop: '1px solid var(--border)' }}>
+                        Showing first 1000 of {sorted.length} hosts — refine the filter above to narrow results.
+                      </div>
+                    )}
+                  </div>
+                </Widget>
+              </>
+            )}
           </div>
         )
       })()}
