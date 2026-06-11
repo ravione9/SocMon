@@ -28,6 +28,7 @@ import {
   classifyRpSegment,
   partitionRpStores,
   buildRpOutageSummary,
+  buildRpSegmentBhSummary,
   resolveGroupTags,
   buildRopGroupBuckets,
   isRpGroupKey,
@@ -187,6 +188,7 @@ export async function fetchRopUptimeReport(opts = {}) {
   const tagsInGroup = resolveGroupTags(snapshot, groupKey, manualCodes)
   const tagsSet = new Set(tagsInGroup)
   const totalStores = tagsInGroup.length
+  const historyTags = [...new Set([...tagsInGroup, ...allRpTags])]
 
   const days = buildDayList(fromMs, cappedTo)
   const dayMsList = days.map((d) => d.dayMs)
@@ -196,15 +198,16 @@ export async function fetchRopUptimeReport(opts = {}) {
 
   /* ── history window + active outages (parallel) ── */
   const [allRecordsRaw, activeOfflineRows] = await Promise.all([
-    fetchOfflineRecords(tagsInGroup, fromMs, cappedTo),
+    fetchOfflineRecords(historyTags, fromMs, cappedTo),
     fetchActiveOfflineRecords(allRpTags),
   ])
   const records = allRecordsRaw.filter((r) => !isBlip(r, nowMs))
   const blipsFiltered = allRecordsRaw.length - records.length
 
-  /* ── per-store rollup ── */
+  /* ── per-store rollup (all RP tags for segment summary; filter list by group) ── */
+  const rollupTags = [...new Set([...allRpTags, ...tagsInGroup])]
   const perStore = new Map()
-  for (const tag of tagsInGroup) {
+  for (const tag of rollupTags) {
     perStore.set(tag, {
       storeTag: tag,
       hostname: tagIdx.get(tag)?.hostname || '',
@@ -219,17 +222,17 @@ export async function fetchRopUptimeReport(opts = {}) {
       sessions: [], // for flap-coalescing into "events"
     })
   }
-  for (const tag of tagsInGroup) {
+  for (const tag of rollupTags) {
     const s = tagIdx.get(tag)
     if (s?.online === false || s?.lastOnline === false) {
-      // best-effort: snapshotter keeps online state; if explicit false, mark live offline
       const ps = perStore.get(tag)
       if (ps) ps.currentlyOffline = true
     }
   }
 
+  const rollupTagSet = new Set(rollupTags)
   for (const rec of records) {
-    if (!tagsSet.has(rec.storeTag)) continue
+    if (!rollupTagSet.has(rec.storeTag)) continue
     const ps = perStore.get(rec.storeTag)
     if (!ps) continue
     const startMs = new Date(rec.firstSeenAt).getTime()
@@ -303,7 +306,20 @@ export async function fetchRopUptimeReport(opts = {}) {
   }
 
   /* ── per-store summaries ── */
-  const perStoreList = [...perStore.values()].map((ps) => {
+  const allStoreMetrics = [...perStore.values()].map((ps) => ({
+    storeTag: ps.storeTag,
+    bizDownMin: ps.bizDownMin,
+    disconnects: ps.disconnects,
+  }))
+  const segmentBhSummary = buildRpSegmentBhSummary({
+    perStoreMetrics: allStoreMetrics,
+    snapshot,
+    manualCodes,
+  })
+
+  const perStoreList = [...perStore.values()]
+    .filter((ps) => tagsSet.has(ps.storeTag))
+    .map((ps) => {
     const storeSnap = tagIdx.get(ps.storeTag)
     const upMin = Math.max(0, bhMinutesPerStore - ps.bizDownMin)
     const uptimePct = bhMinutesPerStore > 0
@@ -442,6 +458,7 @@ export async function fetchRopUptimeReport(opts = {}) {
     topOffenders,
     perStore: perStoreList,
     outageSummary,
+    segmentBhSummary,
     meta: {
       recordsConsidered: records.length,
       blipsFiltered,

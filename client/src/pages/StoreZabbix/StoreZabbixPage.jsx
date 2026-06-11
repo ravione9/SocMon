@@ -2962,16 +2962,20 @@ export default function StoreZabbixPage({
         const topOffenders = ru?.topOffenders || []
         const perStore = ru?.perStore || []
         const days = ru?.days || []
-        const outageSummary = ru?.outageSummary || {}
-        const rpSdwanOutage = outageSummary.rpSdwan || { outageCount: 0, totalStores: 0, offlineStores: [] }
-        const rpNonSdwanOutage = outageSummary.rpNonSdwan || { outageCount: 0, totalStores: 0, offlineStores: [] }
+        const segmentBhSummary = ru?.segmentBhSummary || {}
+        const rpSdwanBh = segmentBhSummary.rpSdwan || { label: 'ROP SD-WAN', totalDowntimeMin: 0, totalDisconnects: 0, totalStores: 0 }
+        const rpNonSdwanBh = segmentBhSummary.rpNonSdwan || { label: 'ROP Non SD-WAN', totalDowntimeMin: 0, totalDisconnects: 0, totalStores: 0 }
+        const segmentRows = [
+          { ...rpSdwanBh, segment: RP_SEGMENT.SDWAN },
+          { ...rpNonSdwanBh, segment: RP_SEGMENT.NON_SDWAN },
+        ]
 
         const scrollToStoreTable = () => {
           requestAnimationFrame(() => {
             ropStoreTableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
           })
         }
-        const selectOutageFilter = (segment) => {
+        const selectSegmentFilter = (segment) => {
           setRopOutageFilter((prev) => {
             const next = prev === segment ? null : segment
             if (next) scrollToStoreTable()
@@ -3011,10 +3015,7 @@ export default function StoreZabbixPage({
         const slaMet = summary.avgUptimePct != null && summary.avgUptimePct >= slaTarget
 
         const filteredStore = perStore.filter((r) => {
-          if (ropOutageFilter) {
-            if (r.rpSegment !== ropOutageFilter) return false
-            if (!r.currentlyOffline) return false
-          }
+          if (ropOutageFilter && r.rpSegment !== ropOutageFilter) return false
           const q = ropSearch.trim().toLowerCase()
           if (!q) return true
           return (r.hostname || '').toLowerCase().includes(q) || (r.storeTag || '').toLowerCase().includes(q)
@@ -3091,6 +3092,14 @@ export default function StoreZabbixPage({
           { id: '30d', label: 'Last 30 days' },
           { id: 'custom', label: 'Custom' },
         ]
+        const rangeSummaryLabel = (() => {
+          if (ropRange === 'custom' && ropCustomEpoch) {
+            const from = new Date(ropCustomEpoch.from).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+            const to = new Date(ropCustomEpoch.to).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+            return `${from} – ${to}`
+          }
+          return rangeChips.find((c) => c.id === ropRange)?.label || ropRange
+        })()
         const toggleBhDay = (d) => {
           const next = new Set(ropBhDays)
           if (next.has(d)) next.delete(d); else next.add(d)
@@ -3373,35 +3382,76 @@ export default function StoreZabbixPage({
                 </div>
 
                 {isRpGroupKey(ropGroupKey) && (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 }}>
-                    <CounterTile
-                      label="Total Outage in RP SD-WAN"
-                      value={rpSdwanOutage.outageCount}
-                      color={rpSdwanOutage.outageCount > 0 ? 'red' : 'green'}
-                      icon="⛔"
-                      sub={`${rpSdwanOutage.totalStores} RP SD-WAN stores · click to filter`}
-                      onClick={() => selectOutageFilter(RP_SEGMENT.SDWAN)}
-                    />
-                    <CounterTile
-                      label="Total Outage in RP Non SD-WAN"
-                      value={rpNonSdwanOutage.outageCount}
-                      color={rpNonSdwanOutage.outageCount > 0 ? 'red' : 'green'}
-                      icon="⛔"
-                      sub={`${rpNonSdwanOutage.totalStores} RP Non SD-WAN stores · click to filter`}
-                      onClick={() => selectOutageFilter(RP_SEGMENT.NON_SDWAN)}
-                    />
-                    {ropOutageFilter && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderRadius: 12, border: '1px dashed var(--border)', background: 'var(--bg2)' }}>
-                        <span style={{ fontSize: 11, color: 'var(--text2)', fontFamily: 'var(--mono)' }}>
-                          Showing <strong style={{ color: 'var(--text)' }}>{RP_OUTAGE_LABELS[ropOutageFilter]}</strong> outages only
+                  <Widget
+                    title="ROP outage summary"
+                    badge="BH · range"
+                    badgeColor="amber"
+                    noPad
+                    actions={
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <span className="opm-pill" style={{ background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10, fontFamily: 'var(--mono)' }}>
+                          BH: {bhSummary}
                         </span>
-                        <button type="button" onClick={() => setRopOutageFilter(null)}
-                          style={{ marginLeft: 'auto', padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', fontSize: 10, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 700 }}>
-                          Clear filter
-                        </button>
+                        <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', border: '1px solid rgba(59,130,246,.25)', fontSize: 10, fontFamily: 'var(--mono)' }}>
+                          Range: {rangeSummaryLabel}
+                        </span>
+                        {ropOutageFilter && (
+                          <button type="button" onClick={() => setRopOutageFilter(null)}
+                            className="opm-pill"
+                            style={{ background: 'rgba(239,68,68,.1)', color: '#ef4444', border: '1px solid rgba(239,68,68,.25)', fontSize: 10, cursor: 'pointer', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+                            ✕ Clear {RP_OUTAGE_LABELS[ropOutageFilter]} filter
+                          </button>
+                        )}
                       </div>
-                    )}
-                  </div>
+                    }
+                  >
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                        <thead>
+                          <tr style={{ background: 'var(--bg3)', borderBottom: '1px solid var(--border)' }}>
+                            {['Group', 'Total downtime (BH)', 'No. of disconnect events', 'Stores'].map((lbl) => (
+                              <th key={lbl} style={{ padding: '10px 14px', textAlign: lbl === 'Group' ? 'left' : 'right', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap' }}>
+                                {lbl}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {segmentRows.map((row) => {
+                            const active = ropOutageFilter === row.segment
+                            const hasIssue = (row.totalDowntimeMin || 0) > 0 || (row.totalDisconnects || 0) > 0
+                            return (
+                              <tr key={row.segment}
+                                onClick={() => selectSegmentFilter(row.segment)}
+                                style={{
+                                  borderBottom: '1px solid rgba(128,128,160,.08)',
+                                  cursor: 'pointer',
+                                  background: active ? 'rgba(59,130,246,.08)' : undefined,
+                                }}
+                                onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'var(--bg3)' }}
+                                onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = active ? 'rgba(59,130,246,.08)' : '' }}>
+                                <td style={{ padding: '12px 14px', fontWeight: 700, color: 'var(--text)', whiteSpace: 'nowrap' }}>
+                                  {row.label || RP_OUTAGE_LABELS[row.segment]}
+                                </td>
+                                <td style={{ padding: '12px 14px', textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: 700, color: hasIssue ? '#ef4444' : 'var(--text2)' }}>
+                                  {fmtMins(row.totalDowntimeMin)}
+                                </td>
+                                <td style={{ padding: '12px 14px', textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: 700, color: (row.totalDisconnects || 0) > 0 ? '#f97316' : 'var(--text2)' }}>
+                                  {row.totalDisconnects ?? 0}
+                                </td>
+                                <td style={{ padding: '12px 14px', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text3)', fontSize: 11 }}>
+                                  {row.totalStores ?? 0}
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div style={{ padding: '8px 14px', borderTop: '1px dashed var(--border)', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                      Click a row to filter the store list below · totals respect business hours and selected range
+                    </div>
+                  </Widget>
                 )}
 
                 {/* ── Trend chart ── */}
@@ -3588,7 +3638,7 @@ export default function StoreZabbixPage({
                 {/* ── Per-store table ── */}
                 <div ref={ropStoreTableRef}>
                 <Widget
-                  title={ropOutageFilter ? `${RP_OUTAGE_LABELS[ropOutageFilter]} outages` : 'All stores'}
+                  title={ropOutageFilter ? `${RP_OUTAGE_LABELS[ropOutageFilter]} stores` : 'All stores'}
                   badge={`${sortedStore.length}${sortedStore.length !== perStore.length ? ` / ${perStore.length}` : ''}`}
                   badgeColor="blue"
                   noPad
@@ -3639,7 +3689,7 @@ export default function StoreZabbixPage({
                                 ? 'Add store codes in Manual ROP + SD-WAN settings above to build this dashboard.'
                                 : 'No stores in this group.')
                               : ropOutageFilter
-                                ? `No ${RP_OUTAGE_LABELS[ropOutageFilter]} stores are currently offline.`
+                                ? `No stores in ${RP_OUTAGE_LABELS[ropOutageFilter]}.`
                                 : ropSearch.trim()
                                   ? `No stores match "${ropSearch}".`
                                   : 'No stores match the current filters.'}

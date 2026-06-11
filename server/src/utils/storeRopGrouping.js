@@ -229,3 +229,39 @@ export function buildRpOutageSummary({ snapshot, activeOfflineTags, activeOfflin
     rpNonSdwan: summarize(nonSdwan, RP_SEGMENT.NON_SDWAN, nonSdwanTags),
   }
 }
+
+/**
+ * BH downtime + disconnect totals by RP segment for the selected range.
+ * @param {object[]} perStoreMetrics — { storeTag, bizDownMin, disconnects }
+ */
+export function buildRpSegmentBhSummary({ perStoreMetrics, snapshot, manualCodes }) {
+  const { sdwanTags, nonSdwanTags } = partitionRpStores(snapshot, manualCodes)
+  const byTag = new Map((perStoreMetrics || []).map((m) => [m.storeTag, m]))
+
+  function sumForTags(tagSet) {
+    let totalDowntimeMin = 0
+    let totalDisconnects = 0
+    let storeCount = 0
+    for (const tag of tagSet) {
+      const m = byTag.get(tag)
+      if (!m) continue
+      storeCount += 1
+      totalDowntimeMin += m.bizDownMin || 0
+      totalDisconnects += m.disconnects || 0
+    }
+    return { totalStores: storeCount, totalDowntimeMin, totalDisconnects }
+  }
+
+  return {
+    rpSdwan: {
+      segment: RP_SEGMENT.SDWAN,
+      label: 'ROP SD-WAN',
+      ...sumForTags(sdwanTags),
+    },
+    rpNonSdwan: {
+      segment: RP_SEGMENT.NON_SDWAN,
+      label: 'ROP Non SD-WAN',
+      ...sumForTags(nonSdwanTags),
+    },
+  }
+}
