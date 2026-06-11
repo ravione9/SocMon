@@ -3094,7 +3094,7 @@ export default function StoreZabbixPage({
       {/* ═══════════ ROP DASHBOARD TAB (BH UPTIME) ═══════════ */}
       {configured && reachable && tab === 'rop' && (() => {
         const ru = ropUptime
-        const summary = ru?.summary || { totalStores: 0, reportingStores: 0, avgUptimePct: null, slaTarget: ropSla, storesAboveSla: 0, storesBelowSla: 0, storesCurrentlyOffline: 0, totalDowntimeMin: 0, totalDisconnects: 0, mttrMin: null, bhMinutesPerStore: 0 }
+        const summary = ru?.summary || { totalStores: 0, reportingStores: 0, avgUptimePct: null, slaTarget: ropSla, storesAboveSla: 0, storesBelowSla: 0, storesCurrentlyOffline: 0, totalDowntimeMin: 0, avgDowntimeMin: null, totalDisconnects: 0, mttrMin: null, bhMinutesPerStore: 0 }
         const trend = ru?.trend || []
         const perStore = ru?.perStore || []
         const days = ru?.days || []
@@ -3515,7 +3515,7 @@ export default function StoreZabbixPage({
                   </div>
                   <CounterTile label="Stores below SLA" value={summary.storesBelowSla} color={summary.storesBelowSla > 0 ? 'red' : 'green'} icon="✗" sub={`${summary.storesAboveSla} above`} />
                   <CounterTile label="Currently offline" value={summary.storesCurrentlyOffline} color={summary.storesCurrentlyOffline > 0 ? 'red' : 'green'} icon="●" />
-                  <CounterTile label="BH downtime (total)" value={fmtMins(summary.totalDowntimeMin)} color="amber" icon="⏱" sub={`across ${summary.totalStores} stores`} />
+                  <CounterTile label="BH downtime (avg)" value={fmtMins(summary.avgDowntimeMin)} color="amber" icon="⏱" sub={`per store · ${summary.totalStores} stores`} />
                   <CounterTile label="Disconnects" value={summary.totalDisconnects} color="purple" icon="↯" sub={summary.totalStores ? `${(summary.totalDisconnects / Math.max(summary.totalStores, 1)).toFixed(2)} avg/store` : undefined} />
                   <CounterTile label="Mean time to recovery" value={summary.mttrMin != null ? fmtMins(summary.mttrMin) : '—'} color="cyan" icon="↺" />
                 </div>

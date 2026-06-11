@@ -130,14 +130,32 @@ function bhMinutesForDay(dayMs, isBh, nowMs) {
   return bhMinutesInInterval(dayMs, dayEnd, isBh)
 }
 
-/* ─── day list builder (local-midnight aligned) ───────────────────── */
+/** YYYY-MM-DD for a UTC epoch in the given timezone offset (minutes east of UTC). */
+function dayLabelInTz(tsMs, tzMinutes) {
+  return new Date(tsMs + tzMinutes * 60_000).toISOString().slice(0, 10)
+}
 
-function buildDayList(fromMs, toMs) {
+/** UTC ms of local midnight for YYYY-MM-DD in tz. */
+function localMidnightMs(label, tzMinutes) {
+  const [y, m, d] = label.split('-').map(Number)
+  return Date.UTC(y, m - 1, d) - tzMinutes * 60_000
+}
+
+function nextDayLabel(label) {
+  const [y, m, d] = label.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10)
+}
+
+/* ─── day list builder (timezone-aligned local midnights) ─────────── */
+
+function buildDayList(fromMs, toMs, tzMinutes = 0) {
   const days = []
-  const start = new Date(fromMs); start.setHours(0, 0, 0, 0)
-  const end = new Date(toMs); end.setHours(0, 0, 0, 0)
-  for (let d = start.getTime(); d <= end.getTime(); d += 86_400_000) {
-    days.push({ dayMs: d, label: new Date(d).toISOString().slice(0, 10) })
+  let label = dayLabelInTz(fromMs, tzMinutes)
+  const endLabel = dayLabelInTz(toMs, tzMinutes)
+  while (label <= endLabel) {
+    const dayMs = localMidnightMs(label, tzMinutes)
+    days.push({ dayMs, label })
+    label = nextDayLabel(label)
   }
   return days
 }
@@ -190,7 +208,7 @@ export async function fetchRopUptimeReport(opts = {}) {
   const totalStores = tagsInGroup.length
   const historyTags = [...new Set([...tagsInGroup, ...allRpTags])]
 
-  const days = buildDayList(fromMs, cappedTo)
+  const days = buildDayList(fromMs, cappedTo, bh.tzOffsetMinutes)
   const dayMsList = days.map((d) => d.dayMs)
   const bhMinPerDay = new Map()
   for (const d of dayMsList) bhMinPerDay.set(d, bhMinutesForDay(d, isBh, cappedTo))
@@ -287,8 +305,7 @@ export async function fetchRopUptimeReport(opts = {}) {
     /* per-day disconnect counts based on coalesced session starts */
     for (const ev of coalesced) {
       if (ev.startMs < fromMs || ev.startMs >= cappedTo) continue
-      const d = new Date(ev.startMs); d.setHours(0, 0, 0, 0)
-      const key = d.getTime()
+      const key = localMidnightMs(dayLabelInTz(ev.startMs, bh.tzOffsetMinutes), bh.tzOffsetMinutes)
       if (ps.perDayDisc.has(key)) ps.perDayDisc.set(key, ps.perDayDisc.get(key) + 1)
     }
     /* longest outage */
@@ -366,6 +383,9 @@ export async function fetchRopUptimeReport(opts = {}) {
       ) / 100
     : null
   const totalDowntimeMin = perStoreList.reduce((s, x) => s + x.bizDownMin, 0)
+  const avgDowntimeMin = totalStores > 0
+    ? Math.round((totalDowntimeMin / totalStores) * 100) / 100
+    : null
   const totalDisconnects = perStoreList.reduce((s, x) => s + x.disconnects, 0)
   const storesAboveSla = reportingStores.filter((s) => s.uptimePct >= slaTarget).length
   const storesBelowSla = reportingStores.filter((s) => s.uptimePct < slaTarget).length
@@ -449,6 +469,7 @@ export async function fetchRopUptimeReport(opts = {}) {
       storesBelowSla,
       storesCurrentlyOffline,
       totalDowntimeMin,
+      avgDowntimeMin,
       totalDisconnects,
       mttrMin,
       bhMinutesPerStore,
