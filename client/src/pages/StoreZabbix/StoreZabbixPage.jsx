@@ -19,7 +19,8 @@ import { useThemeStore } from '../../store/themeStore.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
 import { useSmartPolling } from '../../hooks/useSmartPolling.js'
 import { useUrlTab } from '../../hooks/useUrlTab.js'
-import { RP_SEGMENT, RP_OUTAGE_LABELS } from '../../utils/storeRopGrouping.js'
+import { RP_SEGMENT, RP_OUTAGE_LABELS, ROP_SUBTABS, isRpGroupKey } from '../../utils/storeRopGrouping.js'
+import { parseManualStoreCodes } from '../../config/manualRopSdwanStoreCodes.js'
 
 const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'rop']
 
@@ -1356,6 +1357,13 @@ export default function StoreZabbixPage({
   const [ropDrillStore, setRopDrillStore] = useState(null)
   const [ropOutageFilter, setRopOutageFilter] = useState(null)
   const ropStoreTableRef = useRef(null)
+  const manualCodesInitRef = useRef(false)
+  const [manualRopCodesText, setManualRopCodesText] = useState('')
+  const [manualRopCodesOpen, setManualRopCodesOpen] = useState(false)
+  const [manualRopCodesSaving, setManualRopCodesSaving] = useState(false)
+  const [manualRopCodesSaved, setManualRopCodesSaved] = useState(false)
+  const [manualRopCodesUpdatedAt, setManualRopCodesUpdatedAt] = useState(null)
+  const [manualRopCodesDraft, setManualRopCodesDraft] = useState('')
 
   /* ─── data loaders (unchanged logic) ─── */
   const parseErr = useCallback((e) => {
@@ -1620,7 +1628,20 @@ export default function StoreZabbixPage({
   )
 
   useEffect(() => {
-    if (ropGroupKey !== 'rp') setRopOutageFilter(null)
+    if (tab !== 'rop' || manualCodesInitRef.current) return
+    manualCodesInitRef.current = true
+    api.get('/api/store-monitor/settings')
+      .then(({ data }) => {
+        const raw = data?.manualRopSdwanCodes ?? ''
+        setManualRopCodesText(raw)
+        setManualRopCodesDraft(raw)
+        setManualRopCodesUpdatedAt(data?.updatedAt ?? null)
+      })
+      .catch(() => {})
+  }, [tab])
+
+  useEffect(() => {
+    if (!isRpGroupKey(ropGroupKey)) setRopOutageFilter(null)
   }, [ropGroupKey])
 
   useEffect(() => {
@@ -3014,7 +3035,55 @@ export default function StoreZabbixPage({
         }
         const sortArrow = (k) => ropSortKey === k ? (ropSortDir === 'asc' ? ' ▲' : ' ▼') : ''
         const dayOfWeekLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-        const groupKeyToLabel = { rp: 'ROP / RP Stores', pos: 'POS Systems (LK)', sdwan: 'SD-WAN Stores' }
+        const groupKeyToLabel = {
+          rp: 'All ROP',
+          rp_sdwan: 'ROP + SD-WAN',
+          rp_no_sdwan: 'ROP without SD-WAN',
+          manual_sdwan: 'Manual ROP + SD-WAN',
+          pos: 'POS Systems (LK)',
+          sdwan: 'SD-WAN Stores',
+        }
+        const groupCounts = ru?.meta?.groupCounts || {}
+        const manualRopCodeList = parseManualStoreCodes(manualRopCodesText)
+        const manualMatched = groupCounts.manualMatched ?? 0
+        const manualMissing = Math.max(0, (groupCounts.manualCodesConfigured ?? manualRopCodeList.length) - manualMatched)
+        const ropSubCount = (key) => {
+          if (key === 'rp') return groupCounts.rp
+          if (key === 'rp_sdwan') return groupCounts.rp_sdwan
+          if (key === 'rp_no_sdwan') return groupCounts.rp_no_sdwan
+          if (key === 'manual_sdwan') return groupCounts.manual_sdwan
+          return null
+        }
+        const selectRopGroup = (key) => {
+          setRopGroupKey(key)
+          setRopSearch('')
+          setRopOutageFilter(null)
+          if (key === 'manual_sdwan') setManualRopCodesOpen(true)
+        }
+        const saveManualRopCodes = async () => {
+          setManualRopCodesSaving(true)
+          setManualRopCodesSaved(false)
+          try {
+            const { data } = await api.put('/api/store-monitor/settings', { manualRopSdwanCodes: manualRopCodesDraft })
+            setManualRopCodesText(data.manualRopSdwanCodes ?? manualRopCodesDraft)
+            setManualRopCodesUpdatedAt(data.updatedAt ?? new Date().toISOString())
+            setManualRopCodesSaved(true)
+            await loadRopUptime({
+              range: ropRange,
+              customEpoch: ropCustomEpoch,
+              groupKey: ropGroupKey,
+              bhStart: ropBhStart,
+              bhEnd: ropBhEnd,
+              bhDays: ropBhDays,
+              sla: ropSla,
+            })
+          } catch (e) {
+            const { message } = parseErr(e)
+            setError(message)
+          } finally {
+            setManualRopCodesSaving(false)
+          }
+        }
         const rangeChips = [
           { id: '24h', label: 'Last 24h' },
           { id: '7d',  label: 'Last 7 days' },
@@ -3113,10 +3182,11 @@ export default function StoreZabbixPage({
                     )}
                   </>
                 )}
-                <span className="opm-toolbar-label" style={{ marginLeft: 4 }}>Group</span>
-                <select value={ropGroupKey} onChange={(e) => setRopGroupKey(e.target.value)}
-                  style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', minWidth: 180 }}>
-                  <option value="rp">{groupKeyToLabel.rp}</option>
+                <span className="opm-toolbar-label" style={{ marginLeft: 4 }}>Other</span>
+                <select value={isRpGroupKey(ropGroupKey) ? '' : ropGroupKey}
+                  onChange={(e) => { if (e.target.value) selectRopGroup(e.target.value) }}
+                  style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', minWidth: 160 }}>
+                  <option value="">{isRpGroupKey(ropGroupKey) ? 'ROP groups…' : groupKeyToLabel[ropGroupKey]}</option>
                   <option value="pos">{groupKeyToLabel.pos}</option>
                   <option value="sdwan">{groupKeyToLabel.sdwan}</option>
                 </select>
@@ -3165,6 +3235,87 @@ export default function StoreZabbixPage({
                 )}
               </div>
             </div>
+
+            {/* ── ROP group sub-tabs (Store Monitor parity) ── */}
+            <div style={{ display: 'flex', gap: 2, flexWrap: 'wrap', padding: 3, background: 'var(--bg2)', borderRadius: 8, border: '1px solid var(--border)' }}>
+              {ROP_SUBTABS.map((st) => {
+                const count = ropSubCount(st.id)
+                const active = ropGroupKey === st.id
+                return (
+                  <button key={st.id} type="button" onClick={() => selectRopGroup(st.id)}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                      padding: '6px 14px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                      background: active ? 'var(--bg)' : 'transparent',
+                      color: active ? 'var(--text)' : 'var(--text2)',
+                      boxShadow: active ? '0 1px 4px rgba(0,0,0,.15)' : 'none',
+                      fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600,
+                    }}>
+                    {st.icon} {st.label}
+                    {count != null && (
+                      <span style={{
+                        background: active ? 'rgba(0,0,0,.08)' : 'var(--bg3)',
+                        color: 'var(--text2)', fontSize: 9, fontWeight: 800,
+                        padding: '1px 6px', borderRadius: 999, fontFamily: 'var(--mono)',
+                      }}>
+                        {count}
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
+              {!isRpGroupKey(ropGroupKey) && (
+                <span className="opm-pill" style={{ marginLeft: 4, alignSelf: 'center', background: 'rgba(59,130,246,.1)', color: 'var(--accent)', border: '1px solid rgba(59,130,246,.25)', fontSize: 10 }}>
+                  Viewing: {groupKeyToLabel[ropGroupKey]}
+                </span>
+              )}
+            </div>
+
+            {ropGroupKey === 'manual_sdwan' && (
+              <div style={{ borderRadius: 12, border: '1px solid var(--border)', background: 'var(--bg2)', overflow: 'hidden' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', cursor: 'pointer', borderBottom: manualRopCodesOpen ? '1px solid var(--border)' : 'none' }}
+                  onClick={() => setManualRopCodesOpen((v) => !v)}>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text)' }}>⚙ Manual ROP + SD-WAN — Store Code Settings</span>
+                  <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                    {manualRopCodeList.length} configured · {manualMatched} matched · {manualMissing} no data
+                    {manualRopCodesUpdatedAt && ` · saved ${relAge(Math.floor(new Date(manualRopCodesUpdatedAt).getTime() / 1000))} ago`}
+                  </span>
+                  <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text3)' }}>{manualRopCodesOpen ? '▲' : '▼'}</span>
+                </div>
+                {manualRopCodesOpen && (
+                  <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div style={{ fontSize: 11, color: 'var(--text3)', lineHeight: 1.6 }}>
+                      Paste store codes — one per line, or comma / semicolon separated. Matches by store tag, hostname, or serial.
+                      {' '}<strong style={{ color: 'var(--text2)' }}>Saved to the server and shared with Store Monitor.</strong>
+                    </div>
+                    <textarea
+                      rows={8}
+                      placeholder={'S001\nS002\nRP1234\n1234'}
+                      value={manualRopCodesDraft}
+                      onChange={(e) => { setManualRopCodesDraft(e.target.value); setManualRopCodesSaved(false) }}
+                      style={{ width: '100%', minHeight: 140, fontFamily: 'var(--mono)', fontSize: 11.5, resize: 'vertical', lineHeight: 1.7, padding: 10, borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)' }}
+                    />
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <button type="button" onClick={saveManualRopCodes} disabled={manualRopCodesSaving}
+                        style={{ padding: '6px 14px', borderRadius: 6, border: 'none', cursor: manualRopCodesSaving ? 'wait' : 'pointer', background: 'var(--accent)', color: '#fff', fontSize: 11, fontWeight: 700, fontFamily: 'var(--mono)', opacity: manualRopCodesSaving ? 0.7 : 1 }}>
+                        {manualRopCodesSaving ? 'Saving…' : '💾 Save to server'}
+                      </button>
+                      <button type="button" disabled={manualRopCodesSaving}
+                        onClick={() => { setManualRopCodesDraft(manualRopCodesText); setManualRopCodesSaved(false) }}
+                        style={{ padding: '6px 12px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer' }}>
+                        ✕ Cancel
+                      </button>
+                      {manualRopCodesSaved && (
+                        <span style={{ fontSize: 11, color: '#22c55e', fontFamily: 'var(--mono)' }}>✓ Saved — dashboard refreshed</span>
+                      )}
+                      <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                        {parseManualStoreCodes(manualRopCodesDraft).length} codes
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {ropUptimeBusy && !ru && (
               <div style={{ padding: 40, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center' }}>
@@ -3221,7 +3372,7 @@ export default function StoreZabbixPage({
                   <CounterTile label="Mean time to recovery" value={summary.mttrMin != null ? fmtMins(summary.mttrMin) : '—'} color="cyan" icon="↺" />
                 </div>
 
-                {ropGroupKey === 'rp' && (
+                {isRpGroupKey(ropGroupKey) && (
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 }}>
                     <CounterTile
                       label="Total Outage in RP SD-WAN"
@@ -3484,7 +3635,9 @@ export default function StoreZabbixPage({
                         {sortedStore.length === 0 && (
                           <tr><td colSpan={9} style={{ padding: 28, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>
                             {perStore.length === 0
-                              ? 'No stores in this group.'
+                              ? (ropGroupKey === 'manual_sdwan' && manualRopCodeList.length === 0
+                                ? 'Add store codes in Manual ROP + SD-WAN settings above to build this dashboard.'
+                                : 'No stores in this group.')
                               : ropOutageFilter
                                 ? `No ${RP_OUTAGE_LABELS[ropOutageFilter]} stores are currently offline.`
                                 : ropSearch.trim()

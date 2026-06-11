@@ -51,3 +51,16 @@ export const RP_OUTAGE_LABELS = {
   [RP_SEGMENT.SDWAN]: 'RP SD-WAN',
   [RP_SEGMENT.NON_SDWAN]: 'RP Non SD-WAN',
 }
+
+export const ROP_SUBTABS = [
+  { id: 'rp', label: 'All ROP', icon: '📡' },
+  { id: 'rp_sdwan', label: 'ROP + SD-WAN', icon: '🛡' },
+  { id: 'rp_no_sdwan', label: 'ROP without SD-WAN', icon: '🔗' },
+  { id: 'manual_sdwan', label: 'Manual ROP + SD-WAN', icon: '📋' },
+]
+
+const RP_GROUP_KEYS = new Set(['rp', 'all', 'rp_sdwan', 'rp_no_sdwan', 'manual_sdwan'])
+
+export function isRpGroupKey(groupKey) {
+  return RP_GROUP_KEYS.has(String(groupKey || 'rp').toLowerCase())
+}

@@ -50,6 +50,101 @@ export function isRpSdwanStore(store, manualCodes = null) {
   return false
 }
 
+export function isRpFortinetSdwanStore(store) {
+  return isRpStore(store) && deriveGroups(store).includes('SD-WAN Group')
+}
+
+/** Matched snapshot stores for configured manual codes (Store Monitor parity). */
+export function buildManualRopStoreList(snapshot, manualCodes) {
+  const codes = Array.isArray(manualCodes) ? manualCodes : []
+  if (!codes.length) return []
+  const used = new Set()
+  const result = []
+  for (const code of codes) {
+    const match = (snapshot || []).find(
+      (s) => s?.storeTag && !used.has(s.storeTag) && storeMatchesManualCode(s, code),
+    )
+    if (match) {
+      used.add(match.storeTag)
+      result.push(match)
+    }
+  }
+  return result
+}
+
+/**
+ * ROP group buckets — mirrors Store Monitor ROP Groups sub-tabs.
+ * @returns {{ rp, rp_sdwan, rp_no_sdwan, manual_sdwan, counts }}
+ */
+export function buildRopGroupBuckets(snapshot, manualCodes = null) {
+  const codes = manualCodes || []
+  const manualStores = buildManualRopStoreList(snapshot, codes)
+  const manualTags = new Set(manualStores.map((s) => s.storeTag))
+
+  const rp = new Set()
+  const rpSdwan = new Set()
+  const rpOnly = new Set()
+
+  for (const s of snapshot || []) {
+    if (!s?.storeTag || !isRpStore(s)) continue
+    rp.add(s.storeTag)
+    if (deriveGroups(s).includes('SD-WAN Group')) rpSdwan.add(s.storeTag)
+    else rpOnly.add(s.storeTag)
+  }
+
+  const rpNoSdwan = [...rpOnly].filter((tag) => !manualTags.has(tag))
+  const manualSdwan = manualStores.map((s) => s.storeTag)
+
+  return {
+    rp: [...rp],
+    rp_sdwan: [...rpSdwan],
+    rp_no_sdwan: rpNoSdwan,
+    manual_sdwan: manualSdwan,
+    counts: {
+      rp: rp.size,
+      rp_sdwan: rpSdwan.size,
+      rp_no_sdwan: rpNoSdwan.length,
+      manual_sdwan: manualSdwan.length,
+      manualCodesConfigured: codes.length,
+      manualMatched: manualSdwan.length,
+    },
+  }
+}
+
+const RP_GROUP_KEYS = new Set(['rp', 'all', 'rp_sdwan', 'sdwan_rop', 'rp_no_sdwan', 'no_sdwan', 'manual_sdwan'])
+
+export function isRpGroupKey(groupKey) {
+  return RP_GROUP_KEYS.has(String(groupKey || 'rp').toLowerCase())
+}
+
+/** Resolve store tags for dashboard groupKey (RP sub-groups + POS / SD-WAN). */
+export function resolveGroupTags(snapshot, groupKey, manualCodes = null) {
+  const key = String(groupKey || 'rp').toLowerCase()
+  const rpBuckets = buildRopGroupBuckets(snapshot, manualCodes)
+
+  if (key === 'rp' || key === 'all') return rpBuckets.rp
+  if (key === 'rp_sdwan' || key === 'sdwan_rop') return rpBuckets.rp_sdwan
+  if (key === 'rp_no_sdwan' || key === 'no_sdwan') return rpBuckets.rp_no_sdwan
+  if (key === 'manual_sdwan') return rpBuckets.manual_sdwan
+
+  const pos = []
+  const sdwan = []
+  for (const s of snapshot || []) {
+    if (!s?.storeTag) continue
+    const h = String(s.hostname || '').toUpperCase()
+    if (h.startsWith('LK')) pos.push(s.storeTag)
+    if (
+      vendorIsFortinet(s.gatewayVendor, s.isFortinet)
+      || vendorIsFortinet(s.lastGatewayVendor, s.lastIsFortinet)
+    ) sdwan.push(s.storeTag)
+  }
+  const legacy = {
+    pos: [...new Set(pos)],
+    sdwan: [...new Set(sdwan)],
+  }
+  return legacy[key] || rpBuckets.rp
+}
+
 export function isRpNonSdwanStore(store, manualCodes = null) {
   return isRpStore(store) && !isRpSdwanStore(store, manualCodes)
 }

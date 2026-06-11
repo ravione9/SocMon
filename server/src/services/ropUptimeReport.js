@@ -22,13 +22,15 @@ import StoreProblemHistory from '../models/StoreProblemHistory.js'
 import {
   getAnyCachedStoreSnapshot,
   fetchStoreSnapshot,
-  vendorIsFortinet,
 } from './influxStore.js'
 import { getManualRopCodeList } from '../utils/manualRopStoreCodes.js'
 import {
   classifyRpSegment,
   partitionRpStores,
   buildRpOutageSummary,
+  resolveGroupTags,
+  buildRopGroupBuckets,
+  isRpGroupKey,
 } from '../utils/storeRopGrouping.js'
 
 const OFFLINE_CODE = 'offline'
@@ -49,29 +51,6 @@ function isBlip(rec, nowMs) {
 }
 
 /* ─── group resolution ─────────────────────────────────────────────── */
-
-function buildGroupTags(snapshot, groupKey) {
-  const rp = []
-  const pos = []
-  const sdwan = []
-  for (const s of snapshot || []) {
-    if (!s?.storeTag) continue
-    const h = String(s.hostname || '').toUpperCase()
-    if (h.startsWith('RP')) rp.push(s.storeTag)
-    else if (h.startsWith('LK')) pos.push(s.storeTag)
-    if (
-      vendorIsFortinet(s.gatewayVendor, s.isFortinet)
-      || vendorIsFortinet(s.lastGatewayVendor, s.lastIsFortinet)
-    ) sdwan.push(s.storeTag)
-  }
-  const buckets = {
-    rp:    [...new Set(rp)],
-    pos:   [...new Set(pos)],
-    sdwan: [...new Set(sdwan)],
-    all:   [...new Set([...rp, ...pos, ...sdwan])],
-  }
-  return buckets[groupKey] || buckets.rp
-}
 
 function snapshotIndex(snapshot) {
   const byTag = new Map()
@@ -202,9 +181,10 @@ export async function fetchRopUptimeReport(opts = {}) {
   const tagIdx = snapshotIndex(snapshot)
   const manualCodes = await getManualRopCodeList()
   const rpPartition = partitionRpStores(snapshot, manualCodes)
+  const rpGroupBuckets = buildRopGroupBuckets(snapshot, manualCodes)
   const allRpTags = [...rpPartition.sdwanTags, ...rpPartition.nonSdwanTags]
 
-  const tagsInGroup = buildGroupTags(snapshot, groupKey)
+  const tagsInGroup = resolveGroupTags(snapshot, groupKey, manualCodes)
   const tagsSet = new Set(tagsInGroup)
   const totalStores = tagsInGroup.length
 
@@ -471,6 +451,8 @@ export async function fetchRopUptimeReport(opts = {}) {
       rpSdwanStores: rpPartition.sdwan.length,
       rpNonSdwanStores: rpPartition.nonSdwan.length,
       manualRopCodes: manualCodes.length,
+      groupCounts: rpGroupBuckets.counts,
+      isRpGroup: isRpGroupKey(groupKey),
       source: `StoreProblemHistory (code='offline', MongoDB)`,
     },
   }

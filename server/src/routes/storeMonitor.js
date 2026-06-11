@@ -36,7 +36,7 @@ import {
   buildSpeedtestReport,
   buildGroupStoreDailyDisconnectionReport,
 } from '../services/storeReports.js'
-import { getManualRopSdwanStoreCodes } from '../utils/manualRopStoreCodes.js'
+import { getManualRopSdwanStoreCodes, parseManualStoreCodes, invalidateManualRopCodeCache } from '../utils/manualRopStoreCodes.js'
 import StoreMonitorSetting from '../models/StoreMonitorSetting.js'
 import StoreProblemHistory from '../models/StoreProblemHistory.js'
 import { requirePageWrite } from '../middleware/requireAppPage.js'
@@ -840,6 +840,7 @@ router.put('/settings', requirePageWrite('storeMonitor'), async (req, res, next)
       { manualRopSdwanCodes: raw, updatedBy: req.user?._id },
       { new: true, upsert: true, runValidators: true },
     ).lean()
+    invalidateManualRopCodeCache()
     const codes = raw
       ? [...new Set(raw.split(/[\n,;|\t]+/).map((c) => c.trim().toUpperCase().replace(/^STORE[-_\s]*/i, '')).filter(Boolean))]
       : []
