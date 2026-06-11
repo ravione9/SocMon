@@ -2328,7 +2328,20 @@ router.get('/rop-store-disconnects', async (req, res) => {
       fromMs = nowMs - span
     }
 
-    const data = await fetchRopStoreDisconnectEvents({ storeTag, fromMs, toMs })
+    const bizStart = parseInt(String(req.query.bizStart ?? '0'), 10)
+    const bizEnd   = parseInt(String(req.query.bizEnd   ?? '24'), 10)
+    const bizDaysRaw = String(req.query.bizDays ?? '0,1,2,3,4,5,6')
+    const weekdays = bizDaysRaw.split(',')
+      .map((d) => parseInt(d.trim(), 10))
+      .filter((d) => Number.isFinite(d) && d >= 0 && d <= 6)
+    const tzOffsetMinutes = parseInt(String(req.query.tzOffset ?? '0'), 10) || 0
+
+    const data = await fetchRopStoreDisconnectEvents({
+      storeTag,
+      fromMs,
+      toMs,
+      businessHours: { startHour: bizStart, endHour: bizEnd, weekdays, tzOffsetMinutes },
+    })
     res.json(data)
   } catch (e) {
     return res.status(500).json({ error: e.message || 'Failed to load disconnect events', code: e.code })

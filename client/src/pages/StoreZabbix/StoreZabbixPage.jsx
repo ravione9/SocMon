@@ -1234,7 +1234,7 @@ function TopMonAddWidgetModal({ open, onClose, onSave, initial }) {
   )
 }
 
-function RopDisconnectModal({ open, store, events, loading, error, rangeLabel, onClose }) {
+function RopDisconnectModal({ open, store, events, loading, error, rangeLabel, bhLabel, onClose }) {
   if (!open || !store) return null
 
   const fmtTs = (v) => {
@@ -1254,15 +1254,21 @@ function RopDisconnectModal({ open, store, events, loading, error, rangeLabel, o
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, padding: 16 }}
       onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()}
-        style={{ width: '100%', maxWidth: 820, maxHeight: 'min(90vh, 720px)', background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        style={{ width: '100%', maxWidth: 920, maxHeight: 'min(90vh, 720px)', background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <div style={{ padding: '16px 18px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'flex-start', gap: 12 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text)' }}>Disconnect events</div>
             <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent)', marginTop: 4, fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={store.hostname || store.storeTag}>
               {store.hostname || store.storeTag}
             </div>
-            <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginTop: 4 }}>
-              {store.storeTag}{rangeLabel ? ` · ${rangeLabel}` : ''}
+            <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+              <span>{store.storeTag}</span>
+              {rangeLabel && <><span>·</span><span>{rangeLabel}</span></>}
+              {bhLabel && (
+                <span style={{ background: 'rgba(59,130,246,.10)', color: 'var(--accent)', border: '1px solid rgba(59,130,246,.20)', padding: '1px 6px', borderRadius: 4, fontWeight: 700 }}>
+                  BH {bhLabel}
+                </span>
+              )}
             </div>
           </div>
           <button type="button" onClick={onClose}
@@ -1281,14 +1287,14 @@ function RopDisconnectModal({ open, store, events, loading, error, rangeLabel, o
           )}
           {!loading && !error && events.length === 0 && (
             <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>
-              No disconnect events in this range.
+              No disconnect events overlap the business-hours window.
             </div>
           )}
           {!loading && !error && events.length > 0 && (
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
                 <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                  {['#', 'Disconnected at', 'Back up at', 'Duration', 'Status'].map((lbl, i) => (
+                  {['#', 'Disconnected at', 'Back up at', 'BH duration', 'Total duration', 'Status'].map((lbl, i) => (
                     <th key={lbl} style={{ padding: '8px 10px', textAlign: i === 0 ? 'center' : 'left', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap' }}>
                       {lbl}
                     </th>
@@ -1303,7 +1309,12 @@ function RopDisconnectModal({ open, store, events, loading, error, rangeLabel, o
                     <td style={{ padding: '8px 10px', fontFamily: 'var(--mono)', fontSize: 11, whiteSpace: 'nowrap', color: ev.stillOffline ? '#ef4444' : '#22c55e' }}>
                       {ev.stillOffline ? 'Still offline' : fmtTs(ev.backUpAt)}
                     </td>
-                    <td style={{ padding: '8px 10px', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, color: ev.stillOffline ? '#ef4444' : '#f59e0b', whiteSpace: 'nowrap' }}>
+                    <td style={{ padding: '8px 10px', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, color: ev.bhDurationMin > 0 ? '#f59e0b' : 'var(--text3)', whiteSpace: 'nowrap' }}
+                      title="Time during configured business hours">
+                      {fmtDur(ev.bhDurationMin)}
+                    </td>
+                    <td style={{ padding: '8px 10px', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text3)', whiteSpace: 'nowrap' }}
+                      title="Total wall-clock outage duration">
                       {fmtDur(ev.durationMin)}
                     </td>
                     <td style={{ padding: '8px 10px', whiteSpace: 'nowrap' }}>
@@ -1320,7 +1331,7 @@ function RopDisconnectModal({ open, store, events, loading, error, rangeLabel, o
           )}
         </div>
         <div style={{ padding: '10px 16px', borderTop: '1px dashed var(--border)', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
-          Source: StoreProblemHistory · offline sessions in selected range
+          Source: StoreProblemHistory · {bhLabel ? 'events overlapping BH window' : 'offline sessions in selected range'}
         </div>
       </div>
     </div>
@@ -1539,6 +1550,17 @@ export default function StoreZabbixPage({
     const labels = { '24h': 'Last 24h', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days' }
     return labels[ropRange] || ropRange
   }, [ropRange, ropCustomEpoch])
+
+  const ropBhLabel = useMemo(() => {
+    const dayList = [...(ropBhDays || [])].sort((a, b) => a - b)
+    const allDays = dayList.length === 7
+    const weekdays = dayList.length === 5 && [1,2,3,4,5].every((d) => ropBhDays.has(d))
+    const dayShort = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+    const dayLabel = allDays ? 'Every day' : weekdays ? 'Mon–Fri' : dayList.map((d) => dayShort[d]).join(', ')
+    const start = String(ropBhStart ?? 9).padStart(2, '0')
+    const end = String(ropBhEnd ?? 18).padStart(2, '0')
+    return `${start}:00–${end}:00 · ${dayLabel}`
+  }, [ropBhStart, ropBhEnd, ropBhDays])
 
   const openRopDisconnect = useCallback((s) => {
     setRopDisconnectStore({ storeTag: s.storeTag, hostname: s.hostname || s.storeTag })
@@ -1837,6 +1859,10 @@ export default function StoreZabbixPage({
       qs.set('from', String(Math.floor(new Date(ropCustomEpoch.from).getTime() / 1000)))
       qs.set('to', String(Math.floor(new Date(ropCustomEpoch.to).getTime() / 1000)))
     }
+    qs.set('bizStart', String(ropBhStart ?? 9))
+    qs.set('bizEnd',   String(ropBhEnd ?? 18))
+    qs.set('bizDays',  [...(ropBhDays || [0,1,2,3,4,5,6])].sort((a,b)=>a-b).join(','))
+    qs.set('tzOffset', String(-new Date().getTimezoneOffset()))
     setRopDisconnectBusy(true)
     setRopDisconnectError(null)
     api.get(`${apiBase}/rop-store-disconnects?${qs}`)
@@ -1849,7 +1875,7 @@ export default function StoreZabbixPage({
       })
       .finally(() => { if (!cancelled) setRopDisconnectBusy(false) })
     return () => { cancelled = true }
-  }, [ropDisconnectStore, ropRange, ropCustomEpoch, apiBase, parseErr])
+  }, [ropDisconnectStore, ropRange, ropCustomEpoch, ropBhStart, ropBhEnd, ropBhDays, apiBase, parseErr])
 
   useEffect(() => {
     if (tab !== 'rop' || !config?.configured) return
@@ -4042,6 +4068,7 @@ export default function StoreZabbixPage({
         loading={ropDisconnectBusy}
         error={ropDisconnectError}
         rangeLabel={ropDisconnectRangeLabel}
+        bhLabel={ropBhLabel}
         onClose={() => setRopDisconnectStore(null)}
       />
     </div>

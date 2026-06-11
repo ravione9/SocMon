@@ -504,7 +504,7 @@ export async function fetchRopUptimeReport(opts = {}) {
 }
 
 /** Per-store offline / disconnect timeline for ROP dashboard modal. */
-export async function fetchRopStoreDisconnectEvents({ storeTag, fromMs, toMs }) {
+export async function fetchRopStoreDisconnectEvents({ storeTag, fromMs, toMs, businessHours } = {}) {
   const tag = String(storeTag || '').trim()
   if (!tag) throw new Error('storeTag required')
   const from = new Date(Number(fromMs))
@@ -512,6 +512,10 @@ export async function fetchRopStoreDisconnectEvents({ storeTag, fromMs, toMs }) 
   if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || to <= from) {
     throw new Error('invalid fromMs/toMs')
   }
+
+  const bh = normaliseBh(businessHours)
+  const isBh = makeBhChecker(bh)
+  const bhActive = !!isBh && !(bh.startHour === 0 && bh.endHour === 24 && bh.weekdays.length === 7)
 
   const records = await StoreProblemHistory.find({
     storeTag: tag,
@@ -524,13 +528,27 @@ export async function fetchRopStoreDisconnectEvents({ storeTag, fromMs, toMs }) 
     .lean()
 
   const nowMs = Date.now()
-  const events = records.map((r) => {
+  const fromMsN = Number(fromMs)
+  const toMsN = Number(toMs)
+
+  const events = []
+  for (const r of records) {
     const disconnectAtMs = new Date(r.firstSeenAt).getTime()
     const backUpAtMs = r.resolvedAt ? new Date(r.resolvedAt).getTime() : null
-    const durationMs = backUpAtMs != null
-      ? backUpAtMs - disconnectAtMs
-      : (r.status === 'active' ? nowMs - disconnectAtMs : (r.durationMs ?? null))
-    return {
+    const endMs = backUpAtMs != null
+      ? backUpAtMs
+      : (r.status === 'active' ? nowMs : disconnectAtMs)
+    const durationMs = endMs - disconnectAtMs
+
+    const segStart = Math.max(disconnectAtMs, fromMsN)
+    const segEnd = Math.min(endMs, toMsN)
+    const bhDurationMin = (segEnd > segStart && isBh)
+      ? bhMinutesInInterval(segStart, segEnd, isBh)
+      : 0
+
+    if (bhActive && bhDurationMin <= 0) continue
+
+    events.push({
       storeTag: r.storeTag,
       hostname: r.hostname || '',
       disconnectAt: r.firstSeenAt,
@@ -538,18 +556,21 @@ export async function fetchRopStoreDisconnectEvents({ storeTag, fromMs, toMs }) 
       backUpAt: r.resolvedAt,
       backUpAtMs,
       durationMin: durationMs != null ? Math.round(durationMs / 60_000) : null,
+      bhDurationMin,
       status: r.status,
       stillOffline: r.status === 'active',
-    }
-  })
+    })
+  }
 
   return {
     storeTag: tag,
     hostname: events[0]?.hostname || '',
     rangeFromIso: from.toISOString(),
     rangeToIso: to.toISOString(),
+    businessHours: bh,
+    bhApplied: bhActive,
     events,
     total: events.length,
-    source: `StoreProblemHistory (code='${OFFLINE_CODE}', MongoDB)`,
+    source: `StoreProblemHistory (code='${OFFLINE_CODE}', MongoDB)${bhActive ? ' · BH-filtered' : ''}`,
   }
 }
