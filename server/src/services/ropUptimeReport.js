@@ -123,11 +123,15 @@ function bhMinutesInInterval(aMs, bMs, isBh) {
   return total
 }
 
-/** BH minutes in a single calendar day [dayMs, dayMs+86400000), capped by `nowMs`. */
-function bhMinutesForDay(dayMs, isBh, nowMs) {
-  const dayEnd = Math.min(dayMs + 86_400_000, nowMs)
-  if (dayEnd <= dayMs) return 0
-  return bhMinutesInInterval(dayMs, dayEnd, isBh)
+/** BH minutes in a single calendar day [dayMs, dayMs+86400000), clipped to the
+ *  active window [fromMs, toMs). Clipping both ends matters for partial-day
+ *  windows like "Last 24h" where the first day starts mid-evening — without
+ *  the lower clip, BH minutes overcount and uptime % is artificially inflated. */
+function bhMinutesForDay(dayMs, isBh, fromMs, toMs) {
+  const dayStart = Math.max(dayMs, fromMs)
+  const dayEnd = Math.min(dayMs + 86_400_000, toMs)
+  if (dayEnd <= dayStart) return 0
+  return bhMinutesInInterval(dayStart, dayEnd, isBh)
 }
 
 /** YYYY-MM-DD for a UTC epoch in the given timezone offset (minutes east of UTC). */
@@ -211,7 +215,7 @@ export async function fetchRopUptimeReport(opts = {}) {
   const days = buildDayList(fromMs, cappedTo, bh.tzOffsetMinutes)
   const dayMsList = days.map((d) => d.dayMs)
   const bhMinPerDay = new Map()
-  for (const d of dayMsList) bhMinPerDay.set(d, bhMinutesForDay(d, isBh, cappedTo))
+  for (const d of dayMsList) bhMinPerDay.set(d, bhMinutesForDay(d, isBh, fromMs, cappedTo))
   const bhMinutesPerStore = [...bhMinPerDay.values()].reduce((s, n) => s + n, 0)
 
   /* ── history window + active outages (parallel) ── */
