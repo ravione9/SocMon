@@ -661,6 +661,42 @@ const INLINE_CSS = `
 .rop-day-btn.active{background:var(--bg);color:var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.10),inset 0 0 0 1px rgba(59,130,246,.20)}
 .rop-meta{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:7px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.20);color:var(--accent);font-size:11px;font-family:var(--mono);font-weight:600;letter-spacing:.2px}
 .rop-meta--muted{background:transparent;border-color:var(--border);color:var(--text3)}
+.rop-subtabs{display:flex;align-items:center;gap:0;padding:0;background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.rop-subtab{display:inline-flex;align-items:center;gap:8px;padding:11px 18px;border:none;background:transparent;color:var(--text3);font-size:12px;font-weight:600;cursor:pointer;border-right:1px solid var(--border);transition:all .15s;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif);position:relative}
+.rop-subtab:last-child{border-right:none}
+.rop-subtab:hover:not(.active){color:var(--text2);background:var(--bg3)}
+.rop-subtab.active{color:var(--text);background:var(--bg3);font-weight:700}
+.rop-subtab.active::after{content:'';position:absolute;left:0;right:0;bottom:0;height:2px;background:var(--accent)}
+.rop-subtab-count{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:18px;padding:0 6px;border-radius:999px;background:var(--bg);border:1px solid var(--border);color:var(--text3);font-size:10px;font-weight:700;font-family:var(--mono)}
+.rop-subtab.active .rop-subtab-count{background:rgba(59,130,246,.10);border-color:rgba(59,130,246,.25);color:var(--accent)}
+.rop-kpi-grid{display:grid;grid-template-columns:minmax(280px,1.6fr) repeat(5,minmax(150px,1fr));gap:12px}
+@media (max-width:1280px){.rop-kpi-grid{grid-template-columns:repeat(3,1fr)}.rop-hero{grid-column:1/-1}}
+@media (max-width:720px){.rop-kpi-grid{grid-template-columns:repeat(2,1fr)}}
+.rop-hero{position:relative;display:flex;flex-direction:column;justify-content:space-between;padding:18px 20px;border-radius:12px;border:1px solid var(--border);background:linear-gradient(135deg,var(--bg2) 0%,var(--bg3) 100%);min-height:148px;overflow:hidden}
+.rop-hero::before{content:'';position:absolute;top:0;right:0;width:200px;height:200px;background:radial-gradient(circle at top right,rgba(59,130,246,.10),transparent 65%);pointer-events:none}
+.rop-hero-label{font-size:11px;color:var(--text3);font-weight:600;letter-spacing:.2px;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif)}
+.rop-hero-headline{display:flex;align-items:baseline;gap:8px;margin-top:6px}
+.rop-hero-value{font-size:42px;font-weight:700;line-height:1;font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-1px}
+.rop-hero-unit{font-size:18px;color:var(--text2);font-weight:600;font-family:var(--mono)}
+.rop-hero-bar{position:relative;height:8px;background:var(--bg4);border-radius:4px;overflow:hidden;margin-top:14px}
+.rop-hero-bar-fill{position:absolute;left:0;top:0;bottom:0;border-radius:4px;transition:width .4s ease}
+.rop-hero-bar-target{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--text);opacity:.55}
+.rop-hero-foot{display:flex;justify-content:space-between;align-items:baseline;margin-top:10px;font-size:11px;color:var(--text3);font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif);gap:8px;flex-wrap:wrap}
+.rop-hero-foot strong{color:var(--text2);font-weight:700}
+.rop-stat{position:relative;display:flex;flex-direction:column;justify-content:space-between;padding:16px 18px;border-radius:12px;border:1px solid var(--border);background:var(--bg2);min-height:148px;transition:border-color .2s,box-shadow .2s}
+.rop-stat:hover{border-color:var(--border2,var(--border));box-shadow:0 4px 12px rgba(0,0,0,.06)}
+.rop-stat-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.rop-stat-label{font-size:11px;color:var(--text3);font-weight:600;letter-spacing:.2px;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif);line-height:1.35}
+.rop-stat-icon{width:28px;height:28px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;font-size:13px;background:rgba(100,116,139,.10);color:var(--text3);flex-shrink:0}
+.rop-stat-value{font-size:30px;font-weight:700;line-height:1;color:var(--text);font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.5px;margin-top:6px}
+.rop-stat-foot{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text3);font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif);margin-top:auto;padding-top:10px;line-height:1.4}
+.rop-stat-foot--ok{color:#16a34a}
+.rop-stat-foot--warn{color:#ea580c}
+.rop-stat-foot--bad{color:#dc2626}
+.rop-stat--ok .rop-stat-icon{background:rgba(34,197,94,.12);color:#16a34a}
+.rop-stat--warn .rop-stat-icon{background:rgba(234,179,8,.14);color:#b45309}
+.rop-stat--bad .rop-stat-icon{background:rgba(239,68,68,.12);color:#dc2626}
+.rop-status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
 `
 
 /* ─── Shared components ─── */
@@ -3440,35 +3476,21 @@ export default function StoreZabbixPage({
             </div>
 
             {/* ── ROP group sub-tabs (Store Monitor parity) ── */}
-            <div style={{ display: 'flex', gap: 2, flexWrap: 'wrap', padding: 3, background: 'var(--bg2)', borderRadius: 8, border: '1px solid var(--border)' }}>
+            <div className="rop-subtabs">
               {ROP_SUBTABS.map((st) => {
                 const count = ropSubCount(st.id)
                 const active = ropGroupKey === st.id
                 return (
                   <button key={st.id} type="button" onClick={() => selectRopGroup(st.id)}
-                    style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 6,
-                      padding: '6px 14px', borderRadius: 6, border: 'none', cursor: 'pointer',
-                      background: active ? 'var(--bg)' : 'transparent',
-                      color: active ? 'var(--text)' : 'var(--text2)',
-                      boxShadow: active ? '0 1px 4px rgba(0,0,0,.15)' : 'none',
-                      fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600,
-                    }}>
-                    {st.icon} {st.label}
-                    {count != null && (
-                      <span style={{
-                        background: active ? 'rgba(0,0,0,.08)' : 'var(--bg3)',
-                        color: 'var(--text2)', fontSize: 9, fontWeight: 800,
-                        padding: '1px 6px', borderRadius: 999, fontFamily: 'var(--mono)',
-                      }}>
-                        {count}
-                      </span>
-                    )}
+                    className={`rop-subtab${active ? ' active' : ''}`}>
+                    <span style={{ opacity: 0.7 }}>{st.icon}</span>
+                    <span>{st.label}</span>
+                    {count != null && <span className="rop-subtab-count">{count}</span>}
                   </button>
                 )
               })}
               {!isRpGroupKey(ropGroupKey) && (
-                <span className="opm-pill" style={{ marginLeft: 4, alignSelf: 'center', background: 'rgba(59,130,246,.1)', color: 'var(--accent)', border: '1px solid rgba(59,130,246,.25)', fontSize: 10 }}>
+                <span style={{ marginLeft: 'auto', marginRight: 14, fontSize: 11, color: 'var(--accent)', fontWeight: 600 }}>
                   Viewing: {groupKeyToLabel[ropGroupKey]}
                 </span>
               )}
@@ -3528,52 +3550,125 @@ export default function StoreZabbixPage({
 
             {ru && (
               <>
-                {/* ── Hero strip: huge avg uptime + SLA gauge + KPIs ── */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 1.2fr) repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
-                  {/* Hero card */}
-                  <div style={{ position: 'relative', borderRadius: 14, padding: 22, border: `1px solid ${slaMet ? 'rgba(34,197,94,.35)' : 'rgba(239,68,68,.35)'}`, background: `linear-gradient(135deg, ${slaMet ? 'rgba(34,197,94,.07)' : 'rgba(239,68,68,.07)'} 0%, var(--bg2) 60%, var(--bg3) 100%)`, overflow: 'hidden' }}>
-                    <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text3)', letterSpacing: .8, textTransform: 'uppercase', fontFamily: 'var(--mono)' }}>
-                      Business-hours availability {summary.bhMinutesPerStore > 0 ? `· ${(summary.bhMinutesPerStore / 60).toFixed(1)} h window` : ''}
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 8 }}>
-                      <span style={{ fontSize: 56, fontWeight: 800, lineHeight: 1, color: uptimeColor(summary.avgUptimePct), fontFamily: 'var(--mono)' }}>
-                        {summary.avgUptimePct != null ? `${summary.avgUptimePct.toFixed(2)}` : '—'}
-                      </span>
-                      <span style={{ fontSize: 22, color: 'var(--text2)', fontWeight: 700, fontFamily: 'var(--mono)' }}>%</span>
-                    </div>
-                    {/* SLA progress */}
-                    <div style={{ marginTop: 12 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 4 }}>
-                        <span>SLA target {slaTarget.toFixed(2)}%</span>
-                        <span style={{ fontWeight: 700, color: slaMet ? '#22c55e' : '#ef4444' }}>
-                          {slaMet ? '● Meeting SLA' : '● Below SLA'}
-                          {summary.avgUptimePct != null && (
-                            <span style={{ marginLeft: 6, color: 'var(--text3)', fontWeight: 600 }}>
-                              ({(summary.avgUptimePct - slaTarget).toFixed(2)}%)
+                {/* ── Executive KPI strip: hero availability + 5 secondary tiles ── */}
+                {(() => {
+                  const offlineTone = summary.storesCurrentlyOffline > 0 ? 'bad' : 'ok'
+                  const belowSlaTone = summary.storesBelowSla > 0 ? 'warn' : 'ok'
+                  const downtimeTone = (summary.avgDowntimeMin || 0) > 60 ? 'warn' : 'ok'
+                  const disconnectAvg = summary.totalStores
+                    ? summary.totalDisconnects / Math.max(summary.totalStores, 1)
+                    : 0
+                  const discTone = disconnectAvg > 2 ? 'warn' : 'ok'
+                  const slaDelta = summary.avgUptimePct != null
+                    ? (summary.avgUptimePct - slaTarget)
+                    : null
+                  return (
+                    <div className="rop-kpi-grid">
+                      <div className="rop-hero">
+                        <div>
+                          <div className="rop-hero-label">
+                            Business-hours availability
+                            {summary.bhMinutesPerStore > 0 ? ` · ${(summary.bhMinutesPerStore / 60).toFixed(1)} h window` : ''}
+                          </div>
+                          <div className="rop-hero-headline">
+                            <span className="rop-hero-value" style={{ color: uptimeColor(summary.avgUptimePct) }}>
+                              {summary.avgUptimePct != null ? summary.avgUptimePct.toFixed(2) : '—'}
                             </span>
-                          )}
-                        </span>
+                            <span className="rop-hero-unit">%</span>
+                          </div>
+                        </div>
+                        <div>
+                          <div className="rop-hero-bar">
+                            <div className="rop-hero-bar-fill" style={{
+                              width: `${Math.max(0, Math.min(100, summary.avgUptimePct ?? 0))}%`,
+                              background: slaMet
+                                ? 'linear-gradient(90deg,#22c55e,#16a34a)'
+                                : 'linear-gradient(90deg,#f97316,#dc2626)',
+                            }} />
+                            <div className="rop-hero-bar-target" style={{ left: `${slaTarget}%` }} title={`SLA target ${slaTarget}%`} />
+                          </div>
+                          <div className="rop-hero-foot">
+                            <span>
+                              <span className="rop-status-dot" style={{ background: slaMet ? '#16a34a' : '#dc2626', marginRight: 6 }} />
+                              <strong style={{ color: slaMet ? '#16a34a' : '#dc2626' }}>{slaMet ? 'Meeting SLA' : 'Below SLA'}</strong>
+                              {slaDelta != null && (
+                                <span style={{ marginLeft: 6, color: 'var(--text3)' }}>
+                                  ({slaDelta >= 0 ? '+' : ''}{slaDelta.toFixed(2)}%)
+                                </span>
+                              )}
+                              <span style={{ marginLeft: 8, color: 'var(--text3)' }}>
+                                · target {slaTarget.toFixed(2)}%
+                              </span>
+                            </span>
+                            <span>
+                              <strong>{summary.reportingStores}</strong>
+                              <span style={{ color: 'var(--text3)' }}>/{summary.totalStores} reporting</span>
+                            </span>
+                          </div>
+                        </div>
                       </div>
-                      <div style={{ position: 'relative', height: 10, background: 'var(--bg4)', borderRadius: 5, overflow: 'hidden' }}>
-                        <div style={{
-                          position: 'absolute', left: 0, top: 0, bottom: 0,
-                          width: `${Math.max(0, Math.min(100, summary.avgUptimePct ?? 0))}%`,
-                          background: slaMet ? 'linear-gradient(90deg, #22c55e, #16a34a)' : 'linear-gradient(90deg, #f97316, #dc2626)',
-                          transition: 'width .4s ease',
-                        }} />
-                        <div style={{ position: 'absolute', left: `${slaTarget}%`, top: -2, bottom: -2, width: 2, background: 'var(--text)', opacity: .7 }} title={`SLA target ${slaTarget}%`} />
+
+                      <div className={`rop-stat rop-stat--${belowSlaTone}`}>
+                        <div className="rop-stat-head">
+                          <span className="rop-stat-label">Stores below SLA</span>
+                          <span className="rop-stat-icon">⚠</span>
+                        </div>
+                        <div className="rop-stat-value">{summary.storesBelowSla}</div>
+                        <div className={`rop-stat-foot ${summary.storesBelowSla > 0 ? 'rop-stat-foot--warn' : 'rop-stat-foot--ok'}`}>
+                          {summary.storesAboveSla} above SLA
+                        </div>
+                      </div>
+
+                      <div className={`rop-stat rop-stat--${offlineTone}`}>
+                        <div className="rop-stat-head">
+                          <span className="rop-stat-label">Currently offline</span>
+                          <span className="rop-stat-icon">●</span>
+                        </div>
+                        <div className="rop-stat-value">{summary.storesCurrentlyOffline}</div>
+                        <div className={`rop-stat-foot ${summary.storesCurrentlyOffline > 0 ? 'rop-stat-foot--bad' : 'rop-stat-foot--ok'}`}>
+                          {summary.storesCurrentlyOffline > 0
+                            ? `${((summary.storesCurrentlyOffline / Math.max(summary.totalStores, 1)) * 100).toFixed(1)}% of fleet`
+                            : 'All stores online'}
+                        </div>
+                      </div>
+
+                      <div className={`rop-stat rop-stat--${downtimeTone}`}>
+                        <div className="rop-stat-head">
+                          <span className="rop-stat-label">Avg BH downtime</span>
+                          <span className="rop-stat-icon">⏱</span>
+                        </div>
+                        <div className="rop-stat-value">{fmtMins(summary.avgDowntimeMin)}</div>
+                        <div className="rop-stat-foot">
+                          per store · {summary.totalStores} stores
+                        </div>
+                      </div>
+
+                      <div className={`rop-stat rop-stat--${discTone}`}>
+                        <div className="rop-stat-head">
+                          <span className="rop-stat-label">Disconnect events</span>
+                          <span className="rop-stat-icon">↯</span>
+                        </div>
+                        <div className="rop-stat-value">{summary.totalDisconnects.toLocaleString()}</div>
+                        <div className="rop-stat-foot">
+                          {summary.totalStores ? `${disconnectAvg.toFixed(2)} avg / store` : '—'}
+                        </div>
+                      </div>
+
+                      <div className="rop-stat">
+                        <div className="rop-stat-head">
+                          <span className="rop-stat-label">Mean time to recovery</span>
+                          <span className="rop-stat-icon">↺</span>
+                        </div>
+                        <div className="rop-stat-value">
+                          {summary.mttrMin != null ? fmtMins(summary.mttrMin) : '—'}
+                        </div>
+                        <div className="rop-stat-foot">
+                          across resolved outages
+                        </div>
                       </div>
                     </div>
-                    <div style={{ marginTop: 12, fontSize: 11, color: 'var(--text2)', fontFamily: 'var(--mono)', lineHeight: 1.6 }}>
-                      <strong style={{ color: 'var(--text)' }}>{summary.reportingStores}</strong> of {summary.totalStores} stores reporting · BH window {bhSummary}
-                    </div>
-                  </div>
-                  <CounterTile label="Stores below SLA" value={summary.storesBelowSla} color={summary.storesBelowSla > 0 ? 'red' : 'green'} icon="✗" sub={`${summary.storesAboveSla} above`} />
-                  <CounterTile label="Currently offline" value={summary.storesCurrentlyOffline} color={summary.storesCurrentlyOffline > 0 ? 'red' : 'green'} icon="●" />
-                  <CounterTile label="BH downtime (avg)" value={fmtMins(summary.avgDowntimeMin)} color="amber" icon="⏱" sub={`per store · ${summary.totalStores} stores`} />
-                  <CounterTile label="Disconnects" value={summary.totalDisconnects} color="purple" icon="↯" sub={summary.totalStores ? `${(summary.totalDisconnects / Math.max(summary.totalStores, 1)).toFixed(2)} avg/store` : undefined} />
-                  <CounterTile label="Mean time to recovery" value={summary.mttrMin != null ? fmtMins(summary.mttrMin) : '—'} color="cyan" icon="↺" />
-                </div>
+                  )
+                })()}
 
                 {isRpGroupKey(ropGroupKey) && (
                   <Widget
