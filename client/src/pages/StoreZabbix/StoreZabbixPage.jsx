@@ -628,6 +628,39 @@ const INLINE_CSS = `
 .topmon-val-bar{display:flex;align-items:center;gap:8px;min-width:120px}
 .topmon-val-bar-track{flex:1;height:6px;border-radius:3px;background:var(--bg4);overflow:hidden;min-width:48px}
 .topmon-val-bar-fill{height:100%;border-radius:3px}
+.rop-toolbar{display:flex;flex-direction:column;gap:0;padding:0;border-radius:12px;background:var(--bg2);border:1px solid var(--border);overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.rop-toolbar-row{display:flex;align-items:flex-end;gap:0;flex-wrap:wrap;padding:14px 18px}
+.rop-toolbar-row+.rop-toolbar-row{border-top:1px solid var(--border);background:var(--bg3)}
+.rop-field{display:flex;flex-direction:column;gap:6px;padding:0 16px;min-width:0}
+.rop-field:first-child{padding-left:0}
+.rop-field-divider{align-self:stretch;width:1px;background:var(--border);margin:4px 0}
+.rop-field-label{font-size:10px;color:var(--text3);font-weight:700;letter-spacing:.6px;text-transform:uppercase;line-height:1;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif)}
+.rop-segment{display:inline-flex;height:32px;padding:3px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;gap:2px}
+.rop-toolbar-row+.rop-toolbar-row .rop-segment{background:var(--bg2)}
+.rop-segment-btn{position:relative;height:24px;padding:0 14px;border:none;background:transparent;color:var(--text2);font-size:12px;font-weight:600;border-radius:5px;cursor:pointer;transition:all .15s;white-space:nowrap;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif)}
+.rop-segment-btn:hover:not(.active){color:var(--text);background:rgba(255,255,255,.04)}
+.rop-segment-btn.active{background:var(--bg);color:var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.10),inset 0 0 0 1px rgba(59,130,246,.20)}
+.rop-control{display:inline-flex;align-items:center;height:32px;padding:0 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12px;font-family:var(--mono);outline:none;transition:border-color .15s,box-shadow .15s;cursor:pointer}
+.rop-toolbar-row+.rop-toolbar-row .rop-control{background:var(--bg2)}
+.rop-control:hover{border-color:var(--border2,var(--border))}
+.rop-control:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,130,246,.12)}
+.rop-control--select{padding-right:8px;min-width:140px}
+.rop-control--time{width:78px;justify-content:center;text-align:center}
+.rop-control--num{width:74px;text-align:right}
+.rop-control--datetime{width:200px}
+.rop-sep{font-size:11px;color:var(--text3);align-self:center;padding:0 8px;height:32px;display:inline-flex;align-items:center}
+.rop-action-btn{display:inline-flex;align-items:center;justify-content:center;height:32px;padding:0 16px;border-radius:7px;border:1px solid var(--accent);background:var(--accent);color:#fff;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif)}
+.rop-action-btn:hover:not(:disabled){filter:brightness(1.05);box-shadow:0 4px 10px rgba(59,130,246,.25)}
+.rop-action-btn:disabled{opacity:.4;cursor:not-allowed}
+.rop-action-btn--ghost{background:transparent;color:var(--text2);border-color:var(--border)}
+.rop-action-btn--ghost:hover:not(:disabled){border-color:var(--accent);color:var(--accent);background:rgba(59,130,246,.06);box-shadow:none}
+.rop-day-row{display:inline-flex;height:32px;padding:3px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;gap:2px}
+.rop-toolbar-row+.rop-toolbar-row .rop-day-row{background:var(--bg2)}
+.rop-day-btn{height:24px;width:36px;border:none;background:transparent;color:var(--text3);font-size:11px;font-weight:600;border-radius:5px;cursor:pointer;transition:all .15s;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif)}
+.rop-day-btn:hover:not(.active){color:var(--text2);background:rgba(255,255,255,.04)}
+.rop-day-btn.active{background:var(--bg);color:var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.10),inset 0 0 0 1px rgba(59,130,246,.20)}
+.rop-meta{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:7px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.20);color:var(--accent);font-size:11px;font-family:var(--mono);font-weight:600;letter-spacing:.2px}
+.rop-meta--muted{background:transparent;border-color:var(--border);color:var(--text3)}
 `
 
 /* ─── Shared components ─── */
@@ -3288,98 +3321,120 @@ export default function StoreZabbixPage({
 
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            {/* ── Toolbar: range + custom dates + group + business hours + SLA ── */}
-            <div className="opm-toolbar" style={{ gap: 10 }}>
-              <div className="opm-toolbar-row" style={{ flexWrap: 'wrap', gap: 10 }}>
-                <span className="opm-toolbar-label">Range</span>
-                <div style={{ display: 'inline-flex', gap: 2, padding: 3, background: 'var(--bg2)', borderRadius: 8, border: '1px solid var(--border)' }}>
-                  {rangeChips.map((c) => (
-                    <button key={c.id} type="button" onClick={() => selectRopRange(c.id)}
-                      style={{
-                        padding: '5px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
-                        background: ropRange === c.id ? 'var(--accent)' : 'transparent',
-                        color: ropRange === c.id ? '#fff' : 'var(--text2)',
-                        fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600,
-                      }}>
-                      {c.label}
-                    </button>
-                  ))}
+            {/* ── Toolbar: range + group + business hours + SLA ── */}
+            <div className="rop-toolbar">
+              <div className="rop-toolbar-row">
+                <div className="rop-field">
+                  <span className="rop-field-label">Time range</span>
+                  <div className="rop-segment">
+                    {rangeChips.map((c) => (
+                      <button key={c.id} type="button"
+                        className={`rop-segment-btn${ropRange === c.id ? ' active' : ''}`}
+                        onClick={() => selectRopRange(c.id)}>
+                        {c.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                {ropRange === 'custom' && (
-                  <>
-                    <span className="opm-toolbar-label">Custom</span>
-                    <input type="datetime-local" value={ropCustomFrom} onChange={(e) => setRopCustomFrom(e.target.value)}
-                      style={{ padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)' }} />
-                    <span style={{ fontSize: 11, color: 'var(--text3)' }}>–</span>
-                    <input type="datetime-local" value={ropCustomTo} onChange={(e) => setRopCustomTo(e.target.value)}
-                      style={{ padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)' }} />
-                    <button type="button" onClick={applyRopCustomRange} disabled={!customRangeValid}
-                      style={{
-                        padding: '5px 14px', borderRadius: 6, border: 'none', cursor: customRangeValid ? 'pointer' : 'not-allowed',
-                        background: 'var(--accent)', color: '#fff', fontSize: 11, fontWeight: 700, fontFamily: 'var(--mono)',
-                        opacity: customRangeValid ? 1 : 0.45,
-                      }}>
-                      Apply
-                    </button>
-                    {ropCustomEpoch && (
-                      <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', border: '1px solid rgba(59,130,246,.25)', fontSize: 10 }}>
-                        Active: {new Date(ropCustomEpoch.from).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                        {' – '}
-                        {new Date(ropCustomEpoch.to).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                    )}
-                  </>
-                )}
-                <span className="opm-toolbar-label" style={{ marginLeft: 4 }}>Other</span>
-                <select value={isRpGroupKey(ropGroupKey) ? '' : ropGroupKey}
-                  onChange={(e) => { if (e.target.value) selectRopGroup(e.target.value) }}
-                  style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', minWidth: 160 }}>
-                  <option value="">{isRpGroupKey(ropGroupKey) ? 'ROP groups…' : groupKeyToLabel[ropGroupKey]}</option>
-                  <option value="pos">{groupKeyToLabel.pos}</option>
-                  <option value="sdwan">{groupKeyToLabel.sdwan}</option>
-                </select>
-                <span className="opm-toolbar-label" style={{ marginLeft: 4 }}>Business hours</span>
-                <select value={ropBhStart} onChange={(e) => setRopBhStart(Number(e.target.value))}
-                  style={{ padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', width: 70 }}>
-                  {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
-                </select>
-                <span style={{ fontSize: 11, color: 'var(--text3)' }}>–</span>
-                <select value={ropBhEnd} onChange={(e) => setRopBhEnd(Number(e.target.value))}
-                  style={{ padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', width: 70 }}>
-                  {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
-                </select>
-                <span className="opm-toolbar-label" style={{ marginLeft: 4 }}>SLA</span>
-                <input type="number" min={0} max={100} step={0.1} value={ropSla}
-                  onChange={(e) => setRopSla(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
-                  style={{ width: 70, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)' }} />
-                <span style={{ fontSize: 11, color: 'var(--text3)' }}>%</span>
+
+                <div className="rop-field-divider" />
+
+                <div className="rop-field">
+                  <span className="rop-field-label">Group</span>
+                  <select value={isRpGroupKey(ropGroupKey) ? '' : ropGroupKey}
+                    onChange={(e) => { if (e.target.value) selectRopGroup(e.target.value) }}
+                    className="rop-control rop-control--select">
+                    <option value="">{isRpGroupKey(ropGroupKey) ? 'ROP groups…' : groupKeyToLabel[ropGroupKey]}</option>
+                    <option value="pos">{groupKeyToLabel.pos}</option>
+                    <option value="sdwan">{groupKeyToLabel.sdwan}</option>
+                  </select>
+                </div>
+
+                <div className="rop-field-divider" />
+
+                <div className="rop-field">
+                  <span className="rop-field-label">Business hours</span>
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <select value={ropBhStart} onChange={(e) => setRopBhStart(Number(e.target.value))}
+                      className="rop-control rop-control--time">
+                      {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+                    </select>
+                    <span style={{ fontSize: 12, color: 'var(--text3)' }}>–</span>
+                    <select value={ropBhEnd} onChange={(e) => setRopBhEnd(Number(e.target.value))}
+                      className="rop-control rop-control--time">
+                      {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="rop-field-divider" />
+
+                <div className="rop-field">
+                  <span className="rop-field-label">SLA target</span>
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <input type="number" min={0} max={100} step={0.1} value={ropSla}
+                      onChange={(e) => setRopSla(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+                      className="rop-control rop-control--num" />
+                    <span style={{ fontSize: 12, color: 'var(--text3)' }}>%</span>
+                  </div>
+                </div>
+
                 {ru?.rangeFromIso && (
-                  <span className="opm-pill" style={{ marginLeft: 'auto', background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
-                    Source: StoreProblemHistory · BH {bhSummary}
-                  </span>
+                  <div className="rop-field" style={{ marginLeft: 'auto', alignItems: 'flex-end' }}>
+                    <span className="rop-field-label">Source</span>
+                    <span className="rop-meta rop-meta--muted">StoreProblemHistory · BH {bhSummary}</span>
+                  </div>
                 )}
               </div>
-              <div className="opm-toolbar-row" style={{ flexWrap: 'wrap', gap: 10, paddingTop: 8, borderTop: '1px dashed var(--border)' }}>
-                <span className="opm-toolbar-label">Days</span>
-                <div style={{ display: 'inline-flex', gap: 2 }}>
-                  {dayOfWeekLabels.map((lbl, idx) => {
-                    const on = ropBhDays.has(idx)
-                    return (
-                      <button key={idx} type="button" onClick={() => toggleBhDay(idx)}
-                        style={{ width: 36, padding: '4px 0', borderRadius: 6, border: `1px solid ${on ? 'var(--accent)' : 'var(--border)'}`, background: on ? 'rgba(59,130,246,.12)' : 'var(--bg2)', color: on ? 'var(--accent)' : 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
-                        {lbl}
-                      </button>
-                    )
-                  })}
+
+              <div className="rop-toolbar-row">
+                <div className="rop-field">
+                  <span className="rop-field-label">Active weekdays</span>
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <div className="rop-day-row">
+                      {dayOfWeekLabels.map((lbl, idx) => {
+                        const on = ropBhDays.has(idx)
+                        return (
+                          <button key={idx} type="button" onClick={() => toggleBhDay(idx)}
+                            className={`rop-day-btn${on ? ' active' : ''}`}>
+                            {lbl}
+                          </button>
+                        )
+                      })}
+                    </div>
+                    <button type="button" onClick={presetWeekdays} className="rop-action-btn rop-action-btn--ghost" style={{ height: 32, padding: '0 12px' }}>Mon–Fri</button>
+                    <button type="button" onClick={presetEveryday} className="rop-action-btn rop-action-btn--ghost" style={{ height: 32, padding: '0 12px' }}>Every day</button>
+                  </div>
                 </div>
-                <button type="button" onClick={presetWeekdays}
-                  style={{ padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text2)', fontSize: 10, fontFamily: 'var(--mono)', cursor: 'pointer' }}>Mon–Fri</button>
-                <button type="button" onClick={presetEveryday}
-                  style={{ padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text2)', fontSize: 10, fontFamily: 'var(--mono)', cursor: 'pointer' }}>Every day</button>
-                {ropRange === 'custom' && !ropCustomEpoch && (
-                  <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
-                    Pick a start/end date and click Apply to load the custom range.
-                  </span>
+
+                {ropRange === 'custom' && (
+                  <>
+                    <div className="rop-field-divider" />
+                    <div className="rop-field" style={{ flex: 1, minWidth: 360 }}>
+                      <span className="rop-field-label">Custom range</span>
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <input type="datetime-local" value={ropCustomFrom} onChange={(e) => setRopCustomFrom(e.target.value)}
+                          className="rop-control rop-control--datetime" />
+                        <span style={{ fontSize: 12, color: 'var(--text3)' }}>–</span>
+                        <input type="datetime-local" value={ropCustomTo} onChange={(e) => setRopCustomTo(e.target.value)}
+                          className="rop-control rop-control--datetime" />
+                        <button type="button" onClick={applyRopCustomRange} disabled={!customRangeValid}
+                          className="rop-action-btn">Apply</button>
+                        {ropCustomEpoch && (
+                          <span className="rop-meta">
+                            {new Date(ropCustomEpoch.from).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                            {' – '}
+                            {new Date(ropCustomEpoch.to).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        )}
+                        {!ropCustomEpoch && (
+                          <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                            Pick a start/end date and click Apply to load the custom range.
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </>
                 )}
               </div>
             </div>
