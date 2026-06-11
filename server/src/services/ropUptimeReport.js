@@ -481,3 +481,54 @@ export async function fetchRopUptimeReport(opts = {}) {
   }
   return data
 }
+
+/** Per-store offline / disconnect timeline for ROP dashboard modal. */
+export async function fetchRopStoreDisconnectEvents({ storeTag, fromMs, toMs }) {
+  const tag = String(storeTag || '').trim()
+  if (!tag) throw new Error('storeTag required')
+  const from = new Date(Number(fromMs))
+  const to = new Date(Number(toMs))
+  if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || to <= from) {
+    throw new Error('invalid fromMs/toMs')
+  }
+
+  const records = await StoreProblemHistory.find({
+    storeTag: tag,
+    code: OFFLINE_CODE,
+    firstSeenAt: { $lt: to },
+    $or: [{ resolvedAt: null }, { resolvedAt: { $gt: from } }],
+  })
+    .sort({ firstSeenAt: -1 })
+    .limit(500)
+    .lean()
+
+  const nowMs = Date.now()
+  const events = records.map((r) => {
+    const disconnectAtMs = new Date(r.firstSeenAt).getTime()
+    const backUpAtMs = r.resolvedAt ? new Date(r.resolvedAt).getTime() : null
+    const durationMs = backUpAtMs != null
+      ? backUpAtMs - disconnectAtMs
+      : (r.status === 'active' ? nowMs - disconnectAtMs : (r.durationMs ?? null))
+    return {
+      storeTag: r.storeTag,
+      hostname: r.hostname || '',
+      disconnectAt: r.firstSeenAt,
+      disconnectAtMs,
+      backUpAt: r.resolvedAt,
+      backUpAtMs,
+      durationMin: durationMs != null ? Math.round(durationMs / 60_000) : null,
+      status: r.status,
+      stillOffline: r.status === 'active',
+    }
+  })
+
+  return {
+    storeTag: tag,
+    hostname: events[0]?.hostname || '',
+    rangeFromIso: from.toISOString(),
+    rangeToIso: to.toISOString(),
+    events,
+    total: events.length,
+    source: `StoreProblemHistory (code='${OFFLINE_CODE}', MongoDB)`,
+  }
+}

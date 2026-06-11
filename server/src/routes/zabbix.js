@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { createZabbixClient } from '../services/zabbix.js'
-import { fetchRopUptimeReport } from '../services/ropUptimeReport.js'
+import { fetchRopUptimeReport, fetchRopStoreDisconnectEvents } from '../services/ropUptimeReport.js'
 
 export function createZabbixRouter(client) {
   const {
@@ -2297,6 +2297,41 @@ router.get('/rop-uptime', async (req, res) => {
       return res.status(503).json({ error: 'Store snapshot source not configured', code: e.code })
     }
     return res.status(500).json({ error: e.message || 'Failed to compute ROP uptime', code: e.code })
+  }
+})
+
+router.get('/rop-store-disconnects', async (req, res) => {
+  try {
+    const storeTag = String(req.query.storeTag || '').trim()
+    if (!storeTag) return res.status(400).json({ error: 'storeTag required' })
+
+    const nowMs = Date.now()
+    const range = String(req.query.range || '7d').toLowerCase()
+    const customFromSec = parseInt(String(req.query.from || ''), 10)
+    const customToSec = parseInt(String(req.query.to || ''), 10)
+
+    let fromMs, toMs
+    if (range === 'custom' && Number.isFinite(customFromSec) && Number.isFinite(customToSec) && customToSec > customFromSec) {
+      fromMs = customFromSec * 1000
+      toMs = customToSec * 1000
+    } else {
+      const span = ({
+        '24h': 86_400_000,
+        '1d': 86_400_000,
+        'today': 86_400_000,
+        '7d': 7 * 86_400_000,
+        '14d': 14 * 86_400_000,
+        '30d': 30 * 86_400_000,
+        '60d': 60 * 86_400_000,
+      })[range] || 7 * 86_400_000
+      toMs = nowMs
+      fromMs = nowMs - span
+    }
+
+    const data = await fetchRopStoreDisconnectEvents({ storeTag, fromMs, toMs })
+    res.json(data)
+  } catch (e) {
+    return res.status(500).json({ error: e.message || 'Failed to load disconnect events', code: e.code })
   }
 })
 

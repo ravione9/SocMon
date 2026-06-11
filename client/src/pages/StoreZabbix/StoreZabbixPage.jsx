@@ -1165,6 +1165,99 @@ function TopMonAddWidgetModal({ open, onClose, onSave, initial }) {
   )
 }
 
+function RopDisconnectModal({ open, store, events, loading, error, rangeLabel, onClose }) {
+  if (!open || !store) return null
+
+  const fmtTs = (v) => {
+    if (v == null || v === '') return '—'
+    const d = v instanceof Date ? v : new Date(v)
+    return Number.isFinite(d.getTime()) ? d.toLocaleString() : '—'
+  }
+  const fmtDur = (mins) => {
+    if (mins == null || !Number.isFinite(mins)) return '—'
+    if (mins < 1) return '< 1 m'
+    if (mins < 60) return `${Math.round(mins)} m`
+    if (mins < 1440) return `${(mins / 60).toFixed(1)} h`
+    return `${(mins / 1440).toFixed(1)} d`
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, padding: 16 }}
+      onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ width: '100%', maxWidth: 820, maxHeight: 'min(90vh, 720px)', background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ padding: '16px 18px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text)' }}>Disconnect events</div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent)', marginTop: 4, fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={store.hostname || store.storeTag}>
+              {store.hostname || store.storeTag}
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginTop: 4 }}>
+              {store.storeTag}{rangeLabel ? ` · ${rangeLabel}` : ''}
+            </div>
+          </div>
+          <button type="button" onClick={onClose}
+            style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', fontSize: 12, cursor: 'pointer', flexShrink: 0 }}>
+            ✕
+          </button>
+        </div>
+        <div style={{ flex: 1, overflow: 'auto', padding: '12px 16px' }}>
+          {loading && (
+            <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>
+              Loading disconnect events…
+            </div>
+          )}
+          {!loading && error && (
+            <div style={{ padding: 16, color: '#ef4444', fontFamily: 'var(--mono)', fontSize: 12 }}>{error}</div>
+          )}
+          {!loading && !error && events.length === 0 && (
+            <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>
+              No disconnect events in this range.
+            </div>
+          )}
+          {!loading && !error && events.length > 0 && (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                  {['#', 'Disconnected at', 'Back up at', 'Duration', 'Status'].map((lbl, i) => (
+                    <th key={lbl} style={{ padding: '8px 10px', textAlign: i === 0 ? 'center' : 'left', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap' }}>
+                      {lbl}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {events.map((ev, idx) => (
+                  <tr key={`${ev.disconnectAtMs}-${idx}`} style={{ borderBottom: '1px solid rgba(128,128,160,.08)' }}>
+                    <td style={{ padding: '8px 10px', textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 10 }}>{idx + 1}</td>
+                    <td style={{ padding: '8px 10px', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text2)', whiteSpace: 'nowrap' }}>{fmtTs(ev.disconnectAt)}</td>
+                    <td style={{ padding: '8px 10px', fontFamily: 'var(--mono)', fontSize: 11, whiteSpace: 'nowrap', color: ev.stillOffline ? '#ef4444' : '#22c55e' }}>
+                      {ev.stillOffline ? 'Still offline' : fmtTs(ev.backUpAt)}
+                    </td>
+                    <td style={{ padding: '8px 10px', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, color: ev.stillOffline ? '#ef4444' : '#f59e0b', whiteSpace: 'nowrap' }}>
+                      {fmtDur(ev.durationMin)}
+                    </td>
+                    <td style={{ padding: '8px 10px', whiteSpace: 'nowrap' }}>
+                      {ev.stillOffline ? (
+                        <span className="opm-pill" style={{ background: 'rgba(239,68,68,.12)', color: '#ef4444', border: '1px solid rgba(239,68,68,.25)', fontSize: 10 }}>● OFFLINE</span>
+                      ) : (
+                        <span className="opm-pill" style={{ background: 'rgba(34,197,94,.10)', color: '#22c55e', border: '1px solid rgba(34,197,94,.20)', fontSize: 10 }}>✓ Reconnected</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+        <div style={{ padding: '10px 16px', borderTop: '1px dashed var(--border)', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+          Source: StoreProblemHistory · offline sessions in selected range
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function SeverityFilter({ counts, selected, onSelect }) {
   if (!counts) return null
   return (
@@ -1354,7 +1447,6 @@ export default function StoreZabbixPage({
   const [ropSearch, setRopSearch] = useState('')
   const [ropSortKey, setRopSortKey] = useState('uptimePct')
   const [ropSortDir, setRopSortDir] = useState('asc')
-  const [ropDrillStore, setRopDrillStore] = useState(null)
   const [ropOutageFilter, setRopOutageFilter] = useState(null)
   const ropStoreTableRef = useRef(null)
   const manualCodesInitRef = useRef(false)
@@ -1364,6 +1456,24 @@ export default function StoreZabbixPage({
   const [manualRopCodesSaved, setManualRopCodesSaved] = useState(false)
   const [manualRopCodesUpdatedAt, setManualRopCodesUpdatedAt] = useState(null)
   const [manualRopCodesDraft, setManualRopCodesDraft] = useState('')
+  const [ropDisconnectStore, setRopDisconnectStore] = useState(null)
+  const [ropDisconnectEvents, setRopDisconnectEvents] = useState([])
+  const [ropDisconnectBusy, setRopDisconnectBusy] = useState(false)
+  const [ropDisconnectError, setRopDisconnectError] = useState(null)
+
+  const ropDisconnectRangeLabel = useMemo(() => {
+    if (ropRange === 'custom' && ropCustomEpoch?.from && ropCustomEpoch?.to) {
+      const from = new Date(ropCustomEpoch.from).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      const to = new Date(ropCustomEpoch.to).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      return `${from} – ${to}`
+    }
+    const labels = { '24h': 'Last 24h', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days' }
+    return labels[ropRange] || ropRange
+  }, [ropRange, ropCustomEpoch])
+
+  const openRopDisconnect = useCallback((s) => {
+    setRopDisconnectStore({ storeTag: s.storeTag, hostname: s.hostname || s.storeTag })
+  }, [])
 
   /* ─── data loaders (unchanged logic) ─── */
   const parseErr = useCallback((e) => {
@@ -1643,6 +1753,34 @@ export default function StoreZabbixPage({
   useEffect(() => {
     if (!isRpGroupKey(ropGroupKey)) setRopOutageFilter(null)
   }, [ropGroupKey])
+
+  useEffect(() => {
+    if (!ropDisconnectStore) {
+      setRopDisconnectEvents([])
+      setRopDisconnectError(null)
+      return
+    }
+    let cancelled = false
+    const qs = new URLSearchParams()
+    qs.set('storeTag', ropDisconnectStore.storeTag)
+    qs.set('range', ropRange || '7d')
+    if (ropRange === 'custom' && ropCustomEpoch?.from && ropCustomEpoch?.to) {
+      qs.set('from', String(Math.floor(new Date(ropCustomEpoch.from).getTime() / 1000)))
+      qs.set('to', String(Math.floor(new Date(ropCustomEpoch.to).getTime() / 1000)))
+    }
+    setRopDisconnectBusy(true)
+    setRopDisconnectError(null)
+    api.get(`${apiBase}/rop-store-disconnects?${qs}`)
+      .then(({ data }) => { if (!cancelled) setRopDisconnectEvents(data.events || []) })
+      .catch((e) => {
+        if (cancelled) return
+        const { message } = parseErr(e)
+        setRopDisconnectError(message)
+        setRopDisconnectEvents([])
+      })
+      .finally(() => { if (!cancelled) setRopDisconnectBusy(false) })
+    return () => { cancelled = true }
+  }, [ropDisconnectStore, ropRange, ropCustomEpoch, apiBase, parseErr])
 
   useEffect(() => {
     if (tab !== 'rop' || !config?.configured) return
@@ -3570,14 +3708,15 @@ export default function StoreZabbixPage({
                         {sortedStore.slice(0, 800).map((s) => {
                           const pill = uptimePill(s.uptimePct)
                           const barColor = uptimeColor(s.uptimePct)
-                          const focused = ropDrillStore === s.storeTag
                           return (
                             <tr key={s.storeTag}
-                              onClick={() => setRopDrillStore((t) => (t === s.storeTag ? null : s.storeTag))}
-                              style={{ borderBottom: '1px solid rgba(128,128,160,.06)', cursor: 'pointer', background: focused ? 'rgba(59,130,246,.06)' : undefined }}
-                              onMouseEnter={(e) => { if (!focused) e.currentTarget.style.background = 'var(--bg3)' }}
-                              onMouseLeave={(e) => { if (!focused) e.currentTarget.style.background = focused ? 'rgba(59,130,246,.06)' : '' }}>
-                              <td style={{ padding: '8px 12px', fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`${s.hostname || s.storeTag} (${s.storeTag})`}>
+                              style={{ borderBottom: '1px solid rgba(128,128,160,.06)' }}>
+                              <td
+                                onClick={() => openRopDisconnect(s)}
+                                style={{ padding: '8px 12px', fontWeight: 600, color: 'var(--accent)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer' }}
+                                title={`${s.hostname || s.storeTag} (${s.storeTag}) — click for disconnect events`}
+                                onMouseEnter={(e) => { e.currentTarget.style.textDecoration = 'underline' }}
+                                onMouseLeave={(e) => { e.currentTarget.style.textDecoration = 'none' }}>
                                 {s.hostname || s.storeTag}
                               </td>
                               <td style={{ padding: '8px 12px', textAlign: 'right', whiteSpace: 'nowrap' }}>
@@ -3691,11 +3830,13 @@ export default function StoreZabbixPage({
                           const belowSla = s.uptimePct != null && s.uptimePct < slaTarget
                           return (
                             <tr key={s.storeTag}
-                              onClick={() => setRopDrillStore(s.storeTag === ropDrillStore ? null : s.storeTag)}
-                              style={{ borderBottom: '1px solid rgba(128,128,160,.06)', cursor: 'pointer', background: ropDrillStore === s.storeTag ? 'rgba(59,130,246,.06)' : undefined }}
-                              onMouseEnter={(e) => { if (ropDrillStore !== s.storeTag) e.currentTarget.style.background = 'var(--bg3)' }}
-                              onMouseLeave={(e) => { if (ropDrillStore !== s.storeTag) e.currentTarget.style.background = '' }}>
-                              <td style={{ padding: '7px 12px', color: 'var(--text)', fontWeight: 600, maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.hostname || s.storeTag}>
+                              style={{ borderBottom: '1px solid rgba(128,128,160,.06)' }}>
+                              <td
+                                onClick={() => openRopDisconnect(s)}
+                                style={{ padding: '7px 12px', color: 'var(--accent)', fontWeight: 600, maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer' }}
+                                title={`${s.hostname || s.storeTag} — click for disconnect events`}
+                                onMouseEnter={(e) => { e.currentTarget.style.textDecoration = 'underline' }}
+                                onMouseLeave={(e) => { e.currentTarget.style.textDecoration = 'none' }}>
                                 {s.hostname || s.storeTag}
                                 {belowSla && <span className="opm-pill" style={{ marginLeft: 8, background: 'rgba(239,68,68,.12)', color: '#ef4444', border: '1px solid rgba(239,68,68,.25)' }}>SLA</span>}
                               </td>
@@ -3743,6 +3884,16 @@ export default function StoreZabbixPage({
           </div>
         )
       })()}
+
+      <RopDisconnectModal
+        open={!!ropDisconnectStore}
+        store={ropDisconnectStore}
+        events={ropDisconnectEvents}
+        loading={ropDisconnectBusy}
+        error={ropDisconnectError}
+        rangeLabel={ropDisconnectRangeLabel}
+        onClose={() => setRopDisconnectStore(null)}
+      />
     </div>
   )
 }
