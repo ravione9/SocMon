@@ -1355,7 +1355,6 @@ export default function StoreZabbixPage({
   const [ropSortKey, setRopSortKey] = useState('uptimePct')
   const [ropSortDir, setRopSortDir] = useState('asc')
   const [ropDrillStore, setRopDrillStore] = useState(null)
-  const [ropChartFocusTag, setRopChartFocusTag] = useState(null)
   const [ropOutageFilter, setRopOutageFilter] = useState(null)
   const ropStoreTableRef = useRef(null)
   const manualCodesInitRef = useRef(false)
@@ -1643,7 +1642,6 @@ export default function StoreZabbixPage({
 
   useEffect(() => {
     if (!isRpGroupKey(ropGroupKey)) setRopOutageFilter(null)
-    setRopChartFocusTag(null)
   }, [ropGroupKey])
 
   useEffect(() => {
@@ -3528,170 +3526,105 @@ export default function StoreZabbixPage({
                   )
                 })()}
 
-                {/* ── Store uptime/downtime list + group uptime chart ── */}
-                {(() => {
-                  const chartStores = sortedStore.filter((s) => s.uptimePct != null)
-                  const groupLabel = groupKeyToLabel[ropGroupKey] || ropGroupKey
-                  const chartH = Math.max(360, Math.min(chartStores.length * 18, 1400))
-                  const barData = {
-                    labels: chartStores.map((s) => {
-                      const n = s.hostname || s.storeTag
-                      return n.length > 28 ? n.slice(0, 26) + '…' : n
-                    }),
-                    datasets: [{
-                      label: 'BH uptime %',
-                      data: chartStores.map((s) => s.uptimePct),
-                      backgroundColor: chartStores.map((s) => {
-                        const c = uptimeColor(s.uptimePct)
-                        return s.storeTag === ropChartFocusTag ? c : `${c}bb`
-                      }),
-                      borderColor: chartStores.map((s) => (
-                        s.storeTag === ropChartFocusTag ? '#fff' : uptimeColor(s.uptimePct)
-                      )),
-                      borderWidth: chartStores.map((s) => (s.storeTag === ropChartFocusTag ? 2 : 1)),
-                      borderRadius: 3,
-                      barThickness: 12,
-                    }],
-                  }
-                  const barOpts = {
-                    indexAxis: 'y',
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    animation: { duration: 200 },
-                    plugins: {
-                      legend: { display: false },
-                      tooltip: {
-                        backgroundColor: 'rgba(15,17,23,.95)',
-                        borderColor: 'rgba(79,126,245,.3)',
-                        borderWidth: 1,
-                        callbacks: {
-                          title: (items) => {
-                            const s = chartStores[items[0]?.dataIndex]
-                            return s ? `${s.hostname || s.storeTag} (${s.storeTag})` : ''
-                          },
-                          label: (ctx) => {
-                            const s = chartStores[ctx.dataIndex]
-                            if (!s) return ''
-                            return [
-                              ` Uptime: ${s.uptimePct?.toFixed(2)}%`,
-                              ` Downtime: ${fmtMins(s.bizDownMin)}`,
-                              ` Disconnects: ${s.disconnects}`,
-                              s.currentlyOffline ? ' Status: OFFLINE' : ' Status: Online',
-                            ]
-                          },
-                        },
-                      },
-                    },
-                    scales: {
-                      x: {
-                        min: 0,
-                        max: 100,
-                        ticks: { color: 'var(--text3)', font: { family: 'var(--mono)', size: 10 }, callback: (v) => `${v}%` },
-                        grid: { color: 'rgba(128,128,160,.08)' },
-                      },
-                      y: {
-                        ticks: { color: 'var(--text2)', font: { family: 'var(--mono)', size: 9 }, autoSkip: false },
-                        grid: { display: false },
-                      },
-                    },
-                    onClick: (_ev, elems) => {
-                      if (!elems.length) return
-                      const s = chartStores[elems[0].index]
-                      if (s) setRopChartFocusTag((t) => (t === s.storeTag ? null : s.storeTag))
-                    },
-                  }
-                  return (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1.4fr)', gap: 14 }}>
-                      <Widget
-                        title="Store uptime & downtime"
-                        badge={`${sortedStore.length} in ${groupLabel}`}
-                        badgeColor="blue"
-                        noPad
-                        actions={
-                          <div className="opm-search" style={{ maxWidth: 200 }}>
-                            <span className="opm-search-icon">⌕</span>
-                            <input placeholder="Filter hostname…" value={ropSearch} onChange={(e) => setRopSearch(e.target.value)} />
-                          </div>
-                        }
-                      >
-                        <div style={{ overflowY: 'auto', maxHeight: chartH, overflowX: 'auto' }}>
-                          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                            <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
-                              <tr style={{ background: 'var(--bg3)', borderBottom: '1px solid var(--border)' }}>
-                                {['Hostname', 'BH up %', 'BH downtime', 'Live'].map((lbl, i) => (
-                                  <th key={lbl} style={{ padding: '8px 10px', textAlign: i === 0 ? 'left' : 'right', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap' }}>
-                                    {lbl}
-                                  </th>
-                                ))}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {sortedStore.length === 0 && (
-                                <tr><td colSpan={4} style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>No stores in this group.</td></tr>
-                              )}
-                              {sortedStore.map((s) => {
-                                const focused = ropChartFocusTag === s.storeTag
-                                const pill = uptimePill(s.uptimePct)
-                                return (
-                                  <tr key={s.storeTag}
-                                    onClick={() => setRopChartFocusTag((t) => (t === s.storeTag ? null : s.storeTag))}
-                                    style={{ borderBottom: '1px solid rgba(128,128,160,.06)', cursor: 'pointer', background: focused ? 'rgba(59,130,246,.08)' : undefined }}
-                                    onMouseEnter={(e) => { if (!focused) e.currentTarget.style.background = 'var(--bg3)' }}
-                                    onMouseLeave={(e) => { if (!focused) e.currentTarget.style.background = focused ? 'rgba(59,130,246,.08)' : '' }}>
-                                    <td style={{ padding: '7px 10px', fontWeight: 600, color: 'var(--text)', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.hostname || s.storeTag}>
-                                      {s.hostname || s.storeTag}
-                                    </td>
-                                    <td style={{ padding: '7px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                      <span className="opm-pill" style={{ background: pill.bg, color: pill.color, border: `1px solid ${pill.border}`, fontFamily: 'var(--mono)', fontWeight: 700, fontSize: 11 }}>
-                                        {s.uptimePct != null ? `${s.uptimePct.toFixed(2)}%` : '—'}
-                                      </span>
-                                    </td>
-                                    <td style={{ padding: '7px 10px', textAlign: 'right', fontFamily: 'var(--mono)', color: s.bizDownMin > 0 ? '#f59e0b' : 'var(--text3)', fontSize: 11 }}>
-                                      {fmtMins(s.bizDownMin)}
-                                    </td>
-                                    <td style={{ padding: '7px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                      {s.currentlyOffline
-                                        ? <span className="opm-pill" style={{ background: 'rgba(239,68,68,.12)', color: '#ef4444', border: '1px solid rgba(239,68,68,.25)', fontSize: 10 }}>OFFLINE</span>
-                                        : <span className="opm-pill" style={{ background: 'rgba(34,197,94,.10)', color: '#22c55e', border: '1px solid rgba(34,197,94,.20)', fontSize: 10 }}>Online</span>}
-                                    </td>
-                                  </tr>
-                                )
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
-                      </Widget>
-
-                      <Widget
-                        title="BH uptime by hostname"
-                        badge={`${chartStores.length} stores · ${days.length} day${days.length === 1 ? '' : 's'}`}
-                        badgeColor="cyan"
-                        actions={
-                          ropChartFocusTag ? (
-                            <button type="button" onClick={() => setRopChartFocusTag(null)}
-                              className="opm-pill"
-                              style={{ background: 'rgba(100,116,139,.1)', color: 'var(--text2)', border: '1px solid var(--border)', fontSize: 10, cursor: 'pointer', fontFamily: 'var(--mono)' }}>
-                              ✕ Clear highlight
-                            </button>
-                          ) : null
-                        }
-                      >
-                        {chartStores.length === 0 ? (
-                          <div style={{ padding: 32, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>
-                            No uptime data for this group in the selected range.
-                          </div>
-                        ) : (
-                          <div style={{ height: chartH, overflowY: 'auto', padding: '4px 8px 8px' }}>
-                            <Bar data={barData} options={barOpts} />
-                          </div>
-                        )}
-                        <div style={{ padding: '8px 14px', borderTop: '1px dashed var(--border)', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
-                          Business-hours uptime % for every hostname in {groupLabel} · click a bar or row to highlight
-                        </div>
-                      </Widget>
+                {/* ── Store uptime / downtime with inline graph per row ── */}
+                <Widget
+                  title="Store uptime & downtime"
+                  badge={`${sortedStore.length} in ${groupKeyToLabel[ropGroupKey] || ropGroupKey}`}
+                  badgeColor="blue"
+                  noPad
+                  actions={
+                    <div className="opm-search" style={{ maxWidth: 220 }}>
+                      <span className="opm-search-icon">⌕</span>
+                      <input placeholder="Filter hostname…" value={ropSearch} onChange={(e) => setRopSearch(e.target.value)} />
                     </div>
-                  )
-                })()}
+                  }
+                >
+                  <div style={{ overflowX: 'auto', maxHeight: 640, overflowY: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, tableLayout: 'fixed' }}>
+                      <colgroup>
+                        <col style={{ width: '22%' }} />
+                        <col style={{ width: '10%' }} />
+                        <col style={{ width: '11%' }} />
+                        <col style={{ width: '9%' }} />
+                        <col />
+                      </colgroup>
+                      <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
+                        <tr style={{ background: 'var(--bg3)', borderBottom: '1px solid var(--border)' }}>
+                          {[
+                            ['Hostname', 'left'],
+                            ['BH uptime %', 'right'],
+                            ['BH downtime', 'right'],
+                            ['Live', 'right'],
+                            ['Uptime graph', 'left'],
+                          ].map(([lbl, align]) => (
+                            <th key={lbl} style={{ padding: '9px 12px', textAlign: align, fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap' }}>
+                              {lbl}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sortedStore.length === 0 && (
+                          <tr><td colSpan={5} style={{ padding: 28, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>No stores in this group.</td></tr>
+                        )}
+                        {sortedStore.slice(0, 800).map((s) => {
+                          const pill = uptimePill(s.uptimePct)
+                          const barColor = uptimeColor(s.uptimePct)
+                          const focused = ropDrillStore === s.storeTag
+                          return (
+                            <tr key={s.storeTag}
+                              onClick={() => setRopDrillStore((t) => (t === s.storeTag ? null : s.storeTag))}
+                              style={{ borderBottom: '1px solid rgba(128,128,160,.06)', cursor: 'pointer', background: focused ? 'rgba(59,130,246,.06)' : undefined }}
+                              onMouseEnter={(e) => { if (!focused) e.currentTarget.style.background = 'var(--bg3)' }}
+                              onMouseLeave={(e) => { if (!focused) e.currentTarget.style.background = focused ? 'rgba(59,130,246,.06)' : '' }}>
+                              <td style={{ padding: '8px 12px', fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`${s.hostname || s.storeTag} (${s.storeTag})`}>
+                                {s.hostname || s.storeTag}
+                              </td>
+                              <td style={{ padding: '8px 12px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                <span className="opm-pill" style={{ background: pill.bg, color: pill.color, border: `1px solid ${pill.border}`, fontFamily: 'var(--mono)', fontWeight: 700, fontSize: 11 }}>
+                                  {s.uptimePct != null ? `${s.uptimePct.toFixed(2)}%` : '—'}
+                                </span>
+                              </td>
+                              <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'var(--mono)', color: s.bizDownMin > 0 ? '#f59e0b' : 'var(--text3)', fontSize: 11, whiteSpace: 'nowrap' }}>
+                                {fmtMins(s.bizDownMin)}
+                              </td>
+                              <td style={{ padding: '8px 12px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                {s.currentlyOffline
+                                  ? <span className="opm-pill" style={{ background: 'rgba(239,68,68,.12)', color: '#ef4444', border: '1px solid rgba(239,68,68,.25)', fontSize: 10 }}>OFFLINE</span>
+                                  : <span className="opm-pill" style={{ background: 'rgba(34,197,94,.10)', color: '#22c55e', border: '1px solid rgba(34,197,94,.20)', fontSize: 10 }}>Online</span>}
+                              </td>
+                              <td style={{ padding: '8px 12px', verticalAlign: 'middle' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 120 }}>
+                                  <div style={{ flex: 1, height: 10, borderRadius: 5, background: 'var(--bg4)', overflow: 'hidden', position: 'relative' }}
+                                    title={s.uptimePct != null ? `${s.uptimePct.toFixed(2)}% BH uptime · ${fmtMins(s.bizDownMin)} down · ${s.disconnects} disconnects` : 'No data'}>
+                                    <div style={{ width: `${Math.max(0, Math.min(100, s.uptimePct ?? 0))}%`, height: '100%', background: barColor, borderRadius: 5, transition: 'width .25s ease' }} />
+                                  </div>
+                                  {s.dailyUptimePcts?.length > 0 && (
+                                    <div style={{ display: 'flex', gap: 1, height: 18, alignItems: 'flex-end', flexShrink: 0 }}>
+                                      {s.dailyUptimePcts.map((p, i) => {
+                                        const c = uptimeColor(p)
+                                        const h = p == null ? 3 : Math.max(2, Math.round((p / 100) * 18))
+                                        return (
+                                          <div key={i} title={`${days[i]?.label}: ${p != null ? p.toFixed(2) + '%' : 'no data'}`}
+                                            style={{ width: 4, height: h, background: c, opacity: p == null ? 0.25 : 1, borderRadius: 1 }} />
+                                        )
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                    {sortedStore.length > 800 && (
+                      <div style={{ padding: '10px 12px', textAlign: 'center', fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', borderTop: '1px solid var(--border)' }}>
+                        Showing first 800 of {sortedStore.length} — use search to narrow.
+                      </div>
+                    )}
+                  </div>
+                </Widget>
 
                 {/* ── Per-store table ── */}
                 <div ref={ropStoreTableRef}>
