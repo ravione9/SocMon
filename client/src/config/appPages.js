@@ -2,7 +2,7 @@
 export const APP_PAGE_KEYS = ['soc', 'noc', 'sentinel', 'infra', 'storeZabbix', 'storeMonitor', 'solarwinds', 'idcs', 'ad', 'nexs', 'tickets', 'reports', 'emailSim', 'ai', 'admin']
 
 /** Hidden from sidebar + direct routes until re-enabled (remove key to show again). */
-export const HIDDEN_APP_PAGE_KEYS = ['storeZabbix']
+export const HIDDEN_APP_PAGE_KEYS = []
 
 export function isPageNavVisible(pageKey) {
   return !HIDDEN_APP_PAGE_KEYS.includes(pageKey)
