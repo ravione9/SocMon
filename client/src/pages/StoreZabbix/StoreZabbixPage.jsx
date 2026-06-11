@@ -1338,13 +1338,21 @@ export default function StoreZabbixPage({
   const nhLatRef = useRef(null)
 
   /* ── ROP Dashboard tab state ── */
-  const [ropData, setRopData] = useState(null)
-  const [ropBusy, setRopBusy] = useState(false)
-  const [ropGroup, setRopGroup] = useState('RP')
+  const [ropUptime, setRopUptime] = useState(null)
+  const [ropUptimeBusy, setRopUptimeBusy] = useState(false)
+  const [ropRange, setRopRange] = useState('7d')
+  const [ropCustomFrom, setRopCustomFrom] = useState('')
+  const [ropCustomTo, setRopCustomTo] = useState('')
+  const [ropGroupKey, setRopGroupKey] = useState('rp')
+  const [ropBhStart, setRopBhStart] = useState(9)
+  const [ropBhEnd, setRopBhEnd] = useState(22)
+  const [ropBhDays, setRopBhDays] = useState(() => new Set([0, 1, 2, 3, 4, 5, 6]))
+  const [ropBhEditorOpen, setRopBhEditorOpen] = useState(false)
+  const [ropSla, setRopSla] = useState(99.5)
   const [ropSearch, setRopSearch] = useState('')
-  const [ropStatusFilter, setRopStatusFilter] = useState('all')
-  const [ropSortKey, setRopSortKey] = useState('availability')
+  const [ropSortKey, setRopSortKey] = useState('uptimePct')
   const [ropSortDir, setRopSortDir] = useState('asc')
+  const [ropDrillStore, setRopDrillStore] = useState(null)
 
   /* ─── data loaders (unchanged logic) ─── */
   const parseErr = useCallback((e) => {
@@ -1462,17 +1470,27 @@ export default function StoreZabbixPage({
     }
   }, [apiBase, parseErr])
 
-  const loadRopDashboard = useCallback(async (group) => {
+  const loadRopUptime = useCallback(async ({ range, customFrom, customTo, groupKey, bhStart, bhEnd, bhDays, sla }) => {
     const qs = new URLSearchParams()
-    if (group) qs.set('group', group)
-    setRopBusy(true); setError(null); setErrorHint(null)
+    qs.set('range', range || '7d')
+    if (range === 'custom' && customFrom && customTo) {
+      qs.set('from', String(Math.floor(new Date(customFrom).getTime() / 1000)))
+      qs.set('to',   String(Math.floor(new Date(customTo).getTime() / 1000)))
+    }
+    qs.set('groupKey', groupKey || 'rp')
+    qs.set('bizStart', String(bhStart ?? 9))
+    qs.set('bizEnd',   String(bhEnd ?? 22))
+    qs.set('bizDays',  [...(bhDays || [0,1,2,3,4,5,6])].sort((a,b)=>a-b).join(','))
+    qs.set('sla',      String(sla ?? 99.5))
+    qs.set('tzOffset', String(-new Date().getTimezoneOffset()))
+    setRopUptimeBusy(true); setError(null); setErrorHint(null)
     try {
-      const { data } = await api.get(`${apiBase}/rop-dashboard?${qs}`)
-      setRopData(data)
+      const { data } = await api.get(`${apiBase}/rop-uptime?${qs}`)
+      setRopUptime(data)
     } catch (e) {
       const { message, hint } = parseErr(e); setError(message); setErrorHint(hint)
     } finally {
-      setRopBusy(false)
+      setRopUptimeBusy(false)
     }
   }, [apiBase, parseErr])
 
@@ -1600,13 +1618,31 @@ export default function StoreZabbixPage({
 
   useEffect(() => {
     if (tab !== 'rop' || !config?.configured) return
-    loadRopDashboard(ropGroup)
-  }, [tab, config?.configured, ropGroup, loadRopDashboard])
+    loadRopUptime({
+      range: ropRange,
+      customFrom: ropCustomFrom,
+      customTo: ropCustomTo,
+      groupKey: ropGroupKey,
+      bhStart: ropBhStart,
+      bhEnd: ropBhEnd,
+      bhDays: ropBhDays,
+      sla: ropSla,
+    })
+  }, [tab, config?.configured, ropRange, ropCustomFrom, ropCustomTo, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla, loadRopUptime])
 
   useSmartPolling(
-    () => loadRopDashboard(ropGroup),
-    60_000,
-    [ropGroup, loadRopDashboard],
+    () => loadRopUptime({
+      range: ropRange,
+      customFrom: ropCustomFrom,
+      customTo: ropCustomTo,
+      groupKey: ropGroupKey,
+      bhStart: ropBhStart,
+      bhEnd: ropBhEnd,
+      bhDays: ropBhDays,
+      sla: ropSla,
+    }),
+    120_000,
+    [ropRange, ropCustomFrom, ropCustomTo, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla, loadRopUptime],
     { enabled: tab === 'rop' && !!config?.configured && config?.reachable !== false, skipImmediate: true },
   )
 
@@ -1820,11 +1856,20 @@ export default function StoreZabbixPage({
       if (tab === 'events') await loadEvents(eventLimit)
       if (tab === 'topMon') await loadTopUtil(topLimit, topMonGroup)
       if (tab === 'netHealth') await loadNetHealth(netHealthGroup, netBizStart, netBizEnd)
-      if (tab === 'rop') await loadRopDashboard(ropGroup)
+      if (tab === 'rop') await loadRopUptime({
+        range: ropRange,
+        customFrom: ropCustomFrom,
+        customTo: ropCustomTo,
+        groupKey: ropGroupKey,
+        bhStart: ropBhStart,
+        bhEnd: ropBhEnd,
+        bhDays: ropBhDays,
+        sla: ropSla,
+      })
       if (tab === 'hostGraphs') { await loadAllHosts(); if (selectedHost?.hostid) { const g = await loadHostGraphs(selectedHost.hostid); if (!g.length) await loadHostItemsLatest(selectedHost.hostid); else setHostItemsLatest(null); if (selectedGraphId) { const d = await fetchGraphSeries(selectedGraphId, graphRange, graphDataMode); setGraphSeries(d) } } }
     } catch (e) { const r = parseErr(e); setError(r.message); setErrorHint(r.hint) }
     finally { setLoading(false) }
-  }, [tab, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries, loadTopUtil, topLimit, topMonGroup, refetchProblems, apiBase, urlEnvVar, loadNetHealth, netHealthGroup, netBizStart, netBizEnd, loadRopDashboard, ropGroup])
+  }, [tab, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries, loadTopUtil, topLimit, topMonGroup, refetchProblems, apiBase, urlEnvVar, loadNetHealth, netHealthGroup, netBizStart, netBizEnd, loadRopUptime, ropRange, ropCustomFrom, ropCustomTo, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla])
 
   /* ─── column definitions ─── */
   const hostCols = [
@@ -1889,7 +1934,7 @@ export default function StoreZabbixPage({
     { id: 'problems', label: 'Alarms', icon: '⚠', badge: overview?.activeProblems },
     { id: 'events', label: 'Events', icon: '◉' },
     { id: 'netHealth', label: 'Network Health', icon: '📶' },
-    { id: 'rop', label: 'ROP Dashboard', icon: '🏪', badge: ropData?.totals?.total },
+    { id: 'rop', label: 'ROP Dashboard', icon: '🏪', badge: ropUptime?.summary?.totalStores },
   ]
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 0, minHeight: 0 }}>
@@ -2879,41 +2924,56 @@ export default function StoreZabbixPage({
         )
       })()}
 
-      {/* ═══════════ ROP DASHBOARD TAB ═══════════ */}
+      {/* ═══════════ ROP DASHBOARD TAB (BH UPTIME) ═══════════ */}
       {configured && reachable && tab === 'rop' && (() => {
-        const rd = ropData
-        const fmtUptime = (s) => {
-          if (!s || !Number.isFinite(s)) return '—'
-          if (s >= 86400) return `${(s / 86400).toFixed(1)} d`
-          if (s >= 3600)  return `${(s / 3600).toFixed(1)} h`
-          if (s >= 60)    return `${Math.floor(s / 60)} m`
-          return `${Math.floor(s)} s`
-        }
-        const pct = (v, t) => t > 0 ? Math.round(v / t * 100) : 0
-        const totals = rd?.totals || { total: 0, online: 0, offline: 0, unknown: 0 }
-        const uptime = rd?.uptime || { avg: null, median: null, min: null, max: null, count: 0, distribution: [] }
+        const ru = ropUptime
+        const summary = ru?.summary || { totalStores: 0, reportingStores: 0, avgUptimePct: null, slaTarget: ropSla, storesAboveSla: 0, storesBelowSla: 0, storesCurrentlyOffline: 0, totalDowntimeMin: 0, totalDisconnects: 0, mttrMin: null, bhMinutesPerStore: 0 }
+        const trend = ru?.trend || []
+        const heatmap = ru?.heatmap || []
+        const topOffenders = ru?.topOffenders || []
+        const perStore = ru?.perStore || []
+        const days = ru?.days || []
 
-        const allRows = rd?.rows || []
-        const filtered = allRows.filter((r) => {
-          if (ropStatusFilter === 'online'  && r.availability !== 'Available')   return false
-          if (ropStatusFilter === 'offline' && r.availability !== 'Unavailable') return false
-          if (ropStatusFilter === 'unknown' && r.availability !== 'Unknown')     return false
+        const fmtMins = (m) => {
+          if (m == null || !Number.isFinite(m)) return '—'
+          if (m < 1) return '< 1 m'
+          if (m < 60) return `${Math.round(m)} m`
+          if (m < 1440) return `${(m / 60).toFixed(1)} h`
+          return `${(m / 1440).toFixed(1)} d`
+        }
+        const fmtAge = (ms) => {
+          if (!ms) return '—'
+          const sec = Math.max(0, Math.floor((Date.now() - ms) / 1000))
+          if (sec < 60) return `${sec}s ago`
+          if (sec < 3600) return `${Math.floor(sec / 60)}m ago`
+          if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`
+          return `${Math.floor(sec / 86400)}d ago`
+        }
+        const uptimeColor = (p) => {
+          if (p == null) return '#1f2937'
+          if (p >= 99.9) return '#16a34a'
+          if (p >= 99.0) return '#65a30d'
+          if (p >= 95.0) return '#ca8a04'
+          if (p >= 90.0) return '#ea580c'
+          return '#dc2626'
+        }
+        const uptimePill = (p) => {
+          if (p == null) return { bg: 'rgba(100,116,139,.12)', color: '#94a3b8', border: 'var(--border)' }
+          const c = uptimeColor(p)
+          return { bg: `${c}22`, color: c, border: `${c}55` }
+        }
+        const slaTarget = summary.slaTarget ?? ropSla
+        const slaMet = summary.avgUptimePct != null && summary.avgUptimePct >= slaTarget
+
+        const filteredStore = perStore.filter((r) => {
           const q = ropSearch.trim().toLowerCase()
           if (!q) return true
-          return (
-            (r.name || '').toLowerCase().includes(q) ||
-            (r.host || '').toLowerCase().includes(q) ||
-            (r.ip   || '').toLowerCase().includes(q)
-          )
+          return (r.hostname || '').toLowerCase().includes(q) || (r.storeTag || '').toLowerCase().includes(q)
         })
-        const sorted = [...filtered].sort((a, b) => {
+        const sortedStore = [...filteredStore].sort((a, b) => {
           const dir = ropSortDir === 'desc' ? -1 : 1
           const va = a[ropSortKey]
           const vb = b[ropSortKey]
-          if (ropSortKey === 'availability') {
-            const order = { Unavailable: 0, Unknown: 1, Available: 2 }
-            return ((order[a.availability] ?? 3) - (order[b.availability] ?? 3)) * dir
-          }
           if (va == null && vb == null) return 0
           if (va == null) return 1
           if (vb == null) return -1
@@ -2922,182 +2982,440 @@ export default function StoreZabbixPage({
         })
         const onSort = (k) => {
           if (ropSortKey === k) setRopSortDir((d) => d === 'asc' ? 'desc' : 'asc')
-          else { setRopSortKey(k); setRopSortDir(k === 'name' || k === 'host' || k === 'ip' ? 'asc' : 'desc') }
+          else { setRopSortKey(k); setRopSortDir(k === 'hostname' || k === 'storeTag' ? 'asc' : 'desc') }
         }
         const sortArrow = (k) => ropSortKey === k ? (ropSortDir === 'asc' ? ' ▲' : ' ▼') : ''
-        const maxUptimeBucket = Math.max(...(uptime.distribution || []).map((x) => x.count), 1)
-        const onlinePct = pct(totals.online, totals.total)
+        const dayOfWeekLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+        const groupKeyToLabel = { rp: 'ROP / RP Stores', pos: 'POS Systems (LK)', sdwan: 'SD-WAN Stores' }
+        const rangeChips = [
+          { id: '24h', label: 'Last 24h' },
+          { id: '7d',  label: 'Last 7 days' },
+          { id: '14d', label: 'Last 14 days' },
+          { id: '30d', label: 'Last 30 days' },
+          { id: 'custom', label: 'Custom' },
+        ]
+        const toggleBhDay = (d) => {
+          const next = new Set(ropBhDays)
+          if (next.has(d)) next.delete(d); else next.add(d)
+          if (next.size === 0) return
+          setRopBhDays(next)
+        }
+        const presetWeekdays = () => setRopBhDays(new Set([1, 2, 3, 4, 5]))
+        const presetEveryday = () => setRopBhDays(new Set([0, 1, 2, 3, 4, 5, 6]))
+        const bhSummary = (() => {
+          const allDays = ropBhDays.size === 7
+          const weekdays = ropBhDays.size === 5 && [1,2,3,4,5].every((d) => ropBhDays.has(d))
+          const dayLabel = allDays ? 'Every day' : weekdays ? 'Mon–Fri' : [...ropBhDays].sort().map((d) => dayOfWeekLabels[d]).join(', ')
+          return `${String(ropBhStart).padStart(2,'0')}:00 – ${String(ropBhEnd).padStart(2,'0')}:00 · ${dayLabel}`
+        })()
 
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            {/* Toolbar */}
-            <div className="opm-toolbar">
-              <div className="opm-toolbar-row" style={{ flexWrap: 'wrap', gap: 10 }}>
-                <span className="opm-toolbar-label">ROP host group</span>
-                <select value={ropGroup} onChange={(e) => setRopGroup(e.target.value)}
-                  style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', minWidth: 200, maxWidth: 280 }}>
-                  {(rd?.allGroups && rd.allGroups.length
-                    ? rd.allGroups
-                    : ['RP', 'RPSystem', 'POS System Group']
-                  ).map((g) => <option key={g} value={g}>{g}</option>)}
-                </select>
-                <span className="opm-toolbar-label" style={{ marginLeft: 8 }}>Status</span>
-                <select value={ropStatusFilter} onChange={(e) => setRopStatusFilter(e.target.value)}
-                  style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)' }}>
-                  <option value="all">All ({totals.total})</option>
-                  <option value="online">Online ({totals.online})</option>
-                  <option value="offline">Offline ({totals.offline})</option>
-                  <option value="unknown">Unknown ({totals.unknown})</option>
-                </select>
-                <div className="opm-search" style={{ marginLeft: 8, maxWidth: 320 }}>
-                  <span className="opm-search-icon">⌕</span>
-                  <input placeholder="Search by name, host or IP…" value={ropSearch} onChange={(e) => setRopSearch(e.target.value)} />
+            {/* ── Toolbar: range chips + group + SLA + BH editor ── */}
+            <div className="opm-toolbar" style={{ gap: 10 }}>
+              <div className="opm-toolbar-row" style={{ flexWrap: 'wrap', gap: 8 }}>
+                <span className="opm-toolbar-label">Range</span>
+                <div style={{ display: 'inline-flex', gap: 2, padding: 3, background: 'var(--bg2)', borderRadius: 8, border: '1px solid var(--border)' }}>
+                  {rangeChips.map((c) => (
+                    <button key={c.id} type="button" onClick={() => setRopRange(c.id)}
+                      style={{
+                        padding: '5px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                        background: ropRange === c.id ? 'var(--accent)' : 'transparent',
+                        color: ropRange === c.id ? '#fff' : 'var(--text2)',
+                        fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600,
+                      }}>
+                      {c.label}
+                    </button>
+                  ))}
                 </div>
-                {rd?.sampledAt && (
-                  <span className="opm-pill" style={{ marginLeft: 'auto', background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
-                    Polled {relAge(rd.sampledAt)} ago · auto-refresh 60s
-                  </span>
+                {ropRange === 'custom' && (
+                  <>
+                    <input type="datetime-local" value={ropCustomFrom} onChange={(e) => setRopCustomFrom(e.target.value)}
+                      style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 11, fontFamily: 'var(--mono)' }} />
+                    <span style={{ fontSize: 10, color: 'var(--text3)' }}>→</span>
+                    <input type="datetime-local" value={ropCustomTo} onChange={(e) => setRopCustomTo(e.target.value)}
+                      style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 11, fontFamily: 'var(--mono)' }} />
+                  </>
                 )}
-                {rd && rd.groupExists === false && (
-                  <span className="opm-pill" style={{ background: 'rgba(245,158,11,.12)', color: '#f59e0b', border: '1px solid rgba(245,158,11,.3)' }}>
-                    Group "{rd.groupFilter}" not found in Zabbix — pick a different group above
+                <span className="opm-toolbar-label" style={{ marginLeft: 6 }}>Group</span>
+                <select value={ropGroupKey} onChange={(e) => setRopGroupKey(e.target.value)}
+                  style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', minWidth: 180 }}>
+                  <option value="rp">{groupKeyToLabel.rp}</option>
+                  <option value="pos">{groupKeyToLabel.pos}</option>
+                  <option value="sdwan">{groupKeyToLabel.sdwan}</option>
+                </select>
+                <span className="opm-toolbar-label" style={{ marginLeft: 6 }}>SLA</span>
+                <input type="number" min={0} max={100} step={0.1} value={ropSla}
+                  onChange={(e) => setRopSla(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+                  style={{ width: 70, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)' }} />
+                <span style={{ fontSize: 11, color: 'var(--text3)' }}>%</span>
+                <button type="button" onClick={() => setRopBhEditorOpen((v) => !v)}
+                  style={{ marginLeft: 8, padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: ropBhEditorOpen ? 'var(--bg4)' : 'var(--bg3)', color: 'var(--text)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                  <span style={{ fontSize: 13 }}>🕘</span> Business hours: <strong style={{ color: 'var(--accent)' }}>{bhSummary}</strong> {ropBhEditorOpen ? '▴' : '▾'}
+                </button>
+                {ru?.rangeFromIso && (
+                  <span className="opm-pill" style={{ marginLeft: 'auto', background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
+                    Source: StoreProblemHistory · poll 2m · auto-refresh 2m
                   </span>
                 )}
               </div>
+              {ropBhEditorOpen && (
+                <div className="opm-toolbar-row" style={{ flexWrap: 'wrap', gap: 10, paddingTop: 8, borderTop: '1px dashed var(--border)' }}>
+                  <span className="opm-toolbar-label">Hours</span>
+                  <select value={ropBhStart} onChange={(e) => setRopBhStart(Number(e.target.value))}
+                    style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 11, fontFamily: 'var(--mono)' }}>
+                    {Array.from({ length: 25 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+                  </select>
+                  <span style={{ fontSize: 10, color: 'var(--text3)' }}>to</span>
+                  <select value={ropBhEnd} onChange={(e) => setRopBhEnd(Number(e.target.value))}
+                    style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 11, fontFamily: 'var(--mono)' }}>
+                    {Array.from({ length: 25 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+                  </select>
+                  <span className="opm-toolbar-label" style={{ marginLeft: 8 }}>Days</span>
+                  <div style={{ display: 'inline-flex', gap: 2 }}>
+                    {dayOfWeekLabels.map((lbl, idx) => {
+                      const on = ropBhDays.has(idx)
+                      return (
+                        <button key={idx} type="button" onClick={() => toggleBhDay(idx)}
+                          style={{ width: 36, padding: '4px 0', borderRadius: 6, border: `1px solid ${on ? 'var(--accent)' : 'var(--border)'}`, background: on ? 'rgba(59,130,246,.12)' : 'var(--bg2)', color: on ? 'var(--accent)' : 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                          {lbl}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <button type="button" onClick={presetWeekdays}
+                    style={{ marginLeft: 8, padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text2)', fontSize: 10, fontFamily: 'var(--mono)', cursor: 'pointer' }}>Preset: Mon–Fri</button>
+                  <button type="button" onClick={presetEveryday}
+                    style={{ padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text2)', fontSize: 10, fontFamily: 'var(--mono)', cursor: 'pointer' }}>Preset: Every day</button>
+                </div>
+              )}
             </div>
 
-            {ropBusy && !rd && (
+            {ropUptimeBusy && !ru && (
               <div style={{ padding: 40, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center' }}>
-                <span className="np-page-loading-dot" /> Loading ROP dashboard…
+                <span className="np-page-loading-dot" /> Computing business-hours uptime…
               </div>
             )}
 
-            {rd && (
+            {ru && (
               <>
-                {/* KPI tiles */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
-                  <CounterTile label="Total ROP Systems" value={totals.total}    color="blue"  icon="🏪" />
-                  <CounterTile label="Online Now"        value={totals.online}   color="green" icon="●"  sub={`${onlinePct}% available`} />
-                  <CounterTile label="Offline Now"       value={totals.offline}  color="red"   icon="✕"  sub={totals.total ? `${pct(totals.offline, totals.total)}% down` : undefined} />
-                  <CounterTile label="Unknown"           value={totals.unknown}  color="amber" icon="?"  sub={totals.total ? `${pct(totals.unknown, totals.total)}%` : undefined} />
-                  <CounterTile label="Avg Uptime"        value={fmtUptime(uptime.avg)}    color="cyan"   icon="⏱" sub={`${uptime.count} hosts reporting`} />
-                  <CounterTile label="Longest Uptime"    value={fmtUptime(uptime.max)}    color="purple" icon="↑" />
-                </div>
-
-                {/* Uptime distribution */}
-                {uptime.count > 0 && (
-                  <Widget title="Uptime Distribution" badge={`${uptime.count} hosts`} badgeColor="cyan">
-                    <div style={{ display: 'flex', gap: 14, alignItems: 'flex-end', padding: '8px 0', flexWrap: 'wrap' }}>
-                      {(uptime.distribution || []).map((d) => {
-                        const barH = Math.max(8, Math.round((d.count / maxUptimeBucket) * 110))
-                        return (
-                          <div key={d.label} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, flex: 1, minWidth: 80 }}>
-                            <span style={{ fontSize: 11, color: 'var(--accent)', fontWeight: 700, fontFamily: 'var(--mono)' }}>{d.count}</span>
-                            <div style={{ width: '70%', height: barH, background: 'var(--accent)', borderRadius: '4px 4px 0 0', opacity: 0.8 }} />
-                            <span style={{ fontSize: 10, color: 'var(--text3)', textAlign: 'center', lineHeight: 1.2 }}>{d.label}</span>
-                          </div>
-                        )
-                      })}
-                      <div style={{ marginLeft: 'auto', display: 'flex', flexDirection: 'column', gap: 5, minWidth: 130, background: 'var(--bg3)', padding: '10px 14px', borderRadius: 8 }}>
-                        {[['Avg', fmtUptime(uptime.avg)], ['Median', fmtUptime(uptime.median)], ['Min', fmtUptime(uptime.min)], ['Max', fmtUptime(uptime.max)]].map(([l, v]) => (
-                          <div key={l} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 11, fontFamily: 'var(--mono)' }}>
-                            <span style={{ color: 'var(--text3)' }}>{l}</span>
-                            <span style={{ color: 'var(--text)', fontWeight: 600 }}>{v}</span>
-                          </div>
-                        ))}
+                {/* ── Hero strip: huge avg uptime + SLA gauge + KPIs ── */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 1.2fr) repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+                  {/* Hero card */}
+                  <div style={{ position: 'relative', borderRadius: 14, padding: 22, border: `1px solid ${slaMet ? 'rgba(34,197,94,.35)' : 'rgba(239,68,68,.35)'}`, background: `linear-gradient(135deg, ${slaMet ? 'rgba(34,197,94,.07)' : 'rgba(239,68,68,.07)'} 0%, var(--bg2) 60%, var(--bg3) 100%)`, overflow: 'hidden' }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text3)', letterSpacing: .8, textTransform: 'uppercase', fontFamily: 'var(--mono)' }}>
+                      Business-hours availability {summary.bhMinutesPerStore > 0 ? `· ${(summary.bhMinutesPerStore / 60).toFixed(1)} h window` : ''}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 8 }}>
+                      <span style={{ fontSize: 56, fontWeight: 800, lineHeight: 1, color: uptimeColor(summary.avgUptimePct), fontFamily: 'var(--mono)' }}>
+                        {summary.avgUptimePct != null ? `${summary.avgUptimePct.toFixed(2)}` : '—'}
+                      </span>
+                      <span style={{ fontSize: 22, color: 'var(--text2)', fontWeight: 700, fontFamily: 'var(--mono)' }}>%</span>
+                    </div>
+                    {/* SLA progress */}
+                    <div style={{ marginTop: 12 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 4 }}>
+                        <span>SLA target {slaTarget.toFixed(2)}%</span>
+                        <span style={{ fontWeight: 700, color: slaMet ? '#22c55e' : '#ef4444' }}>
+                          {slaMet ? '● Meeting SLA' : '● Below SLA'}
+                          {summary.avgUptimePct != null && (
+                            <span style={{ marginLeft: 6, color: 'var(--text3)', fontWeight: 600 }}>
+                              ({(summary.avgUptimePct - slaTarget).toFixed(2)}%)
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                      <div style={{ position: 'relative', height: 10, background: 'var(--bg4)', borderRadius: 5, overflow: 'hidden' }}>
+                        <div style={{
+                          position: 'absolute', left: 0, top: 0, bottom: 0,
+                          width: `${Math.max(0, Math.min(100, summary.avgUptimePct ?? 0))}%`,
+                          background: slaMet ? 'linear-gradient(90deg, #22c55e, #16a34a)' : 'linear-gradient(90deg, #f97316, #dc2626)',
+                          transition: 'width .4s ease',
+                        }} />
+                        <div style={{ position: 'absolute', left: `${slaTarget}%`, top: -2, bottom: -2, width: 2, background: 'var(--text)', opacity: .7 }} title={`SLA target ${slaTarget}%`} />
                       </div>
                     </div>
-                  </Widget>
-                )}
+                    <div style={{ marginTop: 12, fontSize: 11, color: 'var(--text2)', fontFamily: 'var(--mono)', lineHeight: 1.6 }}>
+                      <strong style={{ color: 'var(--text)' }}>{summary.reportingStores}</strong> of {summary.totalStores} stores reporting · BH window {bhSummary}
+                    </div>
+                  </div>
+                  <CounterTile label="Stores below SLA" value={summary.storesBelowSla} color={summary.storesBelowSla > 0 ? 'red' : 'green'} icon="✗" sub={`${summary.storesAboveSla} above`} />
+                  <CounterTile label="Currently offline" value={summary.storesCurrentlyOffline} color={summary.storesCurrentlyOffline > 0 ? 'red' : 'green'} icon="●" />
+                  <CounterTile label="BH downtime (total)" value={fmtMins(summary.totalDowntimeMin)} color="amber" icon="⏱" sub={`across ${summary.totalStores} stores`} />
+                  <CounterTile label="Disconnects" value={summary.totalDisconnects} color="purple" icon="↯" sub={summary.totalStores ? `${(summary.totalDisconnects / Math.max(summary.totalStores, 1)).toFixed(2)} avg/store` : undefined} />
+                  <CounterTile label="Mean time to recovery" value={summary.mttrMin != null ? fmtMins(summary.mttrMin) : '—'} color="cyan" icon="↺" />
+                </div>
 
-                {/* Per-host table */}
+                {/* ── Trend chart ── */}
+                {trend.length > 0 && (() => {
+                  const pts = trend.map((t) => t.avgUptimePct)
+                  const labels = trend.map((t) => t.label.slice(5))
+                  const minPct = Math.min(slaTarget - 1, ...pts.filter((p) => p != null))
+                  const yMin = Math.max(0, Math.floor((minPct - 0.5) * 10) / 10)
+                  const data = {
+                    labels,
+                    datasets: [
+                      {
+                        label: 'BH uptime %',
+                        data: pts,
+                        borderColor: '#3b82f6',
+                        backgroundColor: 'rgba(59,130,246,.12)',
+                        fill: true,
+                        tension: 0.35,
+                        spanGaps: true,
+                        pointRadius: 3,
+                        pointHoverRadius: 6,
+                        pointBackgroundColor: pts.map((p) => uptimeColor(p)),
+                        pointBorderColor: '#fff',
+                        pointBorderWidth: 1,
+                        borderWidth: 2,
+                      },
+                      {
+                        label: `SLA ${slaTarget}%`,
+                        data: trend.map(() => slaTarget),
+                        borderColor: 'rgba(239,68,68,.85)',
+                        borderDash: [6, 4],
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        fill: false,
+                        tension: 0,
+                      },
+                    ],
+                  }
+                  const opts = {
+                    responsive: true, maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                      legend: { display: true, position: 'top', labels: { color: 'var(--text3)', font: { family: 'var(--mono)', size: 11 }, usePointStyle: true, boxWidth: 8 } },
+                      tooltip: {
+                        backgroundColor: 'rgba(15,17,23,.95)', borderColor: 'rgba(79,126,245,.3)', borderWidth: 1, cornerRadius: 8,
+                        callbacks: {
+                          label: (ctx) => {
+                            const day = trend[ctx.dataIndex]
+                            if (ctx.dataset.label?.startsWith('SLA')) return ` ${ctx.dataset.label}`
+                            return [
+                              ` Uptime: ${day.avgUptimePct != null ? day.avgUptimePct.toFixed(2) + '%' : '—'}`,
+                              ` Downtime: ${fmtMins(day.totalDowntimeMin)}`,
+                              ` Disconnects: ${day.totalDisconnects}`,
+                              ` Stores impacted: ${day.storesImpacted}`,
+                            ]
+                          },
+                        },
+                      },
+                    },
+                    scales: {
+                      x: { ticks: { color: 'var(--text3)', font: { family: 'var(--mono)', size: 10 } }, grid: { display: false } },
+                      y: { min: yMin, max: 100, ticks: { color: 'var(--text3)', font: { family: 'var(--mono)', size: 10 }, callback: (v) => `${v}%` }, grid: { color: 'rgba(128,128,160,.06)' } },
+                    },
+                  }
+                  return (
+                    <Widget title="Daily availability trend" badge={`${trend.length} day${trend.length === 1 ? '' : 's'}`} badgeColor="blue">
+                      <div style={{ height: 240 }}>
+                        <Line data={data} options={opts} />
+                      </div>
+                    </Widget>
+                  )
+                })()}
+
+                {/* ── Heatmap + Top Offenders ── */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(0, 1fr)', gap: 14 }}>
+                  {/* Heatmap */}
+                  <Widget title="Availability heatmap" badge={`Worst ${heatmap.length} stores · ${days.length} days`} badgeColor="amber" noPad>
+                    {heatmap.length === 0 ? (
+                      <div style={{ padding: 32, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>
+                        No store-level data yet — try a longer range.
+                      </div>
+                    ) : (
+                      <div style={{ overflowX: 'auto', padding: '14px 16px' }}>
+                        <table style={{ borderCollapse: 'separate', borderSpacing: 2, fontSize: 10, fontFamily: 'var(--mono)' }}>
+                          <thead>
+                            <tr>
+                              <th style={{ textAlign: 'left', padding: '4px 8px 4px 0', color: 'var(--text3)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em' }}>Store</th>
+                              <th style={{ textAlign: 'right', padding: '4px 8px', color: 'var(--text3)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em' }}>BH up%</th>
+                              {days.map((d) => (
+                                <th key={d.dayMs} style={{ padding: '4px 0', color: 'var(--text3)', fontSize: 9, fontWeight: 600, minWidth: 26, textAlign: 'center', whiteSpace: 'nowrap' }} title={d.label}>
+                                  {d.label.slice(8, 10)}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {heatmap.map((row) => (
+                              <tr key={row.storeTag}>
+                                <td style={{ padding: '2px 8px 2px 0', color: 'var(--text)', fontWeight: 600, whiteSpace: 'nowrap', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' }} title={`${row.hostname || row.storeTag} (${row.storeTag})`}>
+                                  {row.hostname || row.storeTag}
+                                </td>
+                                <td style={{ padding: '2px 8px', textAlign: 'right', color: uptimeColor(row.uptimePct), fontWeight: 700, whiteSpace: 'nowrap' }}>
+                                  {row.uptimePct != null ? `${row.uptimePct.toFixed(2)}%` : '—'}
+                                </td>
+                                {row.days.map((cell, i) => {
+                                  const c = cell.uptimePct
+                                  const bg = c == null ? '#1f2937' : uptimeColor(c)
+                                  const opacity = c == null ? 0.3 : (c >= 99.9 ? 0.85 : c >= 95 ? 0.7 : c >= 90 ? 0.85 : 0.95)
+                                  return (
+                                    <td key={i} style={{ padding: 0 }}>
+                                      <div style={{ width: 22, height: 22, borderRadius: 3, background: bg, opacity, cursor: 'default' }}
+                                        title={c != null
+                                          ? `${days[i].label}: ${c.toFixed(2)}% uptime · ${fmtMins(cell.downtimeMin)} BH downtime`
+                                          : `${days[i].label}: no business-hour minutes in window`} />
+                                    </td>
+                                  )
+                                })}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                          <span>Worst</span>
+                          {[
+                            { c: '#dc2626', label: '<90%' },
+                            { c: '#ea580c', label: '<95%' },
+                            { c: '#ca8a04', label: '<99%' },
+                            { c: '#65a30d', label: '<99.9%' },
+                            { c: '#16a34a', label: '≥99.9%' },
+                          ].map((b) => (
+                            <span key={b.label} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                              <span style={{ width: 14, height: 14, borderRadius: 3, background: b.c }} />{b.label}
+                            </span>
+                          ))}
+                          <span style={{ marginLeft: 'auto' }}>Cell = one calendar day · BH only</span>
+                        </div>
+                      </div>
+                    )}
+                  </Widget>
+
+                  {/* Top Offenders */}
+                  <Widget title="Top offenders" badge={String(topOffenders.length)} badgeColor="red" noPad>
+                    {topOffenders.length === 0 ? (
+                      <div style={{ padding: 28, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>
+                        All stores hitting 100% uptime in this window. 🎉
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column' }}>
+                        {topOffenders.map((s, i) => {
+                          const c = uptimeColor(s.uptimePct)
+                          return (
+                            <div key={s.storeTag} className="opm-row-hover" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderBottom: '1px solid var(--border)', cursor: 'pointer' }}
+                              onClick={() => setRopDrillStore(s.storeTag)}>
+                              <span style={{ width: 22, height: 22, borderRadius: 6, background: 'var(--bg4)', color: c, fontWeight: 800, fontSize: 11, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--mono)', flexShrink: 0, border: `1px solid ${c}55` }}>
+                                {i + 1}
+                              </span>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`${s.hostname || s.storeTag} (${s.storeTag})`}>
+                                  {s.hostname || s.storeTag}
+                                </div>
+                                <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginTop: 2 }}>
+                                  <span>{fmtMins(s.bizDownMin)} down</span>
+                                  <span>·</span>
+                                  <span>{s.disconnects} drops</span>
+                                  <span>·</span>
+                                  <span>longest {fmtMins(s.longestOutageMin)}</span>
+                                </div>
+                                <div style={{ marginTop: 5, height: 5, borderRadius: 3, background: 'var(--bg4)', overflow: 'hidden' }}>
+                                  <div style={{ width: `${Math.max(0, Math.min(100, s.uptimePct ?? 0))}%`, height: '100%', background: c, transition: 'width .3s' }} />
+                                </div>
+                              </div>
+                              <div style={{ textAlign: 'right', minWidth: 56 }}>
+                                <div style={{ fontSize: 14, fontWeight: 800, color: c, fontFamily: 'var(--mono)' }}>{s.uptimePct != null ? s.uptimePct.toFixed(2) : '—'}%</div>
+                                {s.currentlyOffline && <span className="opm-pill" style={{ background: 'rgba(239,68,68,.15)', color: '#ef4444', border: '1px solid rgba(239,68,68,.3)', marginTop: 2 }}>OFFLINE</span>}
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </Widget>
+                </div>
+
+                {/* ── Per-store table ── */}
                 <Widget
-                  title={`ROP Systems — ${ropGroup}`}
-                  badge={`${sorted.length}${sorted.length !== allRows.length ? ` / ${allRows.length}` : ''}`}
+                  title="All stores"
+                  badge={`${sortedStore.length}${sortedStore.length !== perStore.length ? ` / ${perStore.length}` : ''}`}
                   badgeColor="blue"
                   noPad
+                  actions={
+                    <div className="opm-search" style={{ maxWidth: 260 }}>
+                      <span className="opm-search-icon">⌕</span>
+                      <input placeholder="Search hostname or store tag…" value={ropSearch} onChange={(e) => setRopSearch(e.target.value)} />
+                    </div>
+                  }
                 >
-                  <div style={{ overflowX: 'auto' }}>
+                  <div style={{ overflowX: 'auto', maxHeight: 540, overflowY: 'auto' }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                      <thead>
+                      <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
                         <tr style={{ background: 'var(--bg3)', borderBottom: '1px solid var(--border)' }}>
                           {[
-                            ['availability', 'Status'],
-                            ['name', 'Store / Host name'],
-                            ['host', 'Technical name'],
-                            ['ip', 'IP address'],
-                            ['agentPing', 'Agent ping'],
-                            ['packetLoss', 'Pkt loss'],
-                            ['pingMs', 'Latency'],
-                            ['uptime', 'Uptime'],
-                          ].map(([k, lbl]) => (
-                            <th key={k}
-                              onClick={() => onSort(k)}
-                              style={{ padding: '8px 12px', textAlign: 'left', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap', cursor: 'pointer', userSelect: 'none' }}>
-                              {lbl}{sortArrow(k)}
+                            ['hostname',         'Store / Hostname',    'left'],
+                            ['storeTag',         'Tag',                 'left'],
+                            ['currentlyOffline', 'Live',                'left'],
+                            ['uptimePct',        'BH uptime %',         'right'],
+                            ['bizDownMin',       'BH downtime',         'right'],
+                            ['disconnects',      'Disconnects',         'right'],
+                            ['longestOutageMin', 'Longest outage',      'right'],
+                            ['lastOfflineMs',    'Last offline',        'left'],
+                            [null,               'Daily trend (7-30d)', 'left'],
+                          ].map(([k, lbl, align]) => (
+                            <th key={lbl}
+                              onClick={() => k && onSort(k)}
+                              style={{ padding: '9px 12px', textAlign: align, fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap', cursor: k ? 'pointer' : 'default', userSelect: 'none' }}>
+                              {lbl}{k ? sortArrow(k) : ''}
                             </th>
                           ))}
                         </tr>
                       </thead>
                       <tbody>
-                        {sorted.length === 0 && (
-                          <tr><td colSpan={8} style={{ padding: 28, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>
-                            {allRows.length === 0
-                              ? 'No ROP hosts in this group yet.'
-                              : `No hosts match the current filters (${allRows.length} total).`}
+                        {sortedStore.length === 0 && (
+                          <tr><td colSpan={9} style={{ padding: 28, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>
+                            {perStore.length === 0 ? 'No stores in this group.' : `No stores match "${ropSearch}".`}
                           </td></tr>
                         )}
-                        {sorted.slice(0, 1000).map((h) => {
-                          const availColor = h.availability === 'Available' ? '#22c55e'
-                            : h.availability === 'Unavailable' ? '#ef4444'
-                            : '#94a3b8'
-                          const availBg = h.availability === 'Available' ? 'rgba(34,197,94,.12)'
-                            : h.availability === 'Unavailable' ? 'rgba(239,68,68,.12)'
-                            : 'rgba(100,116,139,.12)'
-                          const availBorder = h.availability === 'Available' ? 'rgba(34,197,94,.25)'
-                            : h.availability === 'Unavailable' ? 'rgba(239,68,68,.25)'
-                            : 'var(--border)'
+                        {sortedStore.slice(0, 800).map((s) => {
+                          const pillStyle = uptimePill(s.uptimePct)
+                          const belowSla = s.uptimePct != null && s.uptimePct < slaTarget
                           return (
-                            <tr key={h.hostid} style={{ borderBottom: '1px solid rgba(128,128,160,.06)' }}
-                              onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg3)' }}
-                              onMouseLeave={(e) => { e.currentTarget.style.background = '' }}>
+                            <tr key={s.storeTag}
+                              onClick={() => setRopDrillStore(s.storeTag === ropDrillStore ? null : s.storeTag)}
+                              style={{ borderBottom: '1px solid rgba(128,128,160,.06)', cursor: 'pointer', background: ropDrillStore === s.storeTag ? 'rgba(59,130,246,.06)' : undefined }}
+                              onMouseEnter={(e) => { if (ropDrillStore !== s.storeTag) e.currentTarget.style.background = 'var(--bg3)' }}
+                              onMouseLeave={(e) => { if (ropDrillStore !== s.storeTag) e.currentTarget.style.background = '' }}>
+                              <td style={{ padding: '7px 12px', color: 'var(--text)', fontWeight: 600, maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.hostname || s.storeTag}>
+                                {s.hostname || s.storeTag}
+                                {belowSla && <span className="opm-pill" style={{ marginLeft: 8, background: 'rgba(239,68,68,.12)', color: '#ef4444', border: '1px solid rgba(239,68,68,.25)' }}>SLA</span>}
+                              </td>
+                              <td style={{ padding: '7px 12px', color: 'var(--text2)', fontFamily: 'var(--mono)', fontSize: 11, whiteSpace: 'nowrap' }}>{s.storeTag}</td>
                               <td style={{ padding: '7px 12px', whiteSpace: 'nowrap' }}>
-                                <span className="opm-pill" style={{ background: availBg, color: availColor, border: `1px solid ${availBorder}` }}>
-                                  {h.availability === 'Available' ? '● ' : h.availability === 'Unavailable' ? '✕ ' : '? '}{h.availability}
+                                {s.currentlyOffline
+                                  ? <span className="opm-pill" style={{ background: 'rgba(239,68,68,.12)', color: '#ef4444', border: '1px solid rgba(239,68,68,.25)' }}>● OFFLINE</span>
+                                  : <span className="opm-pill" style={{ background: 'rgba(34,197,94,.10)', color: '#22c55e', border: '1px solid rgba(34,197,94,.20)' }}>● Online</span>}
+                              </td>
+                              <td style={{ padding: '7px 12px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                <span className="opm-pill" style={{ background: pillStyle.bg, color: pillStyle.color, border: `1px solid ${pillStyle.border}`, fontFamily: 'var(--mono)', fontWeight: 700 }}>
+                                  {s.uptimePct != null ? `${s.uptimePct.toFixed(2)}%` : '—'}
                                 </span>
                               </td>
-                              <td style={{ padding: '7px 12px', color: 'var(--text)', fontWeight: 600, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={h.name}>{h.name}</td>
-                              <td style={{ padding: '7px 12px', color: 'var(--text2)', fontFamily: 'var(--mono)', fontSize: 11, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={h.host}>{h.host}</td>
-                              <td style={{ padding: '7px 12px', color: 'var(--text2)', fontFamily: 'var(--mono)', fontSize: 11, whiteSpace: 'nowrap' }}>{h.ip || '—'}</td>
-                              <td style={{ padding: '7px 12px', whiteSpace: 'nowrap', fontFamily: 'var(--mono)' }}>
-                                {h.agentPingStale
-                                  ? <span style={{ color: '#f59e0b', fontSize: 11 }} title={h.agentPingPoll ? fmtClock(h.agentPingPoll) : undefined}>Stale{h.agentPingPoll ? ` (${relAge(h.agentPingPoll)})` : ''}</span>
-                                  : h.agentPing == null ? <span style={{ color: 'var(--text3)' }}>—</span>
-                                  : <span style={{ color: h.agentPing === 1 ? '#22c55e' : '#ef4444', fontWeight: 600 }}>{h.agentPing === 1 ? '▲ Up' : '▼ Down'}</span>}
-                              </td>
-                              <td style={{ padding: '7px 12px', whiteSpace: 'nowrap', fontFamily: 'var(--mono)' }}>
-                                {h.packetLossStale
-                                  ? <span style={{ color: '#f59e0b', fontSize: 11 }}>Stale</span>
-                                  : h.packetLoss == null ? <span style={{ color: 'var(--text3)' }}>—</span>
-                                  : <span style={{ color: h.packetLoss === 0 ? '#22c55e' : h.packetLoss < 5 ? '#f59e0b' : '#ef4444', fontWeight: 600 }}>{h.packetLoss}%</span>}
-                              </td>
-                              <td style={{ padding: '7px 12px', whiteSpace: 'nowrap', fontFamily: 'var(--mono)', color: h.pingMsStale ? '#f59e0b' : h.pingMs != null ? (h.pingMs < 50 ? '#22c55e' : h.pingMs < 150 ? '#f59e0b' : '#ef4444') : 'var(--text3)' }}>
-                                {h.pingMsStale ? <span style={{ fontSize: 11 }}>Stale</span>
-                                  : h.pingMs != null ? `${Math.round(h.pingMs)} ms` : '—'}
-                              </td>
-                              <td style={{ padding: '7px 12px', whiteSpace: 'nowrap', fontFamily: 'var(--mono)', color: 'var(--text2)', fontSize: 11 }}>
-                                {h.uptime != null ? fmtUptime(h.uptime)
-                                  : h.availability === 'Unavailable' ? <span style={{ color: '#ef4444', fontWeight: 600 }}>Down</span>
-                                  : '—'}
+                              <td style={{ padding: '7px 12px', textAlign: 'right', fontFamily: 'var(--mono)', color: s.bizDownMin > 0 ? '#f59e0b' : 'var(--text3)' }}>{fmtMins(s.bizDownMin)}</td>
+                              <td style={{ padding: '7px 12px', textAlign: 'right', fontFamily: 'var(--mono)', color: s.disconnects > 0 ? 'var(--text)' : 'var(--text3)' }}>{s.disconnects}</td>
+                              <td style={{ padding: '7px 12px', textAlign: 'right', fontFamily: 'var(--mono)', color: s.longestOutageMin > 0 ? '#ef4444' : 'var(--text3)' }}>{fmtMins(s.longestOutageMin)}</td>
+                              <td style={{ padding: '7px 12px', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text3)', whiteSpace: 'nowrap' }} title={s.lastOfflineMs ? new Date(s.lastOfflineMs).toLocaleString() : undefined}>{fmtAge(s.lastOfflineMs)}</td>
+                              <td style={{ padding: '7px 12px' }}>
+                                <div style={{ display: 'flex', gap: 1, height: 18, alignItems: 'flex-end' }}>
+                                  {s.dailyUptimePcts.map((p, i) => {
+                                    const c = uptimeColor(p)
+                                    const h = p == null ? 4 : Math.max(2, Math.round((p / 100) * 18))
+                                    const op = p == null ? 0.25 : 1
+                                    return <div key={i} title={`${days[i]?.label}: ${p != null ? p.toFixed(2) + '%' : 'no data'}`}
+                                      style={{ width: 4, height: h, background: c, opacity: op, borderRadius: 1 }} />
+                                  })}
+                                </div>
                               </td>
                             </tr>
                           )
                         })}
                       </tbody>
                     </table>
-                    {sorted.length > 1000 && (
+                    {sortedStore.length > 800 && (
                       <div style={{ padding: '10px 12px', textAlign: 'center', fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', borderTop: '1px solid var(--border)' }}>
-                        Showing first 1000 of {sorted.length} hosts — refine the filter above to narrow results.
+                        Showing first 800 of {sortedStore.length} stores — refine the search above to narrow.
                       </div>
                     )}
                   </div>
