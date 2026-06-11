@@ -3786,41 +3786,71 @@ export default function StoreZabbixPage({
                   </Widget>
                 )}
 
-                {/* ── Trend chart ── */}
+                {/* ── Trend chart (auto hourly for short ranges) ── */}
                 {trend.length > 0 && (() => {
+                  const isHourly = ru?.granularity === 'hour'
                   const pts = trend.map((t) => t.avgUptimePct)
-                  const labels = trend.map((t) => t.label.slice(5))
-                  const minPct = Math.min(slaTarget - 1, ...pts.filter((p) => p != null))
+                  const labels = trend.map((t) => t.displayLabel ?? (t.label || '').slice(5))
+                  const validPts = pts.filter((p) => p != null)
+                  const minPct = validPts.length
+                    ? Math.min(slaTarget - 1, ...validPts)
+                    : slaTarget - 1
                   const yMin = Math.max(0, Math.floor((minPct - 0.5) * 10) / 10)
+                  const showAsBar = isHourly || trend.length <= 3
+                  const ChartComp = showAsBar ? Bar : Line
                   const data = {
                     labels,
-                    datasets: [
-                      {
-                        label: 'BH uptime %',
-                        data: pts,
-                        borderColor: '#3b82f6',
-                        backgroundColor: 'rgba(59,130,246,.12)',
-                        fill: true,
-                        tension: 0.35,
-                        spanGaps: true,
-                        pointRadius: 3,
-                        pointHoverRadius: 6,
-                        pointBackgroundColor: pts.map((p) => uptimeColor(p)),
-                        pointBorderColor: '#fff',
-                        pointBorderWidth: 1,
-                        borderWidth: 2,
-                      },
-                      {
-                        label: `SLA ${slaTarget}%`,
-                        data: trend.map(() => slaTarget),
-                        borderColor: 'rgba(239,68,68,.85)',
-                        borderDash: [6, 4],
-                        borderWidth: 2,
-                        pointRadius: 0,
-                        fill: false,
-                        tension: 0,
-                      },
-                    ],
+                    datasets: showAsBar
+                      ? [
+                          {
+                            type: 'bar',
+                            label: 'BH uptime %',
+                            data: pts,
+                            backgroundColor: pts.map((p) => p == null ? 'rgba(148,163,184,.25)' : `${uptimeColor(p)}cc`),
+                            borderColor: pts.map((p) => p == null ? 'rgba(148,163,184,.4)' : uptimeColor(p)),
+                            borderWidth: 1,
+                            borderRadius: 4,
+                            maxBarThickness: 28,
+                          },
+                          {
+                            type: 'line',
+                            label: `SLA ${slaTarget}%`,
+                            data: trend.map(() => slaTarget),
+                            borderColor: 'rgba(239,68,68,.85)',
+                            borderDash: [6, 4],
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            fill: false,
+                            tension: 0,
+                          },
+                        ]
+                      : [
+                          {
+                            label: 'BH uptime %',
+                            data: pts,
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59,130,246,.12)',
+                            fill: true,
+                            tension: 0.35,
+                            spanGaps: true,
+                            pointRadius: 3,
+                            pointHoverRadius: 6,
+                            pointBackgroundColor: pts.map((p) => uptimeColor(p)),
+                            pointBorderColor: '#fff',
+                            pointBorderWidth: 1,
+                            borderWidth: 2,
+                          },
+                          {
+                            label: `SLA ${slaTarget}%`,
+                            data: trend.map(() => slaTarget),
+                            borderColor: 'rgba(239,68,68,.85)',
+                            borderDash: [6, 4],
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            fill: false,
+                            tension: 0,
+                          },
+                        ],
                   }
                   const opts = {
                     responsive: true, maintainAspectRatio: false,
@@ -3831,27 +3861,34 @@ export default function StoreZabbixPage({
                         backgroundColor: 'rgba(15,17,23,.95)', borderColor: 'rgba(79,126,245,.3)', borderWidth: 1, cornerRadius: 8,
                         callbacks: {
                           label: (ctx) => {
-                            const day = trend[ctx.dataIndex]
+                            const point = trend[ctx.dataIndex]
                             if (ctx.dataset.label?.startsWith('SLA')) return ` ${ctx.dataset.label}`
-                            return [
-                              ` Uptime: ${day.avgUptimePct != null ? day.avgUptimePct.toFixed(2) + '%' : '—'}`,
-                              ` Downtime: ${fmtMins(day.totalDowntimeMin)}`,
-                              ` Disconnects: ${day.totalDisconnects}`,
-                              ` Stores impacted: ${day.storesImpacted}`,
+                            const lines = [
+                              ` Uptime: ${point.avgUptimePct != null ? point.avgUptimePct.toFixed(2) + '%' : '— (outside BH)'}`,
+                              ` Downtime: ${fmtMins(point.totalDowntimeMin)}`,
                             ]
+                            if (point.totalDisconnects != null) lines.push(` Disconnects: ${point.totalDisconnects}`)
+                            if (point.storesImpacted != null) lines.push(` Stores impacted: ${point.storesImpacted}`)
+                            return lines
                           },
                         },
                       },
                     },
                     scales: {
-                      x: { ticks: { color: 'var(--text3)', font: { family: 'var(--mono)', size: 10 } }, grid: { display: false } },
+                      x: { ticks: { color: 'var(--text3)', font: { family: 'var(--mono)', size: 10 }, autoSkip: true, maxRotation: 0 }, grid: { display: false } },
                       y: { min: yMin, max: 100, ticks: { color: 'var(--text3)', font: { family: 'var(--mono)', size: 10 }, callback: (v) => `${v}%` }, grid: { color: 'rgba(128,128,160,.06)' } },
                     },
                   }
+                  const granularityLabel = isHourly
+                    ? `${trend.length} hour${trend.length === 1 ? '' : 's'} · BH-only`
+                    : `${trend.length} day${trend.length === 1 ? '' : 's'}`
                   return (
-                    <Widget title="Daily availability trend" badge={`${trend.length} day${trend.length === 1 ? '' : 's'}`} badgeColor="blue">
+                    <Widget
+                      title={isHourly ? 'Hourly availability trend' : 'Daily availability trend'}
+                      badge={granularityLabel}
+                      badgeColor="blue">
                       <div style={{ height: 240 }}>
-                        <Line data={data} options={opts} />
+                        <ChartComp data={data} options={opts} />
                       </div>
                     </Widget>
                   )

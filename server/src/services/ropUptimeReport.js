@@ -397,7 +397,7 @@ export async function fetchRopUptimeReport(opts = {}) {
   const mttrMin = totalMttrSamples > 0 ? Math.round((totalMttrSum / totalMttrSamples) / 60_000) : null
 
   /* ── per-day trend (group avg) ── */
-  const trend = dayMsList.map((d, idx) => {
+  const dailyTrend = dayMsList.map((d, idx) => {
     const totalBhMin = bhMinPerDay.get(d) || 0
     let downSum = 0
     let discSum = 0
@@ -421,6 +421,7 @@ export async function fetchRopUptimeReport(opts = {}) {
     return {
       dayMs: d,
       label: days[idx].label,
+      displayLabel: days[idx].label.slice(5), // MM-DD
       avgUptimePct: avgDayUptimePct,
       totalDowntimeMin: downSum,
       totalDisconnects: discSum,
@@ -428,6 +429,61 @@ export async function fetchRopUptimeReport(opts = {}) {
       bhMinutes: totalBhMin,
     }
   })
+
+  /* ── per-hour trend (used for short ranges so the chart isn't empty) ── */
+  const rangeMs = cappedTo - fromMs
+  const useHourly = rangeMs <= 36 * 3_600_000
+  let hourlyTrend = null
+  if (useHourly) {
+    const hourSpanMs = 3_600_000
+    const startHourMs = Math.floor(fromMs / hourSpanMs) * hourSpanMs
+    const buckets = []
+    for (let h = startHourMs; h < cappedTo; h += hourSpanMs) {
+      const bStart = Math.max(h, fromMs)
+      const bEnd = Math.min(h + hourSpanMs, cappedTo)
+      if (bEnd <= bStart) continue
+      const bhMin = bhMinutesInInterval(bStart, bEnd, isBh)
+      buckets.push({ hourMs: h, segStart: bStart, segEnd: bEnd, bhMin, downSum: 0, impacted: new Set() })
+    }
+    for (const rec of records) {
+      if (!tagsSet.has(rec.storeTag)) continue
+      const sMs = new Date(rec.firstSeenAt).getTime()
+      const eMs = rec.resolvedAt ? new Date(rec.resolvedAt).getTime() : cappedTo
+      const segStart = Math.max(sMs, fromMs)
+      const segEnd = Math.min(eMs, cappedTo)
+      if (segEnd <= segStart) continue
+      for (const b of buckets) {
+        if (b.bhMin <= 0) continue
+        const oStart = Math.max(segStart, b.segStart)
+        const oEnd = Math.min(segEnd, b.segEnd)
+        if (oEnd <= oStart) continue
+        const mins = bhMinutesInInterval(oStart, oEnd, isBh)
+        if (mins > 0) {
+          b.downSum += mins
+          b.impacted.add(rec.storeTag)
+        }
+      }
+    }
+    hourlyTrend = buckets.map((b) => {
+      const totalCapacity = b.bhMin * (totalStores || 1)
+      const upSum = Math.max(0, totalCapacity - b.downSum)
+      const avgUptimePct = (b.bhMin > 0 && totalStores > 0)
+        ? Math.round((upSum / totalCapacity) * 10000) / 100
+        : null
+      const localHour = new Date(b.hourMs + bh.tzOffsetMinutes * 60_000).toISOString().slice(11, 16)
+      return {
+        hourMs: b.hourMs,
+        label: new Date(b.hourMs).toISOString(),
+        displayLabel: localHour,
+        avgUptimePct,
+        totalDowntimeMin: b.downSum,
+        storesImpacted: b.impacted.size,
+        bhMinutes: b.bhMin,
+      }
+    })
+  }
+  const trend = useHourly && hourlyTrend ? hourlyTrend : dailyTrend
+  const granularity = useHourly ? 'hour' : 'day'
 
   /* ── heatmap (per-store-per-day) — sorted by uptime asc so worst rows surface first ── */
   const heatmap = [...perStoreList]
@@ -479,6 +535,8 @@ export async function fetchRopUptimeReport(opts = {}) {
       bhMinutesPerStore,
     },
     trend,
+    dailyTrend,
+    granularity,
     heatmap,
     topOffenders,
     perStore: perStoreList,
