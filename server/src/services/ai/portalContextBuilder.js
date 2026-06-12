@@ -398,6 +398,11 @@ async function buildStoreProblemsContext() {
   const fetchedAt = new Date().toISOString()
   const tracker = getProblemSnapshotStatus()
   const intervalMin = Math.round((tracker.intervalMs || 120000) / 60000)
+  const nowMs = Date.now()
+  // Keep payload bounded for MCP clients while still matching the UI's
+  // disconnect-events table shape (disconnected/back-up/BH/total duration).
+  const DISCONNECT_LOOKBACK_DAYS = 30
+  const disconnectSince = new Date(nowMs - DISCONNECT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
 
   if (!isInfluxStoreConfigured()) {
     return {
@@ -414,6 +419,43 @@ async function buildStoreProblemsContext() {
     .limit(50)
     .lean()
 
+  // "Disconnect Events" table rows: offline lifecycle sessions with start/end.
+  // Matches UI semantics: disconnected time + back-up time + BH duration + total.
+  const disconnectRaw = await StoreProblemHistory.find({
+    code: 'offline',
+    firstSeenAt: { $gte: disconnectSince },
+  })
+    .sort({ firstSeenAt: -1 })
+    .limit(250)
+    .lean()
+
+  const bh = normaliseStoreBusinessHours({
+    startHour: 9,
+    endHour: 18,
+    weekdays: [0, 1, 2, 3, 4, 5, 6],
+    // NetPulse ops are typically interpreted in IST unless a report override is passed.
+    tzOffsetMinutes: 330,
+  })
+  const isBh = makeStoreBhChecker(bh)
+
+  const disconnectEvents = disconnectRaw.map((r) => {
+    const disconnectAtMs = new Date(r.firstSeenAt).getTime()
+    const backUpAtMs = r.resolvedAt ? new Date(r.resolvedAt).getTime() : null
+    const endMs = backUpAtMs != null ? backUpAtMs : nowMs
+    const totalDurationMin = Math.max(0, Math.round((endMs - disconnectAtMs) / 60000))
+    const bhDurationMin = isBh ? bhMinutesInInterval(disconnectAtMs, endMs, isBh) : totalDurationMin
+    return {
+      hostname: r.hostname || '',
+      storeTag: r.storeTag || '',
+      disconnectedAt: r.firstSeenAt,
+      backUpAt: r.resolvedAt,
+      status: r.status,
+      stillOffline: r.status === 'active',
+      bhDurationMin,
+      totalDurationMin,
+    }
+  })
+
   return {
     module: 'storeProblems',
     freshness: 'periodic',
@@ -423,6 +465,10 @@ async function buildStoreProblemsContext() {
     snapshotIntervalMinutes: intervalMin,
     lastBackgroundSnapAt: tracker.lastSnapAt || null,
     activeProblemCount: active.length,
+    disconnectEventsWindowDays: DISCONNECT_LOOKBACK_DAYS,
+    businessHours: bh,
+    disconnectEventsCount: disconnectEvents.length,
+    disconnectEvents,
     note: `Problem lifecycle updated by background job every ~${intervalMin} min (not live Influx).`,
     activeProblems: active.map(r => ({
       hostname: r.hostname,
@@ -436,6 +482,55 @@ async function buildStoreProblemsContext() {
       lastSeenAt: r.lastSeenAt,
     })),
   }
+}
+
+function clampHour(h) {
+  const n = Number(h)
+  return Number.isFinite(n) ? Math.max(0, Math.min(24, Math.round(n))) : 0
+}
+
+function normaliseStoreBusinessHours(bh) {
+  const def = { startHour: 9, endHour: 18, weekdays: [0, 1, 2, 3, 4, 5, 6], tzOffsetMinutes: 330 }
+  if (!bh || typeof bh !== 'object') return def
+  const startHour = clampHour(bh.startHour ?? def.startHour)
+  const endHour = clampHour(bh.endHour ?? def.endHour)
+  let weekdays = Array.isArray(bh.weekdays)
+    ? [...new Set(bh.weekdays.map((d) => Number(d)).filter((d) => Number.isFinite(d) && d >= 0 && d <= 6))]
+    : def.weekdays.slice()
+  if (!weekdays.length) weekdays = def.weekdays.slice()
+  const tzOffsetMinutes = Number.isFinite(Number(bh.tzOffsetMinutes)) ? Number(bh.tzOffsetMinutes) : def.tzOffsetMinutes
+  return { startHour, endHour, weekdays: weekdays.sort((a, b) => a - b), tzOffsetMinutes }
+}
+
+function makeStoreBhChecker(bh) {
+  if (!bh || !bh.weekdays?.length) return null
+  const weekdays = new Set(bh.weekdays.map(Number))
+  const startH = bh.startHour
+  const endH = bh.endHour
+  const tzOff = (bh.tzOffsetMinutes || 0) * 60_000
+  return (tsMs) => {
+    const local = new Date(tsMs + tzOff)
+    const day = local.getUTCDay()
+    if (!weekdays.has(day)) return false
+    const hour = local.getUTCHours()
+    if (startH <= endH) return hour >= startH && hour < endH
+    return hour >= startH || hour < endH
+  }
+}
+
+function bhMinutesInInterval(aMs, bMs, isBh) {
+  if (bMs <= aMs) return 0
+  if (!isBh) return Math.floor((bMs - aMs) / 60_000)
+  let total = 0
+  let cursor = aMs
+  while (cursor < bMs) {
+    const hourStart = Math.floor(cursor / 3_600_000) * 3_600_000
+    const hourEnd = hourStart + 3_600_000
+    const segEnd = Math.min(bMs, hourEnd)
+    if (isBh(cursor)) total += Math.floor((segEnd - cursor) / 60_000)
+    cursor = segEnd
+  }
+  return total
 }
 
 async function buildSocContext() {
