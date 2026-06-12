@@ -1068,13 +1068,22 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
     const [version, hosts, groupMeta] = await Promise.all([
       zabbixRpc('apiinfo.version', {}).catch(() => ''),
       (async () => {
-        const hostSearch = (term, limit = 200) => zabbixRpc('host.get', {
-          ...baseParams,
-          search: { name: term, host: term },
-          searchByAny: true,
-          searchWildcardsEnabled: true,
-          limit,
-        })
+        const hostSearch = async (term, limit = 200) => {
+          const q = String(term || '').trim()
+          if (!q) return []
+          const variants = [q, `${q}*`, `${q}-*`, `*${q}*`]
+          for (const v of variants) {
+            const rows = await zabbixRpc('host.get', {
+              ...baseParams,
+              search: { name: v, host: v },
+              searchByAny: true,
+              searchWildcardsEnabled: true,
+              limit,
+            })
+            if (rows?.length) return rows
+          }
+          return []
+        }
 
         if (groupName && !search) {
           const grp = await fetchHostsInGroup(zabbixRpc, groupName, baseParams)
@@ -1110,6 +1119,28 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
         for (const term of probeTerms) {
           const alt = await hostSearch(term, 300)
           if (alt?.length) return alt
+        }
+
+        // Last-resort alias resolver for LKST inputs:
+        // 1) lightweight host scan (hostid/host/name only)
+        // 2) local alias matcher (LKST code -> RP code)
+        // 3) hydrate matched hostids with full baseParams.
+        const liteHosts = await zabbixRpc('host.get', {
+          monitored_hosts: true,
+          output: ['hostid', 'host', 'name'],
+          sortfield: 'name',
+          limit: 5000,
+        }).catch(() => [])
+        const matchedIds = [...new Set((liteHosts || [])
+          .filter(h => hostMatchesSearch(h, search))
+          .map(h => String(h.hostid))
+          .filter(Boolean))]
+        if (matchedIds.length) {
+          return zabbixRpc('host.get', {
+            ...baseParams,
+            hostids: matchedIds.slice(0, 300),
+            limit: 300,
+          })
         }
         return primary
       })(),
