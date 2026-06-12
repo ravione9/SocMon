@@ -73,6 +73,13 @@ function normalizeZabbixUrl(raw) {
 }
 
 /**
+ * Track which client instances have already auto-promoted to bearer this
+ * process so we only log the recommendation once per envPrefix, not per
+ * RPC call.
+ */
+const warnedAuthAutoUpgrade = new Set()
+
+/**
  * @param {string} envPrefix e.g. ZABBIX or STORE_ZABBIX
  */
 export function createZabbixClient(envPrefix = 'ZABBIX') {
@@ -83,12 +90,19 @@ export function createZabbixClient(envPrefix = 'ZABBIX') {
   const tlsEnv = `${envPrefix}_TLS_INSECURE`
   const timeoutEnv = `${envPrefix}_REQUEST_TIMEOUT_MS`
 
+  /**
+   * Runtime override for the auth mode. Set by the body→bearer auto-promotion
+   * path below when the server rejects JSON auth (Zabbix 7.4+). Lives in the
+   * closure so each createZabbixClient() call gets its own state.
+   */
+  let runtimeAuthOverride = null
+
   const getUrl = () => normalizeZabbixUrl(process.env[urlEnv])
   const getZabbixToken = () => {
     const t = process.env[tokenEnv]?.trim() || process.env[tokenAliasEnv]?.trim()
     return t || ''
   }
-  const getAuthMode = () => (process.env[authEnv] || 'auto').toLowerCase()
+  const getAuthMode = () => runtimeAuthOverride || (process.env[authEnv] || 'auto').toLowerCase()
   const isTlsInsecure = () => process.env[tlsEnv] === '1' || process.env[tlsEnv] === 'true'
   const getRequestTimeoutMs = (override) => {
     if (override != null && Number.isFinite(Number(override)) && Number(override) > 0) {
@@ -241,14 +255,33 @@ export function createZabbixClient(envPrefix = 'ZABBIX') {
         const out = handleRpcResponse(res, text, data, url)
         if (out.ok) return out.result
         // Zabbix 7.4+ rejects the JSON `auth` field with "unexpected parameter auth".
-        // Both the auto-fallback and the body-only path benefit from the same hint;
-        // without it the error message is opaque and looks like a NetPulse bug.
-        if (isUnexpectedAuthParam(out.data)) {
-          const err = formatZabbixRpcError(authMode === 'auto' && bearerFailure ? bearerFailure : out.data)
-          err.code = 'ZABBIX_AUTH_MODE'
-          err.hint = `Zabbix 7.4+ rejected JSON 'auth' field. Set ${authEnv}=bearer (or remove ${authEnv} to use auto) and confirm ${tokenEnv} is a valid API token.`
-          throw err
+        // Self-heal: promote this client to bearer for the rest of the process and
+        // retry the same RPC once. No env edit, no restart needed. If bearer also
+        // fails, surface the bearer error (it's the actually-actionable one).
+        if (isUnexpectedAuthParam(out.data) && authMode !== 'bearer') {
+          runtimeAuthOverride = 'bearer'
+          if (!warnedAuthAutoUpgrade.has(envPrefix)) {
+            warnedAuthAutoUpgrade.add(envPrefix)
+            console.warn(
+              `[zabbix:${envPrefix}] server rejected JSON 'auth' (Zabbix 7.4+). ` +
+              `Auto-promoting to bearer for the rest of this process. ` +
+              `Set ${authEnv}=bearer in .env to silence this warning.`,
+            )
+          }
+          try {
+            const retry = await rpcOnce(url, method, params, token, 'bearer', timeoutMs)
+            const retryOut = handleRpcResponse(retry.res, retry.text, retry.data, url)
+            if (retryOut.ok) return retryOut.result
+            const err = formatZabbixRpcError(retryOut.data)
+            err.code = retryOut.data?.error?.code === -32602 ? 'ZABBIX_API_ERROR' : 'ZABBIX_AUTH_MODE'
+            err.hint = `Bearer auth retry also failed at ${maskUrl(url)}. Verify ${tokenEnv} is a valid Zabbix API token (Administration → API tokens).`
+            throw err
+          } catch (retryErr) {
+            if (retryErr.code) throw retryErr
+            throw wrapFetchError(retryErr, url, timeoutMs)
+          }
         }
+        // Body failed for some other reason (or we're already in bearer-only mode).
         throw formatZabbixRpcError(out.data)
       } catch (e) {
         if (e.code) throw e
