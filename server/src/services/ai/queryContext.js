@@ -471,6 +471,25 @@ export function extractStoreHostname(text) {
   return m ? m[1].toUpperCase() : null
 }
 
+/**
+ * Canonical store numeric code used for alias matching across naming schemes.
+ * Examples:
+ *   LKST973-ABCD1234 -> "973"
+ *   RP973-4CE510BDK  -> "973"
+ *   LK0973           -> "973"
+ */
+export function extractStoreCode(text) {
+  const raw = String(text || '').toUpperCase()
+  const direct = raw.match(/\b(?:LKST|LK|RP)\s*0*(\d{2,6})(?:-[A-Z0-9]{2,})?\b/)
+  if (direct?.[1]) return String(Number.parseInt(direct[1], 10))
+
+  const host = extractStoreHostname(raw)
+  const fromHost = host?.match(/^(?:LKST|LK|RP)0*(\d{2,6})(?:-[A-Z0-9]{2,})?$/i)
+  if (fromHost?.[1]) return String(Number.parseInt(fromHost[1], 10))
+
+  return null
+}
+
 const MONTH_INDEX = {
   jan: 0, january: 0,
   feb: 1, february: 1,

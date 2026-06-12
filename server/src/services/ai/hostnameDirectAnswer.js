@@ -9,6 +9,7 @@ import {
 import { getProblemSnapshotStatus } from '../storeProblemSnapshotter.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 import {
+  extractStoreCode,
   extractStoreHostname,
   formatRangeLabelFromInflux,
   isHostnameDataRequest,
@@ -35,7 +36,13 @@ function hostnameMatchesStore(store, hostname) {
   const h = String(hostname || '').toLowerCase()
   const sh = String(store?.hostname || '').toLowerCase()
   const tag = String(store?.storeTag || '').toLowerCase()
-  return sh === h || sh.includes(h) || tag.includes(h) || tag.startsWith(`${h}_`)
+  if (sh === h || sh.includes(h) || tag.includes(h) || tag.startsWith(`${h}_`)) return true
+  // Alias matching: LKST973/LK973 should match RP973-* (same store code).
+  const queryCode = extractStoreCode(hostname)
+  if (!queryCode) return false
+  const hostCode = extractStoreCode(store?.hostname || '')
+  const tagCode = extractStoreCode(store?.storeTag || '')
+  return queryCode === hostCode || queryCode === tagCode
 }
 
 function summarizeHistory(history) {

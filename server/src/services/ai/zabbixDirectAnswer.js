@@ -1,7 +1,7 @@
 import { createZabbixClient } from '../../services/zabbix.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 import { isInfluxStoreConfigured, fetchStoreSnapshot, buildOverviewSummary } from '../influxStore.js'
-import { extractStoreHostname, isStoreHostnamePortalQuery } from './queryContext.js'
+import { extractStoreCode, extractStoreHostname, isStoreHostnamePortalQuery } from './queryContext.js'
 import { isSocReportQuery } from './socDirectAnswer.js'
 import { isXdrQuestion } from './xdrDirectAnswer.js'
 import { isGeoConnectionQuery } from './geoConnectionQuery.js'
@@ -362,6 +362,12 @@ function hostMatchesSearch(h, search) {
   const low = s.toLowerCase()
   if (String(h.name || '').toLowerCase().includes(low) || String(h.host || '').toLowerCase().includes(low)) {
     return true
+  }
+  // Alias matching: LKST973 / LK973 should match RP973-* hosts in Zabbix.
+  const queryCode = extractStoreCode(s)
+  if (queryCode) {
+    const hostCode = extractStoreCode(h.name || '') || extractStoreCode(h.host || '')
+    if (hostCode && hostCode === queryCode) return true
   }
   if (IPV4_RE.test(s)) {
     return (h.interfaces || []).some(i => String(i.ip || '') === s)
