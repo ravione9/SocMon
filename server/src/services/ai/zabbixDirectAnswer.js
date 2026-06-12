@@ -1068,6 +1068,14 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
     const [version, hosts, groupMeta] = await Promise.all([
       zabbixRpc('apiinfo.version', {}).catch(() => ''),
       (async () => {
+        const hostSearch = (term, limit = 200) => zabbixRpc('host.get', {
+          ...baseParams,
+          search: { name: term, host: term },
+          searchByAny: true,
+          searchWildcardsEnabled: true,
+          limit,
+        })
+
         if (groupName && !search) {
           const grp = await fetchHostsInGroup(zabbixRpc, groupName, baseParams)
           return grp.hosts
@@ -1087,13 +1095,23 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
           return zabbixRpc('host.get', { ...baseParams, hostids: ipHostIds, limit: 50 })
         }
 
-        return zabbixRpc('host.get', {
-          ...baseParams,
-          search: { name: search, host: search },
-          searchByAny: true,
-          searchWildcardsEnabled: true,
-          limit: 200,
-        })
+        const primary = await hostSearch(search, 200)
+        if (primary?.length) return primary
+
+        // Alias rescue path:
+        // Query can be LKST973 while Zabbix host is RP973-xxxx. Primary host.get
+        // search by LKST term returns zero rows, so hostMatchesSearch never gets a
+        // chance to apply code-level alias matching. On LKST inputs, retry with
+        // RP/LK/code probes, then let hostMatchesSearch finalize.
+        const code = shouldUseStoreCodeAlias(search) ? extractStoreCode(search) : null
+        if (!code) return primary
+
+        const probeTerms = [`RP${code}`, `LK${code}`, code]
+        for (const term of probeTerms) {
+          const alt = await hostSearch(term, 300)
+          if (alt?.length) return alt
+        }
+        return primary
       })(),
       groupName && !search
         ? fetchHostsInGroup(zabbixRpc, groupName, baseParams).then(g => ({ groupFound: g.groupFound, groupName: g.groupName }))
