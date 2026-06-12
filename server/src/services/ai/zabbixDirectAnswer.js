@@ -1187,6 +1187,7 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
       configured: true,
       error: e.message || String(e),
       errorCode: e.code || 'ZABBIX_ERROR',
+      hint: e.hint || null,
       url: url ? url.replace(/\/api_jsonrpc\.php.*/, '') : '',
     }
   }
@@ -1777,6 +1778,8 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
       fetchedAt,
       configured: true,
       error: data.error,
+      errorCode: data.errorCode || null,
+      hint: data.hint || null,
       url: data.url || null,
     }
   }

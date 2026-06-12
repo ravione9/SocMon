@@ -240,9 +240,13 @@ export function createZabbixClient(envPrefix = 'ZABBIX') {
         const { res, text, data } = await rpcOnce(url, method, params, token, 'body', timeoutMs)
         const out = handleRpcResponse(res, text, data, url)
         if (out.ok) return out.result
-        if (authMode === 'auto' && bearerFailure && isUnexpectedAuthParam(out.data)) {
-          const err = formatZabbixRpcError(bearerFailure)
-          err.hint = `Zabbix 7.4+ requires Bearer tokens only — use ${authEnv}=bearer and a valid API token`
+        // Zabbix 7.4+ rejects the JSON `auth` field with "unexpected parameter auth".
+        // Both the auto-fallback and the body-only path benefit from the same hint;
+        // without it the error message is opaque and looks like a NetPulse bug.
+        if (isUnexpectedAuthParam(out.data)) {
+          const err = formatZabbixRpcError(authMode === 'auto' && bearerFailure ? bearerFailure : out.data)
+          err.code = 'ZABBIX_AUTH_MODE'
+          err.hint = `Zabbix 7.4+ rejected JSON 'auth' field. Set ${authEnv}=bearer (or remove ${authEnv} to use auto) and confirm ${tokenEnv} is a valid API token.`
           throw err
         }
         throw formatZabbixRpcError(out.data)
