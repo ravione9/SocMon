@@ -628,39 +628,35 @@ const INLINE_CSS = `
 .topmon-val-bar{display:flex;align-items:center;gap:8px;min-width:120px}
 .topmon-val-bar-track{flex:1;height:6px;border-radius:3px;background:var(--bg4);overflow:hidden;min-width:48px}
 .topmon-val-bar-fill{height:100%;border-radius:3px}
-.rop-toolbar{display:flex;flex-direction:column;gap:0;padding:0;border-radius:12px;background:var(--bg2);border:1px solid var(--border);overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.04)}
-.rop-toolbar-row{display:flex;align-items:flex-end;gap:0;flex-wrap:wrap;padding:14px 18px}
-.rop-toolbar-row+.rop-toolbar-row{border-top:1px solid var(--border);background:var(--bg3)}
-.rop-field{display:flex;flex-direction:column;gap:6px;padding:0 16px;min-width:0}
-.rop-field:first-child{padding-left:0}
-.rop-field-divider{align-self:stretch;width:1px;background:var(--border);margin:4px 0}
-.rop-field-label{font-size:10px;color:var(--text3);font-weight:700;letter-spacing:.6px;text-transform:uppercase;line-height:1;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif)}
-.rop-segment{display:inline-flex;height:32px;padding:3px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;gap:2px}
-.rop-toolbar-row+.rop-toolbar-row .rop-segment{background:var(--bg2)}
-.rop-segment-btn{position:relative;height:24px;padding:0 14px;border:none;background:transparent;color:var(--text2);font-size:12px;font-weight:600;border-radius:5px;cursor:pointer;transition:all .15s;white-space:nowrap;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif)}
+.rop-toolbar{display:flex;flex-direction:column;gap:0;padding:0;border-radius:10px;background:var(--bg2);border:1px solid var(--border);overflow:hidden}
+.rop-toolbar-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:8px 12px}
+.rop-toolbar-row--sub{border-top:1px solid var(--border);background:var(--bg3);padding:6px 12px}
+.rop-field{display:inline-flex;align-items:center;gap:6px;min-width:0;flex-shrink:0}
+.rop-field-divider{width:1px;height:22px;background:var(--border);flex-shrink:0}
+.rop-field-label{font-size:10px;color:var(--text3);font-weight:600;letter-spacing:.3px;text-transform:uppercase;line-height:1;white-space:nowrap;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif)}
+.rop-segment{display:inline-flex;height:26px;padding:2px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;gap:1px}
+.rop-segment-btn{height:22px;padding:0 8px;border:none;background:transparent;color:var(--text2);font-size:11px;font-weight:600;border-radius:4px;cursor:pointer;transition:all .15s;white-space:nowrap;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif)}
 .rop-segment-btn:hover:not(.active){color:var(--text);background:rgba(255,255,255,.04)}
-.rop-segment-btn.active{background:var(--bg);color:var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.10),inset 0 0 0 1px rgba(59,130,246,.20)}
-.rop-control{display:inline-flex;align-items:center;height:32px;padding:0 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12px;font-family:var(--mono);outline:none;transition:border-color .15s,box-shadow .15s;cursor:pointer}
-.rop-toolbar-row+.rop-toolbar-row .rop-control{background:var(--bg2)}
+.rop-segment-btn.active{background:var(--bg);color:var(--accent);box-shadow:0 1px 2px rgba(0,0,0,.08),inset 0 0 0 1px rgba(59,130,246,.18)}
+.rop-control{display:inline-flex;align-items:center;height:26px;padding:0 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:11px;font-family:var(--mono);outline:none;transition:border-color .15s,box-shadow .15s;cursor:pointer}
 .rop-control:hover{border-color:var(--border2,var(--border))}
-.rop-control:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,130,246,.12)}
-.rop-control--select{padding-right:8px;min-width:140px}
-.rop-control--time{width:78px;justify-content:center;text-align:center}
-.rop-control--num{width:74px;text-align:right}
-.rop-control--datetime{width:200px}
-.rop-sep{font-size:11px;color:var(--text3);align-self:center;padding:0 8px;height:32px;display:inline-flex;align-items:center}
-.rop-action-btn{display:inline-flex;align-items:center;justify-content:center;height:32px;padding:0 16px;border-radius:7px;border:1px solid var(--accent);background:var(--accent);color:#fff;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif)}
-.rop-action-btn:hover:not(:disabled){filter:brightness(1.05);box-shadow:0 4px 10px rgba(59,130,246,.25)}
+.rop-control:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(59,130,246,.10)}
+.rop-control--select{padding-right:6px;min-width:110px;max-width:140px}
+.rop-control--time{width:68px;justify-content:center;text-align:center;padding:0 4px}
+.rop-control--num{width:56px;text-align:right;padding:0 6px}
+.rop-control--datetime{width:170px;font-size:10px}
+.rop-action-btn{display:inline-flex;align-items:center;justify-content:center;height:26px;padding:0 10px;border-radius:6px;border:1px solid var(--accent);background:var(--accent);color:#fff;font-size:11px;font-weight:600;cursor:pointer;transition:all .15s;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif)}
+.rop-action-btn:hover:not(:disabled){filter:brightness(1.05)}
 .rop-action-btn:disabled{opacity:.4;cursor:not-allowed}
-.rop-action-btn--ghost{background:transparent;color:var(--text2);border-color:var(--border)}
-.rop-action-btn--ghost:hover:not(:disabled){border-color:var(--accent);color:var(--accent);background:rgba(59,130,246,.06);box-shadow:none}
-.rop-day-row{display:inline-flex;height:32px;padding:3px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;gap:2px}
-.rop-toolbar-row+.rop-toolbar-row .rop-day-row{background:var(--bg2)}
-.rop-day-btn{height:24px;width:36px;border:none;background:transparent;color:var(--text3);font-size:11px;font-weight:600;border-radius:5px;cursor:pointer;transition:all .15s;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif)}
+.rop-action-btn--ghost{background:transparent;color:var(--text2);border-color:var(--border);font-size:10px;padding:0 8px}
+.rop-action-btn--ghost:hover:not(:disabled){border-color:var(--accent);color:var(--accent);background:rgba(59,130,246,.06)}
+.rop-day-row{display:inline-flex;height:26px;padding:2px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;gap:1px}
+.rop-day-btn{height:22px;width:28px;border:none;background:transparent;color:var(--text3);font-size:10px;font-weight:600;border-radius:4px;cursor:pointer;transition:all .15s;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif)}
 .rop-day-btn:hover:not(.active){color:var(--text2);background:rgba(255,255,255,.04)}
-.rop-day-btn.active{background:var(--bg);color:var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.10),inset 0 0 0 1px rgba(59,130,246,.20)}
-.rop-meta{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:7px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.20);color:var(--accent);font-size:11px;font-family:var(--mono);font-weight:600;letter-spacing:.2px}
-.rop-meta--muted{background:transparent;border-color:var(--border);color:var(--text3)}
+.rop-day-btn.active{background:var(--bg);color:var(--accent);box-shadow:0 1px 2px rgba(0,0,0,.08),inset 0 0 0 1px rgba(59,130,246,.18)}
+.rop-meta{display:inline-flex;align-items:center;gap:4px;height:26px;padding:0 8px;border-radius:6px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.18);color:var(--accent);font-size:10px;font-family:var(--mono);font-weight:600;white-space:nowrap;margin-left:auto}
+.rop-meta--muted{background:transparent;border-color:var(--border);color:var(--text3);font-weight:500}
+.rop-toolbar-spacer{flex:1;min-width:8px}
 .rop-subtabs{display:flex;align-items:center;gap:0;padding:0;background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden}
 .rop-subtab{display:inline-flex;align-items:center;gap:8px;padding:11px 18px;border:none;background:transparent;color:var(--text3);font-size:12px;font-weight:600;cursor:pointer;border-right:1px solid var(--border);transition:all .15s;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif);position:relative}
 .rop-subtab:last-child{border-right:none}
@@ -3322,10 +3318,10 @@ export default function StoreZabbixPage({
           }
         }
         const rangeChips = [
-          { id: '24h', label: 'Last 24h' },
-          { id: '7d',  label: 'Last 7 days' },
-          { id: '14d', label: 'Last 14 days' },
-          { id: '30d', label: 'Last 30 days' },
+          { id: '24h', label: '24h' },
+          { id: '7d',  label: '7d' },
+          { id: '14d', label: '14d' },
+          { id: '30d', label: '30d' },
           { id: 'custom', label: 'Custom' },
         ]
         const rangeSummaryLabel = (() => {
@@ -3334,7 +3330,8 @@ export default function StoreZabbixPage({
             const to = new Date(ropCustomEpoch.to).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
             return `${from} – ${to}`
           }
-          return rangeChips.find((c) => c.id === ropRange)?.label || ropRange
+          const rangeDisplay = { '24h': 'Last 24h', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days', custom: 'Custom' }
+          return rangeDisplay[ropRange] || ropRange
         })()
         const toggleBhDay = (d) => {
           const next = new Set(ropBhDays)
@@ -3389,12 +3386,13 @@ export default function StoreZabbixPage({
             <div className="rop-toolbar">
               <div className="rop-toolbar-row">
                 <div className="rop-field">
-                  <span className="rop-field-label">Time range</span>
+                  <span className="rop-field-label">Range</span>
                   <div className="rop-segment">
                     {rangeChips.map((c) => (
                       <button key={c.id} type="button"
                         className={`rop-segment-btn${ropRange === c.id ? ' active' : ''}`}
-                        onClick={() => selectRopRange(c.id)}>
+                        onClick={() => selectRopRange(c.id)}
+                        title={c.id === '24h' ? 'Last 24 hours' : c.id === '7d' ? 'Last 7 days' : c.id === '14d' ? 'Last 14 days' : c.id === '30d' ? 'Last 30 days' : 'Custom range'}>
                         {c.label}
                       </button>
                     ))}
@@ -3417,90 +3415,80 @@ export default function StoreZabbixPage({
                 <div className="rop-field-divider" />
 
                 <div className="rop-field">
-                  <span className="rop-field-label">Business hours</span>
-                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    <select value={ropBhStart} onChange={(e) => setRopBhStart(Number(e.target.value))}
-                      className="rop-control rop-control--time">
-                      {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
-                    </select>
-                    <span style={{ fontSize: 12, color: 'var(--text3)' }}>–</span>
-                    <select value={ropBhEnd} onChange={(e) => setRopBhEnd(Number(e.target.value))}
-                      className="rop-control rop-control--time">
-                      {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
-                    </select>
-                  </div>
+                  <span className="rop-field-label">BH</span>
+                  <select value={ropBhStart} onChange={(e) => setRopBhStart(Number(e.target.value))}
+                    className="rop-control rop-control--time">
+                    {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+                  </select>
+                  <span style={{ fontSize: 10, color: 'var(--text3)' }}>–</span>
+                  <select value={ropBhEnd} onChange={(e) => setRopBhEnd(Number(e.target.value))}
+                    className="rop-control rop-control--time">
+                    {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+                  </select>
                 </div>
 
                 <div className="rop-field-divider" />
 
                 <div className="rop-field">
-                  <span className="rop-field-label">SLA target</span>
-                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    <input type="number" min={0} max={100} step={0.1} value={ropSla}
-                      onChange={(e) => setRopSla(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
-                      className="rop-control rop-control--num" />
-                    <span style={{ fontSize: 12, color: 'var(--text3)' }}>%</span>
+                  <div className="rop-day-row">
+                    {dayOfWeekLabels.map((lbl, idx) => {
+                      const on = ropBhDays.has(idx)
+                      return (
+                        <button key={idx} type="button" onClick={() => toggleBhDay(idx)}
+                          className={`rop-day-btn${on ? ' active' : ''}`}
+                          title={['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][idx]}>
+                          {lbl}
+                        </button>
+                      )
+                    })}
                   </div>
+                  <button type="button" onClick={presetWeekdays} className="rop-action-btn rop-action-btn--ghost">Mon–Fri</button>
+                  <button type="button" onClick={presetEveryday} className="rop-action-btn rop-action-btn--ghost">All</button>
+                </div>
+
+                <div className="rop-field-divider" />
+
+                <div className="rop-field">
+                  <span className="rop-field-label">SLA</span>
+                  <input type="number" min={0} max={100} step={0.1} value={ropSla}
+                    onChange={(e) => setRopSla(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+                    className="rop-control rop-control--num" />
+                  <span style={{ fontSize: 10, color: 'var(--text3)' }}>%</span>
                 </div>
 
                 {ru?.rangeFromIso && (
-                  <div className="rop-field" style={{ marginLeft: 'auto', alignItems: 'flex-end' }}>
-                    <span className="rop-field-label">Source</span>
-                    <span className="rop-meta rop-meta--muted">StoreProblemHistory · BH {bhSummary}</span>
-                  </div>
+                  <span className="rop-meta rop-meta--muted" title="Data source and active BH window">
+                    StoreProblemHistory · {bhSummary}
+                  </span>
                 )}
               </div>
 
-              <div className="rop-toolbar-row">
-                <div className="rop-field">
-                  <span className="rop-field-label">Active weekdays</span>
-                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                    <div className="rop-day-row">
-                      {dayOfWeekLabels.map((lbl, idx) => {
-                        const on = ropBhDays.has(idx)
-                        return (
-                          <button key={idx} type="button" onClick={() => toggleBhDay(idx)}
-                            className={`rop-day-btn${on ? ' active' : ''}`}>
-                            {lbl}
-                          </button>
-                        )
-                      })}
-                    </div>
-                    <button type="button" onClick={presetWeekdays} className="rop-action-btn rop-action-btn--ghost" style={{ height: 32, padding: '0 12px' }}>Mon–Fri</button>
-                    <button type="button" onClick={presetEveryday} className="rop-action-btn rop-action-btn--ghost" style={{ height: 32, padding: '0 12px' }}>Every day</button>
+              {ropRange === 'custom' && (
+                <div className="rop-toolbar-row rop-toolbar-row--sub">
+                  <div className="rop-field">
+                    <span className="rop-field-label">Custom</span>
+                    <input type="datetime-local" value={ropCustomFrom} onChange={(e) => setRopCustomFrom(e.target.value)}
+                      className="rop-control rop-control--datetime" />
+                    <span style={{ fontSize: 10, color: 'var(--text3)' }}>–</span>
+                    <input type="datetime-local" value={ropCustomTo} onChange={(e) => setRopCustomTo(e.target.value)}
+                      className="rop-control rop-control--datetime" />
+                    <button type="button" onClick={applyRopCustomRange} disabled={!customRangeValid}
+                      className="rop-action-btn">Apply</button>
+                    {ropCustomEpoch && (
+                      <span className="rop-meta">
+                        {new Date(ropCustomEpoch.from).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                        {' – '}
+                        {new Date(ropCustomEpoch.to).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    )}
+                    {!ropCustomEpoch && (
+                      <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                        Pick dates and click Apply
+                      </span>
+                    )}
                   </div>
                 </div>
-
-                {ropRange === 'custom' && (
-                  <>
-                    <div className="rop-field-divider" />
-                    <div className="rop-field" style={{ flex: 1, minWidth: 360 }}>
-                      <span className="rop-field-label">Custom range</span>
-                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                        <input type="datetime-local" value={ropCustomFrom} onChange={(e) => setRopCustomFrom(e.target.value)}
-                          className="rop-control rop-control--datetime" />
-                        <span style={{ fontSize: 12, color: 'var(--text3)' }}>–</span>
-                        <input type="datetime-local" value={ropCustomTo} onChange={(e) => setRopCustomTo(e.target.value)}
-                          className="rop-control rop-control--datetime" />
-                        <button type="button" onClick={applyRopCustomRange} disabled={!customRangeValid}
-                          className="rop-action-btn">Apply</button>
-                        {ropCustomEpoch && (
-                          <span className="rop-meta">
-                            {new Date(ropCustomEpoch.from).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                            {' – '}
-                            {new Date(ropCustomEpoch.to).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                          </span>
-                        )}
-                        {!ropCustomEpoch && (
-                          <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
-                            Pick a start/end date and click Apply to load the custom range.
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  </>
-                )}
-              </div>
+              )}
             </div>
 
             {/* ── ROP group sub-tabs (Store Monitor parity) ── */}
