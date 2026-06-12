@@ -1046,6 +1046,7 @@ function classifyHost(h) {
 }
 
 const SWITCH_DEVICE_TYPES = new Set(['cisco', 'network', 'juniper'])
+const INTERFACE_STALE_SEC = Number.parseInt(process.env.ZABBIX_INTERFACE_STALE_SEC || '1800', 10)
 
 async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '', hostGroupFilter = '', includePing = false, includeBandwidth = false, includeDisk = false, includeCpuMemory = false, includeProblems = true, problemLimit = 12 } = {}) {
   const { isZabbixConfigured, zabbixRpc, getUrl } = client
@@ -1810,6 +1811,106 @@ function hostPortsFromSnapshot(data, host) {
     }))
 }
 
+function buildInterfaceMetricsState(data, matchedHosts, includeBandwidth) {
+  if (!includeBandwidth) {
+    return {
+      available: null,
+      reason: 'not_requested',
+      nextAction: 'Add keywords like "interfaces", "traffic", "bandwidth", or "throughput" to request net.if metrics.',
+    }
+  }
+
+  const hosts = Array.isArray(matchedHosts) ? matchedHosts : []
+  if (!hosts.length) {
+    return {
+      available: false,
+      reason: 'no_hosts',
+      checkedHosts: 0,
+      hostsWithAnyItems: 0,
+      hostsWithTraffic: 0,
+      trafficPorts: 0,
+      freshTrafficPorts: 0,
+      staleTrafficPorts: 0,
+      staleThresholdSec: INTERFACE_STALE_SEC,
+      nextAction: 'No matching hosts were returned. Refine hostname/IP filter or verify host exists in this Zabbix scope.',
+    }
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000)
+  const byHost = data?.interfaceMetrics?.byHost || {}
+  let checkedHosts = 0
+  let hostsWithAnyItems = 0
+  let hostsWithTraffic = 0
+  let trafficPorts = 0
+  let freshTrafficPorts = 0
+  let staleTrafficPorts = 0
+
+  for (const h of hosts) {
+    const hid = String(h?.hostid || '')
+    if (!hid) continue
+    checkedHosts += 1
+    const rows = Object.values(byHost[hid] || {})
+    if (rows.length) hostsWithAnyItems += 1
+
+    let hostHasTraffic = false
+    for (const m of rows) {
+      const hasTraffic = Number.isFinite(m?.in) || Number.isFinite(m?.out)
+      if (!hasTraffic) continue
+      hostHasTraffic = true
+      trafficPorts += 1
+      const poll = Math.max(Number(m?.inPoll) || 0, Number(m?.outPoll) || 0)
+      if (poll > 0 && (nowSec - poll) > INTERFACE_STALE_SEC) staleTrafficPorts += 1
+      else freshTrafficPorts += 1
+    }
+    if (hostHasTraffic) hostsWithTraffic += 1
+  }
+
+  if (trafficPorts === 0) {
+    return {
+      available: false,
+      reason: 'no_net_if_items',
+      checkedHosts,
+      hostsWithAnyItems,
+      hostsWithTraffic,
+      trafficPorts,
+      freshTrafficPorts,
+      staleTrafficPorts,
+      staleThresholdSec: INTERFACE_STALE_SEC,
+      nextAction: 'Enable and monitor SNMP traffic items (net.if.in/out[...]) on the host template; verify item status is enabled and supported.',
+    }
+  }
+
+  if (freshTrafficPorts === 0 && staleTrafficPorts > 0) {
+    return {
+      available: false,
+      reason: 'items_stale',
+      checkedHosts,
+      hostsWithAnyItems,
+      hostsWithTraffic,
+      trafficPorts,
+      freshTrafficPorts,
+      staleTrafficPorts,
+      staleThresholdSec: INTERFACE_STALE_SEC,
+      nextAction: `net.if traffic items exist but are stale (> ${INTERFACE_STALE_SEC}s). Check SNMP reachability, credentials, and item update intervals.`,
+    }
+  }
+
+  return {
+    available: true,
+    reason: staleTrafficPorts > 0 ? 'partial_stale' : 'ok',
+    checkedHosts,
+    hostsWithAnyItems,
+    hostsWithTraffic,
+    trafficPorts,
+    freshTrafficPorts,
+    staleTrafficPorts,
+    staleThresholdSec: INTERFACE_STALE_SEC,
+    nextAction: staleTrafficPorts > 0
+      ? `Some net.if traffic items are stale (> ${INTERFACE_STALE_SEC}s); verify polling health for affected interfaces.`
+      : 'Traffic metrics are available.',
+  }
+}
+
 /**
  * Live Zabbix JSON for LLM synthesis (bandwidth, interface analysis, etc.).
  * @param {string} userMessage
@@ -1891,6 +1992,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
       : undefined,
     ports: includeBandwidth ? hostPortsFromSnapshot(data, h) : undefined,
   }))
+  const interfaceMetricsState = buildInterfaceMetricsState(data, matched, includeBandwidth)
 
   return {
     module: moduleId,
@@ -1907,6 +2009,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     problemCount: data.problemCount,
     problems: (data.problems || []).slice(0, 10),
     hosts,
+    interfaceMetricsState,
     pingSummary: includePing && data.pingMetrics ? data.pingMetrics.summary : undefined,
   }
 }
