@@ -1040,7 +1040,7 @@ function classifyHost(h) {
 
 const SWITCH_DEVICE_TYPES = new Set(['cisco', 'network', 'juniper'])
 
-async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '', hostGroupFilter = '', includePing = false, includeBandwidth = false, includeDisk = false, includeCpuMemory = false, problemLimit = 12 } = {}) {
+async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '', hostGroupFilter = '', includePing = false, includeBandwidth = false, includeDisk = false, includeCpuMemory = false, includeProblems = true, problemLimit = 12 } = {}) {
   const { isZabbixConfigured, zabbixRpc, getUrl } = client
   if (!isZabbixConfigured()) return { configured: false }
 
@@ -1136,7 +1136,7 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
     }
     let problemCount = 0
     let problems = []
-    if (hostids.length) {
+    if (includeProblems && hostids.length) {
       try {
         problemCount = Number(await zabbixRpc('problem.get', {
           hostids,
@@ -1778,17 +1778,26 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   }
 
   const ip = extractIpv4(userMessage)
+  const hostname = extractStoreHostname(userMessage)
   const deviceTypeFilter = detectDeviceTypeFilter(userMessage)
-  const hostFilter = ip || ''
+  // For store-centric questions like "RP973 ping/interfaces", hostname filter
+  // is the critical selector. Without this, we'd fetch broad host sets and the
+  // resulting item.get fan-out could exceed Claude Desktop's tool timeout.
+  const hostFilter = ip || hostname || ''
   const includePing = wantsPingStatus(userMessage)
   const includeBandwidth = wantsBandwidthUtil(userMessage)
     || /\b(bandwidth|utilization|utilisation|interface|port|traffic|throughput)\b/i.test(String(userMessage || ''))
+  // Host-detail queries do not need problem.get every time; that call can be
+  // expensive on some Zabbix deployments and is only useful when alerts are
+  // explicitly requested or for broad overviews with no host filter.
+  const includeProblems = wantsZabbixAlertsQuery(userMessage) || !hostFilter
 
   const data = await fetchZabbixSnapshot(client, {
     hostFilter,
     deviceTypeFilter,
     includePing,
     includeBandwidth,
+    includeProblems,
   })
 
   if (!data.configured) {
