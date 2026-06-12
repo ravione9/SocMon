@@ -988,12 +988,35 @@ function isPhysicalSwitchHost(h) {
 }
 
 async function problemGet(zabbixRpc, params) {
-  const attempts = [{ recent: true, ...params }, { ...params }]
-  for (let i = 0; i < attempts.length; i += 1) {
+  const queue = [{ recent: true, ...params }, { ...params }]
+  const seen = new Set()
+  while (queue.length) {
+    const attempt = queue.shift()
+    const key = JSON.stringify(attempt)
+    if (seen.has(key)) continue
+    seen.add(key)
     try {
-      return await zabbixRpc('problem.get', attempts[i])
+      return await zabbixRpc('problem.get', attempt)
     } catch (e) {
-      if (e.code !== 'ZABBIX_API_ERROR' || i === attempts.length - 1) throw e
+      if (e.code !== 'ZABBIX_API_ERROR') throw e
+      const msg = String(e.message || '').toLowerCase()
+      // Some Zabbix builds reject extra params on problem.get (observed: selectHosts).
+      // Degrade gracefully: strip the unsupported field and retry so the rest of the
+      // Store/Infra snapshot still works.
+      if (msg.includes('unexpected parameter') && msg.includes('selecthosts') && attempt.selectHosts) {
+        const next = { ...attempt }
+        delete next.selectHosts
+        queue.push(next)
+        continue
+      }
+      // Keep existing compatibility behavior for servers that reject "recent".
+      if (msg.includes('unexpected parameter') && msg.includes('recent') && attempt.recent !== undefined) {
+        const next = { ...attempt }
+        delete next.recent
+        queue.push(next)
+        continue
+      }
+      if (!queue.length) throw e
     }
   }
   return []
