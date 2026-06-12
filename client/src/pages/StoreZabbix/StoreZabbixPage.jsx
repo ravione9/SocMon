@@ -665,6 +665,22 @@ const INLINE_CSS = `
 .rop-subtab.active::after{content:'';position:absolute;left:0;right:0;bottom:0;height:2px;background:var(--accent)}
 .rop-subtab-count{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:18px;padding:0 6px;border-radius:999px;background:var(--bg);border:1px solid var(--border);color:var(--text3);font-size:10px;font-weight:700;font-family:var(--mono)}
 .rop-subtab.active .rop-subtab-count{background:rgba(59,130,246,.10);border-color:rgba(59,130,246,.25);color:var(--accent)}
+.rop-reports{border-radius:10px;border:1px solid var(--border);background:var(--bg2);overflow:hidden}
+.rop-reports-hd{display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;border-bottom:1px solid transparent;transition:border-color .15s}
+.rop-reports-hd.open{border-bottom-color:var(--border)}
+.rop-reports-hd-title{font-size:12px;font-weight:700;color:var(--text)}
+.rop-reports-hd-sub{font-size:10px;color:var(--text3);font-family:var(--mono)}
+.rop-reports-body{padding:12px 14px 14px;display:flex;flex-direction:column;gap:12px;background:var(--bg3)}
+.rop-reports-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.rop-report-card{display:flex;flex-direction:column;gap:10px;padding:12px 14px;border-radius:10px;border:1px solid var(--border);background:var(--bg2)}
+.rop-report-card-hd{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.rop-report-card-title{font-size:12px;font-weight:700;color:var(--text)}
+.rop-report-card-desc{margin:0;font-size:11px;color:var(--text2);line-height:1.55}
+.rop-report-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.rop-report-stat{text-align:center;background:var(--bg3);border-radius:6px;padding:6px 4px;border:1px solid var(--border)}
+.rop-report-stat-val{font-size:14px;font-weight:700;color:var(--text);font-family:var(--mono)}
+.rop-report-stat-lbl{font-size:9px;font-family:var(--mono);color:var(--text3);text-transform:uppercase;letter-spacing:.04em;margin-top:2px}
+.rop-report-sheets{font-size:10px;color:var(--text3);font-family:var(--mono);line-height:1.5}
 .rop-kpi-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}
 @media (max-width:1280px){.rop-kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.rop-hero{grid-column:span 3}}
 @media (max-width:720px){.rop-kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.rop-hero{grid-column:span 2}}
@@ -1232,7 +1248,7 @@ function TopMonAddWidgetModal({ open, onClose, onSave, initial }) {
   )
 }
 
-function RopDisconnectModal({ open, store, events, loading, error, rangeLabel, bhLabel, onClose }) {
+function RopDisconnectModal({ open, store, events, loading, error, rangeLabel, bhLabel, onClose, onExport, exportBusy }) {
   if (!open || !store) return null
 
   const fmtTs = (v) => {
@@ -1328,8 +1344,17 @@ function RopDisconnectModal({ open, store, events, loading, error, rangeLabel, b
             </table>
           )}
         </div>
-        <div style={{ padding: '10px 16px', borderTop: '1px dashed var(--border)', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
-          Source: StoreProblemHistory · {bhLabel ? 'events overlapping BH window' : 'offline sessions in selected range'}
+        <div style={{ padding: '10px 16px', borderTop: '1px dashed var(--border)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', flex: 1, minWidth: 200 }}>
+            Source: StoreProblemHistory · {bhLabel ? 'events overlapping BH window' : 'offline sessions in selected range'}
+          </span>
+          <button type="button" onClick={onExport}
+            disabled={exportBusy || loading || !!error || events.length === 0}
+            className="rop-action-btn"
+            style={{ height: 28, fontSize: 11 }}
+            title="Export this store's disconnect events to Excel (BH-filtered)">
+            {exportBusy ? 'Exporting…' : 'Export Excel'}
+          </button>
         </div>
       </div>
     </div>
@@ -1539,6 +1564,8 @@ export default function StoreZabbixPage({
   const [ropDisconnectBusy, setRopDisconnectBusy] = useState(false)
   const [ropDisconnectError, setRopDisconnectError] = useState(null)
   const [ropExportBusy, setRopExportBusy] = useState(false)
+  const [ropStoreExportBusy, setRopStoreExportBusy] = useState(false)
+  const [ropReportsOpen, setRopReportsOpen] = useState(true)
 
   const ropDisconnectRangeLabel = useMemo(() => {
     if (ropRange === 'custom' && ropCustomEpoch?.from && ropCustomEpoch?.to) {
@@ -1705,59 +1732,89 @@ export default function StoreZabbixPage({
     }
   }, [apiBase, parseErr])
 
-  const exportRopDisconnectExcel = useCallback(async () => {
-    if (ropRange === 'custom' && !ropCustomEpoch) return
+  const buildRopFilterQs = useCallback((extra = {}) => {
     const qs = new URLSearchParams()
     qs.set('range', ropRange || '7d')
     if (ropRange === 'custom' && ropCustomEpoch?.from && ropCustomEpoch?.to) {
       qs.set('from', String(Math.floor(new Date(ropCustomEpoch.from).getTime() / 1000)))
       qs.set('to',   String(Math.floor(new Date(ropCustomEpoch.to).getTime() / 1000)))
     }
-    qs.set('groupKey', ropGroupKey || 'rp')
     qs.set('bizStart', String(ropBhStart ?? 9))
     qs.set('bizEnd',   String(ropBhEnd ?? 18))
     qs.set('bizDays',  [...(ropBhDays || [0,1,2,3,4,5,6])].sort((a,b)=>a-b).join(','))
     qs.set('tzOffset', String(-new Date().getTimezoneOffset()))
+    Object.entries(extra).forEach(([k, v]) => qs.set(k, String(v)))
+    return qs
+  }, [ropRange, ropCustomEpoch, ropBhStart, ropBhEnd, ropBhDays])
+
+  const downloadRopExcel = useCallback(async (path, fallbackFilename) => {
+    const res = await api.get(path, { responseType: 'blob', timeout: 300000 })
+    const ct = String(res.headers['content-type'] || '')
+    const disposition = String(res.headers['content-disposition'] || '')
+    if (!/attachment/i.test(disposition) && ct.includes('application/json')) {
+      const text = await res.data.text()
+      let msg = 'Export failed'
+      try { msg = JSON.parse(text)?.error || msg } catch { /* ignore */ }
+      throw new Error(msg)
+    }
+    const match = disposition.match(/filename="?([^"]+)"?/)
+    const filename = match?.[1] || fallbackFilename
+    const url = URL.createObjectURL(new Blob([res.data]))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [apiBase])
+
+  const parseExportErr = useCallback(async (e) => {
+    let msg = e.message || 'Export failed'
+    const blob = e.response?.data
+    if (blob instanceof Blob) {
+      try {
+        const text = await blob.text()
+        msg = JSON.parse(text)?.error || msg
+      } catch { /* ignore */ }
+    }
+    return msg
+  }, [])
+
+  const exportRopDisconnectExcel = useCallback(async () => {
+    if (ropRange === 'custom' && !ropCustomEpoch) return
     setRopExportBusy(true)
     setError(null)
     setErrorHint(null)
     try {
-      const res = await api.get(`${apiBase}/rop-disconnect-export?${qs}`, {
-        responseType: 'blob',
-        timeout: 300000,
-      })
-      const ct = String(res.headers['content-type'] || '')
-      const disposition = String(res.headers['content-disposition'] || '')
-      if (!/attachment/i.test(disposition) && ct.includes('application/json')) {
-        const text = await res.data.text()
-        let msg = 'Export failed'
-        try { msg = JSON.parse(text)?.error || msg } catch { /* ignore */ }
-        throw new Error(msg)
-      }
-      const match = disposition.match(/filename="?([^"]+)"?/)
+      const qs = buildRopFilterQs({ groupKey: ropGroupKey || 'rp' })
       const safeGroup = String(ropGroupKey || 'rp').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40)
-      const filename = match?.[1] || `ROP_Disconnect_Events_${safeGroup}_${new Date().toISOString().slice(0, 10)}.xlsx`
-      const url = URL.createObjectURL(new Blob([res.data]))
-      const a = document.createElement('a')
-      a.href = url
-      a.download = filename
-      a.click()
-      URL.revokeObjectURL(url)
+      await downloadRopExcel(
+        `${apiBase}/rop-disconnect-export?${qs}`,
+        `ROP_Disconnect_Events_${safeGroup}_${new Date().toISOString().slice(0, 10)}.xlsx`,
+      )
     } catch (e) {
-      let msg = e.message || 'Export failed'
-      const blob = e.response?.data
-      if (blob instanceof Blob) {
-        try {
-          const text = await blob.text()
-          msg = JSON.parse(text)?.error || msg
-        } catch { /* ignore */ }
-      }
-      setError(msg)
+      setError(await parseExportErr(e))
       setErrorHint(null)
     } finally {
       setRopExportBusy(false)
     }
-  }, [apiBase, ropRange, ropCustomEpoch, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays])
+  }, [apiBase, ropRange, ropCustomEpoch, ropGroupKey, buildRopFilterQs, downloadRopExcel, parseExportErr])
+
+  const exportRopStoreDisconnectExcel = useCallback(async () => {
+    if (!ropDisconnectStore || (ropRange === 'custom' && !ropCustomEpoch)) return
+    setRopStoreExportBusy(true)
+    try {
+      const qs = buildRopFilterQs({ storeTag: ropDisconnectStore.storeTag })
+      const safeTag = String(ropDisconnectStore.storeTag || 'store').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40)
+      await downloadRopExcel(
+        `${apiBase}/rop-store-disconnect-export?${qs}`,
+        `Disconnect_Events_${safeTag}_${new Date().toISOString().slice(0, 10)}.xlsx`,
+      )
+    } catch (e) {
+      setRopDisconnectError(await parseExportErr(e))
+    } finally {
+      setRopStoreExportBusy(false)
+    }
+  }, [apiBase, ropDisconnectStore, ropRange, ropCustomEpoch, buildRopFilterQs, downloadRopExcel, parseExportErr])
 
   const refetchProblems = useCallback(async () => {
     const qs = new URLSearchParams({ limit: '250' })
@@ -3516,15 +3573,6 @@ export default function StoreZabbixPage({
                     StoreProblemHistory · {bhSummary}
                   </span>
                 )}
-
-                <div className="rop-toolbar-spacer" />
-
-                <button type="button" onClick={exportRopDisconnectExcel}
-                  disabled={ropExportBusy || (ropRange === 'custom' && !ropCustomEpoch)}
-                  className="rop-action-btn"
-                  title="Export all disconnect and reconnect events per store (Excel)">
-                  {ropExportBusy ? 'Exporting…' : 'Export Excel'}
-                </button>
               </div>
 
               {ropRange === 'custom' && (
@@ -3573,6 +3621,59 @@ export default function StoreZabbixPage({
                 <span style={{ marginLeft: 'auto', marginRight: 14, fontSize: 11, color: 'var(--accent)', fontWeight: 600 }}>
                   Viewing: {groupKeyToLabel[ropGroupKey]}
                 </span>
+              )}
+            </div>
+
+            {/* ── Reports: BH disconnect / connect events export ── */}
+            <div className="rop-reports">
+              <div className={`rop-reports-hd${ropReportsOpen ? ' open' : ''}`} onClick={() => setRopReportsOpen((v) => !v)}>
+                <span style={{ fontSize: 14, opacity: 0.85 }}>📊</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="rop-reports-hd-title">Reports</div>
+                  <div className="rop-reports-hd-sub">Business-hours disconnect &amp; reconnect events · Excel export</div>
+                </div>
+                <span style={{ fontSize: 10, color: 'var(--text3)' }}>{ropReportsOpen ? '▲' : '▼'}</span>
+              </div>
+              {ropReportsOpen && (
+                <div className="rop-reports-body">
+                  <div className="rop-reports-grid">
+                    <div className="rop-report-card">
+                      <div className="rop-report-card-hd">
+                        <span className="rop-report-card-title">🔌 BH Disconnect &amp; Connect Events</span>
+                        {ropExportBusy && <span style={{ fontSize: 10, color: 'var(--accent)', fontFamily: 'var(--mono)' }}>Generating…</span>}
+                      </div>
+                      <p className="rop-report-card-desc">
+                        Export every disconnect and reconnect event per store for the selected group, range, and business-hours window.
+                        Same data as the hostname popup — disconnected at, back up at, BH duration, total duration, and status.
+                      </p>
+                      <div className="rop-report-stats">
+                        {[
+                          ['Range', ropDisconnectRangeLabel, 'var(--text)'],
+                          ['Group', groupKeyToLabel[ropGroupKey] || ropGroupKey, 'var(--accent)'],
+                          ['Business hours', bhSummary, '#f59e0b'],
+                          ['Total events', ru ? String(summary.totalDisconnects) : '—', 'var(--text)'],
+                        ].map(([lbl, val, color]) => (
+                          <div key={lbl} className="rop-report-stat">
+                            <div className="rop-report-stat-val" style={{ color, fontSize: lbl === 'Business hours' ? 11 : 14 }} title={String(val)}>
+                              {val}
+                            </div>
+                            <div className="rop-report-stat-lbl">{lbl}</div>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="rop-report-sheets">
+                        Sheets: Summary · All Events · Per Store Summary
+                      </div>
+                      <button type="button" onClick={exportRopDisconnectExcel}
+                        disabled={ropExportBusy || (ropRange === 'custom' && !ropCustomEpoch) || !ru}
+                        className="rop-action-btn"
+                        style={{ alignSelf: 'flex-start' }}
+                        title="Download Excel for all stores in the current group">
+                        {ropExportBusy ? 'Exporting…' : '⬇ Download Excel'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
               )}
             </div>
 
@@ -4174,6 +4275,8 @@ export default function StoreZabbixPage({
         rangeLabel={ropDisconnectRangeLabel}
         bhLabel={ropBhLabel}
         onClose={() => setRopDisconnectStore(null)}
+        onExport={exportRopStoreDisconnectExcel}
+        exportBusy={ropStoreExportBusy}
       />
     </div>
   )

@@ -744,3 +744,31 @@ export async function buildRopDisconnectEventsReport({
 
   return wb
 }
+
+/** Single-store disconnect export (ROP hostname popup). */
+export async function buildRopSingleStoreDisconnectReport(data, tzOffsetMinutes = IST_OFFSET_MIN) {
+  const events = data?.events || []
+  const storeTag = data?.storeTag || ''
+  const hostname = data?.hostname || events[0]?.hostname || ''
+  const storeSummary = [{
+    storeTag,
+    hostname,
+    eventCount: events.length,
+    totalBhDownMin: events.reduce((s, e) => s + (e.bhDurationMin || 0), 0),
+    totalDurationMin: events.reduce((s, e) => s + (e.durationMin || 0), 0),
+    stillOffline: events.some((e) => e.stillOffline),
+  }]
+  return buildRopDisconnectEventsReport({
+    groupKey: storeTag,
+    groupLabel: hostname ? `${hostname} (${storeTag})` : storeTag,
+    fromIso: data?.rangeFromIso,
+    toIso: data?.rangeToIso,
+    source: data?.source,
+    businessHours: data?.businessHours,
+    bhApplied: data?.bhApplied,
+    storeCount: 1,
+    events,
+    storeSummary,
+    tzOffsetMinutes,
+  })
+}
