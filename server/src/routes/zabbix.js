@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { createZabbixClient } from '../services/zabbix.js'
-import { fetchRopUptimeReport, fetchRopStoreDisconnectEvents } from '../services/ropUptimeReport.js'
+import { fetchRopUptimeReport, fetchRopStoreDisconnectEvents, fetchRopGroupDisconnectEvents } from '../services/ropUptimeReport.js'
+import { buildRopDisconnectEventsReport } from '../services/storeReports.js'
 
 export function createZabbixRouter(client) {
   const {
@@ -2345,6 +2346,57 @@ router.get('/rop-store-disconnects', async (req, res) => {
     res.json(data)
   } catch (e) {
     return res.status(500).json({ error: e.message || 'Failed to load disconnect events', code: e.code })
+  }
+})
+
+router.get('/rop-disconnect-export', async (req, res) => {
+  try {
+    const nowMs = Date.now()
+    const range = String(req.query.range || '7d').toLowerCase()
+    const customFromSec = parseInt(String(req.query.from || ''), 10)
+    const customToSec = parseInt(String(req.query.to || ''), 10)
+
+    let fromMs, toMs
+    if (range === 'custom' && Number.isFinite(customFromSec) && Number.isFinite(customToSec) && customToSec > customFromSec) {
+      fromMs = customFromSec * 1000
+      toMs = customToSec * 1000
+    } else {
+      const span = ({
+        '24h': 86_400_000,
+        '1d': 86_400_000,
+        'today': 86_400_000,
+        '7d': 7 * 86_400_000,
+        '14d': 14 * 86_400_000,
+        '30d': 30 * 86_400_000,
+        '60d': 60 * 86_400_000,
+      })[range] || 7 * 86_400_000
+      toMs = nowMs
+      fromMs = nowMs - span
+    }
+
+    const bizStart = parseInt(String(req.query.bizStart ?? '9'), 10)
+    const bizEnd   = parseInt(String(req.query.bizEnd   ?? '18'), 10)
+    const bizDaysRaw = String(req.query.bizDays ?? '0,1,2,3,4,5,6')
+    const weekdays = bizDaysRaw.split(',')
+      .map((d) => parseInt(d.trim(), 10))
+      .filter((d) => Number.isFinite(d) && d >= 0 && d <= 6)
+    const tzOffsetMinutes = parseInt(String(req.query.tzOffset ?? '0'), 10) || 0
+    const groupKey = String(req.query.groupKey || 'rp').toLowerCase()
+    const businessHours = { startHour: bizStart, endHour: bizEnd, weekdays, tzOffsetMinutes }
+
+    const data = await fetchRopGroupDisconnectEvents({ groupKey, fromMs, toMs, businessHours })
+    const wb = await buildRopDisconnectEventsReport({
+      ...data,
+      tzOffsetMinutes,
+    })
+
+    const safeGroup = groupKey.replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40)
+    const filename = `ROP_Disconnect_Events_${safeGroup}_${new Date().toISOString().slice(0, 10)}.xlsx`
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+    await wb.xlsx.write(res)
+  } catch (e) {
+    return res.status(500).json({ error: e.message || 'Failed to export disconnect events', code: e.code })
   }
 })
 

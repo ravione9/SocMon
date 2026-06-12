@@ -1538,6 +1538,7 @@ export default function StoreZabbixPage({
   const [ropDisconnectEvents, setRopDisconnectEvents] = useState([])
   const [ropDisconnectBusy, setRopDisconnectBusy] = useState(false)
   const [ropDisconnectError, setRopDisconnectError] = useState(null)
+  const [ropExportBusy, setRopExportBusy] = useState(false)
 
   const ropDisconnectRangeLabel = useMemo(() => {
     if (ropRange === 'custom' && ropCustomEpoch?.from && ropCustomEpoch?.to) {
@@ -1703,6 +1704,60 @@ export default function StoreZabbixPage({
       setRopUptimeBusy(false)
     }
   }, [apiBase, parseErr])
+
+  const exportRopDisconnectExcel = useCallback(async () => {
+    if (ropRange === 'custom' && !ropCustomEpoch) return
+    const qs = new URLSearchParams()
+    qs.set('range', ropRange || '7d')
+    if (ropRange === 'custom' && ropCustomEpoch?.from && ropCustomEpoch?.to) {
+      qs.set('from', String(Math.floor(new Date(ropCustomEpoch.from).getTime() / 1000)))
+      qs.set('to',   String(Math.floor(new Date(ropCustomEpoch.to).getTime() / 1000)))
+    }
+    qs.set('groupKey', ropGroupKey || 'rp')
+    qs.set('bizStart', String(ropBhStart ?? 9))
+    qs.set('bizEnd',   String(ropBhEnd ?? 18))
+    qs.set('bizDays',  [...(ropBhDays || [0,1,2,3,4,5,6])].sort((a,b)=>a-b).join(','))
+    qs.set('tzOffset', String(-new Date().getTimezoneOffset()))
+    setRopExportBusy(true)
+    setError(null)
+    setErrorHint(null)
+    try {
+      const res = await api.get(`${apiBase}/rop-disconnect-export?${qs}`, {
+        responseType: 'blob',
+        timeout: 300000,
+      })
+      const ct = String(res.headers['content-type'] || '')
+      const disposition = String(res.headers['content-disposition'] || '')
+      if (!/attachment/i.test(disposition) && ct.includes('application/json')) {
+        const text = await res.data.text()
+        let msg = 'Export failed'
+        try { msg = JSON.parse(text)?.error || msg } catch { /* ignore */ }
+        throw new Error(msg)
+      }
+      const match = disposition.match(/filename="?([^"]+)"?/)
+      const safeGroup = String(ropGroupKey || 'rp').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40)
+      const filename = match?.[1] || `ROP_Disconnect_Events_${safeGroup}_${new Date().toISOString().slice(0, 10)}.xlsx`
+      const url = URL.createObjectURL(new Blob([res.data]))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      let msg = e.message || 'Export failed'
+      const blob = e.response?.data
+      if (blob instanceof Blob) {
+        try {
+          const text = await blob.text()
+          msg = JSON.parse(text)?.error || msg
+        } catch { /* ignore */ }
+      }
+      setError(msg)
+      setErrorHint(null)
+    } finally {
+      setRopExportBusy(false)
+    }
+  }, [apiBase, ropRange, ropCustomEpoch, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays])
 
   const refetchProblems = useCallback(async () => {
     const qs = new URLSearchParams({ limit: '250' })
@@ -3461,6 +3516,15 @@ export default function StoreZabbixPage({
                     StoreProblemHistory · {bhSummary}
                   </span>
                 )}
+
+                <div className="rop-toolbar-spacer" />
+
+                <button type="button" onClick={exportRopDisconnectExcel}
+                  disabled={ropExportBusy || (ropRange === 'custom' && !ropCustomEpoch)}
+                  className="rop-action-btn"
+                  title="Export all disconnect and reconnect events per store (Excel)">
+                  {ropExportBusy ? 'Exporting…' : 'Export Excel'}
+                </button>
               </div>
 
               {ropRange === 'custom' && (

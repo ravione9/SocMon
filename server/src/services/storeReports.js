@@ -622,3 +622,125 @@ export async function buildGroupStoreDailyDisconnectionReport({
   }
   return wb
 }
+
+function fmtDurationMin(mins) {
+  if (mins == null || !Number.isFinite(Number(mins))) return '—'
+  const m = Number(mins)
+  if (m < 1) return '< 1 m'
+  if (m < 60) return `${Math.round(m)} m`
+  if (m < 1440) return `${(m / 60).toFixed(1)} h`
+  return `${(m / 1440).toFixed(1)} d`
+}
+
+const ROP_GROUP_LABELS = {
+  rp: 'All ROP',
+  rp_sdwan: 'ROP + SD-WAN',
+  rp_no_sdwan: 'ROP without SD-WAN',
+  manual_sdwan: 'Manual ROP + SD-WAN',
+  pos: 'POS Systems (LK)',
+  sdwan: 'SD-WAN Stores',
+}
+
+/**
+ * ROP Dashboard — store-wise disconnect / reconnect event export.
+ * Sheets: Summary | All Events | Per Store Summary
+ */
+export async function buildRopDisconnectEventsReport({
+  groupKey,
+  groupLabel,
+  fromIso,
+  toIso,
+  source,
+  businessHours,
+  bhApplied,
+  storeCount,
+  events = [],
+  storeSummary = [],
+  tzOffsetMinutes = IST_OFFSET_MIN,
+}) {
+  const wb = new ExcelJS.Workbook()
+  wb.creator = 'Netpulse'
+  wb.created = new Date()
+  const tzMinutes = Number.isFinite(Number(tzOffsetMinutes)) ? Number(tzOffsetMinutes) : IST_OFFSET_MIN
+  const label = groupLabel || ROP_GROUP_LABELS[groupKey] || groupKey || 'ROP Group'
+  const rangeLabel = `${fmtTzDateTime(fromIso, tzMinutes)} → ${fmtTzDateTime(toIso, tzMinutes)}`
+  const bh = businessHours || null
+  const bhLabel = bh
+    ? `${String(bh.startHour).padStart(2, '0')}:00–${String(bh.endHour).padStart(2, '0')}:00 · weekdays ${(bh.weekdays || []).join(',')}`
+    : '24×7'
+
+  addSummaryHeader(wb, `${label} — Disconnect & Connect Events`, rangeLabel, new Date().toISOString())
+  const wsSummary = wb.getWorksheet('Summary')
+  wsSummary.addRow(['Group', label])
+  wsSummary.addRow(['Group key', groupKey || ''])
+  wsSummary.addRow(['Source', source || `StoreProblemHistory (code='offline', MongoDB)`])
+  wsSummary.addRow(['Stores in group', storeCount ?? 0])
+  wsSummary.addRow(['Stores with events', storeSummary.length])
+  wsSummary.addRow(['Total disconnect events', events.length])
+  wsSummary.addRow(['Business hours', bhLabel])
+  wsSummary.addRow(['BH filter applied', bhApplied ? 'Yes' : 'No'])
+
+  const wsEvents = wb.addWorksheet('All Events')
+  mkHeaderRow(wsEvents, [
+    { header: '#', width: 6 },
+    { header: 'Store Tag', width: 20 },
+    { header: 'Hostname', width: 26 },
+    { header: 'Disconnected At', width: 22 },
+    { header: 'Connected At', width: 22 },
+    { header: 'Total Duration', width: 14 },
+    { header: 'BH Duration', width: 14 },
+    { header: 'Status', width: 14 },
+  ], COLORS.blue)
+
+  events.forEach((ev, idx) => {
+    const row = wsEvents.addRow([
+      idx + 1,
+      ev.storeTag || '',
+      ev.hostname || '',
+      fmtTzDateTime(ev.disconnectAt, tzMinutes),
+      ev.stillOffline ? 'Still offline' : fmtTzDateTime(ev.backUpAt, tzMinutes),
+      fmtDurationMin(ev.durationMin),
+      fmtDurationMin(ev.bhDurationMin),
+      ev.stillOffline ? 'OFFLINE' : 'Reconnected',
+    ])
+    if (ev.stillOffline) {
+      mkCell(row.getCell(8), 'OFFLINE', { color: COLORS.red, bold: true })
+    } else {
+      mkCell(row.getCell(8), 'Reconnected', { color: COLORS.green })
+    }
+  })
+  if (!events.length) {
+    wsEvents.addRow(['', 'No disconnect events in this range / BH window', '', '', '', '', '', ''])
+  }
+  wsEvents.views = [{ state: 'frozen', ySplit: 1 }]
+  wsEvents.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 8 } }
+
+  const wsStores = wb.addWorksheet('Per Store Summary')
+  mkHeaderRow(wsStores, [
+    { header: 'Store Tag', width: 20 },
+    { header: 'Hostname', width: 26 },
+    { header: 'Disconnect Events', width: 18 },
+    { header: 'Total BH Downtime', width: 16 },
+    { header: 'Total Duration', width: 16 },
+    { header: 'Still Offline', width: 14 },
+  ], COLORS.purple)
+
+  for (const s of storeSummary) {
+    const row = wsStores.addRow([
+      s.storeTag,
+      s.hostname || '',
+      s.eventCount,
+      fmtDurationMin(s.totalBhDownMin),
+      fmtDurationMin(s.totalDurationMin),
+      s.stillOffline ? 'Yes' : 'No',
+    ])
+    if (s.stillOffline) mkCell(row.getCell(6), 'Yes', { color: COLORS.red, bold: true })
+  }
+  if (!storeSummary.length) {
+    wsStores.addRow(['No stores with disconnect events in this range', '', 0, '', '', ''])
+  }
+  wsStores.views = [{ state: 'frozen', ySplit: 1 }]
+  wsStores.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 6 } }
+
+  return wb
+}

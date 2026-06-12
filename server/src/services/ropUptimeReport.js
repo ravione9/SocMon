@@ -565,6 +565,37 @@ export async function fetchRopUptimeReport(opts = {}) {
   return data
 }
 
+/** Map one StoreProblemHistory offline record to a disconnect event (BH-aware). */
+function mapRecordToDisconnectEvent(r, { fromMsN, toMsN, isBh, bhActive, nowMs }) {
+  const disconnectAtMs = new Date(r.firstSeenAt).getTime()
+  const backUpAtMs = r.resolvedAt ? new Date(r.resolvedAt).getTime() : null
+  const endMs = backUpAtMs != null
+    ? backUpAtMs
+    : (r.status === 'active' ? nowMs : disconnectAtMs)
+  const durationMs = endMs - disconnectAtMs
+
+  const segStart = Math.max(disconnectAtMs, fromMsN)
+  const segEnd = Math.min(endMs, toMsN)
+  const bhDurationMin = (segEnd > segStart && isBh)
+    ? bhMinutesInInterval(segStart, segEnd, isBh)
+    : 0
+
+  if (bhActive && bhDurationMin <= 0) return null
+
+  return {
+    storeTag: r.storeTag,
+    hostname: r.hostname || '',
+    disconnectAt: r.firstSeenAt,
+    disconnectAtMs,
+    backUpAt: r.resolvedAt,
+    backUpAtMs,
+    durationMin: durationMs != null ? Math.round(durationMs / 60_000) : null,
+    bhDurationMin,
+    status: r.status,
+    stillOffline: r.status === 'active',
+  }
+}
+
 /** Per-store offline / disconnect timeline for ROP dashboard modal. */
 export async function fetchRopStoreDisconnectEvents({ storeTag, fromMs, toMs, businessHours } = {}) {
   const tag = String(storeTag || '').trim()
@@ -595,33 +626,8 @@ export async function fetchRopStoreDisconnectEvents({ storeTag, fromMs, toMs, bu
 
   const events = []
   for (const r of records) {
-    const disconnectAtMs = new Date(r.firstSeenAt).getTime()
-    const backUpAtMs = r.resolvedAt ? new Date(r.resolvedAt).getTime() : null
-    const endMs = backUpAtMs != null
-      ? backUpAtMs
-      : (r.status === 'active' ? nowMs : disconnectAtMs)
-    const durationMs = endMs - disconnectAtMs
-
-    const segStart = Math.max(disconnectAtMs, fromMsN)
-    const segEnd = Math.min(endMs, toMsN)
-    const bhDurationMin = (segEnd > segStart && isBh)
-      ? bhMinutesInInterval(segStart, segEnd, isBh)
-      : 0
-
-    if (bhActive && bhDurationMin <= 0) continue
-
-    events.push({
-      storeTag: r.storeTag,
-      hostname: r.hostname || '',
-      disconnectAt: r.firstSeenAt,
-      disconnectAtMs,
-      backUpAt: r.resolvedAt,
-      backUpAtMs,
-      durationMin: durationMs != null ? Math.round(durationMs / 60_000) : null,
-      bhDurationMin,
-      status: r.status,
-      stillOffline: r.status === 'active',
-    })
+    const ev = mapRecordToDisconnectEvent(r, { fromMsN, toMsN, isBh, bhActive, nowMs })
+    if (ev) events.push(ev)
   }
 
   return {
@@ -633,6 +639,87 @@ export async function fetchRopStoreDisconnectEvents({ storeTag, fromMs, toMs, bu
     bhApplied: bhActive,
     events,
     total: events.length,
+    source: `StoreProblemHistory (code='${OFFLINE_CODE}', MongoDB)${bhActive ? ' · BH-filtered' : ''}`,
+  }
+}
+
+/** All disconnect / reconnect events for every store in an ROP group — for Excel export. */
+export async function fetchRopGroupDisconnectEvents({ groupKey, fromMs, toMs, businessHours } = {}) {
+  const from = new Date(Number(fromMs))
+  const to = new Date(Number(toMs))
+  if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || to <= from) {
+    throw new Error('invalid fromMs/toMs')
+  }
+
+  const bh = normaliseBh(businessHours)
+  const isBh = makeBhChecker(bh)
+  const bhActive = !!isBh && !(bh.startHour === 0 && bh.endHour === 24 && bh.weekdays.length === 7)
+
+  const snapshot = await ensureSnapshot()
+  const manualCodes = await getManualRopCodeList()
+  const tagsInGroup = resolveGroupTags(snapshot, groupKey, manualCodes)
+  const tagIdx = snapshotIndex(snapshot)
+
+  const recordsRaw = await fetchOfflineRecords(tagsInGroup, fromMs, toMs)
+  const nowMs = Date.now()
+  const fromMsN = Number(fromMs)
+  const toMsN = Number(toMs)
+
+  const events = []
+  for (const r of recordsRaw) {
+    if (isBlip(r, nowMs)) continue
+    const ev = mapRecordToDisconnectEvent(r, { fromMsN, toMsN, isBh, bhActive, nowMs })
+    if (!ev) continue
+    if (!ev.hostname) ev.hostname = tagIdx.get(r.storeTag)?.hostname || ''
+    events.push(ev)
+  }
+  events.sort((a, b) => b.disconnectAtMs - a.disconnectAtMs)
+
+  const byStore = new Map()
+  for (const tag of tagsInGroup) {
+    const snap = tagIdx.get(tag)
+    byStore.set(tag, {
+      storeTag: tag,
+      hostname: snap?.hostname || '',
+      eventCount: 0,
+      totalBhDownMin: 0,
+      totalDurationMin: 0,
+      stillOffline: false,
+    })
+  }
+  for (const ev of events) {
+    if (!byStore.has(ev.storeTag)) {
+      byStore.set(ev.storeTag, {
+        storeTag: ev.storeTag,
+        hostname: ev.hostname || '',
+        eventCount: 0,
+        totalBhDownMin: 0,
+        totalDurationMin: 0,
+        stillOffline: false,
+      })
+    }
+    const row = byStore.get(ev.storeTag)
+    row.eventCount += 1
+    row.totalBhDownMin += ev.bhDurationMin || 0
+    row.totalDurationMin += ev.durationMin || 0
+    if (ev.stillOffline) row.stillOffline = true
+    if (!row.hostname && ev.hostname) row.hostname = ev.hostname
+  }
+
+  const storeSummary = [...byStore.values()]
+    .filter((s) => s.eventCount > 0)
+    .sort((a, b) => b.eventCount - a.eventCount || b.totalBhDownMin - a.totalBhDownMin)
+
+  return {
+    groupKey: String(groupKey || 'rp').toLowerCase(),
+    storeCount: tagsInGroup.length,
+    rangeFromIso: from.toISOString(),
+    rangeToIso: to.toISOString(),
+    businessHours: bh,
+    bhApplied: bhActive,
+    events,
+    storeSummary,
+    totalEvents: events.length,
     source: `StoreProblemHistory (code='${OFFLINE_CODE}', MongoDB)${bhActive ? ' · BH-filtered' : ''}`,
   }
 }
