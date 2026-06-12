@@ -170,13 +170,18 @@ async function runHttp() {
         }
       }
       await server.connect(transport)
-      // Attach dashboards AFTER connect so the initial list_changed
-      // notification reaches the client cleanly.
-      attachDynamicModules().catch((err) => {
+      // IMPORTANT: attach dynamic module tools before handling initialize.
+      // Some MCP clients (including Claude Desktop builds) cache the first
+      // tool list and may not reliably process later list_changed events for
+      // newly added tools. Awaiting here ensures tools like
+      // netpulse_storeZabbix are present from the first tools/list call.
+      try {
+        await attachDynamicModules()
+      } catch (err) {
         process.stderr.write(
           `[netpulse-mcp] initial dashboard attach failed: ${err.message}\n`,
         )
-      })
+      }
       entry = { transport, server, bearer, dispose }
     }
 
