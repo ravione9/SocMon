@@ -15,6 +15,7 @@ import {
   isHostnameDataRequest,
   isStoreHostnamePortalQuery,
   parseQuestionTimeRange,
+  shouldUseStoreCodeAlias,
 } from './queryContext.js'
 import { isNetworkInfraQuery, isZabbixQuestion } from './zabbixDirectAnswer.js'
 
@@ -37,6 +38,7 @@ function hostnameMatchesStore(store, hostname) {
   const sh = String(store?.hostname || '').toLowerCase()
   const tag = String(store?.storeTag || '').toLowerCase()
   if (sh === h || sh.includes(h) || tag.includes(h) || tag.startsWith(`${h}_`)) return true
+  if (!shouldUseStoreCodeAlias(hostname)) return false
   // Alias matching: LKST973/LK973 should match RP973-* (same store code).
   const queryCode = extractStoreCode(hostname)
   if (!queryCode) return false

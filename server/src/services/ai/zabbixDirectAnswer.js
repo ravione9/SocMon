@@ -1,7 +1,7 @@
 import { createZabbixClient } from '../../services/zabbix.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 import { isInfluxStoreConfigured, fetchStoreSnapshot, buildOverviewSummary } from '../influxStore.js'
-import { extractStoreCode, extractStoreHostname, isStoreHostnamePortalQuery } from './queryContext.js'
+import { extractStoreCode, extractStoreHostname, isStoreHostnamePortalQuery, shouldUseStoreCodeAlias } from './queryContext.js'
 import { isSocReportQuery } from './socDirectAnswer.js'
 import { isXdrQuestion } from './xdrDirectAnswer.js'
 import { isGeoConnectionQuery } from './geoConnectionQuery.js'
@@ -364,7 +364,8 @@ function hostMatchesSearch(h, search) {
     return true
   }
   // Alias matching: LKST973 / LK973 should match RP973-* hosts in Zabbix.
-  const queryCode = extractStoreCode(s)
+  // Keep RP full-host searches strict by applying alias only for LK/LKST input.
+  const queryCode = shouldUseStoreCodeAlias(s) ? extractStoreCode(s) : null
   if (queryCode) {
     const hostCode = extractStoreCode(h.name || '') || extractStoreCode(h.host || '')
     if (hostCode && hostCode === queryCode) return true
