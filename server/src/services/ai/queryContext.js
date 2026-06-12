@@ -35,8 +35,16 @@ const FOLLOWUP_AFFECTED = /\b(which stores|what stores|stores are affected|affec
 const APP_ONLY = /\b(only for|just for|only about|asking about only)\b/i
 const HOSTNAME_DETAIL = /\b(complete details|full details|all environ|all enviro|all data|full data|give me all|give me.*details|details of|everything about|store details|this hostname|usb|threat)\b/i
 
-/** Store agent hostname — RP1190-E519BNYW, RP1537-E519BNZT, WGGN-4CE225BH1H */
-export const STORE_HOSTNAME_RE = /\b([A-Z]{2,8}(?:\d{2,6})?-[A-Z0-9]{4,})\b/i
+/**
+ * Store agent hostname.
+ * Matches both full forms and short tags:
+ *   RP1190-E519BNYW, RP1537-E519BNZT  (prefix + digits + hyphen + serial)
+ *   WGGN-4CE225BH1H                    (prefix-only + hyphen + serial)
+ *   RP911, RP1190, LK1234              (prefix + digits, no serial — short tag)
+ * Requires at least 2 digits after the prefix on the no-serial branch so
+ * abbreviations like "IPV4" or "HTTP2" don't get treated as store hostnames.
+ */
+export const STORE_HOSTNAME_RE = /\b([A-Z]{2,8}\d{2,6}(?:-[A-Z0-9]{4,})?|[A-Z]{2,8}-[A-Z0-9]{4,})\b/i
 
 /** Store/retail hostname question — search Store Monitor, Sentinel, SOC, NOC (not Infra Zabbix-only). */
 export function isStoreHostnamePortalQuery(q) {
