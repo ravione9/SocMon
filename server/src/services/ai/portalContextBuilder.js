@@ -27,6 +27,8 @@ import {
   hasExplicitTimeRange,
   wantsCrashEventLog,
   extractStoreHostname,
+  extractStoreCode,
+  shouldUseStoreCodeAlias,
 } from './queryContext.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 
@@ -394,15 +396,56 @@ async function buildStoreMonitorContext(staleMinutes = 10, detail = 'standard') 
   }
 }
 
-async function buildStoreProblemsContext() {
+function escapeMongoRegex(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Build a Mongo $or filter when the question names a store hostname/tag.
+ * LKST793 resolves to RP793-* / LK793-* via store-code alias (LKST only).
+ * @param {string} userMessage
+ * @returns {{ hostname: string, code: string | null, filter: object } | null}
+ */
+function buildStoreProblemHostFilter(userMessage) {
+  const hostname = extractStoreHostname(userMessage)
+  if (!hostname) return null
+
+  const escaped = escapeMongoRegex(hostname)
+  const or = [
+    { hostname: new RegExp(escaped, 'i') },
+    { storeTag: new RegExp(escaped, 'i') },
+  ]
+
+  const code = extractStoreCode(userMessage)
+  if (code && shouldUseStoreCodeAlias(userMessage)) {
+    or.push(
+      { hostname: new RegExp(`^RP0*${code}(?:-|$)`, 'i') },
+      { hostname: new RegExp(`^LK0*${code}(?:-|$)`, 'i') },
+      { storeTag: new RegExp(`^RP0*${code}(?:_|$)`, 'i') },
+      { storeTag: new RegExp(`^LK0*${code}(?:_|$)`, 'i') },
+      { storeTag: new RegExp(`^LKST0*${code}(?:_|$)?`, 'i') },
+    )
+  } else if (code) {
+    const prefix = hostname.replace(/-.*$/, '')
+    const prefixEsc = escapeMongoRegex(prefix)
+    or.push(
+      { hostname: new RegExp(`^${prefixEsc}(?:-|$)`, 'i') },
+      { storeTag: new RegExp(prefixEsc, 'i') },
+    )
+  }
+
+  return { hostname, code, filter: { $or: or } }
+}
+
+async function buildStoreProblemsContext(userMessage = '') {
   const fetchedAt = new Date().toISOString()
   const tracker = getProblemSnapshotStatus()
   const intervalMin = Math.round((tracker.intervalMs || 120000) / 60000)
   const nowMs = Date.now()
-  // Keep payload bounded for MCP clients while still matching the UI's
-  // disconnect-events table shape (disconnected/back-up/BH/total duration).
-  const DISCONNECT_LOOKBACK_DAYS = 14
-  const DISCONNECT_EVENT_LIMIT = 120
+  const hostScope = buildStoreProblemHostFilter(userMessage)
+  // Global snapshot stays bounded; store-scoped queries widen window/limit.
+  const DISCONNECT_LOOKBACK_DAYS = hostScope ? 30 : 14
+  const DISCONNECT_EVENT_LIMIT = hostScope ? 100 : 120
   const disconnectSince = new Date(nowMs - DISCONNECT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
 
   if (!isInfluxStoreConfigured()) {
@@ -415,10 +458,19 @@ async function buildStoreProblemsContext() {
     }
   }
 
+  const activeQuery = { status: 'active' }
+  if (hostScope) Object.assign(activeQuery, hostScope.filter)
+
+  const disconnectQuery = {
+    code: 'offline',
+    firstSeenAt: { $gte: disconnectSince },
+  }
+  if (hostScope) Object.assign(disconnectQuery, hostScope.filter)
+
   const [active, disconnectRaw] = await Promise.all([
-    StoreProblemHistory.find({ status: 'active' })
+    StoreProblemHistory.find(activeQuery)
       .sort({ severity: 1, lastSeenAt: -1 })
-      .limit(50)
+      .limit(hostScope ? 100 : 50)
       .select({
         hostname: 1,
         storeTag: 1,
@@ -433,10 +485,7 @@ async function buildStoreProblemsContext() {
       .lean(),
     // "Disconnect Events" table rows: offline lifecycle sessions with start/end.
     // Matches UI semantics: disconnected time + back-up time + BH duration + total.
-    StoreProblemHistory.find({
-      code: 'offline',
-      firstSeenAt: { $gte: disconnectSince },
-    })
+    StoreProblemHistory.find(disconnectQuery)
       .sort({ firstSeenAt: -1 })
       .limit(DISCONNECT_EVENT_LIMIT)
       .select({
@@ -476,6 +525,8 @@ async function buildStoreProblemsContext() {
     }
   })
 
+  const disconnectEventsTruncated = !hostScope && disconnectRaw.length >= DISCONNECT_EVENT_LIMIT
+
   return {
     module: 'storeProblems',
     freshness: 'periodic',
@@ -487,10 +538,18 @@ async function buildStoreProblemsContext() {
     activeProblemCount: active.length,
     disconnectEventsWindowDays: DISCONNECT_LOOKBACK_DAYS,
     disconnectEventsLimit: DISCONNECT_EVENT_LIMIT,
+    disconnectEventsFilter: hostScope
+      ? { hostname: hostScope.hostname, storeCode: hostScope.code, scoped: true }
+      : { scoped: false },
+    disconnectEventsTruncated,
     businessHours: bh,
     disconnectEventsCount: disconnectEvents.length,
     disconnectEvents,
-    note: `Problem lifecycle updated by background job every ~${intervalMin} min (not live Influx).`,
+    note: hostScope
+      ? `Disconnect events scoped to ${hostScope.hostname} (30-day window). Problem lifecycle updated by background job every ~${intervalMin} min.`
+      : disconnectEventsTruncated
+        ? `Showing newest ${DISCONNECT_EVENT_LIMIT} disconnect events (${DISCONNECT_LOOKBACK_DAYS}d window). Include a store hostname (e.g. LKST793) in your question for store-specific history. Updated every ~${intervalMin} min.`
+        : `Problem lifecycle updated by background job every ~${intervalMin} min (not live Influx).`,
     activeProblems: active.map(r => ({
       hostname: r.hostname,
       storeTag: r.storeTag,
@@ -602,7 +661,7 @@ async function buildSocContext() {
 
 const BUILDERS = {
   storeMonitor: (detail) => buildStoreMonitorContext(10, detail),
-  storeProblems: buildStoreProblemsContext,
+  storeProblems: (_, opts) => buildStoreProblemsContext(opts?.userMessage || ''),
   soc: buildSocContext,
   zabbixInfra: (_, opts) => buildZabbixInfraContext(opts?.userMessage || ''),
   storeZabbix: (_, opts) => buildStoreZabbixContext(opts?.userMessage || ''),
@@ -1558,7 +1617,7 @@ export async function buildPortalContext(user, moduleIds = [], opts = {}) {
       try {
         const data = id === 'storeMonitor'
           ? await builder(detail)
-          : (id === 'zabbixInfra' || id === 'storeZabbix')
+          : (id === 'zabbixInfra' || id === 'storeZabbix' || id === 'storeProblems')
             ? await builder(detail, { userMessage: opts.userMessage || '' })
             : await builder()
         modules[id] = data
@@ -1642,6 +1701,9 @@ export function buildContextPreview(context) {
       activeProblemCount: sp.activeProblemCount,
       snapshotIntervalMinutes: sp.snapshotIntervalMinutes || 2,
       lastBackgroundSnapAt: sp.lastBackgroundSnapAt || null,
+      disconnectEventsCount: sp.disconnectEventsCount,
+      disconnectEventsFilter: sp.disconnectEventsFilter,
+      disconnectEventsTruncated: sp.disconnectEventsTruncated,
     }
   }
   const soc = context?.modules?.soc
