@@ -22,7 +22,24 @@ import { useUrlTab } from '../../hooks/useUrlTab.js'
 import { RP_OUTAGE_LABELS, ROP_SUBTABS, isRpGroupKey } from '../../utils/storeRopGrouping.js'
 import { parseManualStoreCodes } from '../../config/manualRopSdwanStoreCodes.js'
 
-const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'rop']
+const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'rop', 'reports']
+
+const ROP_GROUP_LABELS = {
+  rp: 'All ROP',
+  rp_sdwan: 'ROP + SD-WAN',
+  rp_no_sdwan: 'ROP without SD-WAN',
+  manual_sdwan: 'Manual ROP + SD-WAN',
+  pos: 'POS Systems (LK)',
+  sdwan: 'SD-WAN Stores',
+}
+const ROP_DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const ROP_RANGE_CHIPS = [
+  { id: '24h', label: '24h' },
+  { id: '7d', label: '7d' },
+  { id: '14d', label: '14d' },
+  { id: '30d', label: '30d' },
+  { id: 'custom', label: 'Custom' },
+]
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, BarController, ArcElement, Tooltip, Legend, Filler)
 
@@ -665,12 +682,6 @@ const INLINE_CSS = `
 .rop-subtab.active::after{content:'';position:absolute;left:0;right:0;bottom:0;height:2px;background:var(--accent)}
 .rop-subtab-count{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:18px;padding:0 6px;border-radius:999px;background:var(--bg);border:1px solid var(--border);color:var(--text3);font-size:10px;font-weight:700;font-family:var(--mono)}
 .rop-subtab.active .rop-subtab-count{background:rgba(59,130,246,.10);border-color:rgba(59,130,246,.25);color:var(--accent)}
-.rop-reports{border-radius:10px;border:1px solid var(--border);background:var(--bg2);overflow:hidden}
-.rop-reports-hd{display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;border-bottom:1px solid transparent;transition:border-color .15s}
-.rop-reports-hd.open{border-bottom-color:var(--border)}
-.rop-reports-hd-title{font-size:12px;font-weight:700;color:var(--text)}
-.rop-reports-hd-sub{font-size:10px;color:var(--text3);font-family:var(--mono)}
-.rop-reports-body{padding:12px 14px 14px;display:flex;flex-direction:column;gap:12px;background:var(--bg3)}
 .rop-reports-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
 .rop-report-card{display:flex;flex-direction:column;gap:10px;padding:12px 14px;border-radius:10px;border:1px solid var(--border);background:var(--bg2)}
 .rop-report-card-hd{display:flex;align-items:center;justify-content:space-between;gap:8px}
@@ -1565,7 +1576,6 @@ export default function StoreZabbixPage({
   const [ropDisconnectError, setRopDisconnectError] = useState(null)
   const [ropExportBusy, setRopExportBusy] = useState(false)
   const [ropStoreExportBusy, setRopStoreExportBusy] = useState(false)
-  const [ropReportsOpen, setRopReportsOpen] = useState(true)
 
   const ropDisconnectRangeLabel = useMemo(() => {
     if (ropRange === 'custom' && ropCustomEpoch?.from && ropCustomEpoch?.to) {
@@ -1988,7 +1998,7 @@ export default function StoreZabbixPage({
   }, [ropDisconnectStore, ropRange, ropCustomEpoch, ropBhStart, ropBhEnd, ropBhDays, apiBase, parseErr])
 
   useEffect(() => {
-    if (tab !== 'rop' || !config?.configured) return
+    if ((tab !== 'rop' && tab !== 'reports') || !config?.configured) return
     if (ropRange === 'custom' && !ropCustomEpoch) return
     loadRopUptime({
       range: ropRange,
@@ -2016,7 +2026,7 @@ export default function StoreZabbixPage({
     },
     120_000,
     [ropRange, ropCustomEpoch, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla, loadRopUptime],
-    { enabled: tab === 'rop' && !!config?.configured && config?.reachable !== false, skipImmediate: true },
+    { enabled: (tab === 'rop' || tab === 'reports') && !!config?.configured && config?.reachable !== false, skipImmediate: true },
   )
 
   useEffect(() => {
@@ -2229,7 +2239,7 @@ export default function StoreZabbixPage({
       if (tab === 'events') await loadEvents(eventLimit)
       if (tab === 'topMon') await loadTopUtil(topLimit, topMonGroup)
       if (tab === 'netHealth') await loadNetHealth(netHealthGroup, netBizStart, netBizEnd)
-      if (tab === 'rop' && (ropRange !== 'custom' || ropCustomEpoch)) await loadRopUptime({
+      if ((tab === 'rop' || tab === 'reports') && (ropRange !== 'custom' || ropCustomEpoch)) await loadRopUptime({
         range: ropRange,
         customEpoch: ropCustomEpoch,
         groupKey: ropGroupKey,
@@ -2307,6 +2317,7 @@ export default function StoreZabbixPage({
     { id: 'events', label: 'Events', icon: '◉' },
     { id: 'netHealth', label: 'Network Health', icon: '📶' },
     { id: 'rop', label: 'ROP Dashboard', icon: '🏪', badge: ropUptime?.summary?.totalStores },
+    { id: 'reports', label: 'Reports', icon: '📊' },
   ]
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 0, minHeight: 0 }}>
@@ -3624,59 +3635,6 @@ export default function StoreZabbixPage({
               )}
             </div>
 
-            {/* ── Reports: BH disconnect / connect events export ── */}
-            <div className="rop-reports">
-              <div className={`rop-reports-hd${ropReportsOpen ? ' open' : ''}`} onClick={() => setRopReportsOpen((v) => !v)}>
-                <span style={{ fontSize: 14, opacity: 0.85 }}>📊</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div className="rop-reports-hd-title">Reports</div>
-                  <div className="rop-reports-hd-sub">Business-hours disconnect &amp; reconnect events · Excel export</div>
-                </div>
-                <span style={{ fontSize: 10, color: 'var(--text3)' }}>{ropReportsOpen ? '▲' : '▼'}</span>
-              </div>
-              {ropReportsOpen && (
-                <div className="rop-reports-body">
-                  <div className="rop-reports-grid">
-                    <div className="rop-report-card">
-                      <div className="rop-report-card-hd">
-                        <span className="rop-report-card-title">🔌 BH Disconnect &amp; Connect Events</span>
-                        {ropExportBusy && <span style={{ fontSize: 10, color: 'var(--accent)', fontFamily: 'var(--mono)' }}>Generating…</span>}
-                      </div>
-                      <p className="rop-report-card-desc">
-                        Export every disconnect and reconnect event per store for the selected group, range, and business-hours window.
-                        Same data as the hostname popup — disconnected at, back up at, BH duration, total duration, and status.
-                      </p>
-                      <div className="rop-report-stats">
-                        {[
-                          ['Range', ropDisconnectRangeLabel, 'var(--text)'],
-                          ['Group', groupKeyToLabel[ropGroupKey] || ropGroupKey, 'var(--accent)'],
-                          ['Business hours', bhSummary, '#f59e0b'],
-                          ['Total events', ru ? String(summary.totalDisconnects) : '—', 'var(--text)'],
-                        ].map(([lbl, val, color]) => (
-                          <div key={lbl} className="rop-report-stat">
-                            <div className="rop-report-stat-val" style={{ color, fontSize: lbl === 'Business hours' ? 11 : 14 }} title={String(val)}>
-                              {val}
-                            </div>
-                            <div className="rop-report-stat-lbl">{lbl}</div>
-                          </div>
-                        ))}
-                      </div>
-                      <div className="rop-report-sheets">
-                        Sheets: Summary · All Events · Per Store Summary
-                      </div>
-                      <button type="button" onClick={exportRopDisconnectExcel}
-                        disabled={ropExportBusy || (ropRange === 'custom' && !ropCustomEpoch) || !ru}
-                        className="rop-action-btn"
-                        style={{ alignSelf: 'flex-start' }}
-                        title="Download Excel for all stores in the current group">
-                        {ropExportBusy ? 'Exporting…' : '⬇ Download Excel'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-
             {ropGroupKey === 'manual_sdwan' && (
               <div style={{ borderRadius: 12, border: '1px solid var(--border)', background: 'var(--bg2)', overflow: 'hidden' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', cursor: 'pointer', borderBottom: manualRopCodesOpen ? '1px solid var(--border)' : 'none' }}
@@ -4261,6 +4219,215 @@ export default function StoreZabbixPage({
                 </Widget>
                 </div>
               </>
+            )}
+          </div>
+        )
+      })()}
+
+      {/* ═══════════ REPORTS TAB (BH DISCONNECT EXPORT) ═══════════ */}
+      {configured && reachable && tab === 'reports' && (() => {
+        const ru = ropUptime
+        const summary = ru?.summary || { totalDisconnects: 0 }
+        const groupCounts = ru?.meta?.groupCounts || {}
+        const ropSubCount = (key) => {
+          if (key === 'rp') return groupCounts.rp
+          if (key === 'rp_sdwan') return groupCounts.rp_sdwan
+          if (key === 'rp_no_sdwan') return groupCounts.rp_no_sdwan
+          if (key === 'manual_sdwan') return groupCounts.manual_sdwan
+          return null
+        }
+        const toggleBhDay = (d) => {
+          const next = new Set(ropBhDays)
+          if (next.has(d)) next.delete(d); else next.add(d)
+          if (next.size === 0) return
+          setRopBhDays(next)
+        }
+        const seedCustomRange = (daysBack = 7) => {
+          const to = Math.floor(Date.now() / 1000)
+          const from = to - daysBack * 86400
+          const fromStr = toLocalInput(from)
+          const toStr = toLocalInput(to)
+          setRopCustomFrom(fromStr)
+          setRopCustomTo(toStr)
+          setRopCustomEpoch({ from: fromStr, to: toStr })
+        }
+        const selectRopRange = (id) => {
+          setRopRange(id)
+          if (id === 'custom') {
+            if (!ropCustomEpoch) seedCustomRange(7)
+            else {
+              setRopCustomFrom(ropCustomEpoch.from)
+              setRopCustomTo(ropCustomEpoch.to)
+            }
+          } else {
+            setRopCustomEpoch(null)
+          }
+        }
+        const applyRopCustomRange = () => {
+          if (!ropCustomFrom || !ropCustomTo) return
+          const fromTs = Math.floor(new Date(ropCustomFrom).getTime() / 1000)
+          const toTs = Math.floor(new Date(ropCustomTo).getTime() / 1000)
+          if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || fromTs >= toTs) return
+          setRopCustomEpoch({ from: ropCustomFrom, to: ropCustomTo })
+        }
+        const bhSummary = (() => {
+          const allDays = ropBhDays.size === 7
+          const weekdays = ropBhDays.size === 5 && [1, 2, 3, 4, 5].every((d) => ropBhDays.has(d))
+          const dayLabel = allDays ? 'Every day' : weekdays ? 'Mon–Fri' : [...ropBhDays].sort().map((d) => ROP_DAY_LABELS[d]).join(', ')
+          return `${String(ropBhStart).padStart(2, '0')}:00 – ${String(ropBhEnd).padStart(2, '0')}:00 · ${dayLabel}`
+        })()
+        const customRangeValid = ropCustomFrom && ropCustomTo
+          && Number.isFinite(new Date(ropCustomFrom).getTime())
+          && Number.isFinite(new Date(ropCustomTo).getTime())
+          && new Date(ropCustomFrom) < new Date(ropCustomTo)
+
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div style={{ fontSize: 12, color: 'var(--text2)', lineHeight: 1.55 }}>
+              Business-hours disconnect &amp; reconnect events · Excel export
+            </div>
+
+            <div className="rop-toolbar">
+              <div className="rop-toolbar-row">
+                <div className="rop-field">
+                  <span className="rop-field-label">Range</span>
+                  <div className="rop-segment">
+                    {ROP_RANGE_CHIPS.map((c) => (
+                      <button key={c.id} type="button"
+                        className={`rop-segment-btn${ropRange === c.id ? ' active' : ''}`}
+                        onClick={() => selectRopRange(c.id)}>
+                        {c.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="rop-field-divider" />
+                <div className="rop-field">
+                  <span className="rop-field-label">Group</span>
+                  <select value={isRpGroupKey(ropGroupKey) ? '' : ropGroupKey}
+                    onChange={(e) => { if (e.target.value) setRopGroupKey(e.target.value) }}
+                    className="rop-control rop-control--select">
+                    <option value="">{isRpGroupKey(ropGroupKey) ? 'ROP groups…' : ROP_GROUP_LABELS[ropGroupKey]}</option>
+                    <option value="pos">{ROP_GROUP_LABELS.pos}</option>
+                    <option value="sdwan">{ROP_GROUP_LABELS.sdwan}</option>
+                  </select>
+                </div>
+                <div className="rop-field-divider" />
+                <div className="rop-field">
+                  <span className="rop-field-label">BH</span>
+                  <select value={ropBhStart} onChange={(e) => setRopBhStart(Number(e.target.value))}
+                    className="rop-control rop-control--time">
+                    {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+                  </select>
+                  <span style={{ fontSize: 10, color: 'var(--text3)' }}>–</span>
+                  <select value={ropBhEnd} onChange={(e) => setRopBhEnd(Number(e.target.value))}
+                    className="rop-control rop-control--time">
+                    {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+                  </select>
+                </div>
+                <div className="rop-field-divider" />
+                <div className="rop-field">
+                  <div className="rop-day-row">
+                    {ROP_DAY_LABELS.map((lbl, idx) => {
+                      const on = ropBhDays.has(idx)
+                      return (
+                        <button key={idx} type="button" onClick={() => toggleBhDay(idx)}
+                          className={`rop-day-btn${on ? ' active' : ''}`}
+                          title={['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][idx]}>
+                          {lbl}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <button type="button" onClick={() => setRopBhDays(new Set([1, 2, 3, 4, 5]))} className="rop-action-btn rop-action-btn--ghost">Mon–Fri</button>
+                  <button type="button" onClick={() => setRopBhDays(new Set([0, 1, 2, 3, 4, 5, 6]))} className="rop-action-btn rop-action-btn--ghost">All</button>
+                </div>
+                {ru?.rangeFromIso && (
+                  <span className="rop-meta rop-meta--muted" title="Data source and active BH window">
+                    StoreProblemHistory · {bhSummary}
+                  </span>
+                )}
+              </div>
+              {ropRange === 'custom' && (
+                <div className="rop-toolbar-row rop-toolbar-row--sub">
+                  <div className="rop-field">
+                    <span className="rop-field-label">Custom</span>
+                    <input type="datetime-local" value={ropCustomFrom} onChange={(e) => setRopCustomFrom(e.target.value)}
+                      className="rop-control rop-control--datetime" />
+                    <span style={{ fontSize: 10, color: 'var(--text3)' }}>–</span>
+                    <input type="datetime-local" value={ropCustomTo} onChange={(e) => setRopCustomTo(e.target.value)}
+                      className="rop-control rop-control--datetime" />
+                    <button type="button" onClick={applyRopCustomRange} disabled={!customRangeValid}
+                      className="rop-action-btn">Apply</button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="rop-subtabs">
+              {ROP_SUBTABS.map((st) => {
+                const count = ropSubCount(st.id)
+                const active = ropGroupKey === st.id
+                return (
+                  <button key={st.id} type="button" onClick={() => setRopGroupKey(st.id)}
+                    className={`rop-subtab${active ? ' active' : ''}`}>
+                    <span style={{ opacity: 0.7 }}>{st.icon}</span>
+                    <span>{st.label}</span>
+                    {count != null && <span className="rop-subtab-count">{count}</span>}
+                  </button>
+                )
+              })}
+              {!isRpGroupKey(ropGroupKey) && (
+                <span style={{ marginLeft: 'auto', marginRight: 14, fontSize: 11, color: 'var(--accent)', fontWeight: 600 }}>
+                  Viewing: {ROP_GROUP_LABELS[ropGroupKey]}
+                </span>
+              )}
+            </div>
+
+            {ropUptimeBusy && !ru && (
+              <div style={{ padding: 40, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center' }}>
+                <span className="np-page-loading-dot" /> Loading report scope…
+              </div>
+            )}
+
+            {ru && (
+              <div className="rop-reports-grid">
+                <div className="rop-report-card">
+                  <div className="rop-report-card-hd">
+                    <span className="rop-report-card-title">🔌 BH Disconnect &amp; Connect Events</span>
+                    {ropExportBusy && <span style={{ fontSize: 10, color: 'var(--accent)', fontFamily: 'var(--mono)' }}>Generating…</span>}
+                  </div>
+                  <p className="rop-report-card-desc">
+                    Export every disconnect and reconnect event per store for the selected group, range, and business-hours window.
+                    Same data as the hostname popup — disconnected at, back up at, BH duration, total duration, and status.
+                  </p>
+                  <div className="rop-report-stats">
+                    {[
+                      ['Range', ropDisconnectRangeLabel, 'var(--text)'],
+                      ['Group', ROP_GROUP_LABELS[ropGroupKey] || ropGroupKey, 'var(--accent)'],
+                      ['Business hours', bhSummary, '#f59e0b'],
+                      ['Total events', String(summary.totalDisconnects), 'var(--text)'],
+                    ].map(([lbl, val, color]) => (
+                      <div key={lbl} className="rop-report-stat">
+                        <div className="rop-report-stat-val" style={{ color, fontSize: lbl === 'Business hours' ? 11 : 14 }} title={String(val)}>
+                          {val}
+                        </div>
+                        <div className="rop-report-stat-lbl">{lbl}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="rop-report-sheets">
+                    Sheets: Summary · All Events · Per Store Summary
+                  </div>
+                  <button type="button" onClick={exportRopDisconnectExcel}
+                    disabled={ropExportBusy || (ropRange === 'custom' && !ropCustomEpoch)}
+                    className="rop-action-btn"
+                    style={{ alignSelf: 'flex-start' }}
+                    title="Download Excel for all stores in the current group">
+                    {ropExportBusy ? 'Exporting…' : '⬇ Download Excel'}
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         )
