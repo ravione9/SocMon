@@ -1734,16 +1734,22 @@ function hostPortsFromSnapshot(data, host) {
  * Live Zabbix JSON for LLM synthesis (bandwidth, interface analysis, etc.).
  * @param {string} userMessage
  */
-export async function buildZabbixInfraContext(userMessage = '') {
+/**
+ * Shared snapshot-builder used by both Infra Zabbix and Store Zabbix module
+ * exporters. The two flavors differ only in which env-var-backed Zabbix
+ * client they hit and how the result is labelled, so we centralise the
+ * snapshot logic here to keep them in lockstep.
+ */
+async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, missingError }, userMessage = '') {
   const fetchedAt = new Date().toISOString()
-  const client = createZabbixClient('ZABBIX')
+  const client = createZabbixClient(envName)
   if (!client.isZabbixConfigured()) {
     return {
-      module: 'zabbixInfra',
+      module: moduleId,
       freshness: 'live',
       fetchedAt,
       configured: false,
-      error: 'ZABBIX_URL + ZABBIX_API_TOKEN not configured',
+      error: missingError,
     }
   }
 
@@ -1762,11 +1768,11 @@ export async function buildZabbixInfraContext(userMessage = '') {
   })
 
   if (!data.configured) {
-    return { module: 'zabbixInfra', freshness: 'live', fetchedAt, configured: false, error: 'Zabbix not configured' }
+    return { module: moduleId, freshness: 'live', fetchedAt, configured: false, error: `${sourceLabel} not configured` }
   }
   if (data.error) {
     return {
-      module: 'zabbixInfra',
+      module: moduleId,
       freshness: 'live',
       fetchedAt,
       configured: true,
@@ -1796,11 +1802,11 @@ export async function buildZabbixInfraContext(userMessage = '') {
   }))
 
   return {
-    module: 'zabbixInfra',
+    module: moduleId,
     freshness: 'live',
     fetchedAt,
     configured: true,
-    source: 'Infra Zabbix API (host.get + item.get net.if.*)',
+    source: `${sourceLabel} API (host.get + item.get net.if.*)`,
     note: 'Live SNMP/interface metrics at send time. inBps/outBps are raw bytes/sec from Zabbix net.if.in/out items.',
     version: data.version,
     hostFilter: data.hostFilter,
@@ -1812,4 +1818,22 @@ export async function buildZabbixInfraContext(userMessage = '') {
     hosts,
     pingSummary: includePing && data.pingMetrics ? data.pingMetrics.summary : undefined,
   }
+}
+
+export async function buildZabbixInfraContext(userMessage = '') {
+  return buildZabbixContextFromClient({
+    moduleId: 'zabbixInfra',
+    envName: 'ZABBIX',
+    sourceLabel: 'Infra Zabbix',
+    missingError: 'ZABBIX_URL + ZABBIX_API_TOKEN not configured',
+  }, userMessage)
+}
+
+export async function buildStoreZabbixContext(userMessage = '') {
+  return buildZabbixContextFromClient({
+    moduleId: 'storeZabbix',
+    envName: 'STORE_ZABBIX',
+    sourceLabel: 'Store Zabbix',
+    missingError: 'STORE_ZABBIX_URL + STORE_ZABBIX_API_TOKEN not configured',
+  }, userMessage)
 }

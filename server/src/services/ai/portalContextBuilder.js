@@ -17,7 +17,7 @@ import { getProblemSnapshotStatus } from '../storeProblemSnapshotter.js'
 import { computeUserPageAccess } from '../../utils/computeUserPageAccess.js'
 import { isXdrQuestion } from './xdrDirectAnswer.js'
 import { isStoreMonitorConnectivityQuery, isStoreMonitorIssuesQuery, isStoreDowntimeQuery, extractTopLimit } from './geoConnectionQuery.js'
-import { isNetworkInfraQuery, isZabbixQuestion, extractIpv4, isInfraMonitorQuery, isIpInfraQuery, prefersLlmSynthesis, buildZabbixInfraContext, wantsDiskUsage, extractHostGroupFilter } from './zabbixDirectAnswer.js'
+import { isNetworkInfraQuery, isZabbixQuestion, extractIpv4, isInfraMonitorQuery, isIpInfraQuery, prefersLlmSynthesis, buildZabbixInfraContext, buildStoreZabbixContext, wantsDiskUsage, extractHostGroupFilter } from './zabbixDirectAnswer.js'
 import {
   appNameMatches,
   crashRecordMatches,
@@ -70,6 +70,13 @@ export const AI_CONTEXT_MODULES = [
     pageKey: 'infra',
     freshness: 'live',
     description: 'Zabbix host availability, ping, and interface traffic at send time',
+  },
+  {
+    id: 'storeZabbix',
+    label: 'Store Zabbix',
+    pageKey: 'storeZabbix',
+    freshness: 'live',
+    description: 'Store-tier Zabbix host availability, ping, and interface traffic at send time',
   },
 ]
 
@@ -482,6 +489,7 @@ const BUILDERS = {
   storeProblems: buildStoreProblemsContext,
   soc: buildSocContext,
   zabbixInfra: (_, opts) => buildZabbixInfraContext(opts?.userMessage || ''),
+  storeZabbix: (_, opts) => buildStoreZabbixContext(opts?.userMessage || ''),
 }
 
 /**
@@ -1434,7 +1442,7 @@ export async function buildPortalContext(user, moduleIds = [], opts = {}) {
       try {
         const data = id === 'storeMonitor'
           ? await builder(detail)
-          : id === 'zabbixInfra'
+          : (id === 'zabbixInfra' || id === 'storeZabbix')
             ? await builder(detail, { userMessage: opts.userMessage || '' })
             : await builder()
         modules[id] = data
