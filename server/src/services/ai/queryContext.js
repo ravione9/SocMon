@@ -491,12 +491,12 @@ export function extractStoreCode(text) {
 }
 
 /**
- * Alias matching should only kick in for LK/LKST requests, so exact RP host
+ * Alias matching should only kick in for LKST requests, so exact RP/LK host
  * lookups remain strict and are not widened to same-code siblings.
  */
 export function shouldUseStoreCodeAlias(text) {
   const raw = String(text || '').toUpperCase()
-  return /\b(?:LKST|LK)\s*0*\d{2,6}(?:-[A-Z0-9]{2,})?\b/.test(raw)
+  return /\bLKST\s*0*\d{2,6}(?:-[A-Z0-9]{2,})?\b/.test(raw)
 }
 
 const MONTH_INDEX = {
