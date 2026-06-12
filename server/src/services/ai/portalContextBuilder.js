@@ -401,7 +401,8 @@ async function buildStoreProblemsContext() {
   const nowMs = Date.now()
   // Keep payload bounded for MCP clients while still matching the UI's
   // disconnect-events table shape (disconnected/back-up/BH/total duration).
-  const DISCONNECT_LOOKBACK_DAYS = 30
+  const DISCONNECT_LOOKBACK_DAYS = 14
+  const DISCONNECT_EVENT_LIMIT = 120
   const disconnectSince = new Date(nowMs - DISCONNECT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
 
   if (!isInfluxStoreConfigured()) {
@@ -414,20 +415,39 @@ async function buildStoreProblemsContext() {
     }
   }
 
-  const active = await StoreProblemHistory.find({ status: 'active' })
-    .sort({ severity: 1, lastSeenAt: -1 })
-    .limit(50)
-    .lean()
-
-  // "Disconnect Events" table rows: offline lifecycle sessions with start/end.
-  // Matches UI semantics: disconnected time + back-up time + BH duration + total.
-  const disconnectRaw = await StoreProblemHistory.find({
-    code: 'offline',
-    firstSeenAt: { $gte: disconnectSince },
-  })
-    .sort({ firstSeenAt: -1 })
-    .limit(250)
-    .lean()
+  const [active, disconnectRaw] = await Promise.all([
+    StoreProblemHistory.find({ status: 'active' })
+      .sort({ severity: 1, lastSeenAt: -1 })
+      .limit(50)
+      .select({
+        hostname: 1,
+        storeTag: 1,
+        code: 1,
+        severity: 1,
+        message: 1,
+        online: 1,
+        connState: 1,
+        firstSeenAt: 1,
+        lastSeenAt: 1,
+      })
+      .lean(),
+    // "Disconnect Events" table rows: offline lifecycle sessions with start/end.
+    // Matches UI semantics: disconnected time + back-up time + BH duration + total.
+    StoreProblemHistory.find({
+      code: 'offline',
+      firstSeenAt: { $gte: disconnectSince },
+    })
+      .sort({ firstSeenAt: -1 })
+      .limit(DISCONNECT_EVENT_LIMIT)
+      .select({
+        hostname: 1,
+        storeTag: 1,
+        firstSeenAt: 1,
+        resolvedAt: 1,
+        status: 1,
+      })
+      .lean(),
+  ])
 
   const bh = normaliseStoreBusinessHours({
     startHour: 9,
@@ -466,6 +486,7 @@ async function buildStoreProblemsContext() {
     lastBackgroundSnapAt: tracker.lastSnapAt || null,
     activeProblemCount: active.length,
     disconnectEventsWindowDays: DISCONNECT_LOOKBACK_DAYS,
+    disconnectEventsLimit: DISCONNECT_EVENT_LIMIT,
     businessHours: bh,
     disconnectEventsCount: disconnectEvents.length,
     disconnectEvents,

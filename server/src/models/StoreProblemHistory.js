@@ -28,6 +28,8 @@ const storeProblemHistorySchema = new mongoose.Schema({
 }, { timestamps: false, versionKey: false })
 
 storeProblemHistorySchema.index({ storeTag: 1, code: 1, status: 1 })
+// Fast recent disconnect-event fetch for MCP/UI tables.
+storeProblemHistorySchema.index({ code: 1, firstSeenAt: -1 })
 storeProblemHistorySchema.index({ firstSeenAt: -1, severity: 1 })
 storeProblemHistorySchema.index({ status: 1, firstSeenAt: -1 })
 
