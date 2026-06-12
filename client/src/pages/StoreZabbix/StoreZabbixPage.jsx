@@ -669,34 +669,36 @@ const INLINE_CSS = `
 .rop-subtab.active::after{content:'';position:absolute;left:0;right:0;bottom:0;height:2px;background:var(--accent)}
 .rop-subtab-count{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:18px;padding:0 6px;border-radius:999px;background:var(--bg);border:1px solid var(--border);color:var(--text3);font-size:10px;font-weight:700;font-family:var(--mono)}
 .rop-subtab.active .rop-subtab-count{background:rgba(59,130,246,.10);border-color:rgba(59,130,246,.25);color:var(--accent)}
-.rop-kpi-grid{display:grid;grid-template-columns:minmax(280px,1.6fr) repeat(5,minmax(150px,1fr));gap:12px}
-@media (max-width:1280px){.rop-kpi-grid{grid-template-columns:repeat(3,1fr)}.rop-hero{grid-column:1/-1}}
-@media (max-width:720px){.rop-kpi-grid{grid-template-columns:repeat(2,1fr)}}
-.rop-hero{position:relative;display:flex;flex-direction:column;justify-content:space-between;padding:18px 20px;border-radius:12px;border:1px solid var(--border);background:linear-gradient(135deg,var(--bg2) 0%,var(--bg3) 100%);min-height:148px;overflow:hidden}
-.rop-hero::before{content:'';position:absolute;top:0;right:0;width:200px;height:200px;background:radial-gradient(circle at top right,rgba(59,130,246,.10),transparent 65%);pointer-events:none}
-.rop-hero-label{font-size:11px;color:var(--text3);font-weight:600;letter-spacing:.2px;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif)}
-.rop-hero-headline{display:flex;align-items:baseline;gap:8px;margin-top:6px}
-.rop-hero-value{font-size:42px;font-weight:700;line-height:1;font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-1px}
-.rop-hero-unit{font-size:18px;color:var(--text2);font-weight:600;font-family:var(--mono)}
-.rop-hero-bar{position:relative;height:8px;background:var(--bg4);border-radius:4px;overflow:hidden;margin-top:14px}
-.rop-hero-bar-fill{position:absolute;left:0;top:0;bottom:0;border-radius:4px;transition:width .4s ease}
-.rop-hero-bar-target{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--text);opacity:.55}
-.rop-hero-foot{display:flex;justify-content:space-between;align-items:baseline;margin-top:10px;font-size:11px;color:var(--text3);font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif);gap:8px;flex-wrap:wrap}
+.rop-kpi-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}
+@media (max-width:1280px){.rop-kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.rop-hero{grid-column:span 3}}
+@media (max-width:720px){.rop-kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.rop-hero{grid-column:span 2}}
+.rop-hero{position:relative;display:flex;align-items:center;gap:14px;padding:10px 14px;border-radius:10px;border:1px solid var(--border);background:linear-gradient(135deg,var(--bg2) 0%,var(--bg3) 100%);overflow:hidden;grid-column:span 2;min-height:0}
+.rop-hero::before{content:'';position:absolute;top:0;right:0;width:120px;height:120px;background:radial-gradient(circle at top right,rgba(59,130,246,.08),transparent 65%);pointer-events:none}
+.rop-hero-main{flex-shrink:0;min-width:0}
+.rop-hero-label{font-size:10px;color:var(--text3);font-weight:600;letter-spacing:.3px;text-transform:uppercase;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rop-hero-headline{display:flex;align-items:baseline;gap:4px;margin-top:2px}
+.rop-hero-value{font-size:26px;font-weight:700;line-height:1;font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.5px}
+.rop-hero-unit{font-size:14px;color:var(--text2);font-weight:600;font-family:var(--mono)}
+.rop-hero-side{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:6px}
+.rop-hero-bar{position:relative;height:6px;background:var(--bg4);border-radius:3px;overflow:hidden}
+.rop-hero-bar-fill{position:absolute;left:0;top:0;bottom:0;border-radius:3px;transition:width .4s ease}
+.rop-hero-bar-target{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--text);opacity:.55}
+.rop-hero-foot{display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--text3);font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif);gap:6px;flex-wrap:nowrap;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rop-hero-foot strong{color:var(--text2);font-weight:700}
-.rop-stat{position:relative;display:flex;flex-direction:column;justify-content:space-between;padding:16px 18px;border-radius:12px;border:1px solid var(--border);background:var(--bg2);min-height:148px;transition:border-color .2s,box-shadow .2s}
-.rop-stat:hover{border-color:var(--border2,var(--border));box-shadow:0 4px 12px rgba(0,0,0,.06)}
-.rop-stat-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
-.rop-stat-label{font-size:11px;color:var(--text3);font-weight:600;letter-spacing:.2px;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif);line-height:1.35}
-.rop-stat-icon{width:28px;height:28px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;font-size:13px;background:rgba(100,116,139,.10);color:var(--text3);flex-shrink:0}
-.rop-stat-value{font-size:30px;font-weight:700;line-height:1;color:var(--text);font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.5px;margin-top:6px}
-.rop-stat-foot{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text3);font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif);margin-top:auto;padding-top:10px;line-height:1.4}
+.rop-stat{position:relative;display:flex;flex-direction:column;justify-content:center;padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:var(--bg2);min-height:0;transition:border-color .2s,box-shadow .2s;gap:2px}
+.rop-stat:hover{border-color:var(--border2,var(--border));box-shadow:0 2px 8px rgba(0,0,0,.05)}
+.rop-stat-head{display:flex;align-items:center;justify-content:space-between;gap:6px}
+.rop-stat-label{font-size:10px;color:var(--text3);font-weight:600;letter-spacing:.2px;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rop-stat-icon{width:20px;height:20px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;background:rgba(100,116,139,.10);color:var(--text3);flex-shrink:0}
+.rop-stat-value{font-size:22px;font-weight:700;line-height:1.1;color:var(--text);font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.3px}
+.rop-stat-foot{font-size:10px;color:var(--text3);font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif);line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rop-stat-foot--ok{color:#16a34a}
 .rop-stat-foot--warn{color:#ea580c}
 .rop-stat-foot--bad{color:#dc2626}
 .rop-stat--ok .rop-stat-icon{background:rgba(34,197,94,.12);color:#16a34a}
 .rop-stat--warn .rop-stat-icon{background:rgba(234,179,8,.14);color:#b45309}
 .rop-stat--bad .rop-stat-icon{background:rgba(239,68,68,.12);color:#dc2626}
-.rop-status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
+.rop-status-dot{width:6px;height:6px;border-radius:50%;display:inline-block;flex-shrink:0}
 `
 
 /* ─── Shared components ─── */
@@ -3591,10 +3593,10 @@ export default function StoreZabbixPage({
                   return (
                     <div className="rop-kpi-grid">
                       <div className="rop-hero">
-                        <div>
+                        <div className="rop-hero-main">
                           <div className="rop-hero-label">
-                            Business-hours availability
-                            {summary.bhMinutesPerStore > 0 ? ` · ${(summary.bhMinutesPerStore / 60).toFixed(1)} h window` : ''}
+                            BH availability
+                            {summary.bhMinutesPerStore > 0 ? ` · ${(summary.bhMinutesPerStore / 60).toFixed(1)}h` : ''}
                           </div>
                           <div className="rop-hero-headline">
                             <span className="rop-hero-value" style={{ color: uptimeColor(summary.avgUptimePct) }}>
@@ -3603,7 +3605,7 @@ export default function StoreZabbixPage({
                             <span className="rop-hero-unit">%</span>
                           </div>
                         </div>
-                        <div>
+                        <div className="rop-hero-side">
                           <div className="rop-hero-bar">
                             <div className="rop-hero-bar-fill" style={{
                               width: `${Math.max(0, Math.min(100, summary.avgUptimePct ?? 0))}%`,
@@ -3615,20 +3617,16 @@ export default function StoreZabbixPage({
                           </div>
                           <div className="rop-hero-foot">
                             <span>
-                              <span className="rop-status-dot" style={{ background: slaMet ? '#16a34a' : '#dc2626', marginRight: 6 }} />
+                              <span className="rop-status-dot" style={{ background: slaMet ? '#16a34a' : '#dc2626', marginRight: 4 }} />
                               <strong style={{ color: slaMet ? '#16a34a' : '#dc2626' }}>{slaMet ? 'Meeting SLA' : 'Below SLA'}</strong>
                               {slaDelta != null && (
-                                <span style={{ marginLeft: 6, color: 'var(--text3)' }}>
+                                <span style={{ marginLeft: 4, color: 'var(--text3)' }}>
                                   ({slaDelta >= 0 ? '+' : ''}{slaDelta.toFixed(2)}%)
                                 </span>
                               )}
-                              <span style={{ marginLeft: 8, color: 'var(--text3)' }}>
-                                · target {slaTarget.toFixed(2)}%
-                              </span>
                             </span>
                             <span>
-                              <strong>{summary.reportingStores}</strong>
-                              <span style={{ color: 'var(--text3)' }}>/{summary.totalStores} reporting</span>
+                              <strong>{summary.reportingStores}</strong>/{summary.totalStores}
                             </span>
                           </div>
                         </div>
@@ -3636,60 +3634,60 @@ export default function StoreZabbixPage({
 
                       <div className={`rop-stat rop-stat--${belowSlaTone}`}>
                         <div className="rop-stat-head">
-                          <span className="rop-stat-label">Stores below SLA</span>
+                          <span className="rop-stat-label">Below SLA</span>
                           <span className="rop-stat-icon">⚠</span>
                         </div>
                         <div className="rop-stat-value">{summary.storesBelowSla}</div>
                         <div className={`rop-stat-foot ${summary.storesBelowSla > 0 ? 'rop-stat-foot--warn' : 'rop-stat-foot--ok'}`}>
-                          {summary.storesAboveSla} above SLA
+                          {summary.storesAboveSla} above
                         </div>
                       </div>
 
                       <div className={`rop-stat rop-stat--${offlineTone}`}>
                         <div className="rop-stat-head">
-                          <span className="rop-stat-label">Currently offline</span>
+                          <span className="rop-stat-label">Offline now</span>
                           <span className="rop-stat-icon">●</span>
                         </div>
                         <div className="rop-stat-value">{summary.storesCurrentlyOffline}</div>
                         <div className={`rop-stat-foot ${summary.storesCurrentlyOffline > 0 ? 'rop-stat-foot--bad' : 'rop-stat-foot--ok'}`}>
                           {summary.storesCurrentlyOffline > 0
-                            ? `${((summary.storesCurrentlyOffline / Math.max(summary.totalStores, 1)) * 100).toFixed(1)}% of fleet`
-                            : 'All stores online'}
+                            ? `${((summary.storesCurrentlyOffline / Math.max(summary.totalStores, 1)) * 100).toFixed(1)}% fleet`
+                            : 'All online'}
                         </div>
                       </div>
 
                       <div className={`rop-stat rop-stat--${downtimeTone}`}>
                         <div className="rop-stat-head">
-                          <span className="rop-stat-label">Avg BH downtime</span>
+                          <span className="rop-stat-label">Avg downtime</span>
                           <span className="rop-stat-icon">⏱</span>
                         </div>
                         <div className="rop-stat-value">{fmtMins(summary.avgDowntimeMin)}</div>
                         <div className="rop-stat-foot">
-                          per store · {summary.totalStores} stores
+                          per store · BH
                         </div>
                       </div>
 
                       <div className={`rop-stat rop-stat--${discTone}`}>
                         <div className="rop-stat-head">
-                          <span className="rop-stat-label">Disconnect events</span>
+                          <span className="rop-stat-label">Disconnects</span>
                           <span className="rop-stat-icon">↯</span>
                         </div>
                         <div className="rop-stat-value">{summary.totalDisconnects.toLocaleString()}</div>
                         <div className="rop-stat-foot">
-                          {summary.totalStores ? `${disconnectAvg.toFixed(2)} avg / store` : '—'}
+                          {summary.totalStores ? `${disconnectAvg.toFixed(2)}/store` : '—'}
                         </div>
                       </div>
 
                       <div className="rop-stat">
                         <div className="rop-stat-head">
-                          <span className="rop-stat-label">Mean time to recovery</span>
+                          <span className="rop-stat-label">MTTR</span>
                           <span className="rop-stat-icon">↺</span>
                         </div>
                         <div className="rop-stat-value">
                           {summary.mttrMin != null ? fmtMins(summary.mttrMin) : '—'}
                         </div>
                         <div className="rop-stat-foot">
-                          across resolved outages
+                          resolved outages
                         </div>
                       </div>
                     </div>
