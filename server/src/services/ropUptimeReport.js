@@ -34,7 +34,13 @@ import {
   isRpGroupKey,
 } from '../utils/storeRopGrouping.js'
 
-const OFFLINE_CODE = 'offline'
+import {
+  OFFLINE_CODE,
+  normaliseBusinessHours,
+  makeBhChecker,
+  bhMinutesInInterval,
+  mapStoreDisconnectEvent,
+} from './storeDisconnectEvents.js'
 const REPORT_CACHE_MS = 60_000
 const _reportCache = new Map()
 
@@ -89,39 +95,20 @@ async function fetchActiveOfflineRecords(storeTags) {
   }).select('storeTag hostname serial firstSeenAt lastSeenAt').lean()
 }
 
-/* ─── BH minute math ───────────────────────────────────────────────── */
+/* ─── BH minute math (storeDisconnectEvents.js) ───────────────────── */
 
-function makeBhChecker(bh) {
-  if (!bh || !bh.weekdays?.length) return null
-  const weekdays = new Set(bh.weekdays.map(Number))
-  const startH = bh.startHour
-  const endH = bh.endHour
-  const tzOff = (bh.tzOffsetMinutes || 0) * 60_000
-  return (tsMs) => {
-    const local = new Date(tsMs + tzOff)
-    const day = local.getUTCDay()
-    if (!weekdays.has(day)) return false
-    const hour = local.getUTCHours()
-    if (startH <= endH) return hour >= startH && hour < endH
-    return hour >= startH || hour < endH
-  }
+const ROP_DEFAULT_BH = { startHour: 9, endHour: 18, weekdays: [0, 1, 2, 3, 4, 5, 6], tzOffsetMinutes: 0 }
+
+function normaliseBh(bh) {
+  return normaliseBusinessHours(bh, ROP_DEFAULT_BH)
 }
 
-/** BH minutes inside a half-open interval [aMs, bMs). */
-function bhMinutesInInterval(aMs, bMs, isBh) {
-  if (bMs <= aMs) return 0
-  if (!isBh) return Math.floor((bMs - aMs) / 60_000)
-  let total = 0
-  let cursor = aMs
-  while (cursor < bMs) {
-    const hourStart = Math.floor(cursor / 3_600_000) * 3_600_000
-    const hourEnd = hourStart + 3_600_000
-    const segEnd = Math.min(bMs, hourEnd)
-    if (isBh(cursor)) total += Math.floor((segEnd - cursor) / 60_000)
-    cursor = segEnd
-  }
-  return total
+/** Map one StoreProblemHistory offline record to a disconnect event (BH-aware). */
+function mapRecordToDisconnectEvent(r, ctx) {
+  return mapStoreDisconnectEvent(r, ctx)
 }
+
+/* ─── day list builder (timezone-aligned local midnights) ─────────── */
 
 /** BH minutes in a single calendar day [dayMs, dayMs+86400000), clipped to the
  *  active window [fromMs, toMs). Clipping both ends matters for partial-day
@@ -163,22 +150,6 @@ function buildDayList(fromMs, toMs, tzMinutes = 0) {
   }
   return days
 }
-
-/* ─── normalise inputs ─────────────────────────────────────────────── */
-
-function normaliseBh(bh) {
-  const def = { startHour: 9, endHour: 18, weekdays: [0, 1, 2, 3, 4, 5, 6], tzOffsetMinutes: 0 }
-  if (!bh || typeof bh !== 'object') return def
-  const startHour = clampHour(bh.startHour ?? def.startHour)
-  const endHour = clampHour(bh.endHour ?? def.endHour)
-  let weekdays = Array.isArray(bh.weekdays)
-    ? [...new Set(bh.weekdays.map((d) => Number(d)).filter((d) => Number.isFinite(d) && d >= 0 && d <= 6))]
-    : def.weekdays.slice()
-  if (!weekdays.length) weekdays = def.weekdays.slice()
-  const tzOffsetMinutes = Number.isFinite(Number(bh.tzOffsetMinutes)) ? Number(bh.tzOffsetMinutes) : def.tzOffsetMinutes
-  return { startHour, endHour, weekdays: weekdays.sort((a, b) => a - b), tzOffsetMinutes }
-}
-function clampHour(h) { const n = Number(h); return Number.isFinite(n) ? Math.max(0, Math.min(24, Math.round(n))) : 0 }
 
 /* ─── public entry point ───────────────────────────────────────────── */
 
@@ -563,37 +534,6 @@ export async function fetchRopUptimeReport(opts = {}) {
     if (oldest) _reportCache.delete(oldest[0])
   }
   return data
-}
-
-/** Map one StoreProblemHistory offline record to a disconnect event (BH-aware). */
-function mapRecordToDisconnectEvent(r, { fromMsN, toMsN, isBh, bhActive, nowMs }) {
-  const disconnectAtMs = new Date(r.firstSeenAt).getTime()
-  const backUpAtMs = r.resolvedAt ? new Date(r.resolvedAt).getTime() : null
-  const endMs = backUpAtMs != null
-    ? backUpAtMs
-    : (r.status === 'active' ? nowMs : disconnectAtMs)
-  const durationMs = endMs - disconnectAtMs
-
-  const segStart = Math.max(disconnectAtMs, fromMsN)
-  const segEnd = Math.min(endMs, toMsN)
-  const bhDurationMin = (segEnd > segStart && isBh)
-    ? bhMinutesInInterval(segStart, segEnd, isBh)
-    : 0
-
-  if (bhActive && bhDurationMin <= 0) return null
-
-  return {
-    storeTag: r.storeTag,
-    hostname: r.hostname || '',
-    disconnectAt: r.firstSeenAt,
-    disconnectAtMs,
-    backUpAt: r.resolvedAt,
-    backUpAtMs,
-    durationMin: durationMs != null ? Math.round(durationMs / 60_000) : null,
-    bhDurationMin,
-    status: r.status,
-    stillOffline: r.status === 'active',
-  }
 }
 
 /** Per-store offline / disconnect timeline for ROP dashboard modal. */

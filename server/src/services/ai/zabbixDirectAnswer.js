@@ -1,5 +1,6 @@
 import { createZabbixClient } from '../../services/zabbix.js'
 import { fetchAllMonitoredHosts, ZABBIX_HOST_FETCH_MAX } from '../../services/zabbixHostFetch.js'
+import { buildStoreDisconnectMcpContext } from '../../services/storeDisconnectEvents.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 import { isInfluxStoreConfigured, fetchStoreSnapshot, buildOverviewSummary } from '../influxStore.js'
 import { extractStoreCode, extractStoreHostname, isStoreHostnamePortalQuery, shouldUseStoreCodeAlias } from './queryContext.js'
@@ -2484,10 +2485,33 @@ export async function buildZabbixInfraContext(userMessage = '') {
 }
 
 export async function buildStoreZabbixContext(userMessage = '') {
-  return buildZabbixContextFromClient({
-    moduleId: 'storeZabbix',
-    envName: 'STORE_ZABBIX',
-    sourceLabel: 'Store Zabbix',
-    missingError: 'STORE_ZABBIX_URL + STORE_ZABBIX_API_TOKEN not configured',
-  }, userMessage)
+  const [disconnectBlock, zabbixBlock] = await Promise.all([
+    buildStoreDisconnectMcpContext(userMessage),
+    buildZabbixContextFromClient({
+      moduleId: 'storeZabbix',
+      envName: 'STORE_ZABBIX',
+      sourceLabel: 'Store Zabbix',
+      missingError: 'STORE_ZABBIX_URL + STORE_ZABBIX_API_TOKEN not configured',
+    }, userMessage),
+  ])
+
+  const zabbixConfigured = zabbixBlock.configured !== false
+  const zabbixError = zabbixBlock.error || null
+
+  return {
+    ...zabbixBlock,
+    ...disconnectBlock,
+    module: 'storeZabbix',
+    configured: disconnectBlock.disconnectConfigured !== false || zabbixConfigured,
+    zabbixConfigured,
+    zabbixReachable: zabbixConfigured && !zabbixError,
+    zabbixError,
+    note: [
+      disconnectBlock.disconnectNote,
+      zabbixConfigured && !zabbixError
+        ? 'Zabbix host metrics (ping, interfaces, CPU/RAM) from STORE_ZABBIX API.'
+        : (zabbixError || 'Zabbix metrics unavailable — set STORE_ZABBIX_URL + STORE_ZABBIX_API_TOKEN in server .env.'),
+      'Disconnect events/activeDisconnectEvents use Mongo BH rules (same as Store Zabbix ROP tab) and do not require Zabbix.',
+    ].filter(Boolean).join(' '),
+  }
 }

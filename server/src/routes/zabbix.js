@@ -167,22 +167,35 @@ function sendZabbixError(res, e) {
 }
 
 router.get('/config', async (req, res) => {
-  const url = getUrl()
-  const token = getZabbixToken()
-  const configured = isZabbixConfigured()
-  let probe = null
-  if (configured) {
-    probe = await zabbixPing({ timeoutMs: 8000 })
+  try {
+    const url = getUrl()
+    const token = getZabbixToken()
+    const configured = isZabbixConfigured()
+    let probe = null
+    if (configured) {
+      probe = await zabbixPing({ timeoutMs: 8000 })
+    }
+    res.json({
+      configured,
+      reachable: probe ? probe.ok : null,
+      probe,
+      zabbixUrl: url ? url.replace(/\/api_jsonrpc\.php.*$/i, '') : null,
+      authMode: getAuthMode(),
+      tokenPresent: Boolean(token),
+      tokenSuffix: token ? `…${token.slice(-6)}` : null,
+      urlEnv,
+      tokenEnv,
+    })
+  } catch (e) {
+    res.status(200).json({
+      configured: isZabbixConfigured(),
+      reachable: false,
+      probe: { ok: false, message: e?.message || String(e), code: e?.code || 'CONFIG_ERROR' },
+      zabbixUrl: getUrl() ? getUrl().replace(/\/api_jsonrpc\.php.*$/i, '') : null,
+      urlEnv,
+      tokenEnv,
+    })
   }
-  res.json({
-    configured,
-    reachable: probe ? probe.ok : null,
-    probe,
-    zabbixUrl: url ? url.replace(/\/api_jsonrpc\.php.*$/i, '') : null,
-    authMode: getAuthMode(),
-    tokenPresent: Boolean(token),
-    tokenSuffix: token ? `…${token.slice(-6)}` : null,
-  })
 })
 
 router.get('/diagnostic', async (req, res) => {

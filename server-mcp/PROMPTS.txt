@@ -18,7 +18,7 @@ Tools you have access to (auto-grown from NetPulse on connect):
   netpulse_context         -- raw structured snapshot (multi-module)
   netpulse_storeMonitor    -- live InfluxDB store snapshot
   netpulse_storeProblems   -- Mongo store-problem lifecycle + disconnect events
-  netpulse_storeZabbix     -- Store Zabbix: ping, interfaces, CPU/RAM, 24h trends
+  netpulse_storeZabbix     -- Store Zabbix: metrics + BH disconnect events (ROP/Mongo)
   netpulse_soc             -- firewall / SOC, last hour, Elasticsearch
   netpulse_sentinelXdr     -- SentinelOne XDR / Singularity Data Lake
   netpulse_zabbixInfra     -- infra Zabbix: ping, host avail, traffic, CPU/RAM
@@ -42,7 +42,7 @@ netpulse_query alone. Available tools:
   netpulse_query, netpulse_context        (cross-module)
   netpulse_storeMonitor                   (live InfluxDB store snapshot)
   netpulse_storeProblems                  (Mongo store-problem lifecycle + disconnect events)
-  netpulse_storeZabbix                    (Store Zabbix: ping, interfaces, CPU/RAM, trends)
+  netpulse_storeZabbix                    (Store Zabbix: metrics + BH disconnect events)
   netpulse_soc                            (firewall / SOC, last hour, ES)
   netpulse_sentinelXdr                    (SentinelOne XDR data lake)
   netpulse_zabbixInfra                    (infra Zabbix: ping, host avail, traffic, CPU/RAM)
@@ -207,12 +207,14 @@ issues). Use netpulse_storeMonitor.
   SECTION 7 — netpulse_storeProblems  (store-problem lifecycle, Mongo, ~2 min snapshot)
 ================================================================================
 
-IMPORTANT — disconnect events table:
-  Columns match the Store Monitor UI: disconnectedAt, backUpAt, bhDurationMin
-  (business hours 09:00–18:00 IST), totalDurationMin, status, stillOffline.
-  Global query returns newest 120 offline events (14-day window). If
-  disconnectEventsTruncated is true, many stores are offline and your target
-  store may be missing — re-query WITH the hostname in the question.
+IMPORTANT — disconnect events table (storeProblems ONLY — not storeZabbix):
+  Source: Mongo StoreProblemHistory (same as Store Zabbix ROP tab), BH 09:00–18:00 IST.
+  Columns: disconnectedAt, backUpAt, bhDurationMin, totalDurationMin, stillOffline.
+  activeDisconnectEvents[] = currently offline sessions that overlap BH.
+  Events with bhDurationMin=0 are EXCLUDED (same rule as ROP REST).
+  Do NOT infer disconnects from storeZabbix availability.unavailable — that is Zabbix gear status.
+  Global query returns newest 120 BH-filtered events (14-day window). If
+  disconnectEventsTruncated is true, re-query WITH the hostname in the question.
 
 ----------------------------------------------------------------------
 Use netpulse_storeProblems to list stores that disconnected in the last
@@ -251,8 +253,15 @@ List them with disconnectedAt and bhDurationMin.
 ----------------------------------------------------------------------
 
 ================================================================================
-  SECTION 8 — netpulse_storeZabbix  (Store Zabbix: hosts, ping, CPU/RAM, ROP disconnects)
+  SECTION 8 — netpulse_storeZabbix  (metrics + BH disconnect events)
 ================================================================================
+
+IMPORTANT — disconnect events on storeZabbix (works even if Zabbix API is down):
+  disconnectEvents[] / activeDisconnectEvents[] — Mongo BH filter (09:00–18:00 IST).
+  Same source as Store Zabbix → ROP tab → click store → Disconnect Events table.
+  zabbixConfigured=false only means host metrics unavailable; disconnect block still works.
+  Fields: disconnectedAt, backUpAt, bhDurationMin, totalDurationMin, stillOffline.
+  Events with bhDurationMin=0 excluded. Do NOT use availability.unavailable as disconnects.
 
 IMPORTANT — CPU / Memory dual-source:
   * hosts[].cpu / hosts[].memory  — Zabbix % items (system.cpu.util,

@@ -1,6 +1,11 @@
 import { getESClient } from '../../config/elasticsearch.js'
 import StoreProblemHistory from '../../models/StoreProblemHistory.js'
 import {
+  OFFLINE_CODE,
+  buildStoreDisconnectMcpContext,
+  buildDisconnectHostScope,
+} from '../storeDisconnectEvents.js'
+import {
   isInfluxStoreConfigured,
   fetchStoreSnapshot,
   fetchStoreIssuesLite,
@@ -28,8 +33,6 @@ import {
   hasExplicitTimeRange,
   wantsCrashEventLog,
   extractStoreHostname,
-  extractStoreCode,
-  shouldUseStoreCodeAlias,
 } from './queryContext.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 
@@ -51,7 +54,7 @@ export const AI_CONTEXT_MODULES = [
     label: 'Problem tracker',
     pageKey: 'storeMonitor',
     freshness: 'periodic',
-    description: 'MongoDB lifecycle records; background job every 2 min',
+    description: 'MongoDB store disconnect events (BH-filtered) and active problem lifecycle; ~2 min snapshot',
   },
   {
     id: 'soc',
@@ -79,7 +82,7 @@ export const AI_CONTEXT_MODULES = [
     label: 'Store Zabbix',
     pageKey: 'storeZabbix',
     freshness: 'live',
-    description: 'Store-tier Zabbix host availability, ping, and interface traffic at send time',
+    description: 'Store Zabbix metrics + BH-filtered disconnect events (ROP/Mongo); Zabbix API optional for disconnects',
   },
   {
     id: 'orian',
@@ -97,6 +100,7 @@ const CRASH_KEYWORDS = /\b(crash|crashed|crashes|crahed|app crash|app hang|hangs
 const SOC_KEYWORDS = /\b(firewall|fortigate|deny|denied|soc|intrusion|utm|ips|traffic spike|blocked)\b/i
 const NOC_KEYWORDS = /\b(cisco|switch|interface|noc|vlan|mac flap|updown|config change)\b/i
 const OVERVIEW_KEYWORDS = /\b(summary|status|overview|how many|show me|list|top \d+|worst|hostname.wise|hostname-wise)\b/i
+const DISCONNECT_KEYWORDS = /\b(disconnect\w*|disconn\w*|went down|back up|backup at|bh duration|outage session|still offline)\b/i
 
 /**
  * @param {string} message
@@ -140,6 +144,10 @@ export function suggestContextModules(message, allowedPages, ctx = null) {
       modules.add('storeMonitor')
       if (!CRASH_KEYWORDS.test(text)) modules.add('storeProblems')
     }
+  }
+  if (pages.has('storeMonitor') && DISCONNECT_KEYWORDS.test(text)) {
+    modules.add('storeProblems')
+    if (pages.has('storeZabbix')) modules.add('storeZabbix')
   }
   if (pages.has('soc') && SOC_KEYWORDS.test(text)) {
     modules.add('soc')
@@ -410,10 +418,6 @@ async function buildStoreMonitorContext(staleMinutes = 10, detail = 'standard') 
   }
 }
 
-function escapeMongoRegex(text) {
-  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
 /**
  * Build a Mongo $or filter when the question names a store hostname/tag.
  * LKST793 resolves to RP793-* / LK793-* via store-code alias (LKST only).
@@ -421,46 +425,15 @@ function escapeMongoRegex(text) {
  * @returns {{ hostname: string, code: string | null, filter: object } | null}
  */
 function buildStoreProblemHostFilter(userMessage) {
-  const hostname = extractStoreHostname(userMessage)
-  if (!hostname) return null
-
-  const escaped = escapeMongoRegex(hostname)
-  const or = [
-    { hostname: new RegExp(escaped, 'i') },
-    { storeTag: new RegExp(escaped, 'i') },
-  ]
-
-  const code = extractStoreCode(userMessage)
-  if (code && shouldUseStoreCodeAlias(userMessage)) {
-    or.push(
-      { hostname: new RegExp(`^RP0*${code}(?:-|$)`, 'i') },
-      { hostname: new RegExp(`^LK0*${code}(?:-|$)`, 'i') },
-      { storeTag: new RegExp(`^RP0*${code}(?:_|$)`, 'i') },
-      { storeTag: new RegExp(`^LK0*${code}(?:_|$)`, 'i') },
-      { storeTag: new RegExp(`^LKST0*${code}(?:_|$)?`, 'i') },
-    )
-  } else if (code) {
-    const prefix = hostname.replace(/-.*$/, '')
-    const prefixEsc = escapeMongoRegex(prefix)
-    or.push(
-      { hostname: new RegExp(`^${prefixEsc}(?:-|$)`, 'i') },
-      { storeTag: new RegExp(prefixEsc, 'i') },
-    )
-  }
-
-  return { hostname, code, filter: { $or: or } }
+  return buildDisconnectHostScope(userMessage)
 }
 
 async function buildStoreProblemsContext(userMessage = '') {
   const fetchedAt = new Date().toISOString()
   const tracker = getProblemSnapshotStatus()
   const intervalMin = Math.round((tracker.intervalMs || 120000) / 60000)
-  const nowMs = Date.now()
   const hostScope = buildStoreProblemHostFilter(userMessage)
-  // Global snapshot stays bounded; store-scoped queries widen window/limit.
-  const DISCONNECT_LOOKBACK_DAYS = hostScope ? 30 : 14
-  const DISCONNECT_EVENT_LIMIT = hostScope ? 100 : 120
-  const disconnectSince = new Date(nowMs - DISCONNECT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
+  const disconnectBlock = await buildStoreDisconnectMcpContext(userMessage)
 
   if (!isInfluxStoreConfigured()) {
     return {
@@ -469,101 +442,40 @@ async function buildStoreProblemsContext(userMessage = '') {
       fetchedAt,
       configured: false,
       error: 'InfluxDB not configured',
+      ...disconnectBlock,
     }
   }
 
   const activeQuery = { status: 'active' }
-  if (hostScope) Object.assign(activeQuery, hostScope.filter)
+  if (hostScope?.filter) Object.assign(activeQuery, hostScope.filter)
 
-  const disconnectQuery = {
-    code: 'offline',
-    firstSeenAt: { $gte: disconnectSince },
-  }
-  if (hostScope) Object.assign(disconnectQuery, hostScope.filter)
-
-  const [active, disconnectRaw] = await Promise.all([
-    StoreProblemHistory.find(activeQuery)
-      .sort({ severity: 1, lastSeenAt: -1 })
-      .limit(hostScope ? 100 : 50)
-      .select({
-        hostname: 1,
-        storeTag: 1,
-        code: 1,
-        severity: 1,
-        message: 1,
-        online: 1,
-        connState: 1,
-        firstSeenAt: 1,
-        lastSeenAt: 1,
-      })
-      .lean(),
-    // "Disconnect Events" table rows: offline lifecycle sessions with start/end.
-    // Matches UI semantics: disconnected time + back-up time + BH duration + total.
-    StoreProblemHistory.find(disconnectQuery)
-      .sort({ firstSeenAt: -1 })
-      .limit(DISCONNECT_EVENT_LIMIT)
-      .select({
-        hostname: 1,
-        storeTag: 1,
-        firstSeenAt: 1,
-        resolvedAt: 1,
-        status: 1,
-      })
-      .lean(),
-  ])
-
-  const bh = normaliseStoreBusinessHours({
-    startHour: 9,
-    endHour: 18,
-    weekdays: [0, 1, 2, 3, 4, 5, 6],
-    // NetPulse ops are typically interpreted in IST unless a report override is passed.
-    tzOffsetMinutes: 330,
-  })
-  const isBh = makeStoreBhChecker(bh)
-
-  const disconnectEvents = disconnectRaw.map((r) => {
-    const disconnectAtMs = new Date(r.firstSeenAt).getTime()
-    const backUpAtMs = r.resolvedAt ? new Date(r.resolvedAt).getTime() : null
-    const endMs = backUpAtMs != null ? backUpAtMs : nowMs
-    const totalDurationMin = Math.max(0, Math.round((endMs - disconnectAtMs) / 60000))
-    const bhDurationMin = isBh ? bhMinutesInInterval(disconnectAtMs, endMs, isBh) : totalDurationMin
-    return {
-      hostname: r.hostname || '',
-      storeTag: r.storeTag || '',
-      disconnectedAt: r.firstSeenAt,
-      backUpAt: r.resolvedAt,
-      status: r.status,
-      stillOffline: r.status === 'active',
-      bhDurationMin,
-      totalDurationMin,
-    }
-  })
-
-  const disconnectEventsTruncated = !hostScope && disconnectRaw.length >= DISCONNECT_EVENT_LIMIT
+  const active = await StoreProblemHistory.find(activeQuery)
+    .sort({ severity: 1, lastSeenAt: -1 })
+    .limit(hostScope ? 100 : 50)
+    .select({
+      hostname: 1,
+      storeTag: 1,
+      code: 1,
+      severity: 1,
+      message: 1,
+      online: 1,
+      connState: 1,
+      firstSeenAt: 1,
+      lastSeenAt: 1,
+    })
+    .lean()
 
   return {
     module: 'storeProblems',
     freshness: 'periodic',
     fetchedAt,
     configured: true,
-    source: 'MongoDB StoreProblemHistory',
+    source: disconnectBlock.disconnectSource || `MongoDB StoreProblemHistory (code='${OFFLINE_CODE}')`,
     snapshotIntervalMinutes: intervalMin,
     lastBackgroundSnapAt: tracker.lastSnapAt || null,
     activeProblemCount: active.length,
-    disconnectEventsWindowDays: DISCONNECT_LOOKBACK_DAYS,
-    disconnectEventsLimit: DISCONNECT_EVENT_LIMIT,
-    disconnectEventsFilter: hostScope
-      ? { hostname: hostScope.hostname, storeCode: hostScope.code, scoped: true }
-      : { scoped: false },
-    disconnectEventsTruncated,
-    businessHours: bh,
-    disconnectEventsCount: disconnectEvents.length,
-    disconnectEvents,
-    note: hostScope
-      ? `Disconnect events scoped to ${hostScope.hostname} (30-day window). Problem lifecycle updated by background job every ~${intervalMin} min.`
-      : disconnectEventsTruncated
-        ? `Showing newest ${DISCONNECT_EVENT_LIMIT} disconnect events (${DISCONNECT_LOOKBACK_DAYS}d window). Include a store hostname (e.g. LKST793) in your question for store-specific history. Updated every ~${intervalMin} min.`
-        : `Problem lifecycle updated by background job every ~${intervalMin} min (not live Influx).`,
+    ...disconnectBlock,
+    note: disconnectBlock.disconnectNote,
     activeProblems: active.map(r => ({
       hostname: r.hostname,
       storeTag: r.storeTag,
@@ -576,55 +488,6 @@ async function buildStoreProblemsContext(userMessage = '') {
       lastSeenAt: r.lastSeenAt,
     })),
   }
-}
-
-function clampHour(h) {
-  const n = Number(h)
-  return Number.isFinite(n) ? Math.max(0, Math.min(24, Math.round(n))) : 0
-}
-
-function normaliseStoreBusinessHours(bh) {
-  const def = { startHour: 9, endHour: 18, weekdays: [0, 1, 2, 3, 4, 5, 6], tzOffsetMinutes: 330 }
-  if (!bh || typeof bh !== 'object') return def
-  const startHour = clampHour(bh.startHour ?? def.startHour)
-  const endHour = clampHour(bh.endHour ?? def.endHour)
-  let weekdays = Array.isArray(bh.weekdays)
-    ? [...new Set(bh.weekdays.map((d) => Number(d)).filter((d) => Number.isFinite(d) && d >= 0 && d <= 6))]
-    : def.weekdays.slice()
-  if (!weekdays.length) weekdays = def.weekdays.slice()
-  const tzOffsetMinutes = Number.isFinite(Number(bh.tzOffsetMinutes)) ? Number(bh.tzOffsetMinutes) : def.tzOffsetMinutes
-  return { startHour, endHour, weekdays: weekdays.sort((a, b) => a - b), tzOffsetMinutes }
-}
-
-function makeStoreBhChecker(bh) {
-  if (!bh || !bh.weekdays?.length) return null
-  const weekdays = new Set(bh.weekdays.map(Number))
-  const startH = bh.startHour
-  const endH = bh.endHour
-  const tzOff = (bh.tzOffsetMinutes || 0) * 60_000
-  return (tsMs) => {
-    const local = new Date(tsMs + tzOff)
-    const day = local.getUTCDay()
-    if (!weekdays.has(day)) return false
-    const hour = local.getUTCHours()
-    if (startH <= endH) return hour >= startH && hour < endH
-    return hour >= startH || hour < endH
-  }
-}
-
-function bhMinutesInInterval(aMs, bMs, isBh) {
-  if (bMs <= aMs) return 0
-  if (!isBh) return Math.floor((bMs - aMs) / 60_000)
-  let total = 0
-  let cursor = aMs
-  while (cursor < bMs) {
-    const hourStart = Math.floor(cursor / 3_600_000) * 3_600_000
-    const hourEnd = hourStart + 3_600_000
-    const segEnd = Math.min(bMs, hourEnd)
-    if (isBh(cursor)) total += Math.floor((segEnd - cursor) / 60_000)
-    cursor = segEnd
-  }
-  return total
 }
 
 async function buildSocContext() {
@@ -1714,11 +1577,13 @@ export function buildContextPreview(context) {
   if (sp && sp.activeProblemCount != null) {
     preview.storeProblems = {
       activeProblemCount: sp.activeProblemCount,
+      activeDisconnectCount: sp.activeDisconnectCount,
       snapshotIntervalMinutes: sp.snapshotIntervalMinutes || 2,
       lastBackgroundSnapAt: sp.lastBackgroundSnapAt || null,
       disconnectEventsCount: sp.disconnectEventsCount,
       disconnectEventsFilter: sp.disconnectEventsFilter,
       disconnectEventsTruncated: sp.disconnectEventsTruncated,
+      bhApplied: sp.bhApplied,
     }
   }
   const soc = context?.modules?.soc
@@ -1749,10 +1614,15 @@ export function buildContextPreview(context) {
     }
   }
   const sz = context?.modules?.storeZabbix
-  if (sz?.availability || sz?.storeAgentMetrics || sz?.cpuMemoryMetricsState) {
+  if (sz?.availability || sz?.storeAgentMetrics || sz?.cpuMemoryMetricsState || sz?.disconnectEvents) {
     const cm = sz.cpuMemoryMetricsState
     preview.storeZabbix = {
       hostFilter: sz.hostFilter,
+      zabbixConfigured: sz.zabbixConfigured,
+      zabbixReachable: sz.zabbixReachable,
+      activeDisconnectCount: sz.activeDisconnectCount,
+      disconnectEventsCount: sz.disconnectEventsCount,
+      bhApplied: sz.bhApplied,
       monitoredHostTotal: sz.monitoredHostTotal ?? sz.availability?.total ?? null,
       hostsReturned: sz.hostsReturned ?? (sz.hosts || []).length,
       hostsListTruncated: sz.hostsListTruncated ?? false,
@@ -1796,6 +1666,8 @@ export function formatContextForPrompt(context) {
     '- If hostFilter is an IP and hosts[] is empty, say no Zabbix host matched that SNMP/management IP.',
     '- For storeZabbix: CPU/RAM can come from BOTH hosts[].cpu/memory (Zabbix) and storeAgentMetrics (Influx agent). Use cpuMemoryMetricsState.zabbix and cpuMemoryMetricsState.storeAgent; report each source separately when both exist.',
     '- For storeZabbix/zabbixInfra fleet counts: availability.total is the full inventory; hosts[] may be capped (see hostsListTruncated, monitoredHostTotal, hostsReturned). Quote availability.total for "how many hosts" — not hosts.length.',
+    '- For storeZabbix: disconnectEvents + activeDisconnectEvents are BH-filtered Mongo (ROP tab) and work even when Zabbix API is down. zabbixConfigured/zabbixError describe STORE_ZABBIX metrics only.',
+    '- For storeProblems disconnect events: same BH fields as storeZabbix disconnect block. Do NOT use Zabbix availability.unavailable as disconnect events.',
     '- For 24h CPU/memory trend graphs, use cpuMemoryHistory.hosts[].cpu/memory.points (Zabbix history.get / trend.get). REST equivalent: GET /api/store-zabbix/items/{itemId}/history?from=&to=',
     '- For orian (SolarWinds Orion): summary.nodes/alerts are fleet counts by status/severity; nodes[] has cpu, memory, responseTime, packetLoss; nodeDetail has interfaces (inBps/outBps) when a single node matched nodeFilter.',
     '',
