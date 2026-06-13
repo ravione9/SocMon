@@ -9,7 +9,7 @@ import {
   fetchNodeSnapshot,
   findNodeIdByCaption,
 } from '../solarwindsNodeSnapshot.js'
-import { extractIpv4 } from './queryContext.js'
+import { extractIpv4 } from './zabbixDirectAnswer.js'
 
 const NODE_STATUS = {
   0: 'Unknown', 1: 'Up', 2: 'Down', 3: 'Warning',
