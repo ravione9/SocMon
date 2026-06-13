@@ -1,0 +1,737 @@
+================================================================================
+  NETPULSE MCP — CLAUDE DESKTOP PROMPT LIBRARY
+  Last updated: 2026-06-12 (storeZabbix ROP disconnect BH filter, disconnect events, CPU/RAM, 24h trends)
+================================================================================
+
+How to use this file:
+  1. Open Claude Desktop, start a new chat.
+  2. Paste the SYSTEM PROMPT block once (top of every new chat).
+  3. Then paste any prompt block below as a user message. Each block between
+     two dashed lines (---) is one prompt — copy the full block.
+  4. Replace placeholders shown in <ANGLE-BRACKETS> with your real values
+     (e.g. <STORE-HOSTNAME>, <SITE-CODE>, <HH:MM>, <YOUR-EMAIL>).
+
+Tools you have access to (auto-grown from NetPulse on connect):
+  netpulse_meta            -- identity & access
+  netpulse_modules         -- dashboard catalog
+  netpulse_query           -- natural-language Q&A across modules
+  netpulse_context         -- raw structured snapshot (multi-module)
+  netpulse_storeMonitor    -- live InfluxDB store snapshot
+  netpulse_storeProblems   -- Mongo store-problem lifecycle + disconnect events
+  netpulse_storeZabbix     -- Store Zabbix: ping, interfaces, CPU/RAM, 24h trends
+  netpulse_soc             -- firewall / SOC, last hour, Elasticsearch
+  netpulse_sentinelXdr     -- SentinelOne XDR / Singularity Data Lake
+  netpulse_zabbixInfra     -- infra Zabbix: ping, host avail, traffic, CPU/RAM
+
+Built-in prompts:
+  noc_status_summary       -- preset NOC executive summary
+
+================================================================================
+  SECTION 1 — SYSTEM PROMPT (paste once at the top of every new chat)
+================================================================================
+
+----------------------------------------------------------------------
+You have an MCP server "netpulse" connected to a NetPulse NOC/SOC platform.
+Always prefer netpulse tools over guessing. For any question about live
+state, call a tool first and quote numbers from the tool output verbatim
+-- never invent hostnames, counts, or timestamps. If a question spans
+multiple modules, call each tool separately rather than relying on
+netpulse_query alone. Available tools:
+  netpulse_meta, netpulse_modules         (introspection)
+  netpulse_query, netpulse_context        (cross-module)
+  netpulse_storeMonitor                   (live InfluxDB store snapshot)
+  netpulse_storeProblems                  (Mongo store-problem lifecycle + disconnect events)
+  netpulse_storeZabbix                    (Store Zabbix: ping, interfaces, CPU/RAM, trends)
+  netpulse_soc                            (firewall / SOC, last hour, ES)
+  netpulse_sentinelXdr                    (SentinelOne XDR data lake)
+  netpulse_zabbixInfra                    (infra Zabbix: ping, host avail, traffic, CPU/RAM)
+
+Rules:
+  * Always include a store hostname/tag in the question when you need
+    store-specific data (e.g. LKST793, RP973). Short tags like RP911 work.
+  * LKSTxxxx aliases to RPxxxx in Store Zabbix host search (LKST only).
+  * CPU/RAM for store PCs may come from BOTH sources — report each:
+      - storeAgentMetrics / storeMonitor (Influx PowerShell agent)
+      - hosts[].cpu / hosts[].memory (Zabbix utilization items)
+  * For 24h CPU/memory trend graphs, use keywords: trend, graph, history,
+    24h — response includes cpuMemoryHistory.points.
+  * storeProblems global disconnect list is capped at 120 newest events;
+    include a hostname in the question for store-scoped history (30-day window).
+  * Store Zabbix ROP disconnect events use the same StoreProblemHistory source
+    but support custom BH filters via REST (see Section 8 — ROP disconnect).
+----------------------------------------------------------------------
+
+================================================================================
+  SECTION 2 — netpulse_meta  (identity & access)
+================================================================================
+
+----------------------------------------------------------------------
+Use netpulse_meta and tell me:
+1. The NetPulse user I'm authenticated as.
+2. The auth method.
+3. Which pages I'm allowed to see, as a bullet list.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Run netpulse_meta and verify my MCP session is using my expected NetPulse
+account. If the email doesn't match <YOUR-EMAIL>, raise a warning and stop.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Use netpulse_meta to confirm I have access to: storeMonitor, storeProblems,
+storeZabbix, soc, sentinelXdr, zabbixInfra. Tell me which (if any) are missing from my
+allowed pages.
+----------------------------------------------------------------------
+
+================================================================================
+  SECTION 3 — netpulse_modules  (dashboard catalog)
+================================================================================
+
+----------------------------------------------------------------------
+Call netpulse_modules and render every available NetPulse dashboard as a
+markdown table with columns: id, label, mcpTool, freshness, description.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Use netpulse_modules to list any NEW dashboards that have been added since
+the last time I asked. (Compare against the 6 standard ones: storeMonitor,
+storeProblems, storeZabbix, soc, sentinelXdr, zabbixInfra.)
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Run netpulse_modules and for each module suggest 3 starter questions that
+I should be able to answer well with this MCP. Be specific.
+----------------------------------------------------------------------
+
+================================================================================
+  SECTION 4 — netpulse_query  (natural-language Q&A across modules)
+================================================================================
+
+----------------------------------------------------------------------
+Use netpulse_query with question: "Give me a one-paragraph state-of-the-
+estate right now: outages, top alerts, top tickets, worst-affected sites."
+Quote all numbers.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_query: "How many stores are offline right now, and how many
+disconnected in the last 24 hours? Break down by ROP type."
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_query: "List every P1-grade incident currently open across NOC
+and SOC, with timestamp and affected scope."
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Run netpulse_query for: "Compare today's stores-down counts against
+yesterday's at the same hour-of-day; show the delta and call out which
+sites are repeat offenders."
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_query: "What changed in the last 15 minutes that I should care
+about?" Then summarize in 5 bullets.
+----------------------------------------------------------------------
+
+================================================================================
+  SECTION 5 — netpulse_context  (raw structured snapshot)
+================================================================================
+
+----------------------------------------------------------------------
+Call netpulse_context with modules ["storeMonitor", "storeProblems"] and
+no question. Show me the JSON keys at top level so I understand the shape.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Use netpulse_context with autoModules=true and question: "store outages
+in Mumbai region". Then walk me through which modules NetPulse picked
+and why.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_context modules=["storeZabbix","storeMonitor"] question:
+"<STORE-HOSTNAME> CPU memory status". Report BOTH Zabbix hosts[].cpu/memory
+AND storeAgentMetrics (Influx agent). Do not say metrics are Zabbix-only or
+Influx-only unless one source is actually empty in the JSON.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_context modules=["zabbixInfra","soc"] -- pull a fresh snapshot
+and produce a 10-bullet executive briefing.
+----------------------------------------------------------------------
+
+================================================================================
+  SECTION 6 — netpulse_storeMonitor  (live store state, InfluxDB)
+================================================================================
+
+----------------------------------------------------------------------
+Use netpulse_storeMonitor to list every store currently offline, ranked
+by how long they've been down. Top 20.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_storeMonitor with question: "stores in Bangalore region with
+packet loss > 5%". Return a table of hostname, site, current loss%,
+and last seen.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Call netpulse_storeMonitor and tell me which stores have CPU or memory
+pressure right now (>80%). Group by site.
+Note: these values come from the Influx store agent (cpu_usage_pct /
+mem_used_pct), not Store Zabbix. For Zabbix-monitored gear use
+netpulse_storeZabbix.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Use netpulse_storeMonitor for hostname <STORE-HOSTNAME>. Show its current
+connectivity, last heartbeat age, ISP path, and any active alerts.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_storeMonitor: "top 10 stores with highest latency in the last
+5 minutes". Quote the latency numbers.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Show me ROP+SD-WAN stores that are currently degraded (online but with
+issues). Use netpulse_storeMonitor.
+----------------------------------------------------------------------
+
+================================================================================
+  SECTION 7 — netpulse_storeProblems  (store-problem lifecycle, Mongo, ~2 min snapshot)
+================================================================================
+
+IMPORTANT — disconnect events table:
+  Columns match the Store Monitor UI: disconnectedAt, backUpAt, bhDurationMin
+  (business hours 09:00–18:00 IST), totalDurationMin, status, stillOffline.
+  Global query returns newest 120 offline events (14-day window). If
+  disconnectEventsTruncated is true, many stores are offline and your target
+  store may be missing — re-query WITH the hostname in the question.
+
+----------------------------------------------------------------------
+Use netpulse_storeProblems to list stores that disconnected in the last
+1 hour. Include disconnectedAt, backUpAt, bhDurationMin, totalDurationMin.
+If the list hits 120 rows, say so and mention truncation.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_storeProblems question: "disconnect events for <STORE-HOSTNAME>
+last 30 days". Render a table: hostname, disconnectedAt, backUpAt,
+bhDurationMin, totalDurationMin, stillOffline. Use IST for times.
+(LKST793 resolves to RP793 via alias.)
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_storeProblems question: "LKST793 disconnect history". If zero
+rows, say whether the store was scoped (disconnectEventsFilter.scoped) and
+whether it simply has no offline lifecycle records in the window.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Use netpulse_storeProblems and find recurring offenders: stores that
+disconnected >=3 times in the last 24 hours. Group by site, show counts.
+Include hostname in question if checking a specific store.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_storeProblems: "top sites by total store-disconnect minutes in
+the last 24h". Render as a bar-style ranked list using bhDurationMin.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Cross-check netpulse_storeProblems with my expectations: are there any
+active disconnects older than 30 minutes still flagged as ongoing?
+List them with disconnectedAt and bhDurationMin.
+----------------------------------------------------------------------
+
+================================================================================
+  SECTION 8 — netpulse_storeZabbix  (Store Zabbix: hosts, ping, CPU/RAM, ROP disconnects)
+================================================================================
+
+IMPORTANT — CPU / Memory dual-source:
+  * hosts[].cpu / hosts[].memory  — Zabbix % items (system.cpu.util,
+    vm.memory.utilization) on monitored store network gear
+  * storeAgentMetrics             — store PC CPU/RAM from Influx agent
+  * cpuMemoryMetricsState.zabbix  — Zabbix snapshot summary
+  * cpuMemoryMetricsState.storeAgent — Influx agent summary
+  Report BOTH when present. Never label "Not in Zabbix scope" if
+  storeAgentMetrics has values.
+
+IMPORTANT — 24h trend graphs:
+  Include trend / graph / history / 24h in the question. Response field:
+  cpuMemoryHistory.hosts[].cpu.points and .memory.points (IST timestamps).
+  Each point: { at, percent }. Item IDs are in hosts[].cpu.itemid.
+
+IMPORTANT — hostname search:
+  Short tags work: RP911, LK973, LKST793. LKST793 aliases to RP793-* in
+  Zabbix host.get. Full RP hostnames (RP973-4CE510BDK) are strict match.
+
+----------------------------------------------------------------------
+netpulse_storeZabbix question: "<STORE-HOSTNAME> status ping interfaces".
+Show host availability, ping ms/loss, and top interface traffic. If
+interfaceMetricsState.available is false, quote reason and nextAction.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_storeZabbix question: "<STORE-HOSTNAME> CPU memory". Report:
+  1) storeAgentMetrics cpuPct / memPct (Influx store PC)
+  2) hosts[].cpu.percent / hosts[].memory.percent (Zabbix)
+Label each source. If one is null, say which and why per nextAction.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_storeZabbix question: "<STORE-HOSTNAME> CPU memory 24h trend
+graph". Plot or tabulate cpuMemoryHistory points for CPU and memory.
+Quote min, max, avg, and latest percent over the window. Times in IST.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_storeZabbix question: "LKST793 CPU memory 24h trend". Resolve
+alias to RP793 host in Zabbix. If multiple hosts match, list each with
+its own cpu/memory series.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Use netpulse_storeZabbix question: "top interfaces bandwidth for
+<STORE-HOSTNAME>". Rank ports by inBps+outBps from hosts[].ports.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_storeZabbix question: "<STORE-HOSTNAME> active problems alerts".
+Include Zabbix problems[] if returned; note freshness is live at send time.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Compare netpulse_storeMonitor vs netpulse_storeZabbix for <STORE-HOSTNAME>:
+  - storeMonitor: online, ping, speedtest, agent CPU/RAM
+  - storeZabbix: Zabbix host ping, interface traffic, Zabbix CPU/RAM items
+Highlight any mismatch (e.g. store online in Monitor but Zabbix host down).
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+  ROP SYSTEM DISCONNECT EVENTS — BH FILTER (Store Zabbix UI / REST)
+----------------------------------------------------------------------
+
+Source: MongoDB StoreProblemHistory (code='offline') — same data as
+netpulse_storeProblems, but the Store Zabbix ROP dashboard applies an
+explicit business-hours (BH) filter toolbar:
+
+  UI location: Store Zabbix → ROP tab → click a store row → Disconnect
+  events modal. Reports tab → group Excel export.
+
+  Table columns (match Store Monitor / storeProblems MCP):
+    # | Disconnected at | Back up at | BH duration | Total duration | Status
+
+  BH filter params (REST query string):
+    bizStart   — hour 0–23 start (default 9 = 09:00)
+    bizEnd     — hour 0–23 end   (default 18 = 18:00)
+    bizDays    — weekday CSV 0=Sun … 6=Sat (default 0,1,2,3,4,5,6)
+    tzOffset   — minutes east of UTC (IST = 330)
+    range      — 24h | 7d | 14d | 30d | 60d | custom
+    from / to  — Unix seconds when range=custom
+
+  Per-store events (one storeTag):
+    GET /api/store-zabbix/rop-store-disconnects
+      ?storeTag=<STORE-TAG>
+      &range=7d
+      &bizStart=9&bizEnd=18
+      &bizDays=1,2,3,4,5
+      &tzOffset=330
+
+  Group Excel export (all stores in ROP group):
+    GET /api/store-zabbix/rop-disconnect-export
+      ?groupKey=rp|rp_sdwan|rp_no_sdwan|manual_sdwan|pos|sdwan
+      &range=30d&bizStart=9&bizEnd=18&bizDays=0,1,2,3,4,5,6&tzOffset=330
+
+  Single-store Excel export:
+    GET /api/store-zabbix/rop-store-disconnect-export?storeTag=...&range=...
+
+  BH filter rule: events with bhDurationMin <= 0 are EXCLUDED when BH is
+  active (not 00:00–24:00 every day). "No events overlap BH window" means
+  outages happened only outside configured business hours.
+
+  MCP shortcut (default BH 09:00–18:00 IST, no custom bizDays):
+    netpulse_storeProblems question: "disconnect events <STORE-HOSTNAME> 30 days"
+    Use when BH = 9–18 all days. For Mon–Fri only or custom hours, use REST.
+
+  storeTag vs hostname:
+    REST rop-store-disconnects needs storeTag (e.g. RP793_… from storeMonitor).
+    MCP storeProblems accepts hostname (RP793, LKST793) and applies alias filter.
+
+----------------------------------------------------------------------
+Store Zabbix ROP disconnect events for storeTag <STORE-TAG>, range 7d,
+business hours Mon–Fri 09:00–18:00 IST. Call REST:
+  /api/store-zabbix/rop-store-disconnects?storeTag=<STORE-TAG>&range=7d
+  &bizStart=9&bizEnd=18&bizDays=1,2,3,4,5&tzOffset=330
+Render table: disconnected at, back up at, BH duration, total duration,
+status. If empty, say whether BH filter excluded all events.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+ROP group disconnect export: all RP stores, last 30 days, BH 09:00–18:00
+IST every day. REST:
+  /api/store-zabbix/rop-disconnect-export?groupKey=rp&range=30d
+  &bizStart=9&bizEnd=18&bizDays=0,1,2,3,4,5,6&tzOffset=330
+Summarize: total events, stores with most disconnects, longest BH outage.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Compare disconnect sources for <STORE-HOSTNAME>:
+  1) netpulse_storeProblems (MCP — default BH 9–18 IST in businessHours)
+  2) REST rop-store-disconnects with bizDays=1,2,3,4,5 (weekdays only)
+Explain any row count difference (BH filter excludes non-overlapping events).
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_storeProblems question: "LKST793 disconnect events last 14 days".
+Then note: for custom BH (e.g. 10:00–20:00 Sat–Sun only) use Store Zabbix
+REST rop-store-disconnects with storeTag from storeMonitor and adjusted
+bizStart/bizEnd/bizDays/tzOffset=330.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Store Zabbix ROP dashboard: list stores in groupKey rp_sdwan with highest
+disconnect count in the last 7 days (BH 9–18 IST). Use rop-uptime / group
+data if available; drill into per-store events via rop-store-disconnects
+for the worst 5 storeTags.
+----------------------------------------------------------------------
+
+================================================================================
+  SECTION 9 — netpulse_soc  (firewall / SOC, last hour, Elasticsearch)
+================================================================================
+
+----------------------------------------------------------------------
+Use netpulse_soc to list the top 10 denied source IPs in the last hour.
+Tag any that look like scanners (high port count + low byte volume).
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_soc: "top destination ports being denied at the firewall right
+now". Rank by hit count.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Pull netpulse_soc and surface any FortiGate IPS / IDS detections in the
+last hour. Group by signature name.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Use netpulse_soc for site <SITE-CODE>: what was denied at that site's
+firewall in the last hour? Top 20 by hit count.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_soc: "any unusual deny patterns vs. baseline?" Spot anything
+that looks like a step-change.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Use netpulse_soc to find inbound deny traffic from public IPs (not
+RFC1918). List unique source ASNs if visible.
+----------------------------------------------------------------------
+
+================================================================================
+  SECTION 10 — netpulse_sentinelXdr  (SentinelOne XDR / Singularity Data Lake)
+================================================================================
+
+----------------------------------------------------------------------
+Use netpulse_sentinelXdr to list the top 10 endpoints with unresolved
+threats right now, ranked by severity then recency.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_sentinelXdr: "any malware family detected on more than one
+endpoint in the last 24 hours?" Group by threat indicator.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Use netpulse_sentinelXdr to find failed-login bursts (5+ failures within
+5 minutes) in the last hour. Show user, source, timestamps.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_sentinelXdr for endpoint <HOSTNAME-OR-AGENT-ID>: every alert
+in the last 7 days, with timeline and severity.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Use netpulse_sentinelXdr to identify endpoints whose agent is offline
+or out-of-date. Group by site if possible.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_sentinelXdr: "lateral-movement signals across the fleet right
+now". Flag any same-source-to-multiple-destinations patterns.
+----------------------------------------------------------------------
+
+================================================================================
+  SECTION 11 — netpulse_zabbixInfra  (infra Zabbix: hosts, ping, interfaces, CPU/RAM)
+================================================================================
+
+----------------------------------------------------------------------
+Use netpulse_zabbixInfra to list every infra host currently unreachable.
+Sort by how long they've been down.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_zabbixInfra: "ping latency > 50ms hosts in the last 15 minutes".
+Quote the latencies.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Use netpulse_zabbixInfra and show me the top 10 interfaces by current
+traffic. Flag any >=80% utilization.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_zabbixInfra: "hosts that are flapping (up/down repeatedly) in
+the last hour". Explain the pattern per host.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Use netpulse_zabbixInfra to list every host that triggered a Zabbix alert
+in the last 30 minutes. Group by severity.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+For host <ZABBIX-HOSTNAME>, pull netpulse_zabbixInfra and tell me current
+ping, interface up/down state, CPU/memory utilization, and any active triggers.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_zabbixInfra question: "<ZABBIX-HOSTNAME-OR-IP> CPU memory 24h
+trend graph". Tabulate cpuMemoryHistory points. Times in IST.
+----------------------------------------------------------------------
+
+================================================================================
+  SECTION 12 — noc_status_summary  (built-in prompt)
+================================================================================
+
+----------------------------------------------------------------------
+Use the noc_status_summary prompt with no focus argument.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Use the noc_status_summary prompt with focus="Bangalore stores".
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Run noc_status_summary focused on "core routers" and append a top-3
+firewall denies block from netpulse_soc.
+----------------------------------------------------------------------
+
+================================================================================
+  SECTION 13 — Cross-module patterns  (multi-tool recipes)
+================================================================================
+
+----------------------------------------------------------------------
+[RCA TIMELINE]
+There was a probable outage at site <SITE-CODE> around <HH:MM IST>.
+Reconstruct a minute-by-minute timeline by calling, in order:
+  1. netpulse_storeMonitor   -- current state of the site's stores
+  2. netpulse_storeProblems  -- disconnect lifecycle (include hostname in Q)
+  3. netpulse_storeZabbix    -- store network gear ping/interfaces/CPU
+  4. netpulse_zabbixInfra    -- infra host availability for the site
+  5. netpulse_soc            -- any firewall anomalies from that site
+  6. netpulse_sentinelXdr    -- endpoint signals from those store hostnames
+Identify the first signal that something was wrong and the most likely
+root cause.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+[TOP FIRES RIGHT NOW]
+Build a unified "top fires" list for the next 30 minutes of NOC
+attention. Call:
+  - netpulse_storeMonitor    (offline + degraded stores)
+  - netpulse_storeProblems   (recently-down sites — include hostname if scoped)
+  - netpulse_storeZabbix     (store gear down / high CPU / interface stale)
+  - netpulse_soc             (top deny patterns)
+  - netpulse_zabbixInfra     (down/flapping hosts)
+  - netpulse_sentinelXdr     (high-severity alerts)
+Merge into a single ranked list (max 15 rows). Columns: rank,
+source_module, target, severity, evidence, suggested_action.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+[SITE-LEVEL HEALTH CARD]
+Give me a one-page health card for site <SITE-CODE>. Pull, in order:
+  1. netpulse_storeMonitor   (stores — live agent)
+  2. netpulse_storeZabbix    (store network gear — Zabbix)
+  3. netpulse_storeProblems  (recent disconnects — hostname in question)
+  4. netpulse_zabbixInfra    (infra)
+  5. netpulse_soc            (firewall, last hour)
+  6. netpulse_sentinelXdr    (endpoints)
+Include CPU/RAM from both Influx agent and Zabbix where available.
+Render as a markdown report with one section per data source and a
+"verdict" line at the top (Green / Yellow / Red).
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+[NOC SHIFT HANDOFF]
+Generate a NOC shift handoff for the last 12 hours. Sections:
+  1. Headline (1 line)
+  2. Numbers -- outages, alerts, tickets -- via netpulse_query
+  3. Top 5 affected sites -- via netpulse_storeProblems
+  4. Open SOC concerns -- via netpulse_soc
+  5. Endpoint risks -- via netpulse_sentinelXdr
+  6. Infra worries -- via netpulse_zabbixInfra
+  7. Store Zabbix gear -- via netpulse_storeZabbix (ping/interfaces)
+  8. Watchlist for the next shift
+Length: under 350 words. Quote numbers verbatim.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+[P1 TICKET DRAFT]
+Identify the worst incident currently open across all NetPulse modules.
+Pull the relevant tools (decide which) and produce a P1 ticket draft with:
+  - Title (under 80 chars)
+  - Severity + justification
+  - Affected scope (sites, hostnames, users)
+  - Current impact (numeric)
+  - Suspected root cause (with evidence)
+  - Mitigation tried so far (if known from data)
+  - Suggested next steps for L1/L2 NOC
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+[CUSTOMER-FACING NOTE]
+For any P1 currently open, draft a customer-facing status note. Pull
+data via netpulse_query. Tone: factual, no internal jargon, no acronyms,
+no hostnames. Length: under 80 words. End with an ETA placeholder if a
+fix-time isn't available from the tools.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+[CSV REPORT]
+Produce a CSV-style table of every store that disconnected in the last
+24 hours. Columns: hostname, storeTag, disconnectedAt, backUpAt,
+bhDurationMin, totalDurationMin, stillOffline. Use netpulse_storeProblems
+(include hostname for a single-store export). Quote IST times.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+[STORE CPU/RAM 24H TREND]
+For <STORE-HOSTNAME>, pull a 24-hour CPU and memory trend:
+  1. netpulse_storeZabbix question: "<STORE-HOSTNAME> CPU memory 24h trend graph"
+  2. netpulse_storeMonitor question: "<STORE-HOSTNAME> metrics history"
+Report Zabbix series from cpuMemoryHistory and Influx agent snapshot from
+storeAgentMetrics. Tabulate min/max/avg/latest for each source. IST times.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+[ROP DISCONNECT BH EXPORT]
+Export-style summary for ROP group <GROUP-KEY> (rp | rp_sdwan | pos | sdwan),
+range 30d, BH 09:00–18:00 IST weekdays Mon–Fri:
+  REST /api/store-zabbix/rop-disconnect-export?groupKey=<GROUP-KEY>&range=30d
+  &bizStart=9&bizEnd=18&bizDays=1,2,3,4,5&tzOffset=330
+Top 10 stores by disconnect count; longest single BH outage per store.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+[TREND COMPARISON]
+Compare today's metrics against yesterday's at the same hour-of-day, for:
+total stores down, total firewall denies, total Zabbix triggers, total
+XDR alerts. Pull each respective tool. Quote both numbers and the delta.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+[ANOMALY HUNT]
+Hunt for anomalies in the last 1 hour vs. the previous 6 hours. For each
+module (storeMonitor, storeProblems, storeZabbix, soc, sentinelXdr,
+zabbixInfra), call the tool and surface anything that looks like a
+step-change. Output as a table:
+module, metric, baseline, current, delta_pct, severity_guess.
+----------------------------------------------------------------------
+
+================================================================================
+  SECTION 14 — Trigger-phrase macros  (paste once, drive the rest of the chat)
+================================================================================
+
+----------------------------------------------------------------------
+From now on, in this chat:
+  "check"            -> run noc_status_summary, then top-fires from
+                        netpulse_storeMonitor + netpulse_soc.
+  "tick"             -> re-run last query, show only the diff vs.
+                        previous output.
+  "card <SITE>"      -> produce a site-level health card (use the
+                        cross-module recipe).
+  "rca <SITE> <HH:MM>" -> run the RCA timeline recipe with those args.
+  "p1"               -> produce a P1 ticket draft for the worst current
+                        incident.
+  "fires"            -> top-fires list across all modules.
+  "handoff"          -> NOC shift handoff for the last 12 hours.
+  "disconnect <HOST>" -> netpulse_storeProblems with hostname in question;
+                        table of disconnectEvents with BH duration (IST).
+  "disconnect-bh <TAG>" -> REST rop-store-disconnects for storeTag <TAG>;
+                        ask user for range + bizStart/bizEnd/bizDays if not
+                        specified (default 7d, 9–18 IST, all days).
+  "cpu <HOST>"       -> netpulse_storeZabbix + storeMonitor for dual-source
+                        CPU/RAM; label Zabbix vs Influx agent.
+  "trend <HOST>"     -> netpulse_storeZabbix 24h cpuMemoryHistory graph.
+Always quote numbers verbatim from tool output. Never invent data.
+----------------------------------------------------------------------
+
+================================================================================
+  TIPS FOR BETTER RESULTS
+================================================================================
+
+  * Name the tool when you want to force its use. Claude sometimes prefers
+    netpulse_query for everything; nudging it to a specific dashboard tool
+    gives you raw module data instead of a summarized answer.
+
+  * Phrase prompts as "...and quote numbers from the tool output" to stop
+    Claude from rounding or paraphrasing counts.
+
+  * Time bounds matter. NetPulse modules have different freshness ("live"
+    vs "periodic"). "Last 5 minutes" works on storeMonitor (live InfluxDB);
+    storeProblems is snapshotted every ~2 min so prefer "last hour" or longer.
+    storeZabbix and zabbixInfra are live Zabbix API at send time.
+
+  * Hostname in question unlocks scoped data:
+      storeProblems  -> 30-day disconnect history for that store (not global 120 cap)
+      storeZabbix    -> host filter + CPU/RAM + optional 24h cpuMemoryHistory
+      storeMonitor   -> single-store live snapshot from Influx agent
+
+  * LKST vs LK vs RP naming:
+      LKST793  -> aliases to RP793 in Store Zabbix (LKST prefix only)
+      LK973    -> strict LK host match (no RP alias)
+      RP973    -> strict RP host match
+
+  * CPU / Memory sources — do not conflate:
+      Store PC       -> storeAgentMetrics / storeMonitor (Influx agent)
+      Network gear   -> hosts[].cpu/memory in storeZabbix (Zabbix SNMP/agent)
+      24h trends     -> cpuMemoryHistory (Zabbix history.get / trend.get)
+
+  * Disconnect events use IST business hours (09:00–18:00) for bhDurationMin.
+    All rendered timestamps should be stated as IST unless user asks otherwise.
+
+  * Disconnect events — two paths:
+      MCP storeProblems     -> disconnectEvents[] · default BH 09:00–18:00 IST
+                               · hostname/LKST filter · 30-day scoped window
+      Store Zabbix REST     -> rop-store-disconnects · custom BH toolbar
+                               · needs storeTag · range 24h–60d · Excel export
+      Same Mongo source (StoreProblemHistory code=offline). BH filter drops
+      events where bhDurationMin=0 (outage did not overlap BH window).
+
+  * If disconnectEventsTruncated is true in storeProblems, re-query with the
+    store hostname (e.g. LKST793) instead of relying on the global list.
+
+  * For long replies, ask for "under 200 words" or "as a table" -- keeps
+    output scannable in Claude Desktop.
+
+  * Module-specific prompts beat generic ones when you know the domain.
+    Claude wastes fewer tokens picking modules.
+
+  * REST equivalents (for scripts, not Claude):
+      GET /api/store-zabbix/rop-store-disconnects?storeTag=&range=&bizStart=&bizEnd=&bizDays=&tzOffset=
+      GET /api/store-zabbix/rop-disconnect-export?groupKey=rp&range=30d&...
+      GET /api/store-zabbix/rop-store-disconnect-export?storeTag=&range=...
+      GET /api/store-zabbix/items/{itemId}/history?from=&to=
+      GET /api/store-zabbix/graphs/{graphId}/series?from=&to=
+      GET /api/store-monitor/stores  (live Influx snapshot)
+
+================================================================================
+  END OF FILE
+================================================================================
