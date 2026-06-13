@@ -1766,6 +1766,7 @@ export function formatContextForPrompt(context) {
     '- Rank or highlight busiest interfaces when the user asks about utilization — compute from inBps+outBps when helpful.',
     '- If hostFilter is an IP and hosts[] is empty, say no Zabbix host matched that SNMP/management IP.',
     '- For storeZabbix: CPU/RAM can come from BOTH hosts[].cpu/memory (Zabbix) and storeAgentMetrics (Influx agent). Use cpuMemoryMetricsState.zabbix and cpuMemoryMetricsState.storeAgent; report each source separately when both exist.',
+    '- For 24h CPU/memory trend graphs, use cpuMemoryHistory.hosts[].cpu/memory.points (Zabbix history.get / trend.get). REST equivalent: GET /api/store-zabbix/items/{itemId}/history?from=&to=',
     '',
     JSON.stringify(context),
     '=== END PORTAL CONTEXT ===',

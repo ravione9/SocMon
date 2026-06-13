@@ -237,6 +237,27 @@ export function wantsCpuMemoryUtil(question) {
     || Boolean(extractIpv4(q))
 }
 
+/** Zabbix history/trend time-series for CPU/RAM graphs (e.g. 24h trend). */
+export function wantsCpuMemoryHistory(question) {
+  const q = String(question || '')
+  if (!/\b(graph|graphical|chart|visual|plot|timeline|trend|history|time\s*series|24\s*h|24h|last\s+24)\b/i.test(q)) {
+    return false
+  }
+  return /\b(cpu|memory|mem|ram)\b/i.test(q)
+    || Boolean(extractStoreHostname(q) || extractIpv4(q))
+}
+
+function parseZabbixHistoryRangeSec(message) {
+  const q = String(message || '').toLowerCase()
+  if (/\b(30\s*d|30d|last\s+30\s*days?)\b/.test(q)) return 30 * 86400
+  if (/\b(7\s*d|7d|last\s+week|one\s+week)\b/.test(q)) return 7 * 86400
+  if (/\b(12\s*h|12h)\b/.test(q)) return 12 * 3600
+  if (/\b(6\s*h|6h)\b/.test(q)) return 6 * 3600
+  if (/\b(3\s*h|3h)\b/.test(q)) return 3 * 3600
+  if (/\b(1\s*h|1h)\b/.test(q)) return 3600
+  return 86400
+}
+
 /** Which resource metrics the user asked for (memory-only, cpu-only, or both). */
 export function resolveCpuMemoryScope(question) {
   const q = String(question || '').toLowerCase()
@@ -395,6 +416,8 @@ function formatCpuMemoryMetric(metric) {
   return {
     percent: metric.percent,
     itemName: metric.itemName,
+    itemid: metric.itemid || null,
+    key: metric.key || null,
     polledAt: metric.clock ? formatPortalTimestamp(Number(metric.clock) * 1000) : null,
   }
 }
@@ -550,6 +573,176 @@ function readPctUtilItem(it, inverted = false) {
   return Math.round(Math.max(0, Math.min(100, pct)) * 10) / 10
 }
 
+function parseLooseNumber(raw) {
+  if (raw == null || raw === '') return NaN
+  const s = String(raw).trim().replace(/,/g, '')
+  const n = Number(s)
+  if (Number.isFinite(n)) return n
+  const m = s.match(/-?\d*\.?\d+(?:e[+-]?\d+)?/i)
+  return m ? Number(m[0]) : NaN
+}
+
+function zabbixHistoryKind(valueType) {
+  const v = Number(valueType)
+  if (v === 0) return { history: 0, parse: (x) => Number(x), trends: true }
+  if (v === 3) return { history: 3, parse: (x) => Number(x), trends: true }
+  if (v === 1) return { history: 1, parse: parseLooseNumber, trends: false }
+  if (v === 4) return { history: 4, parse: parseLooseNumber, trends: false }
+  return null
+}
+
+function downsampleHistoryPoints(points, maxPoints) {
+  if (!points?.length || points.length <= maxPoints) return points
+  const out = []
+  const step = points.length / maxPoints
+  for (let i = 0; i < maxPoints; i++) {
+    const start = Math.floor(i * step)
+    const end = Math.min(points.length, Math.floor((i + 1) * step))
+    const chunk = points.slice(start, end)
+    if (!chunk.length) continue
+    let sum = 0
+    for (const p of chunk) sum += Number(p.value)
+    const mid = chunk[Math.floor(chunk.length / 2)]
+    out.push({ clock: mid.clock, value: sum / chunk.length })
+  }
+  return out
+}
+
+async function fetchItemHistorySeries(zabbixRpc, metric, from, to, maxPoints = 120) {
+  const itemid = String(metric?.itemid || '').trim()
+  if (!itemid) return null
+
+  let valueType = Number(metric?.valueType)
+  let units = metric?.units || ''
+  let itemName = metric?.itemName || metric?.key || itemid
+  let key = metric?.key || ''
+
+  if (!Number.isFinite(valueType)) {
+    const metaRows = await zabbixRpc('item.get', {
+      itemids: [itemid],
+      output: ['itemid', 'name', 'key_', 'value_type', 'units'],
+    }).catch(() => [])
+    const meta = (metaRows || [])[0]
+    if (!meta) return null
+    valueType = Number(meta.value_type)
+    units = meta.units || units
+    itemName = meta.name || itemName
+    key = meta.key_ || key
+  }
+
+  const hk = zabbixHistoryKind(valueType)
+  if (!hk) return null
+
+  const span = to - from
+  const preferTrend = span > 2 * 86400 && hk.trends
+  let points = []
+  let source = null
+
+  async function fetchTrends() {
+    if (!hk.trends) return []
+    const tr = await zabbixRpc('trend.get', {
+      itemids: [itemid],
+      time_from: from,
+      time_till: to,
+      output: ['clock', 'value_avg'],
+      sortfield: 'clock',
+      sortorder: 'ASC',
+      limit: 5000,
+    }).catch(() => [])
+    return (tr || [])
+      .map((row) => ({ clock: Number(row.clock), value: Number(row.value_avg) }))
+      .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+  }
+
+  async function fetchHistory() {
+    const hist = await zabbixRpc('history.get', {
+      history: hk.history,
+      itemids: [itemid],
+      time_from: from,
+      time_till: to,
+      output: ['clock', 'value'],
+      sortfield: 'clock',
+      sortorder: 'ASC',
+      limit: 15000,
+    }).catch(() => [])
+    return (hist || [])
+      .map((row) => ({ clock: Number(row.clock), value: hk.parse(row.value) }))
+      .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+  }
+
+  if (preferTrend) {
+    points = await fetchTrends()
+    if (points.length) source = 'trend'
+    if (!points.length) {
+      points = await fetchHistory()
+      if (points.length) source = 'history'
+    }
+  } else {
+    points = await fetchHistory()
+    if (points.length) source = 'history'
+    if (!points.length && hk.trends) {
+      points = await fetchTrends()
+      if (points.length) source = 'trend'
+    }
+  }
+
+  points = downsampleHistoryPoints(points, maxPoints)
+  if (!points.length) return null
+
+  return {
+    itemid,
+    itemName,
+    key,
+    units,
+    source,
+    from,
+    to,
+    pointCount: points.length,
+    points: points.map((p) => ({
+      clock: p.clock,
+      at: formatPortalTimestamp(p.clock * 1000),
+      percent: Math.round(Math.max(0, Math.min(100, p.value)) * 10) / 10,
+    })),
+  }
+}
+
+async function fetchCpuMemoryHistory(zabbixRpc, cpuMemoryMetrics, matchedHosts, rangeSec, maxPoints = 120) {
+  const byHost = cpuMemoryMetrics?.byHost || {}
+  const hostMeta = Object.fromEntries((matchedHosts || []).map(h => [String(h.hostid), h]))
+  const now = Math.floor(Date.now() / 1000)
+  const from = now - rangeSec
+  const to = now
+  const hosts = []
+
+  for (const [hostid, metrics] of Object.entries(byHost)) {
+    const meta = hostMeta[hostid]
+    const row = {
+      hostid,
+      name: meta?.name || meta?.host || hostid,
+      cpu: null,
+      memory: null,
+    }
+    if (metrics?.cpu) {
+      row.cpu = await fetchItemHistorySeries(zabbixRpc, metrics.cpu, from, to, maxPoints)
+    }
+    if (metrics?.memory) {
+      row.memory = await fetchItemHistorySeries(zabbixRpc, metrics.memory, from, to, maxPoints)
+    }
+    if (row.cpu || row.memory) hosts.push(row)
+  }
+
+  return {
+    windowSec: rangeSec,
+    windowLabel: rangeSec >= 86400 ? `${Math.round(rangeSec / 86400)}d` : `${Math.round(rangeSec / 3600)}h`,
+    from,
+    to,
+    fromAt: formatPortalTimestamp(from * 1000),
+    toAt: formatPortalTimestamp(to * 1000),
+    hosts,
+    note: 'Fetched via Zabbix history.get / trend.get on system.cpu.util and vm.memory.utilization item IDs.',
+  }
+}
+
 function pickHostPctMetric(itemRows, hostid, patterns, invertRe = null) {
   for (const re of patterns) {
     let best = null
@@ -567,6 +760,9 @@ function pickHostPctMetric(itemRows, hostid, patterns, invertRe = null) {
           itemName: it.name || key,
           key,
           clock,
+          itemid: String(it.itemid),
+          valueType: Number(it.value_type),
+          units: it.units || '',
         }
       }
     }
@@ -2070,9 +2266,11 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   const includePing = wantsPingStatus(userMessage)
   const includeBandwidth = wantsBandwidthUtil(userMessage)
     || /\b(bandwidth|utilization|utilisation|interface|port|traffic|throughput)\b/i.test(String(userMessage || ''))
+  const includeCpuMemoryHistory = wantsCpuMemoryHistory(userMessage)
   const includeCpuMemory = wantsCpuMemoryUtil(userMessage)
     || /\b(cpu|memory|mem|ram)\b/i.test(String(userMessage || ''))
     || Boolean(hostFilter)
+    || includeCpuMemoryHistory
   // Host-detail queries do not need problem.get every time; that call can be
   // expensive on some Zabbix deployments and is only useful when alerts are
   // explicitly requested or for broad overviews with no host filter.
@@ -2153,6 +2351,24 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   const interfaceMetricsState = buildInterfaceMetricsState(data, matched, includeBandwidth)
   const cpuMemoryMetricsState = buildCpuMemoryMetricsState(data, matched, includeCpuMemory, storeAgentMetrics)
 
+  let cpuMemoryHistory = null
+  if (includeCpuMemoryHistory && matched.length && data.cpuMemoryMetrics?.byHost) {
+    try {
+      cpuMemoryHistory = await fetchCpuMemoryHistory(
+        client.zabbixRpc,
+        data.cpuMemoryMetrics,
+        matched,
+        parseZabbixHistoryRangeSec(userMessage),
+      )
+    } catch (err) {
+      cpuMemoryHistory = {
+        windowSec: parseZabbixHistoryRangeSec(userMessage),
+        hosts: [],
+        error: err?.message || 'Failed to fetch Zabbix CPU/memory history',
+      }
+    }
+  }
+
   return {
     module: moduleId,
     freshness: 'live',
@@ -2173,6 +2389,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     storeAgentMetrics,
     interfaceMetricsState,
     cpuMemoryMetricsState,
+    cpuMemoryHistory,
     pingSummary: includePing && data.pingMetrics ? data.pingMetrics.summary : undefined,
   }
 }

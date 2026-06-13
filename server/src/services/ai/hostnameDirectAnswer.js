@@ -234,9 +234,11 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
         .sort({ lastSeenAt: -1 })
         .limit(100)
         .lean(),
-    wantsChart || !wantsZabbixCm
+    !wantsZabbixCm
       ? Promise.resolve(null)
-      : buildStoreZabbixContext(`${hostname} CPU memory`).catch(() => null),
+      : buildStoreZabbixContext(
+        wantsChart ? `${hostname} CPU memory 24h trend graph` : `${hostname} CPU memory`,
+      ).catch(() => null),
   ])
 
   const crashes = wantsChart ? [] : crashRows.filter(r => hostnameMatchesStore(r, hostname))
