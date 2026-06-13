@@ -18,6 +18,7 @@ import { computeUserPageAccess } from '../../utils/computeUserPageAccess.js'
 import { isXdrQuestion } from './xdrDirectAnswer.js'
 import { isStoreMonitorConnectivityQuery, isStoreMonitorIssuesQuery, isStoreDowntimeQuery, extractTopLimit } from './geoConnectionQuery.js'
 import { isNetworkInfraQuery, isZabbixQuestion, extractIpv4, isInfraMonitorQuery, isIpInfraQuery, prefersLlmSynthesis, buildZabbixInfraContext, buildStoreZabbixContext, wantsDiskUsage, extractHostGroupFilter } from './zabbixDirectAnswer.js'
+import { buildSolarWindsContext, isOrionQuestion } from './orionDirectAnswer.js'
 import {
   appNameMatches,
   crashRecordMatches,
@@ -79,6 +80,13 @@ export const AI_CONTEXT_MODULES = [
     pageKey: 'storeZabbix',
     freshness: 'live',
     description: 'Store-tier Zabbix host availability, ping, and interface traffic at send time',
+  },
+  {
+    id: 'orian',
+    label: 'SolarWinds Orion',
+    pageKey: 'solarwinds',
+    freshness: 'live',
+    description: 'Orion NPM SWIS: node status, alerts, CPU/memory, interface traffic at send time',
   },
 ]
 
@@ -151,6 +159,12 @@ export function suggestContextModules(message, allowedPages, ctx = null) {
   }
   if (pages.has('noc') && NOC_KEYWORDS.test(text)) {
     modules.add('soc')
+  }
+  if (pages.has('solarwinds') && (
+    isOrionQuestion(text)
+    || (extractIpv4(text) && /\b(orion|orian|solarwinds|node|npm|swis|host)\b/i.test(text))
+  )) {
+    modules.add('orian')
   }
 
   if (!modules.size && pages.has('storeMonitor') && OVERVIEW_KEYWORDS.test(text)) {
@@ -665,6 +679,7 @@ const BUILDERS = {
   soc: buildSocContext,
   zabbixInfra: (_, opts) => buildZabbixInfraContext(opts?.userMessage || ''),
   storeZabbix: (_, opts) => buildStoreZabbixContext(opts?.userMessage || ''),
+  orian: (_, opts) => buildSolarWindsContext(opts?.userMessage || ''),
 }
 
 /**
@@ -1617,7 +1632,7 @@ export async function buildPortalContext(user, moduleIds = [], opts = {}) {
       try {
         const data = id === 'storeMonitor'
           ? await builder(detail)
-          : (id === 'zabbixInfra' || id === 'storeZabbix' || id === 'storeProblems')
+          : (id === 'zabbixInfra' || id === 'storeZabbix' || id === 'storeProblems' || id === 'orian')
             ? await builder(detail, { userMessage: opts.userMessage || '' })
             : await builder()
         modules[id] = data
@@ -1738,6 +1753,9 @@ export function buildContextPreview(context) {
     const cm = sz.cpuMemoryMetricsState
     preview.storeZabbix = {
       hostFilter: sz.hostFilter,
+      monitoredHostTotal: sz.monitoredHostTotal ?? sz.availability?.total ?? null,
+      hostsReturned: sz.hostsReturned ?? (sz.hosts || []).length,
+      hostsListTruncated: sz.hostsListTruncated ?? false,
       hostCount: (sz.hosts || []).length,
       storeAgentCpuPct: sz.storeAgentMetrics?.cpuPct ?? cm?.storeAgent?.cpuPct ?? null,
       storeAgentMemPct: sz.storeAgentMetrics?.memPct ?? cm?.storeAgent?.memPct ?? null,
@@ -1745,6 +1763,17 @@ export function buildContextPreview(context) {
       zabbixMemPct: cm?.zabbix?.primary?.memory?.percent ?? null,
       cpuMemoryAvailable: cm?.available,
       cpuMemoryReason: cm?.reason,
+    }
+  }
+  const orion = context?.modules?.orian
+  if (orion?.summary || orion?.nodes?.length) {
+    preview.orian = {
+      nodeFilter: orion.nodeFilter,
+      statusFilter: orion.statusFilter,
+      nodeCount: orion.nodeCount ?? (orion.nodes || []).length,
+      downNodes: (orion.nodes || []).filter(n => n.statusColor === 'down').length,
+      activeAlertCount: orion.activeAlertCount ?? (orion.activeAlerts || []).length,
+      hasNodeDetail: Boolean(orion.nodeDetail),
     }
   }
   return preview
@@ -1766,7 +1795,9 @@ export function formatContextForPrompt(context) {
     '- Rank or highlight busiest interfaces when the user asks about utilization — compute from inBps+outBps when helpful.',
     '- If hostFilter is an IP and hosts[] is empty, say no Zabbix host matched that SNMP/management IP.',
     '- For storeZabbix: CPU/RAM can come from BOTH hosts[].cpu/memory (Zabbix) and storeAgentMetrics (Influx agent). Use cpuMemoryMetricsState.zabbix and cpuMemoryMetricsState.storeAgent; report each source separately when both exist.',
+    '- For storeZabbix/zabbixInfra fleet counts: availability.total is the full inventory; hosts[] may be capped (see hostsListTruncated, monitoredHostTotal, hostsReturned). Quote availability.total for "how many hosts" — not hosts.length.',
     '- For 24h CPU/memory trend graphs, use cpuMemoryHistory.hosts[].cpu/memory.points (Zabbix history.get / trend.get). REST equivalent: GET /api/store-zabbix/items/{itemId}/history?from=&to=',
+    '- For orian (SolarWinds Orion): summary.nodes/alerts are fleet counts by status/severity; nodes[] has cpu, memory, responseTime, packetLoss; nodeDetail has interfaces (inBps/outBps) when a single node matched nodeFilter.',
     '',
     JSON.stringify(context),
     '=== END PORTAL CONTEXT ===',

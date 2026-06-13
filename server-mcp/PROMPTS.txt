@@ -1,6 +1,6 @@
 ================================================================================
   NETPULSE MCP — CLAUDE DESKTOP PROMPT LIBRARY
-  Last updated: 2026-06-12 (storeZabbix ROP disconnect BH filter, disconnect events, CPU/RAM, 24h trends)
+  Last updated: 2026-06-12 (orian/SolarWinds Orion MCP, storeZabbix ROP disconnect BH filter, disconnect events, CPU/RAM, 24h trends)
 ================================================================================
 
 How to use this file:
@@ -22,6 +22,7 @@ Tools you have access to (auto-grown from NetPulse on connect):
   netpulse_soc             -- firewall / SOC, last hour, Elasticsearch
   netpulse_sentinelXdr     -- SentinelOne XDR / Singularity Data Lake
   netpulse_zabbixInfra     -- infra Zabbix: ping, host avail, traffic, CPU/RAM
+  netpulse_orian           -- SolarWinds Orion SWIS: nodes, alerts, interfaces
 
 Built-in prompts:
   noc_status_summary       -- preset NOC executive summary
@@ -45,6 +46,7 @@ netpulse_query alone. Available tools:
   netpulse_soc                            (firewall / SOC, last hour, ES)
   netpulse_sentinelXdr                    (SentinelOne XDR data lake)
   netpulse_zabbixInfra                    (infra Zabbix: ping, host avail, traffic, CPU/RAM)
+  netpulse_orian                          (SolarWinds Orion NPM: nodes, alerts, interfaces)
 
 Rules:
   * Always include a store hostname/tag in the question when you need
@@ -59,6 +61,8 @@ Rules:
     include a hostname in the question for store-scoped history (30-day window).
   * Store Zabbix ROP disconnect events use the same StoreProblemHistory source
     but support custom BH filters via REST (see Section 8 — ROP disconnect).
+  * Orion (netpulse_orian): include node caption or IP in the question for
+    drill-down; nodeDetail.interfaces has inBps/outBps when one node matches.
 ----------------------------------------------------------------------
 
 ================================================================================
@@ -79,7 +83,7 @@ account. If the email doesn't match <YOUR-EMAIL>, raise a warning and stop.
 
 ----------------------------------------------------------------------
 Use netpulse_meta to confirm I have access to: storeMonitor, storeProblems,
-storeZabbix, soc, sentinelXdr, zabbixInfra. Tell me which (if any) are missing from my
+storeZabbix, soc, sentinelXdr, zabbixInfra, orian. Tell me which (if any) are missing from my
 allowed pages.
 ----------------------------------------------------------------------
 
@@ -95,7 +99,7 @@ markdown table with columns: id, label, mcpTool, freshness, description.
 ----------------------------------------------------------------------
 Use netpulse_modules to list any NEW dashboards that have been added since
 the last time I asked. (Compare against the 6 standard ones: storeMonitor,
-storeProblems, storeZabbix, soc, sentinelXdr, zabbixInfra.)
+storeProblems, storeZabbix, soc, sentinelXdr, zabbixInfra, orian.)
 ----------------------------------------------------------------------
 
 ----------------------------------------------------------------------
@@ -258,6 +262,11 @@ IMPORTANT — CPU / Memory dual-source:
   * cpuMemoryMetricsState.storeAgent — Influx agent summary
   Report BOTH when present. Never label "Not in Zabbix scope" if
   storeAgentMetrics has values.
+
+IMPORTANT — fleet inventory (~3000 store hosts):
+  * availability.total / monitoredHostTotal = full Zabbix inventory count
+  * hosts[] may be capped (hostsListTruncated=true); prioritize down hosts
+  * For "how many hosts", quote availability.total — NOT hosts.length
 
 IMPORTANT — 24h trend graphs:
   Include trend / graph / history / 24h in the question. Response field:
@@ -506,7 +515,42 @@ trend graph". Tabulate cpuMemoryHistory points. Times in IST.
 ----------------------------------------------------------------------
 
 ================================================================================
-  SECTION 12 — noc_status_summary  (built-in prompt)
+  SECTION 12 — netpulse_orian  (SolarWinds Orion SWIS: nodes, alerts, interfaces)
+================================================================================
+
+----------------------------------------------------------------------
+Use netpulse_orian to summarize Orion fleet health: node counts by status
+(up/down/warning) and active alerts by severity. Quote summary.* verbatim.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_orian: "list all down nodes" — tabulate nodes[] where
+statusColor is down. Include name, ip, responseTime, packetLoss.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_orian question: "node <ORION-CAPTION-OR-IP> snapshot interfaces
+traffic". Use nodeDetail.interfaces for inBps/outBps and admin status.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+Use netpulse_orian to show the top 15 active Orion alerts. Columns:
+severity, node, message, triggeredAt. From activeAlerts[].
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+netpulse_orian: "warning nodes with CPU > 80%". Filter nodes[] by
+statusColor warning and cpu >= 80. Sort by cpu descending.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+For Orion node <ORION-CAPTION>, call netpulse_orian with the caption in
+the question. Report nodeDetail node fields, interface utilization, and
+recent events from nodeDetail.events.
+----------------------------------------------------------------------
+
+================================================================================
+  SECTION 13 — noc_status_summary  (built-in prompt)
 ================================================================================
 
 ----------------------------------------------------------------------
@@ -523,7 +567,7 @@ firewall denies block from netpulse_soc.
 ----------------------------------------------------------------------
 
 ================================================================================
-  SECTION 13 — Cross-module patterns  (multi-tool recipes)
+  SECTION 14 — Cross-module patterns  (multi-tool recipes)
 ================================================================================
 
 ----------------------------------------------------------------------
@@ -549,6 +593,7 @@ attention. Call:
   - netpulse_storeZabbix     (store gear down / high CPU / interface stale)
   - netpulse_soc             (top deny patterns)
   - netpulse_zabbixInfra     (down/flapping hosts)
+  - netpulse_orian           (Orion down/warning nodes, critical alerts)
   - netpulse_sentinelXdr     (high-severity alerts)
 Merge into a single ranked list (max 15 rows). Columns: rank,
 source_module, target, severity, evidence, suggested_action.
@@ -577,6 +622,7 @@ Generate a NOC shift handoff for the last 12 hours. Sections:
   4. Open SOC concerns -- via netpulse_soc
   5. Endpoint risks -- via netpulse_sentinelXdr
   6. Infra worries -- via netpulse_zabbixInfra
+  7. Orion NPM -- via netpulse_orian (down nodes, critical alerts)
   7. Store Zabbix gear -- via netpulse_storeZabbix (ping/interfaces)
   8. Watchlist for the next shift
 Length: under 350 words. Quote numbers verbatim.
@@ -640,13 +686,13 @@ XDR alerts. Pull each respective tool. Quote both numbers and the delta.
 [ANOMALY HUNT]
 Hunt for anomalies in the last 1 hour vs. the previous 6 hours. For each
 module (storeMonitor, storeProblems, storeZabbix, soc, sentinelXdr,
-zabbixInfra), call the tool and surface anything that looks like a
+zabbixInfra, orian), call the tool and surface anything that looks like a
 step-change. Output as a table:
 module, metric, baseline, current, delta_pct, severity_guess.
 ----------------------------------------------------------------------
 
 ================================================================================
-  SECTION 14 — Trigger-phrase macros  (paste once, drive the rest of the chat)
+  SECTION 15 — Trigger-phrase macros  (paste once, drive the rest of the chat)
 ================================================================================
 
 ----------------------------------------------------------------------
@@ -688,6 +734,7 @@ Always quote numbers verbatim from tool output. Never invent data.
     vs "periodic"). "Last 5 minutes" works on storeMonitor (live InfluxDB);
     storeProblems is snapshotted every ~2 min so prefer "last hour" or longer.
     storeZabbix and zabbixInfra are live Zabbix API at send time.
+    orian is live SolarWinds Orion SWIS at send time (requires ORION_* env).
 
   * Hostname in question unlocks scoped data:
       storeProblems  -> 30-day disconnect history for that store (not global 120 cap)

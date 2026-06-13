@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { createZabbixClient } from '../services/zabbix.js'
+import { fetchAllMonitoredHosts, ZABBIX_HOST_FETCH_MAX } from '../services/zabbixHostFetch.js'
 import { fetchRopUptimeReport, fetchRopStoreDisconnectEvents, fetchRopGroupDisconnectEvents } from '../services/ropUptimeReport.js'
 import { buildRopDisconnectEventsReport, buildRopSingleStoreDisconnectReport } from '../services/storeReports.js'
 
@@ -65,8 +66,6 @@ function filterOverviewHosts(rows, groupName, q) {
   return out
 }
 
-const HOST_FETCH_MAX = 10000
-const HOST_DETAIL_CHUNK = 500
 /** Treat Zabbix item data older than this as stale (typical poll interval 2–5 min). */
 const NET_HEALTH_STALE_DEFAULT_SEC = 300
 
@@ -80,52 +79,6 @@ function pollAgeBounds(clocks) {
   const valid = clocks.filter((c) => c != null && c > 0)
   if (!valid.length) return { oldestPoll: null, newestPoll: null }
   return { oldestPoll: Math.min(...valid), newestPoll: Math.max(...valid) }
-}
-
-async function monitoredHostCount() {
-  try {
-    return Number(await zabbixRpc('host.get', { monitored_hosts: true, countOutput: true })) || 0
-  } catch (e) {
-    if (e.code !== 'ZABBIX_API_ERROR') throw e
-    return Number(await zabbixRpc('host.get', { countOutput: true })) || 0
-  }
-}
-
-/** Fetch all monitored hosts (paginated by hostid chunks when > HOST_FETCH_MAX). */
-async function fetchAllMonitoredHosts(baseParams = {}, { maxTotal = HOST_FETCH_MAX, chunkSize = HOST_DETAIL_CHUNK } = {}) {
-  const total = await monitoredHostCount()
-  if (total <= maxTotal) {
-    const rows = await zabbixRpc('host.get', {
-      monitored_hosts: true,
-      sortfield: 'hostid',
-      sortorder: 'ASC',
-      limit: maxTotal,
-      ...baseParams,
-    })
-    return { rows: rows || [], total, truncated: false }
-  }
-
-  const idRows = await zabbixRpc('host.get', {
-    monitored_hosts: true,
-    output: ['hostid'],
-    sortfield: 'hostid',
-    sortorder: 'ASC',
-    limit: maxTotal,
-  })
-  const ids = (idRows || []).map((h) => String(h.hostid)).filter(Boolean)
-  const truncated = ids.length < total
-  const all = []
-  for (let i = 0; i < ids.length; i += chunkSize) {
-    const hostids = ids.slice(i, i + chunkSize)
-    const batch = await zabbixRpc('host.get', {
-      monitored_hosts: true,
-      hostids,
-      limit: chunkSize,
-      ...baseParams,
-    })
-    all.push(...(batch || []))
-  }
-  return { rows: all, total, truncated }
 }
 
 async function problemCountForHostids(hostids) {
@@ -343,7 +296,7 @@ router.get('/overview', async (req, res) => {
 
     const [version, hostFetch] = await Promise.all([
       zabbixRpc('apiinfo.version', {}),
-      fetchAllMonitoredHosts({
+      fetchAllMonitoredHosts(zabbixRpc,{
         output: ['hostid', 'host', 'name', 'status', 'available', 'active_available'],
         selectInterfaces: ['interfaceid', 'available', 'type'],
         ...selectGroupsParam,
@@ -422,13 +375,13 @@ router.get('/hosts', async (req, res) => {
       return res.status(503).json({ error: 'Zabbix not configured' })
     }
     const reqLimit = parseInt(String(req.query.limit || '5000'), 10)
-    const limit = Math.min(Math.max(Number.isFinite(reqLimit) ? reqLimit : 5000, 1), HOST_FETCH_MAX)
+    const limit = Math.min(Math.max(Number.isFinite(reqLimit) ? reqLimit : 5000, 1), ZABBIX_HOST_FETCH_MAX)
     let selectGroupsKey = 'selectGroups'
     try {
       await zabbixRpc('hostgroup.get', { output: ['groupid'], limit: 1 })
       selectGroupsKey = 'selectHostGroups'
     } catch { /* keep selectGroups */ }
-    const { rows: raw, total: monitoredHostTotal, truncated: hostsTruncated } = await fetchAllMonitoredHosts({
+    const { rows: raw, total: monitoredHostTotal, truncated: hostsTruncated } = await fetchAllMonitoredHosts(zabbixRpc,{
       output: ['hostid', 'host', 'name', 'status', 'available', 'active_available'],
       selectInterfaces: ['interfaceid', 'available', 'type', 'ip', 'dns', 'port', 'main'],
       [selectGroupsKey]: ['groupid', 'name'],
@@ -994,7 +947,7 @@ router.get('/problems', async (req, res) => {
         await zabbixRpc('hostgroup.get', { output: ['groupid'], limit: 1 })
         selectGroupsKey = 'selectHostGroups'
       } catch { /* keep */ }
-      const { rows: raw } = await fetchAllMonitoredHosts({
+      const { rows: raw } = await fetchAllMonitoredHosts(zabbixRpc,{
         output: ['hostid', 'host', 'name'],
         [selectGroupsKey]: ['groupid', 'name'],
       })
@@ -1268,7 +1221,7 @@ async function resolveMonitoredHostsForGroup(groupFilter = '') {
     if (gobj) {
       const hrows = await zabbixRpc('host.get', {
         groupids: [gobj.groupid], monitored_hosts: true,
-        output: ['hostid'], limit: HOST_FETCH_MAX,
+        output: ['hostid'], limit: ZABBIX_HOST_FETCH_MAX,
       })
       groupHostids = (hrows || []).map((h) => String(h.hostid))
     } else {
@@ -1276,7 +1229,7 @@ async function resolveMonitoredHostsForGroup(groupFilter = '') {
     }
   }
 
-  const { rows: hostRows } = await fetchAllMonitoredHosts({ output: ['hostid', 'host', 'name'] })
+  const { rows: hostRows } = await fetchAllMonitoredHosts(zabbixRpc,{ output: ['hostid', 'host', 'name'] })
   const hosts = groupHostids
     ? hostRows.filter((h) => groupHostids.includes(String(h.hostid)))
     : hostRows
@@ -1724,7 +1677,7 @@ router.get('/network-health', async (req, res) => {
       if (gobj) {
         const hrows = await zabbixRpc('host.get', {
           groupids: [gobj.groupid], monitored_hosts: true,
-          output: ['hostid'], limit: HOST_FETCH_MAX,
+          output: ['hostid'], limit: ZABBIX_HOST_FETCH_MAX,
         })
         groupHostids = (hrows || []).map((h) => String(h.hostid))
       } else {
@@ -1733,7 +1686,7 @@ router.get('/network-health', async (req, res) => {
     }
 
     /* ── fetch monitored hosts with availability ── */
-    const { rows: hostRows } = await fetchAllMonitoredHosts({
+    const { rows: hostRows } = await fetchAllMonitoredHosts(zabbixRpc,{
       output: ['hostid', 'host', 'name', 'status', 'available', 'active_available'],
       selectInterfaces: ['interfaceid', 'available', 'type', 'main'],
     })
@@ -2090,7 +2043,7 @@ router.get('/rop-dashboard', async (req, res) => {
       output: ['hostid', 'host', 'name', 'status', 'available', 'active_available'],
       selectInterfaces: ['interfaceid', 'available', 'type', 'ip', 'dns', 'main'],
       sortfield: 'name',
-      limit: HOST_FETCH_MAX,
+      limit: ZABBIX_HOST_FETCH_MAX,
     })
     const hosts = rawHosts || []
     const hostids = hosts.map((h) => String(h.hostid))

@@ -26,9 +26,11 @@ user has access to). Today's defaults:
 |---|---|
 | `netpulse_storeMonitor` | Store Monitor (live InfluxDB) |
 | `netpulse_storeProblems` | Store problem tracker (Mongo lifecycle) |
+| `netpulse_storeZabbix` | Store Zabbix (ping, interfaces, CPU/RAM) |
 | `netpulse_soc` | SOC / firewall (Elasticsearch, last hour) |
 | `netpulse_sentinelXdr` | SentinelOne XDR (Singularity Data Lake) |
 | `netpulse_zabbixInfra` | Infra Zabbix (host availability, ping, traffic) |
+| `netpulse_orian` | SolarWinds Orion NPM (SWIS nodes, alerts, interfaces) |
 
 **Resources:** `netpulse://meta`, `netpulse://modules`
 **Prompts:** `noc_status_summary`

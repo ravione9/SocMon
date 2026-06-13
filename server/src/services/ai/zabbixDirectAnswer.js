@@ -1,4 +1,5 @@
 import { createZabbixClient } from '../../services/zabbix.js'
+import { fetchAllMonitoredHosts, ZABBIX_HOST_FETCH_MAX } from '../../services/zabbixHostFetch.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 import { isInfluxStoreConfigured, fetchStoreSnapshot, buildOverviewSummary } from '../influxStore.js'
 import { extractStoreCode, extractStoreHostname, isStoreHostnamePortalQuery, shouldUseStoreCodeAlias } from './queryContext.js'
@@ -906,7 +907,7 @@ async function fetchHostsInGroup(zabbixRpc, groupName, baseParams) {
   }
   if (!groups?.length) return { hosts: [], groupFound: false, groupName: name }
   const groupids = groups.map(g => g.groupid)
-  const hosts = await zabbixRpc('host.get', { ...baseParams, groupids, limit: 500 })
+  const hosts = await zabbixRpc('host.get', { ...baseParams, groupids, limit: ZABBIX_HOST_FETCH_MAX })
   return { hosts: hosts || [], groupFound: true, groupName: groups[0].name || name }
 }
 
@@ -1266,6 +1267,51 @@ function classifyHost(h) {
 
 const SWITCH_DEVICE_TYPES = new Set(['cisco', 'network', 'juniper'])
 const INTERFACE_STALE_SEC = Number.parseInt(process.env.ZABBIX_INTERFACE_STALE_SEC || '1800', 10)
+const ZABBIX_CONTEXT_HOST_LIST_CAP = Math.min(
+  Math.max(parseInt(process.env.ZABBIX_CONTEXT_HOST_LIST_CAP || '1000', 10) || 1000, 50),
+  ZABBIX_HOST_FETCH_MAX,
+)
+const ZABBIX_CONTEXT_ENRICH_LIMIT = Math.min(
+  Math.max(parseInt(process.env.ZABBIX_CONTEXT_ENRICH_LIMIT || '250', 10) || 250, 25),
+  ZABBIX_HOST_FETCH_MAX,
+)
+
+async function globalProblemCount(zabbixRpc) {
+  try {
+    return Number(await zabbixRpc('problem.get', { recent: true, countOutput: true })) || 0
+  } catch (e) {
+    if (e.code !== 'ZABBIX_API_ERROR') throw e
+    return Number(await zabbixRpc('problem.get', { countOutput: true })) || 0
+  }
+}
+
+function prioritizeHostsForList(hosts, cap) {
+  const sorted = [...hosts].sort((a, b) => {
+    const rank = (h) => {
+      const s = availLabelFromHost(h)
+      if (s === 'unavailable') return 0
+      if (s === 'unknown') return 1
+      return 2
+    }
+    const ra = rank(a)
+    const rb = rank(b)
+    if (ra !== rb) return ra - rb
+    return String(a.name || a.host).localeCompare(String(b.name || b.host))
+  })
+  return sorted.slice(0, cap)
+}
+
+function mapLiteHostRow(h) {
+  return {
+    hostid: String(h.hostid),
+    name: h.name || h.host,
+    host: h.host,
+    status: availLabelFromHost(h),
+    type: classifyHost(h),
+    interfaceIps: (h.interfaces || []).map(i => i.ip).filter(Boolean),
+    groups: (h.groups || []).map(g => g.name).filter(Boolean),
+  }
+}
 
 async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '', hostGroupFilter = '', includePing = false, includeBandwidth = false, includeDisk = false, includeCpuMemory = false, includeProblems = true, problemLimit = 12 } = {}) {
   const { isZabbixConfigured, zabbixRpc, getUrl } = client
@@ -1285,7 +1331,7 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
       sortfield: 'name',
     }
 
-    const [version, hosts, groupMeta] = await Promise.all([
+    const [version, hostFetch, groupMeta] = await Promise.all([
       zabbixRpc('apiinfo.version', {}).catch(() => ''),
       (async () => {
         const hostSearch = async (term, limit = 200) => {
@@ -1311,7 +1357,7 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
         }
 
         if (!search) {
-          return zabbixRpc('host.get', { ...baseParams, limit: 500 })
+          return fetchAllMonitoredHosts(zabbixRpc, baseParams)
         }
 
         if (isExactIp) {
@@ -1345,12 +1391,11 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
         // 1) lightweight host scan (hostid/host/name only)
         // 2) local alias matcher (LKST code -> RP code)
         // 3) hydrate matched hostids with full baseParams.
-        const liteHosts = await zabbixRpc('host.get', {
-          monitored_hosts: true,
+        const liteFetch = await fetchAllMonitoredHosts(zabbixRpc, {
           output: ['hostid', 'host', 'name'],
           sortfield: 'name',
-          limit: 5000,
-        }).catch(() => [])
+        }).catch(() => ({ rows: [] }))
+        const liteHosts = liteFetch.rows || []
         const matchedIds = [...new Set((liteHosts || [])
           .filter(h => hostMatchesSearch(h, search))
           .map(h => String(h.hostid))
@@ -1369,14 +1414,22 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
         : Promise.resolve(null),
     ])
 
+    const hosts = Array.isArray(hostFetch)
+      ? hostFetch
+      : (hostFetch?.rows || [])
+    const inventoryTotal = Array.isArray(hostFetch) ? null : (hostFetch?.total ?? null)
+    const inventoryTruncated = Array.isArray(hostFetch) ? false : Boolean(hostFetch?.truncated)
+
     const rows = isExactIp
-      ? (hosts || [])
-      : (hosts || []).filter(h => hostMatchesSearch(h, search))
+      ? hosts
+      : hosts.filter(h => hostMatchesSearch(h, search))
     const filtered = deviceTypeFilter === 'switch'
       ? rows.filter(h => isPhysicalSwitchHost(h))
       : deviceTypeFilter
         ? rows.filter(h => classifyHost(h) === deviceTypeFilter)
         : rows
+    const scopedQuery = Boolean(search || groupName)
+    const monitoredHostTotal = inventoryTotal ?? filtered.length
     const availability = { total: filtered.length, available: 0, unavailable: 0, unknown: 0 }
 
     // Device type breakdown
@@ -1393,7 +1446,16 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
       if (a === 'unavailable') deviceTypeDown[type] = (deviceTypeDown[type] || 0) + 1
     }
 
-    const hostids = filtered.map(h => String(h.hostid)).filter(Boolean)
+    const listCap = scopedQuery ? filtered.length : ZABBIX_CONTEXT_HOST_LIST_CAP
+    const listedHosts = scopedQuery
+      ? filtered
+      : prioritizeHostsForList(filtered, listCap)
+    const hostsListTruncated = !scopedQuery && filtered.length > listedHosts.length
+
+    const enrichHosts = scopedQuery
+      ? filtered
+      : listedHosts.slice(0, Math.min(listedHosts.length, ZABBIX_CONTEXT_ENRICH_LIMIT))
+    const hostids = enrichHosts.map(h => String(h.hostid)).filter(Boolean)
     let pingMetrics = null
     if (includePing && hostids.length) {
       pingMetrics = await fetchPingMetrics(zabbixRpc, hostids)
@@ -1412,24 +1474,40 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
     }
     let problemCount = 0
     let problems = []
-    if (includeProblems && hostids.length) {
+    if (includeProblems) {
       try {
-        problemCount = Number(await zabbixRpc('problem.get', {
-          hostids,
-          recent: true,
-          countOutput: true,
-        })) || 0
+        if (scopedQuery && hostids.length) {
+          try {
+            problemCount = Number(await zabbixRpc('problem.get', {
+              hostids,
+              recent: true,
+              countOutput: true,
+            })) || 0
+          } catch {
+            problemCount = Number(await zabbixRpc('problem.get', { hostids, countOutput: true })) || 0
+          }
+          problems = await problemGet(zabbixRpc, {
+            hostids,
+            sortfield: ['eventid'],
+            sortorder: 'DESC',
+            limit: Math.max(1, Math.min(Number(problemLimit) || 12, 50)),
+            output: ['eventid', 'name', 'severity', 'clock', 'acknowledged'],
+            selectHosts: ['hostid', 'host', 'name'],
+          })
+        } else if (!scopedQuery) {
+          problemCount = await globalProblemCount(zabbixRpc)
+          problems = await problemGet(zabbixRpc, {
+            sortfield: ['eventid'],
+            sortorder: 'DESC',
+            limit: Math.max(1, Math.min(Number(problemLimit) || 12, 50)),
+            output: ['eventid', 'name', 'severity', 'clock', 'acknowledged'],
+            selectHosts: ['hostid', 'host', 'name'],
+          })
+        }
       } catch {
-        problemCount = Number(await zabbixRpc('problem.get', { hostids, countOutput: true })) || 0
+        problemCount = 0
+        problems = []
       }
-      problems = await problemGet(zabbixRpc, {
-        hostids,
-        sortfield: ['eventid'],
-        sortorder: 'DESC',
-        limit: Math.max(1, Math.min(Number(problemLimit) || 12, 50)),
-        output: ['eventid', 'name', 'severity', 'clock', 'acknowledged'],
-        selectHosts: ['hostid', 'host', 'name'],
-      })
     }
 
     return {
@@ -1468,15 +1546,12 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
       cpuMemoryMetrics,
       hostGroupFilter: groupName || null,
       hostGroupFound: groupMeta?.groupFound ?? (groupName ? null : undefined),
-      matchedHosts: filtered.map(h => ({
-        hostid: String(h.hostid),
-        name: h.name || h.host,
-        host: h.host,
-        status: availLabelFromHost(h),
-        type: classifyHost(h),
-        interfaceIps: (h.interfaces || []).map(i => i.ip).filter(Boolean),
-        groups: (h.groups || []).map(g => g.name).filter(Boolean),
-      })),
+      matchedHosts: listedHosts.map(mapLiteHostRow),
+      monitoredHostTotal,
+      hostsReturned: listedHosts.length,
+      hostsListTruncated,
+      hostsListCap: scopedQuery ? null : listCap,
+      inventoryTruncated,
       hostFilter: search || null,
       deviceTypeFilter: deviceTypeFilter || null,
     }
@@ -2382,6 +2457,11 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     hostFilter: data.hostFilter,
     deviceTypeFilter: data.deviceTypeFilter,
     availability: data.availability,
+    monitoredHostTotal: data.monitoredHostTotal ?? data.availability?.total ?? null,
+    hostsReturned: data.hostsReturned ?? (data.matchedHosts || []).length,
+    hostsListTruncated: data.hostsListTruncated ?? false,
+    hostsListCap: data.hostsListCap ?? null,
+    inventoryTruncated: data.inventoryTruncated ?? false,
     deviceTypes: data.deviceTypes,
     problemCount: data.problemCount,
     problems: (data.problems || []).slice(0, 10),
