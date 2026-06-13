@@ -33,10 +33,11 @@ import { randomUUID } from 'node:crypto'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
-import { NetPulseClient, verifyJwtAgainstNetPulse } from './netpulseClient.js'
+import { NetPulseClient, resolveMcpTimeoutMs, verifyJwtAgainstNetPulse } from './netpulseClient.js'
 import { createNetPulseMcpServer } from './server.js'
 
 const NETPULSE_API_BASE = process.env.NETPULSE_API_BASE || 'http://server:5000'
+const MCP_TIMEOUT_MS = resolveMcpTimeoutMs()
 const REFRESH_MS = (() => {
   const raw = Number(process.env.NETPULSE_MCP_REFRESH_MS)
   if (!Number.isFinite(raw) || raw < 0) return 60_000
@@ -77,7 +78,11 @@ async function runStdio() {
     process.exit(1)
   }
 
-  const netpulse = new NetPulseClient({ baseUrl: NETPULSE_API_BASE, bearer })
+  const netpulse = new NetPulseClient({
+    baseUrl: NETPULSE_API_BASE,
+    bearer,
+    timeoutMs: MCP_TIMEOUT_MS,
+  })
   const { server, attachDynamicModules, dispose } = createNetPulseMcpServer({
     netpulse,
     refreshMs: REFRESH_MS,
@@ -92,7 +97,8 @@ async function runStdio() {
 
   process.stderr.write(
     `[netpulse-mcp] stdio transport ready (api=${NETPULSE_API_BASE}, ` +
-    `user=${verify.meta?.serviceUser?.email || 'unknown'}, refresh=${REFRESH_MS}ms)\n`,
+    `user=${verify.meta?.serviceUser?.email || 'unknown'}, refresh=${REFRESH_MS}ms, ` +
+    `timeout=${MCP_TIMEOUT_MS}ms)\n`,
   )
 }
 
@@ -146,7 +152,11 @@ async function runHttp() {
         )
       }
 
-      const netpulse = new NetPulseClient({ baseUrl: NETPULSE_API_BASE, bearer })
+      const netpulse = new NetPulseClient({
+        baseUrl: NETPULSE_API_BASE,
+        bearer,
+        timeoutMs: MCP_TIMEOUT_MS,
+      })
       const { server, attachDynamicModules, dispose } = createNetPulseMcpServer({
         netpulse,
         refreshMs: REFRESH_MS,

@@ -104,6 +104,7 @@ services:
       # become MCP tools without a server restart. 0 disables auto-refresh
       # (initial registration only). 5 s floor enforced in code.
       NETPULSE_MCP_REFRESH_MS: "60000"
+      NETPULSE_MCP_TIMEOUT_MS: "120000"
     depends_on:
       - server
     networks:

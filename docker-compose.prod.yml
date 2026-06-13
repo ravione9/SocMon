@@ -130,6 +130,8 @@ services:
       # Re-poll AI_CONTEXT_MODULES so newly added dashboards appear in MCP
       # clients without a restart. 0 disables; 5s floor enforced in code.
       NETPULSE_MCP_REFRESH_MS: "60000"
+      # Broad store Zabbix snapshots can exceed the old 30s client default.
+      NETPULSE_MCP_TIMEOUT_MS: "120000"
     # service_started, NOT service_healthy: mcp doesn't make any upstream
     # calls until a client opens a session, so we don't need server to be
     # health-check healthy first. Strict service_healthy here was timing

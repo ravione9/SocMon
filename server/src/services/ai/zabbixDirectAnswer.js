@@ -1314,16 +1314,23 @@ function mapLiteHostRow(h) {
   }
 }
 
-async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '', hostGroupFilter = '', includePing = false, includeBandwidth = false, includeDisk = false, includeCpuMemory = false, includeProblems = true, problemLimit = 12 } = {}) {
+async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter = '', hostGroupFilter = '', includePing = false, includeBandwidth = false, includeDisk = false, includeCpuMemory = false, includeProblems = true, problemLimit = 12, inventoryLite = false } = {}) {
   const { isZabbixConfigured, zabbixRpc, getUrl } = client
   if (!isZabbixConfigured()) return { configured: false }
 
   const search = String(hostFilter || '').trim()
   const groupName = String(hostGroupFilter || '').trim()
   const isExactIp = search ? (IPV4_RE.test(search) && search.match(IPV4_RE)[0] === search) : false
+  const broadInventory = !search && !groupName
 
   try {
-    const baseParams = {
+    const baseParams = broadInventory && inventoryLite
+      ? {
+        monitored_hosts: true,
+        output: ['hostid', 'host', 'name', 'status', 'available', 'active_available'],
+        sortfield: 'name',
+      }
+      : {
       monitored_hosts: true,
       output: ['hostid', 'host', 'name', 'status', 'available', 'active_available'],
       selectInterfaces: ['interfaceid', 'available', 'type', 'main', 'ip'],
@@ -2350,7 +2357,10 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   // Host-detail queries do not need problem.get every time; that call can be
   // expensive on some Zabbix deployments and is only useful when alerts are
   // explicitly requested or for broad overviews with no host filter.
-  const includeProblems = wantsZabbixAlertsQuery(userMessage) || !hostFilter
+  const broadQuery = !hostFilter
+  const inventoryLite = moduleId === 'storeZabbix' && broadQuery && shouldUseLiteZabbixInventory(userMessage)
+  const includeProblems = wantsZabbixAlertsQuery(userMessage)
+    || (broadQuery && !inventoryLite)
 
   const data = await fetchZabbixSnapshot(client, {
     hostFilter,
@@ -2359,6 +2369,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     includeBandwidth,
     includeCpuMemory,
     includeProblems,
+    inventoryLite,
   })
 
   if (!data.configured) {
@@ -2484,16 +2495,66 @@ export async function buildZabbixInfraContext(userMessage = '') {
   }, userMessage)
 }
 
+function isDisconnectFocusedQuery(userMessage) {
+  const msg = String(userMessage || '').trim()
+  if (!msg) return false
+  const disconnectKw = /\b(disconnect|disconn|went down|back up|came back|still offline|active disconnect|offline event|rop|uptime|bh duration|business hour)\b/i
+  const zabbixKw = /\b(ping|interface|bandwidth|cpu|memory|host count|how many host|zabbix|unavailable host|snmp|port status|alert|problem)\b/i
+  return disconnectKw.test(msg) && !zabbixKw.test(msg)
+}
+
+function shouldUseLiteZabbixInventory(userMessage) {
+  const msg = String(userMessage || '').trim()
+  const detailKw = /\b(ping|interface|bandwidth|cpu|memory|alert|problem|host list|list host|show host|all host|device type|switch)\b/i
+  return !detailKw.test(msg)
+}
+
+async function buildStoreZabbixZabbixStub(userMessage = '') {
+  const fetchedAt = new Date().toISOString()
+  const client = createZabbixClient('STORE_ZABBIX')
+  if (!client.isZabbixConfigured()) {
+    return {
+      module: 'storeZabbix',
+      freshness: 'live',
+      fetchedAt,
+      configured: false,
+      error: 'STORE_ZABBIX_URL + STORE_ZABBIX_API_TOKEN not configured',
+      zabbixSkipped: true,
+      zabbixSkipReason: 'disconnect-focused query — Zabbix host inventory skipped for MCP latency',
+    }
+  }
+  let reachable = null
+  try {
+    const ping = await client.zabbixPing({ timeoutMs: 6000 })
+    reachable = Boolean(ping?.ok)
+  } catch {
+    reachable = false
+  }
+  return {
+    module: 'storeZabbix',
+    freshness: 'live',
+    fetchedAt,
+    configured: true,
+    zabbixSkipped: true,
+    zabbixSkipReason: 'disconnect-focused query — Zabbix host inventory skipped for MCP latency',
+    zabbixReachable: reachable,
+    error: reachable ? null : 'Store Zabbix API unreachable',
+  }
+}
+
 export async function buildStoreZabbixContext(userMessage = '') {
-  const [disconnectBlock, zabbixBlock] = await Promise.all([
-    buildStoreDisconnectMcpContext(userMessage),
-    buildZabbixContextFromClient({
+  const disconnectBlock = await buildStoreDisconnectMcpContext(userMessage)
+  const hostScope = extractIpv4(userMessage) || extractStoreHostname(userMessage)
+  const skipZabbixInventory = isDisconnectFocusedQuery(userMessage) && !hostScope
+
+  const zabbixBlock = skipZabbixInventory
+    ? await buildStoreZabbixZabbixStub(userMessage)
+    : await buildZabbixContextFromClient({
       moduleId: 'storeZabbix',
       envName: 'STORE_ZABBIX',
       sourceLabel: 'Store Zabbix',
       missingError: 'STORE_ZABBIX_URL + STORE_ZABBIX_API_TOKEN not configured',
-    }, userMessage),
-  ])
+    }, userMessage)
 
   const zabbixConfigured = zabbixBlock.configured !== false
   const zabbixError = zabbixBlock.error || null

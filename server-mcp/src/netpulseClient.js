@@ -7,7 +7,14 @@
  */
 import { fetch } from 'undici'
 
-const DEFAULT_TIMEOUT_MS = 30_000
+/** MCP → NetPulse /api/agent/* timeout (broad Zabbix snapshots can exceed 30s). */
+export const DEFAULT_TIMEOUT_MS = 30_000
+
+export function resolveMcpTimeoutMs() {
+  const raw = Number(process.env.NETPULSE_MCP_TIMEOUT_MS)
+  if (!Number.isFinite(raw) || raw <= 0) return 120_000
+  return Math.max(30_000, Math.min(raw, 600_000))
+}
 
 export class NetPulseClient {
   constructor({ baseUrl, bearer, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
