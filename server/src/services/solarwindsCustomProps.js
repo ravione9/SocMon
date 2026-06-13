@@ -649,7 +649,7 @@ async function fetchInterfacesBulk(nodeIds, ifaceFields) {
       const q = `SELECT i.InterfaceID, i.NodeID, i.Caption, i.Status, i.InBps, i.OutBps,
         i.PercentUtil, ${ifaceCpCols}
         FROM Orion.NPM.Interfaces i
-        INNER JOIN Orion.NPM.InterfacesCustomProperties icp ON i.InterfaceID = icp.InterfaceID
+        LEFT JOIN Orion.NPM.InterfacesCustomProperties icp ON i.InterfaceID = icp.InterfaceID
         WHERE i.NodeID IN (${ids}) ORDER BY i.NodeID, i.InterfaceID`
       const d = await orionSwisQuery(q)
       for (const row of d?.results || []) accumulate(Number(row.NodeID), row)
@@ -681,4 +681,32 @@ async function fetchInterfacesBulk(nodeIds, ifaceFields) {
   return { ifaceMap, statsMap }
 }
 
-export { toOrionDT, parseBusinessHours, inBusinessHours, fetchInterfacesBulk, cpFieldLabel, buildCpFieldMeta }
+/** Load node custom property row (chunked + per-field fallback). */
+export async function fetchNodeCpRow(nodeId, nodeFields) {
+  const fields = (nodeFields || []).filter(isValidCol)
+  if (!fields.length || !Number.isFinite(Number(nodeId))) return null
+  const row = {}
+  const CHUNK = 12
+  for (let i = 0; i < fields.length; i += CHUNK) {
+    const chunk = fields.slice(i, i + CHUNK)
+    try {
+      const data = await orionSwisQuery(
+        `SELECT ${chunk.join(', ')} FROM Orion.NodesCustomProperties WHERE NodeID=${Number(nodeId)}`,
+      )
+      Object.assign(row, data?.results?.[0] || {})
+    } catch {
+      await Promise.allSettled(chunk.map(async (field) => {
+        try {
+          const data = await orionSwisQuery(
+            `SELECT TOP 1 ${field} FROM Orion.NodesCustomProperties WHERE NodeID=${Number(nodeId)}`,
+          )
+          const val = data?.results?.[0]?.[field]
+          if (val != null && String(val).trim() !== '') row[field] = val
+        } catch { /* column absent on this Orion */ }
+      }))
+    }
+  }
+  return Object.keys(row).length ? row : null
+}
+
+export { toOrionDT, parseBusinessHours, inBusinessHours, fetchInterfacesBulk, cpFieldLabel, buildCpFieldMeta, fetchNodeCpRow }

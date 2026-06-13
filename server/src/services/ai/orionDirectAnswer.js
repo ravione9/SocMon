@@ -149,7 +149,7 @@ export async function buildSolarWindsContext(userMessage = '') {
   const nodeFilter = extractNodeSearch(userMessage)
   const statusFilter = detectNodeStatusFilter(userMessage)
   const wantsDetail = Boolean(nodeFilter)
-    || /\b(snapshot|interfaces|interface|traffic|detail|events)\b/i.test(userMessage)
+    || /\b(snapshot|interfaces|interface|traffic|detail|events|custom\s*propert|dual\s*link|link\s*status|carrier|lkst_bu|organization|city)\b/i.test(userMessage)
 
   try {
     const [summary, nodesData, alerts] = await Promise.all([
@@ -173,6 +173,7 @@ export async function buildSolarWindsContext(userMessage = '') {
         if (snap?.found) {
           nodeDetail = {
             node: snap.node,
+            nodeCustomProperties: snap.nodeCustomProperties || [],
             interfaces: (snap.interfaces || []).slice(0, 30),
             alerts: (snap.alerts || []).slice(0, 12),
             events: (snap.events || []).slice(0, 15),
@@ -198,8 +199,8 @@ export async function buildSolarWindsContext(userMessage = '') {
       activeAlertCount: alerts.length,
       nodeDetail,
       note: nodeFilter
-        ? `Orion nodes filtered by "${nodeFilter}". nodeDetail includes interfaces (inBps/outBps) when a single node matched.`
-        : 'Orion NPM live snapshot. nodes[] has cpu, memory, responseTime, packetLoss from SWIS. Use node/host name in question for drill-down.',
+        ? `Orion nodes filtered by "${nodeFilter}". nodeDetail includes nodeCustomProperties (CITY, DUAL_LINKS, LINK_STATUS, LKST_BU, ORGANIZATION, STATE, …) and interfaces[].customProperties (CarrierName, Comments, … per link) when a single node matched.`
+        : 'Orion NPM live snapshot. nodes[] has cpu, memory, responseTime, packetLoss from SWIS. Use node/host name in question for drill-down with custom properties.',
     }
   } catch (err) {
     return {

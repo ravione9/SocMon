@@ -917,6 +917,12 @@ function AlertDetailModal({ detail, onClose }) {
   )
 }
 
+function ifaceCpValue(iface, field) {
+  if (!iface) return null
+  const hit = (iface.customProperties || []).find((p) => p.field === field)
+  return hit?.value ?? null
+}
+
 function CpGrid({ items, emptyLabel = 'No custom properties' }) {
   if (!items?.length) {
     return <div className="sw-empty" style={{ padding: '12px 0' }}>{emptyLabel}</div>
@@ -1106,6 +1112,15 @@ function DeviceSnapshotTab({
   const node = snapshot?.node || selectedNode
   const dotColor = STATUS_COLOR[node?.statusColor] || STATUS_COLOR.unknown
 
+  const visibleIfaceCpCols = useMemo(
+    () => visibleCpColumns(
+      snapshot?.ifaceFieldMeta,
+      snapshot?.interfaces,
+      (iface, field) => ifaceCpValue(iface, field),
+    ),
+    [snapshot?.ifaceFieldMeta, snapshot?.interfaces],
+  )
+
   return (
     <div className="sw-fade">
       <div className="sw-toolbar">
@@ -1203,11 +1218,12 @@ function DeviceSnapshotTab({
                 </div>
               </Widget>
 
-              {(snapshot.nodeCustomProperties?.length > 0) && (
-                <Widget title="Custom Properties (Node)">
-                  <CpGrid items={snapshot.nodeCustomProperties} />
-                </Widget>
-              )}
+              <Widget title="Custom Properties (Node)">
+                <CpGrid
+                  items={snapshot.nodeCustomProperties}
+                  emptyLabel="No node custom properties returned from Orion for this device."
+                />
+              </Widget>
 
               <div className="sw-kpi-grid">
                 <KpiCard label="Response Time" value={fmtMs(node.responseTime)} sub="ICMP / poller" />
@@ -1226,7 +1242,9 @@ function DeviceSnapshotTab({
                     <div className="sw-table-wrap" style={{ marginBottom: 14 }}>
                       <table className="sw-table">
                         <thead><tr>
-                          <th>Status</th><th>Interface</th><th>In (live)</th><th>Out (live)</th><th>Util</th>
+                          <th>Status</th><th>Interface</th>
+                          {visibleIfaceCpCols.map((c) => <th key={c.field}>{c.label || c.field}</th>)}
+                          <th>In (live)</th><th>Out (live)</th><th>Util</th>
                         </tr></thead>
                         <tbody>
                           {snapshot.interfaces.map((iface) => (
@@ -1234,10 +1252,24 @@ function DeviceSnapshotTab({
                               key={iface.id}
                               className={`sw-row-click${selectedIfaceId === iface.id ? ' sw-row-active' : ''}`}
                               onClick={() => setSelectedIfaceId(iface.id)}
-                              title="Show bandwidth graph"
+                              title="Show link details and bandwidth graph"
                             >
                               <td><Pill label={iface.status} /></td>
-                              <td style={{ fontWeight: 600, color: selectedIfaceId === iface.id ? 'var(--accent)' : undefined }}>{iface.name}</td>
+                              <td style={{ fontWeight: 600, color: selectedIfaceId === iface.id ? 'var(--accent)' : undefined }}>
+                                <div>{iface.name}</div>
+                                {visibleIfaceCpCols.length === 0 && (iface.customProperties || []).length > 0 && (
+                                  <div style={{ fontSize: 10, color: 'var(--text3)', marginTop: 4, fontWeight: 400 }}>
+                                    {(iface.customProperties || []).map((cp) => (
+                                      <span key={cp.field} style={{ marginRight: 10 }}>{cp.label}: {cp.value}</span>
+                                    ))}
+                                  </div>
+                                )}
+                              </td>
+                              {visibleIfaceCpCols.map((c) => (
+                                <td key={c.field} style={{ fontSize: 11, color: 'var(--text2)' }}>
+                                  {ifaceCpValue(iface, c.field) || '—'}
+                                </td>
+                              ))}
                               <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{fmtBps(iface.inBps)}</td>
                               <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{fmtBps(iface.outBps)}</td>
                               <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{fmtPct(iface.utilization)}</td>
@@ -1249,14 +1281,15 @@ function DeviceSnapshotTab({
 
                     {selectedIface && (
                       <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
-                        {selectedIface.customProperties?.length > 0 && (
-                          <div style={{ marginBottom: 14 }}>
-                            <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 8 }}>
-                              LINK CUSTOM PROPERTIES — {selectedIface.name}
-                            </div>
-                            <CpGrid items={selectedIface.customProperties} emptyLabel="No link custom properties" />
+                        <div style={{ marginBottom: 14 }}>
+                          <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 8 }}>
+                            LINK CUSTOM PROPERTIES — {selectedIface.name}
                           </div>
-                        )}
+                          <CpGrid
+                            items={selectedIface.customProperties}
+                            emptyLabel="No interface custom properties in Orion for this link."
+                          />
+                        </div>
                         <div className="sw-traffic-toolbar">
                           <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text)', fontFamily: 'var(--mono)' }}>
                             Bandwidth — {selectedIface.name}

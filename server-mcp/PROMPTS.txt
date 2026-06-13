@@ -1,6 +1,6 @@
 ================================================================================
   NETPULSE MCP — CLAUDE DESKTOP PROMPT LIBRARY
-  Last updated: 2026-06-12 (LKST full-store dossier, orian MCP, storeZabbix disconnect BH, CPU/RAM, 24h trends)
+  Last updated: 2026-06-13 (Orion device snapshot CPs, LKST dossier, storeZabbix disconnect BH, CPU/RAM, 24h trends)
 ================================================================================
 
 How to use this file:
@@ -543,6 +543,24 @@ traffic". Use nodeDetail.interfaces for inBps/outBps and admin status.
 ----------------------------------------------------------------------
 
 ----------------------------------------------------------------------
+[ORION DEVICE SNAPSHOT + CUSTOM PROPERTIES]
+For store/router <ORION-CAPTION-OR-IP> (e.g. LKST1012_Bangalore_JP_Nagar):
+  netpulse_orian question:
+  "<ORION-CAPTION> snapshot custom properties interfaces carrier"
+
+Report nodeDetail fields:
+  • node — status, ip, vendor, machineType, responseTime, packetLoss, cpu, memory
+  • nodeCustomProperties[] — { field, label, value } for node CPs:
+    CITY, DUAL_LINKS, LINK_STATUS, LKST_BU, ORGANIZATION, STATE, Department, …
+  • interfaces[] — name, status, inBps, outBps, utilization
+  • interfaces[].customProperties[] — per-link CPs (CarrierName, Comments, Circuit, …)
+  • alerts[], events[] — active Orion alerts and recent events on the node
+
+Tabulate node CPs and each WAN link (BB1/BB2/wan) with its carrier CP.
+Quote values verbatim from Orion SWIS.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
 Use netpulse_orian to show the top 15 active Orion alerts. Columns:
 severity, node, message, triggeredAt. From activeAlerts[].
 ----------------------------------------------------------------------
@@ -554,7 +572,8 @@ statusColor warning and cpu >= 80. Sort by cpu descending.
 
 ----------------------------------------------------------------------
 For Orion node <ORION-CAPTION>, call netpulse_orian with the caption in
-the question. Report nodeDetail node fields, interface utilization, and
+the question. Report nodeDetail node fields, nodeCustomProperties[],
+interface utilization, interfaces[].customProperties per link, and
 recent events from nodeDetail.events.
 ----------------------------------------------------------------------
 
@@ -698,12 +717,16 @@ Call each tool below — include <LKST-CODE> in every question:
      "<LKST-CODE> threats alerts endpoints"
      Skip this section if empty or not configured.
 
-  6. (optional) If storeZabbix returns gear IPs, netpulse_orian:
-     "node <IP> status interfaces alerts"
+  6. netpulse_orian (match by store caption or gear IP from Zabbix):
+     "<LKST-CODE> snapshot custom properties interfaces carrier"
+     Report nodeDetail.nodeCustomProperties[] (CITY, DUAL_LINKS, LINK_STATUS,
+     LKST_BU, ORGANIZATION, STATE) and each interface link with
+     customProperties[] (CarrierName, etc.).
 
 Render ONE markdown report with sections:
   • Verdict — Green / Yellow / Red (one-line why)
   • Identity — resolved hostname, storeTag, store groups
+  • Orion custom properties — node CPs + per-link carrier CPs (if orian matched)
   • Live agent — Influx / storeMonitor (online, ping, speedtest, agent CPU/RAM)
   • Network gear — Zabbix hosts, ping, top interfaces, CPU/RAM (label Zabbix vs agent)
   • Disconnect history — BH minutes, IST times, still offline?
@@ -775,6 +798,8 @@ From now on, in this chat:
   "trend <HOST>"     -> netpulse_storeZabbix 24h cpuMemoryHistory graph.
   "lkst <CODE>"      -> run [LKST FULL STORE DOSSIER] for LKST<CODE>
                         (e.g. lkst 793 -> LKST793).
+  "orian snap <NAME>" -> netpulse_orian snapshot + nodeCustomProperties +
+                        per-link customProperties for Orion caption/IP.
 Always quote numbers verbatim from tool output. Never invent data.
 ----------------------------------------------------------------------
 
@@ -799,6 +824,7 @@ Always quote numbers verbatim from tool output. Never invent data.
       storeProblems  -> 30-day disconnect history for that store (not global 120 cap)
       storeZabbix    -> host filter + CPU/RAM + optional 24h cpuMemoryHistory
       storeMonitor   -> single-store live snapshot from Influx agent
+      orian          -> nodeDetail with nodeCustomProperties + interfaces[].customProperties
 
   * LKST vs LK vs RP naming:
       LKST793  -> aliases to RP793 in Store Zabbix (LKST prefix only)

@@ -7,6 +7,7 @@ import {
   discoverNodeCPFields,
   discoverIfaceCPFields,
   fetchInterfacesBulk,
+  fetchNodeCpRow,
   cpFieldLabel,
   toOrionDT,
 } from './solarwindsCustomProps.js'
@@ -194,25 +195,18 @@ export async function fetchNodeSnapshot(nodeId) {
     label: cpFieldLabel(field, 'iface'),
   }))
 
-  const nodeCpSwql = nodeFields.length
-    ? `SELECT ${nodeFields.join(', ')} FROM Orion.NodesCustomProperties WHERE NodeID=${nodeId}`
-    : null
-
   const eventsSwql = `SELECT TOP 50 e.EventID, e.EventTime, e.EventType, e.Message, e.Acknowledged
     FROM Orion.Events e INNER JOIN Orion.Nodes n ON e.NetworkNode = n.NodeID
     WHERE n.NodeID=${nodeId} ORDER BY e.EventTime DESC`
   const alertsSwqlWhere = `ao.RelatedNodeCaption='${cap}' OR ao.EntityCaption='${cap}'`
 
-  const [nodeCpData, ifaceBulk, eventsData, alertsData] = await Promise.all([
-    nodeCpSwql
-      ? withOrionTimeout(orionSwisQuery(nodeCpSwql), 'node CP').catch(() => ({ results: [] }))
-      : Promise.resolve({ results: [] }),
+  const [nodeCpRow, ifaceBulk, eventsData, alertsData] = await Promise.all([
+    fetchNodeCpRow(nodeId, nodeFields),
     withOrionTimeout(fetchInterfacesBulk([nodeId], ifaceFields), 'interfaces'),
     withOrionTimeout(orionSwisQuery(eventsSwql), 'events'),
     withOrionTimeout(queryAlertObjects({ top: 50, where: alertsSwqlWhere }), 'alerts').catch(() => ({ results: [] })),
   ])
 
-  const nodeCpRow = nodeCpData?.results?.[0] || null
   const nodeCustomProperties = mapCpEntries(nodeFields, nodeCpRow, 'node')
 
   const interfaces = (ifaceBulk?.ifaceMap?.get(nodeId) || []).map((iface) => ({
