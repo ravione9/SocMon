@@ -280,6 +280,9 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
   if (pingLine) lines.push(`Ping: ${pingLine}`)
   if (store.cpuPct != null) lines.push(`CPU: ${store.cpuPct}%`)
   if (store.memPct != null) lines.push(`Memory: ${store.memPct}%`)
+  if (store.cpuPct == null && store.memPct == null) {
+    lines.push('CPU / Memory: not reported by store agent (Influx system measurement missing on last heartbeat)')
+  }
   if (store.downloadMbps != null) {
     lines.push(`Speedtest: ↓ ${store.downloadMbps} Mbps${store.uploadMbps != null ? ` · ↑ ${store.uploadMbps} Mbps` : ''}`)
   }

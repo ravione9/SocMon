@@ -376,6 +376,29 @@ function hostMatchesSearch(h, search) {
   return false
 }
 
+/** Match Influx store snapshot row to RP/LK/LKST hostname or tag. */
+function storeRecordMatchesHostname(store, hostname) {
+  const h = String(hostname || '').toLowerCase()
+  const sh = String(store?.hostname || '').toLowerCase()
+  const tag = String(store?.storeTag || '').toLowerCase()
+  if (sh === h || sh.includes(h) || tag.includes(h) || tag.startsWith(`${h}_`)) return true
+  if (!shouldUseStoreCodeAlias(hostname)) return false
+  const queryCode = extractStoreCode(hostname)
+  if (!queryCode) return false
+  const hostCode = extractStoreCode(store?.hostname || '')
+  const tagCode = extractStoreCode(store?.storeTag || '')
+  return queryCode === hostCode || queryCode === tagCode
+}
+
+function formatCpuMemoryMetric(metric) {
+  if (!metric) return undefined
+  return {
+    percent: metric.percent,
+    itemName: metric.itemName,
+    polledAt: metric.clock ? formatPortalTimestamp(Number(metric.clock) * 1000) : null,
+  }
+}
+
 function ifaceLabelFromItem(it) {
   const name = String(it.name || '')
   // "Interface port1(JIO): Bits received" → "port1(JIO)"
@@ -1911,6 +1934,71 @@ function buildInterfaceMetricsState(data, matchedHosts, includeBandwidth) {
   }
 }
 
+function buildCpuMemoryMetricsState(data, matchedHosts, includeCpuMemory, storeAgentMetrics) {
+  if (!includeCpuMemory) {
+    return {
+      available: null,
+      reason: 'not_requested',
+      nextAction: 'Add keywords like "cpu", "memory", "ram", or "utilization" to request CPU/RAM metrics.',
+    }
+  }
+
+  if (storeAgentMetrics && (storeAgentMetrics.cpuPct != null || storeAgentMetrics.memPct != null)) {
+    return {
+      available: true,
+      reason: 'store_agent',
+      source: storeAgentMetrics.source,
+      cpuPct: storeAgentMetrics.cpuPct,
+      memPct: storeAgentMetrics.memPct,
+      hostname: storeAgentMetrics.hostname,
+      storeTag: storeAgentMetrics.storeTag,
+      nextAction: 'Store PC CPU/RAM from PowerShell agent heartbeat (~5 min). Use netpulse_storeMonitor for fleet-wide CPU/memory queries.',
+    }
+  }
+
+  const cm = data?.cpuMemoryMetrics?.byHost || {}
+  const hosts = Array.isArray(matchedHosts) ? matchedHosts : []
+  let hostsWithCpu = 0
+  let hostsWithMemory = 0
+  for (const h of hosts) {
+    const m = cm[String(h?.hostid || '')]
+    if (m?.cpu) hostsWithCpu += 1
+    if (m?.memory) hostsWithMemory += 1
+  }
+
+  if (hostsWithCpu || hostsWithMemory) {
+    return {
+      available: true,
+      reason: 'zabbix_items',
+      source: 'Zabbix % utilization items',
+      checkedHosts: hosts.length,
+      hostsWithCpu,
+      hostsWithMemory,
+      nextAction: 'CPU/RAM from Zabbix system.cpu.util / vm.memory.utilization items on matched hosts.',
+    }
+  }
+
+  if (storeAgentMetrics) {
+    return {
+      available: false,
+      reason: 'no_agent_metrics',
+      source: storeAgentMetrics.source,
+      hostname: storeAgentMetrics.hostname,
+      storeTag: storeAgentMetrics.storeTag,
+      nextAction: 'Store agent is online but not reporting cpu_usage_pct/mem_used_pct. Verify the PowerShell store agent system measurement on this PC.',
+    }
+  }
+
+  return {
+    available: false,
+    reason: 'no_cpu_mem_items',
+    checkedHosts: hosts.length,
+    nextAction: hosts.length
+      ? 'No Zabbix CPU/memory % items on matched hosts. Store PC metrics live in netpulse_storeMonitor (Influx agent); Store Zabbix covers network gear.'
+      : 'No matching hosts. Refine hostname filter or verify the device exists in this Zabbix scope.',
+  }
+}
+
 /**
  * Live Zabbix JSON for LLM synthesis (bandwidth, interface analysis, etc.).
  * @param {string} userMessage
@@ -1944,6 +2032,9 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   const includePing = wantsPingStatus(userMessage)
   const includeBandwidth = wantsBandwidthUtil(userMessage)
     || /\b(bandwidth|utilization|utilisation|interface|port|traffic|throughput)\b/i.test(String(userMessage || ''))
+  const includeCpuMemory = wantsCpuMemoryUtil(userMessage)
+    || /\b(cpu|memory|mem|ram)\b/i.test(String(userMessage || ''))
+    || Boolean(hostname && hostFilter)
   // Host-detail queries do not need problem.get every time; that call can be
   // expensive on some Zabbix deployments and is only useful when alerts are
   // explicitly requested or for broad overviews with no host filter.
@@ -1954,6 +2045,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     deviceTypeFilter,
     includePing,
     includeBandwidth,
+    includeCpuMemory,
     includeProblems,
   })
 
@@ -1974,25 +2066,54 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   }
 
   const matched = data.matchedHosts || []
-  const hosts = matched.map(h => ({
-    hostid: h.hostid,
-    name: h.name,
-    host: h.host,
-    status: h.status,
-    type: h.type,
-    interfaceIps: h.interfaceIps,
-    groups: h.groups,
-    ping: includePing && data.pingMetrics?.byHost?.[h.hostid]
-      ? {
-          reach: data.pingMetrics.byHost[h.hostid].reach,
-          ms: data.pingMetrics.byHost[h.hostid].ms,
-          loss: data.pingMetrics.byHost[h.hostid].loss,
-          source: data.pingMetrics.byHost[h.hostid].source,
+  const cmByHost = data.cpuMemoryMetrics?.byHost || {}
+
+  let storeAgentMetrics = null
+  if (moduleId === 'storeZabbix' && hostname && isInfluxStoreConfigured()) {
+    try {
+      const stores = await fetchStoreSnapshot(10, '-1h')
+      const store = stores.find(s => storeRecordMatchesHostname(s, hostname))
+      if (store) {
+        storeAgentMetrics = {
+          hostname: store.hostname,
+          storeTag: store.storeTag,
+          cpuPct: store.cpuPct ?? null,
+          memPct: store.memPct ?? null,
+          online: store.online,
+          source: 'Influx store agent (Store Monitor)',
         }
-      : undefined,
-    ports: includeBandwidth ? hostPortsFromSnapshot(data, h) : undefined,
-  }))
+      }
+    } catch {
+      // Non-fatal — Zabbix context still returns without agent metrics.
+    }
+  }
+
+  const hosts = matched.map(h => {
+    const hid = String(h.hostid)
+    const zabbixCm = cmByHost[hid]
+    return {
+      hostid: h.hostid,
+      name: h.name,
+      host: h.host,
+      status: h.status,
+      type: h.type,
+      interfaceIps: h.interfaceIps,
+      groups: h.groups,
+      ping: includePing && data.pingMetrics?.byHost?.[hid]
+        ? {
+          reach: data.pingMetrics.byHost[hid].reach,
+          ms: data.pingMetrics.byHost[hid].ms,
+          loss: data.pingMetrics.byHost[hid].loss,
+          source: data.pingMetrics.byHost[hid].source,
+        }
+        : undefined,
+      ports: includeBandwidth ? hostPortsFromSnapshot(data, h) : undefined,
+      cpu: includeCpuMemory ? formatCpuMemoryMetric(zabbixCm?.cpu) : undefined,
+      memory: includeCpuMemory ? formatCpuMemoryMetric(zabbixCm?.memory) : undefined,
+    }
+  })
   const interfaceMetricsState = buildInterfaceMetricsState(data, matched, includeBandwidth)
+  const cpuMemoryMetricsState = buildCpuMemoryMetricsState(data, matched, includeCpuMemory, storeAgentMetrics)
 
   return {
     module: moduleId,
@@ -2000,7 +2121,9 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     fetchedAt,
     configured: true,
     source: `${sourceLabel} API (host.get + item.get net.if.*)`,
-    note: 'Live SNMP/interface metrics at send time. inBps/outBps are raw bytes/sec from Zabbix net.if.in/out items.',
+    note: moduleId === 'storeZabbix' && storeAgentMetrics
+      ? 'Store PC CPU/RAM comes from Store Monitor agent (Influx), not Store Zabbix SNMP. Zabbix hosts[] cpu/memory are for monitored network gear templates.'
+      : 'Live SNMP/interface metrics at send time. inBps/outBps are raw bytes/sec from Zabbix net.if.in/out items.',
     version: data.version,
     hostFilter: data.hostFilter,
     deviceTypeFilter: data.deviceTypeFilter,
@@ -2009,7 +2132,9 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     problemCount: data.problemCount,
     problems: (data.problems || []).slice(0, 10),
     hosts,
+    storeAgentMetrics,
     interfaceMetricsState,
+    cpuMemoryMetricsState,
     pingSummary: includePing && data.pingMetrics ? data.pingMetrics.summary : undefined,
   }
 }

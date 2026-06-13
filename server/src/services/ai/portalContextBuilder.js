@@ -1733,6 +1733,17 @@ export function buildContextPreview(context) {
       hostCount: (zb.hosts || []).length,
     }
   }
+  const sz = context?.modules?.storeZabbix
+  if (sz?.availability || sz?.storeAgentMetrics || sz?.cpuMemoryMetricsState) {
+    preview.storeZabbix = {
+      hostFilter: sz.hostFilter,
+      hostCount: (sz.hosts || []).length,
+      storeAgentCpuPct: sz.storeAgentMetrics?.cpuPct ?? null,
+      storeAgentMemPct: sz.storeAgentMetrics?.memPct ?? null,
+      cpuMemoryAvailable: sz.cpuMemoryMetricsState?.available,
+      cpuMemoryReason: sz.cpuMemoryMetricsState?.reason,
+    }
+  }
   return preview
 }
 
@@ -1751,6 +1762,7 @@ export function formatContextForPrompt(context) {
     '- For zabbixInfra: use hosts[].ports for per-interface bandwidth. inRate/outRate are formatted; inBps/outBps are raw bytes/sec.',
     '- Rank or highlight busiest interfaces when the user asks about utilization — compute from inBps+outBps when helpful.',
     '- If hostFilter is an IP and hosts[] is empty, say no Zabbix host matched that SNMP/management IP.',
+    '- For storeZabbix: store PC CPU/RAM is in storeAgentMetrics (Influx agent), not Zabbix hosts[].cpu/memory. Use cpuMemoryMetricsState.nextAction when values are missing.',
     '',
     JSON.stringify(context),
     '=== END PORTAL CONTEXT ===',
