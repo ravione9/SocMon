@@ -9,7 +9,8 @@ import { orionSwisQuery, withOrionTimeout } from './solarwinds.js'
 
 // Default candidates — known-good columns for THIS Orion. Extend via env var.
 const NODE_CP_DEFAULTS = [
-  'DUAL_LINKS', 'ORGANIZATION', 'Department', 'City', 'State', 'AssetTag', 'Comments',
+  'DUAL_LINKS', 'LINK_STATUS', 'LKST_BU', 'ORGANIZATION', 'Department',
+  'CITY', 'City', 'STATE', 'State', 'AssetTag', 'Comments',
   'Country', 'Region', 'Site', 'Zone', 'BranchCode', 'Category', 'Tier',
   'Customer', 'Owner', 'Type', 'SubType',
 ]
@@ -84,8 +85,7 @@ async function probeFields(entity, candidates) {
         if (desc) labelMap.set(name, desc)
       }
       if (known.size) {
-        const fromMeta = candidates.filter(isValidCol).filter((c) => known.has(c))
-        if (fromMeta.length) return fromMeta
+        return [...known].sort()
       }
     }
   } catch { /* metadata table not exposed — fall through to probing */ }
@@ -268,6 +268,13 @@ async function nodeIdsInEventWindow(fromIso, toIso, bh = null) {
  *  ifaceProp1, ifaceVal1, ifaceProp2, ifaceVal2 — interface CP filters
  *  match ('equals'|'contains'), from, to, excludeFrom, excludeTo
  */
+function buildCpFieldMeta(fields, entity = 'node') {
+  return (fields || []).map((field) => ({
+    field,
+    label: cpFieldLabel(field, entity),
+  }))
+}
+
 /** Preset radio dimensions → field names and distinct values (one round-trip for the UI). */
 export async function getCustomPropertyPresets(force = false) {
   const [nodeFields, ifaceFields, linkVals, carrierVals] = await Promise.all([
@@ -279,6 +286,8 @@ export async function getCustomPropertyPresets(force = false) {
   return {
     nodeFields,
     ifaceFields,
+    nodeFieldMeta: buildCpFieldMeta(nodeFields, 'node'),
+    ifaceFieldMeta: buildCpFieldMeta(ifaceFields, 'iface'),
     presets: {
       link: {
         field: 'DUAL_LINKS',
@@ -579,6 +588,8 @@ export async function queryByCustomProperties(opts = {}) {
   return {
     nodeFields,
     ifaceFields,
+    nodeFieldMeta: buildCpFieldMeta(nodeFields, 'node'),
+    ifaceFieldMeta: buildCpFieldMeta(ifaceFields, 'iface'),
     timeWindow: opts.from && opts.to ? { from: opts.from, to: opts.to } : null,
     uptimeWindow,
     businessHours: bh ? { enabled: true, startMin: bh.startMin, endMin: bh.endMin, days: [...bh.days].sort() } : null,
@@ -670,4 +681,4 @@ async function fetchInterfacesBulk(nodeIds, ifaceFields) {
   return { ifaceMap, statsMap }
 }
 
-export { toOrionDT, parseBusinessHours, inBusinessHours, fetchInterfacesBulk }
+export { toOrionDT, parseBusinessHours, inBusinessHours, fetchInterfacesBulk, cpFieldLabel, buildCpFieldMeta }

@@ -917,6 +917,33 @@ function AlertDetailModal({ detail, onClose }) {
   )
 }
 
+function CpGrid({ items, emptyLabel = 'No custom properties' }) {
+  if (!items?.length) {
+    return <div className="sw-empty" style={{ padding: '12px 0' }}>{emptyLabel}</div>
+  }
+  return (
+    <div className="sw-info-grid">
+      {items.map((cp) => (
+        <div key={cp.field} className="sw-info-field">
+          <div className="sw-info-label">{cp.label || cp.field}</div>
+          <div className="sw-info-value">{cp.value}</div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function visibleCpColumns(meta, rows, getValue) {
+  const fields = Array.isArray(meta) ? meta : []
+  if (!fields.length) return []
+  const list = Array.isArray(rows) ? rows : []
+  if (!list.length) return fields
+  return fields.filter(({ field }) => list.some((row) => {
+    const v = getValue(row, field)
+    return v != null && String(v).trim() !== ''
+  }))
+}
+
 function DeviceSnapshotTab({
   nodes,
   nodesLoading,
@@ -1176,6 +1203,12 @@ function DeviceSnapshotTab({
                 </div>
               </Widget>
 
+              {(snapshot.nodeCustomProperties?.length > 0) && (
+                <Widget title="Custom Properties (Node)">
+                  <CpGrid items={snapshot.nodeCustomProperties} />
+                </Widget>
+              )}
+
               <div className="sw-kpi-grid">
                 <KpiCard label="Response Time" value={fmtMs(node.responseTime)} sub="ICMP / poller" />
                 <KpiCard label="Packet Loss" value={fmtPct(node.packetLoss)} color={node.packetLoss > 0 ? STATUS_COLOR.warning : undefined} />
@@ -1216,6 +1249,14 @@ function DeviceSnapshotTab({
 
                     {selectedIface && (
                       <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+                        {selectedIface.customProperties?.length > 0 && (
+                          <div style={{ marginBottom: 14 }}>
+                            <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 8 }}>
+                              LINK CUSTOM PROPERTIES — {selectedIface.name}
+                            </div>
+                            <CpGrid items={selectedIface.customProperties} emptyLabel="No link custom properties" />
+                          </div>
+                        )}
                         <div className="sw-traffic-toolbar">
                           <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text)', fontFamily: 'var(--mono)' }}>
                             Bandwidth — {selectedIface.name}
@@ -1447,6 +1488,7 @@ function CustomPropertiesTab({
   results, loading, onSearch, onNodeClick,
   filters, onFiltersChange,
   uptimeWindow,
+  nodeFieldMeta, ifaceFieldMeta,
 }) {
   const f = filters || {}
   const set = (key, val) => onFiltersChange?.({ ...f, [key]: val })
@@ -1497,6 +1539,15 @@ function CustomPropertiesTab({
       bwBins,
     }
   }, [results])
+
+  const visibleNodeCols = useMemo(
+    () => visibleCpColumns(nodeFieldMeta, results, (row, field) => row.nodeCp?.[field]),
+    [nodeFieldMeta, results],
+  )
+  const visibleIfaceCols = useMemo(
+    () => visibleCpColumns(ifaceFieldMeta, results, (row, field) => (row.link || row.interface1)?.cp?.[field]),
+    [ifaceFieldMeta, results],
+  )
 
   const statusDoughnut = useMemo(() => ({
     labels: ['Up', 'Warning', 'Down', 'Other'],
@@ -1549,7 +1600,11 @@ function CustomPropertiesTab({
   const exportCsv = () => {
     const rows = Array.isArray(results) ? results : []
     if (!rows.length) return
-    const header = ['Name', 'IP', 'Link status', 'Link uptime %', 'Bandwidth %', 'Dual links', 'Org', 'Dept', 'Interface', 'Interface health', 'Avail %', 'Carrier']
+    const header = [
+      'Name', 'IP', 'Link status', 'Link uptime %', 'Bandwidth %', 'Interface',
+      ...visibleNodeCols.map((c) => c.label || c.field),
+      ...visibleIfaceCols.map((c) => c.label || c.field),
+    ]
     const cell = (v) => {
       if (v == null) return ''
       const s = String(v).replace(/"/g, '""')
@@ -1561,10 +1616,9 @@ function CustomPropertiesTab({
         n.name, n.ip || '', n.linkStatus || link?.status || n.status || '',
         n.uptimeSampled && Number.isFinite(n.uptimePct) ? n.uptimePct.toFixed(1) : '',
         Number.isFinite(n.bandwidthPct) ? n.bandwidthPct.toFixed(1) : '',
-        n.nodeCp?.DUAL_LINKS || '', n.nodeCp?.ORGANIZATION || '', n.nodeCp?.Department || '',
-        link?.name || '', link?.status || '',
-        link?.availabilitySampled && Number.isFinite(link?.availabilityPct) ? link.availabilityPct.toFixed(1) : '',
-        link?.cp?.CarrierName || '',
+        link?.name || '',
+        ...visibleNodeCols.map((c) => n.nodeCp?.[c.field] ?? ''),
+        ...visibleIfaceCols.map((c) => link?.cp?.[c.field] ?? ''),
       ].map(cell).join(',')
     })
     const csv = [header.join(','), ...body].join('\n')
@@ -1762,8 +1816,9 @@ function CustomPropertiesTab({
                   <thead><tr>
                     <th>Link</th><th>Store</th><th>IP</th>
                     <th>Link uptime</th><th>Bandwidth</th>
-                    <th>Dual</th><th>Org</th><th>Dept</th>
-                    <th>Interface</th><th>Carrier</th>
+                    <th>Interface</th>
+                    {visibleNodeCols.map((c) => <th key={c.field}>{c.label || c.field}</th>)}
+                    {visibleIfaceCols.map((c) => <th key={`if-${c.field}`}>{c.label || c.field}</th>)}
                   </tr></thead>
                   <tbody>
                     {results.map((n) => {
@@ -1782,11 +1837,13 @@ function CustomPropertiesTab({
                         <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: Number.isFinite(n.bandwidthPct) && n.bandwidthPct > 50 ? 'var(--amber)' : undefined }} title={Number.isFinite(link?.utilization) ? `Current util ${link.utilization.toFixed(1)}%` : undefined}>
                           {fmtPct(n.bandwidthPct)}
                         </td>
-                        <td style={{ fontSize: 11 }}>{n.nodeCp?.DUAL_LINKS ?? '—'}</td>
-                        <td style={{ fontSize: 11 }}>{n.nodeCp?.ORGANIZATION ?? '—'}</td>
-                        <td style={{ fontSize: 11 }}>{n.nodeCp?.Department ?? '—'}</td>
                         <td><LinkCell iface={link} /></td>
-                        <td style={{ fontSize: 11, color: 'var(--text3)' }}>{link?.cp?.CarrierName ?? '—'}</td>
+                        {visibleNodeCols.map((c) => (
+                          <td key={c.field} style={{ fontSize: 11 }}>{n.nodeCp?.[c.field] ?? '—'}</td>
+                        ))}
+                        {visibleIfaceCols.map((c) => (
+                          <td key={`if-${c.field}`} style={{ fontSize: 11, color: 'var(--text3)' }}>{link?.cp?.[c.field] ?? '—'}</td>
+                        ))}
                       </tr>
                     )})}
                   </tbody>
@@ -2026,6 +2083,8 @@ export default function SolarWindsPage() {
   const [cpPresetsLoaded, setCpPresetsLoaded] = useState(false)
   const [cpResults, setCpResults] = useState(null)
   const [cpUptimeWindow, setCpUptimeWindow] = useState(null)
+  const [cpNodeFieldMeta, setCpNodeFieldMeta] = useState([])
+  const [cpIfaceFieldMeta, setCpIfaceFieldMeta] = useState([])
   const [cpFilters, setCpFilters] = useState({
     link: 'all',
     carrier: 'all',
@@ -2084,6 +2143,8 @@ export default function SolarWindsPage() {
     const { data } = await api.get('/api/solarwinds/custom-properties/presets')
     applyReachability(data)
     setCpPresets(data.presets || {})
+    setCpNodeFieldMeta(data.nodeFieldMeta || [])
+    setCpIfaceFieldMeta(data.ifaceFieldMeta || [])
     setCpPresetsLoaded(true)
     return data.presets
   }, [])
@@ -2129,6 +2190,8 @@ export default function SolarWindsPage() {
       applyReachability(data)
       setCpResults(data.nodes || [])
       setCpUptimeWindow(data.uptimeWindow || null)
+      if (Array.isArray(data.nodeFieldMeta)) setCpNodeFieldMeta(data.nodeFieldMeta)
+      if (Array.isArray(data.ifaceFieldMeta)) setCpIfaceFieldMeta(data.ifaceFieldMeta)
     } catch (e) {
       setError(e.response?.data?.error || e.message || 'Custom property search failed')
       setCpResults([])
@@ -2465,6 +2528,8 @@ export default function SolarWindsPage() {
               onSearch={() => searchCustomProperties()}
               onNodeClick={goToSnapshot}
               uptimeWindow={cpUptimeWindow}
+              nodeFieldMeta={cpNodeFieldMeta}
+              ifaceFieldMeta={cpIfaceFieldMeta}
             />
           )}
           {tab === 'snapshot' && (

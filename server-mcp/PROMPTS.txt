@@ -1,6 +1,6 @@
 ================================================================================
   NETPULSE MCP — CLAUDE DESKTOP PROMPT LIBRARY
-  Last updated: 2026-06-12 (orian/SolarWinds Orion MCP, storeZabbix ROP disconnect BH filter, disconnect events, CPU/RAM, 24h trends)
+  Last updated: 2026-06-12 (LKST full-store dossier, orian MCP, storeZabbix disconnect BH, CPU/RAM, 24h trends)
 ================================================================================
 
 How to use this file:
@@ -667,6 +667,54 @@ bhDurationMin, totalDurationMin, stillOffline. Use netpulse_storeProblems
 ----------------------------------------------------------------------
 
 ----------------------------------------------------------------------
+[LKST FULL STORE DOSSIER]
+Build a complete operational dossier for <LKST-CODE> (example: LKST793).
+LKST### aliases to RP### in Store Zabbix host search only (not strict hostname).
+
+Call each tool below — include <LKST-CODE> in every question:
+
+  1. netpulse_query question:
+     "<LKST-CODE> full hostname details ping CPU memory gateway ISP
+     connectivity crashes problems"
+     (deep Influx store-agent report — fastest per-host summary)
+
+  2. netpulse_storeMonitor question:
+     "<LKST-CODE> online status connState lastSeen speedtest issues"
+     Find the matching row in the snapshot (match LKST/LK/RP store code).
+
+  3. netpulse_storeZabbix question:
+     "<LKST-CODE> status ping interfaces bandwidth CPU memory problems
+     alerts disconnect events"
+     Report: every matched hosts[], storeAgentMetrics, hosts[].ping,
+     hosts[].ports, hosts[].cpu/memory, problems[], disconnectEvents[],
+     activeDisconnectEvents[].
+
+  4. netpulse_storeProblems question:
+     "<LKST-CODE> disconnect events last 30 days active problems"
+     Table: disconnectedAt, backUpAt, bhDurationMin, totalDurationMin,
+     stillOffline (IST). Include activeProblems[].
+
+  5. netpulse_sentinelXdr question:
+     "<LKST-CODE> threats alerts endpoints"
+     Skip this section if empty or not configured.
+
+  6. (optional) If storeZabbix returns gear IPs, netpulse_orian:
+     "node <IP> status interfaces alerts"
+
+Render ONE markdown report with sections:
+  • Verdict — Green / Yellow / Red (one-line why)
+  • Identity — resolved hostname, storeTag, store groups
+  • Live agent — Influx / storeMonitor (online, ping, speedtest, agent CPU/RAM)
+  • Network gear — Zabbix hosts, ping, top interfaces, CPU/RAM (label Zabbix vs agent)
+  • Disconnect history — BH minutes, IST times, still offline?
+  • Active problems & Zabbix alerts
+  • Security — SentinelOne (if any)
+  • Gaps & mismatches — sources that disagree or returned no data
+
+Quote every number verbatim. Never invent hostnames or timestamps.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
 [STORE CPU/RAM 24H TREND]
 For <STORE-HOSTNAME>, pull a 24-hour CPU and memory trend:
   1. netpulse_storeZabbix question: "<STORE-HOSTNAME> CPU memory 24h trend graph"
@@ -725,6 +773,8 @@ From now on, in this chat:
   "cpu <HOST>"       -> netpulse_storeZabbix + storeMonitor for dual-source
                         CPU/RAM; label Zabbix vs Influx agent.
   "trend <HOST>"     -> netpulse_storeZabbix 24h cpuMemoryHistory graph.
+  "lkst <CODE>"      -> run [LKST FULL STORE DOSSIER] for LKST<CODE>
+                        (e.g. lkst 793 -> LKST793).
 Always quote numbers verbatim from tool output. Never invent data.
 ----------------------------------------------------------------------
 

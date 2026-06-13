@@ -3,7 +3,13 @@
  */
 
 import { orionSwisQuery, withOrionTimeout } from './solarwinds.js'
-import { discoverIfaceCPFields, fetchInterfacesBulk, toOrionDT } from './solarwindsCustomProps.js'
+import {
+  discoverNodeCPFields,
+  discoverIfaceCPFields,
+  fetchInterfacesBulk,
+  cpFieldLabel,
+  toOrionDT,
+} from './solarwindsCustomProps.js'
 
 const NODE_STATUS = {
   0: 'Unknown', 1: 'Up', 2: 'Down', 3: 'Warning',
@@ -146,6 +152,17 @@ export async function findNodeIdByCaption(caption) {
   return id != null ? Number(id) : null
 }
 
+function mapCpEntries(fields, row, entity = 'node') {
+  const source = row || {}
+  return (fields || [])
+    .map((field) => {
+      const value = source[field]
+      if (value == null || String(value).trim() === '') return null
+      return { field, label: cpFieldLabel(field, entity), value: String(value).trim() }
+    })
+    .filter(Boolean)
+}
+
 export async function fetchNodeSnapshot(nodeId) {
   const nodeSwql = `SELECT NodeID, Caption, IPAddress, Status, StatusDescription,
     ResponseTime, PercentLoss, CPULoad, PercentMemoryUsed,
@@ -155,32 +172,58 @@ export async function fetchNodeSnapshot(nodeId) {
   const nodeData = await withOrionTimeout(orionSwisQuery(nodeSwql), 'node')
   const raw = nodeData?.results?.[0]
   if (!raw) {
-    return { found: false, node: null, interfaces: [], alerts: [], events: [] }
+    return {
+      found: false, node: null, interfaces: [], alerts: [], events: [],
+      nodeCustomProperties: [], nodeFieldMeta: [], ifaceFieldMeta: [],
+    }
   }
 
   const node = mapNodeRow(raw)
   const cap = swqlEscape(node.name)
 
-  const ifSwql = `SELECT TOP 100 InterfaceID, Caption, Status, InBps, OutBps, PercentUtil
-    FROM Orion.NPM.Interfaces WHERE NodeID=${nodeId} ORDER BY Caption`
+  const [nodeFields, ifaceFields] = await Promise.all([
+    discoverNodeCPFields(),
+    discoverIfaceCPFields(),
+  ])
+  const nodeFieldMeta = (nodeFields || []).map((field) => ({
+    field,
+    label: cpFieldLabel(field, 'node'),
+  }))
+  const ifaceFieldMeta = (ifaceFields || []).map((field) => ({
+    field,
+    label: cpFieldLabel(field, 'iface'),
+  }))
+
+  const nodeCpSwql = nodeFields.length
+    ? `SELECT ${nodeFields.join(', ')} FROM Orion.NodesCustomProperties WHERE NodeID=${nodeId}`
+    : null
+
   const eventsSwql = `SELECT TOP 50 e.EventID, e.EventTime, e.EventType, e.Message, e.Acknowledged
     FROM Orion.Events e INNER JOIN Orion.Nodes n ON e.NetworkNode = n.NodeID
     WHERE n.NodeID=${nodeId} ORDER BY e.EventTime DESC`
   const alertsSwqlWhere = `ao.RelatedNodeCaption='${cap}' OR ao.EntityCaption='${cap}'`
-  const [ifData, eventsData, alertsData] = await Promise.all([
-    withOrionTimeout(orionSwisQuery(ifSwql), 'interfaces').catch(() => ({ results: [] })),
+
+  const [nodeCpData, ifaceBulk, eventsData, alertsData] = await Promise.all([
+    nodeCpSwql
+      ? withOrionTimeout(orionSwisQuery(nodeCpSwql), 'node CP').catch(() => ({ results: [] }))
+      : Promise.resolve({ results: [] }),
+    withOrionTimeout(fetchInterfacesBulk([nodeId], ifaceFields), 'interfaces'),
     withOrionTimeout(orionSwisQuery(eventsSwql), 'events'),
     withOrionTimeout(queryAlertObjects({ top: 50, where: alertsSwqlWhere }), 'alerts').catch(() => ({ results: [] })),
   ])
 
-  const interfaces = (ifData?.results || []).map((i) => ({
-    id: i.InterfaceID,
-    name: i.Caption,
-    status: nodeStatusLabel(i.Status),
-    statusColor: nodeStatusColor(i.Status),
-    inBps: i.InBps != null ? Number(i.InBps) : null,
-    outBps: i.OutBps != null ? Number(i.OutBps) : null,
-    utilization: i.PercentUtil != null ? Number(i.PercentUtil) : null,
+  const nodeCpRow = nodeCpData?.results?.[0] || null
+  const nodeCustomProperties = mapCpEntries(nodeFields, nodeCpRow, 'node')
+
+  const interfaces = (ifaceBulk?.ifaceMap?.get(nodeId) || []).map((iface) => ({
+    id: iface.id,
+    name: iface.name,
+    status: iface.status,
+    statusColor: iface.statusColor || nodeStatusColor(iface.statusCode),
+    inBps: iface.inBps,
+    outBps: iface.outBps,
+    utilization: iface.utilization,
+    customProperties: mapCpEntries(ifaceFields, iface.cp || {}, 'iface'),
   }))
 
   const events = await enrichEventsWithCarriers(
@@ -193,7 +236,16 @@ export async function fetchNodeSnapshot(nodeId) {
 
   const alerts = (alertsData?.results || []).map((a, idx) => mapAlertRow(a, idx))
 
-  return { found: true, node, interfaces, alerts, events }
+  return {
+    found: true,
+    node,
+    interfaces,
+    alerts,
+    events,
+    nodeCustomProperties,
+    nodeFieldMeta,
+    ifaceFieldMeta,
+  }
 }
 
 function mapAlertRow(a, idx = 0) {

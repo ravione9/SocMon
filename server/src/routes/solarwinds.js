@@ -245,6 +245,9 @@ router.get('/nodes/:nodeId/snapshot', async (req, res) => {
       interfaces: snap.interfaces,
       alerts: snap.alerts,
       events: snap.events,
+      nodeCustomProperties: snap.nodeCustomProperties || [],
+      nodeFieldMeta: snap.nodeFieldMeta || [],
+      ifaceFieldMeta: snap.ifaceFieldMeta || [],
     })
   } catch (e) {
     swisErr(res, e, { found: false, node: null, interfaces: [], alerts: [], events: [] })
@@ -421,6 +424,8 @@ router.get('/custom-properties/nodes', async (req, res) => {
       configured: true,
       nodeFields: result.nodeFields,
       ifaceFields: result.ifaceFields,
+      nodeFieldMeta: result.nodeFieldMeta,
+      ifaceFieldMeta: result.ifaceFieldMeta,
       timeWindow: result.timeWindow,
       uptimeWindow: result.uptimeWindow,
       businessHours: result.businessHours,
