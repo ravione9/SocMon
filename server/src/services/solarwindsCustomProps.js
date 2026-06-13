@@ -709,4 +709,4 @@ export async function fetchNodeCpRow(nodeId, nodeFields) {
   return Object.keys(row).length ? row : null
 }
 
-export { toOrionDT, parseBusinessHours, inBusinessHours, fetchInterfacesBulk, cpFieldLabel, buildCpFieldMeta, fetchNodeCpRow }
+export { toOrionDT, parseBusinessHours, inBusinessHours, fetchInterfacesBulk, cpFieldLabel, buildCpFieldMeta }
