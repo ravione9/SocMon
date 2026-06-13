@@ -1943,59 +1943,97 @@ function buildCpuMemoryMetricsState(data, matchedHosts, includeCpuMemory, storeA
     }
   }
 
-  if (storeAgentMetrics && (storeAgentMetrics.cpuPct != null || storeAgentMetrics.memPct != null)) {
-    return {
-      available: true,
-      reason: 'store_agent',
-      source: storeAgentMetrics.source,
-      cpuPct: storeAgentMetrics.cpuPct,
-      memPct: storeAgentMetrics.memPct,
-      hostname: storeAgentMetrics.hostname,
-      storeTag: storeAgentMetrics.storeTag,
-      nextAction: 'Store PC CPU/RAM from PowerShell agent heartbeat (~5 min). Use netpulse_storeMonitor for fleet-wide CPU/memory queries.',
-    }
-  }
-
   const cm = data?.cpuMemoryMetrics?.byHost || {}
   const hosts = Array.isArray(matchedHosts) ? matchedHosts : []
   let hostsWithCpu = 0
   let hostsWithMemory = 0
+  let primaryZabbix = null
+  const zabbixHosts = []
+
   for (const h of hosts) {
     const m = cm[String(h?.hostid || '')]
     if (m?.cpu) hostsWithCpu += 1
     if (m?.memory) hostsWithMemory += 1
-  }
-
-  if (hostsWithCpu || hostsWithMemory) {
-    return {
-      available: true,
-      reason: 'zabbix_items',
-      source: 'Zabbix % utilization items',
-      checkedHosts: hosts.length,
-      hostsWithCpu,
-      hostsWithMemory,
-      nextAction: 'CPU/RAM from Zabbix system.cpu.util / vm.memory.utilization items on matched hosts.',
+    if (!m?.cpu && !m?.memory) continue
+    const row = {
+      hostid: h.hostid,
+      name: h.name,
+      host: h.host,
+      cpu: formatCpuMemoryMetric(m.cpu),
+      memory: formatCpuMemoryMetric(m.memory),
     }
+    zabbixHosts.push(row)
+    if (!primaryZabbix) primaryZabbix = row
   }
 
-  if (storeAgentMetrics) {
-    return {
-      available: false,
-      reason: 'no_agent_metrics',
+  const zabbixAvailable = hostsWithCpu > 0 || hostsWithMemory > 0
+  const agentAvailable = Boolean(
+    storeAgentMetrics && (storeAgentMetrics.cpuPct != null || storeAgentMetrics.memPct != null),
+  )
+
+  const zabbix = {
+    available: zabbixAvailable,
+    source: 'Zabbix % utilization items (system.cpu.util / vm.memory.utilization)',
+    checkedHosts: hosts.length,
+    hostsWithCpu,
+    hostsWithMemory,
+    hosts: zabbixHosts,
+    primary: primaryZabbix,
+  }
+
+  const storeAgent = storeAgentMetrics
+    ? {
+      available: agentAvailable,
       source: storeAgentMetrics.source,
       hostname: storeAgentMetrics.hostname,
       storeTag: storeAgentMetrics.storeTag,
-      nextAction: 'Store agent is online but not reporting cpu_usage_pct/mem_used_pct. Verify the PowerShell store agent system measurement on this PC.',
+      cpuPct: storeAgentMetrics.cpuPct ?? null,
+      memPct: storeAgentMetrics.memPct ?? null,
+      online: storeAgentMetrics.online ?? null,
     }
+    : null
+
+  const available = zabbixAvailable || agentAvailable
+
+  let reason = 'no_cpu_mem_items'
+  if (zabbixAvailable && agentAvailable) reason = 'zabbix_and_store_agent'
+  else if (zabbixAvailable) reason = 'zabbix_items'
+  else if (agentAvailable) reason = 'store_agent'
+  else if (storeAgentMetrics) reason = 'no_metrics'
+
+  const display = {
+    cpuPct: storeAgent?.cpuPct ?? primaryZabbix?.cpu?.percent ?? null,
+    memPct: storeAgent?.memPct ?? primaryZabbix?.memory?.percent ?? null,
+    cpuSource: storeAgent?.cpuPct != null
+      ? 'store_agent'
+      : (primaryZabbix?.cpu ? 'zabbix' : null),
+    memSource: storeAgent?.memPct != null
+      ? 'store_agent'
+      : (primaryZabbix?.memory ? 'zabbix' : null),
+  }
+
+  let nextAction = 'No CPU/RAM from Zabbix items or store agent.'
+  if (zabbixAvailable && agentAvailable) {
+    nextAction = 'CPU/RAM available from both Zabbix (network gear / monitored host templates) and Store Monitor agent (store PC). Prefer storeAgent for POS PC; hosts[].cpu/memory for Zabbix-monitored devices.'
+  } else if (zabbixAvailable) {
+    nextAction = 'CPU/RAM from Zabbix utilization items on matched hosts. See hosts[].cpu and hosts[].memory.'
+  } else if (agentAvailable) {
+    nextAction = 'Store PC CPU/RAM from PowerShell agent heartbeat (~5 min). No Zabbix % items on matched hosts.'
+  } else if (storeAgentMetrics) {
+    nextAction = 'Store found in Influx but agent is not reporting cpu_usage_pct/mem_used_pct, and no Zabbix CPU/memory % items on matched hosts.'
+  } else if (hosts.length) {
+    nextAction = 'No Zabbix CPU/memory % items on matched hosts. Store PC metrics may be in netpulse_storeMonitor (Influx agent).'
+  } else {
+    nextAction = 'No matching hosts. Refine hostname filter or verify the device exists in this Zabbix scope.'
   }
 
   return {
-    available: false,
-    reason: 'no_cpu_mem_items',
-    checkedHosts: hosts.length,
-    nextAction: hosts.length
-      ? 'No Zabbix CPU/memory % items on matched hosts. Store PC metrics live in netpulse_storeMonitor (Influx agent); Store Zabbix covers network gear.'
-      : 'No matching hosts. Refine hostname filter or verify the device exists in this Zabbix scope.',
+    available,
+    reason,
+    zabbix,
+    storeAgent,
+    display,
+    nextAction,
   }
 }
 
@@ -2034,7 +2072,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     || /\b(bandwidth|utilization|utilisation|interface|port|traffic|throughput)\b/i.test(String(userMessage || ''))
   const includeCpuMemory = wantsCpuMemoryUtil(userMessage)
     || /\b(cpu|memory|mem|ram)\b/i.test(String(userMessage || ''))
-    || Boolean(hostname && hostFilter)
+    || Boolean(hostFilter)
   // Host-detail queries do not need problem.get every time; that call can be
   // expensive on some Zabbix deployments and is only useful when alerts are
   // explicitly requested or for broad overviews with no host filter.
@@ -2121,9 +2159,9 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     fetchedAt,
     configured: true,
     source: `${sourceLabel} API (host.get + item.get net.if.*)`,
-    note: moduleId === 'storeZabbix' && storeAgentMetrics
-      ? 'Store PC CPU/RAM comes from Store Monitor agent (Influx), not Store Zabbix SNMP. Zabbix hosts[] cpu/memory are for monitored network gear templates.'
-      : 'Live SNMP/interface metrics at send time. inBps/outBps are raw bytes/sec from Zabbix net.if.in/out items.',
+    note: moduleId === 'storeZabbix'
+      ? 'CPU/RAM from both sources when available: hosts[].cpu/memory (Zabbix items) and storeAgentMetrics (Influx store PC agent). Report both; do not say metrics are only in Influx.'
+      : 'Live SNMP/interface metrics at send time. inBps/outBps are raw bytes/sec from Zabbix net.if.in/out items. hosts[].cpu/memory are Zabbix utilization items when requested.',
     version: data.version,
     hostFilter: data.hostFilter,
     deviceTypeFilter: data.deviceTypeFilter,

@@ -17,7 +17,7 @@ import {
   parseQuestionTimeRange,
   shouldUseStoreCodeAlias,
 } from './queryContext.js'
-import { isNetworkInfraQuery, isZabbixQuestion } from './zabbixDirectAnswer.js'
+import { isNetworkInfraQuery, isZabbixQuestion, buildStoreZabbixContext } from './zabbixDirectAnswer.js'
 
 import {
   fetchHostnameEnvironments,
@@ -220,7 +220,8 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
   }
 
   const storeTag = store.storeTag || hostname
-  const [history, problems] = await Promise.all([
+  const wantsZabbixCm = allowedPages.includes('storeZabbix')
+  const [history, problems, storeZabbixCtx] = await Promise.all([
     fetchStoreHistory(storeTag, rangeSec),
     wantsChart
       ? Promise.resolve([])
@@ -233,6 +234,9 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
         .sort({ lastSeenAt: -1 })
         .limit(100)
         .lean(),
+    wantsChart || !wantsZabbixCm
+      ? Promise.resolve(null)
+      : buildStoreZabbixContext(`${hostname} CPU memory`).catch(() => null),
   ])
 
   const crashes = wantsChart ? [] : crashRows.filter(r => hostnameMatchesStore(r, hostname))
@@ -278,10 +282,21 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
   if (store.activeInterface) lines.push(`Active interface: ${store.activeInterface}`)
   if (store.activeSsid) lines.push(`SSID: ${store.activeSsid}`)
   if (pingLine) lines.push(`Ping: ${pingLine}`)
-  if (store.cpuPct != null) lines.push(`CPU: ${store.cpuPct}%`)
-  if (store.memPct != null) lines.push(`Memory: ${store.memPct}%`)
-  if (store.cpuPct == null && store.memPct == null) {
-    lines.push('CPU / Memory: not reported by store agent (Influx system measurement missing on last heartbeat)')
+  if (store.cpuPct != null) lines.push(`CPU (store agent): ${store.cpuPct}%`)
+  if (store.memPct != null) lines.push(`Memory (store agent): ${store.memPct}%`)
+
+  const zabbixCm = storeZabbixCtx?.cpuMemoryMetricsState
+  const zabbixPrimary = zabbixCm?.zabbix?.primary
+  if (zabbixPrimary?.cpu?.percent != null) {
+    lines.push(`CPU (Zabbix — ${zabbixPrimary.name}): ${zabbixPrimary.cpu.percent}%`)
+  }
+  if (zabbixPrimary?.memory?.percent != null) {
+    lines.push(`Memory (Zabbix — ${zabbixPrimary.name}): ${zabbixPrimary.memory.percent}%`)
+  }
+  if (store.cpuPct == null && store.memPct == null && !zabbixPrimary?.cpu && !zabbixPrimary?.memory) {
+    lines.push('CPU / Memory: not reported by store agent or Zabbix utilization items')
+  } else if (store.cpuPct == null && store.memPct == null) {
+    lines.push('CPU / Memory (store agent): not reported on last Influx heartbeat')
   }
   if (store.downloadMbps != null) {
     lines.push(`Speedtest: ↓ ${store.downloadMbps} Mbps${store.uploadMbps != null ? ` · ↑ ${store.uploadMbps} Mbps` : ''}`)

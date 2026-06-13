@@ -1735,13 +1735,16 @@ export function buildContextPreview(context) {
   }
   const sz = context?.modules?.storeZabbix
   if (sz?.availability || sz?.storeAgentMetrics || sz?.cpuMemoryMetricsState) {
+    const cm = sz.cpuMemoryMetricsState
     preview.storeZabbix = {
       hostFilter: sz.hostFilter,
       hostCount: (sz.hosts || []).length,
-      storeAgentCpuPct: sz.storeAgentMetrics?.cpuPct ?? null,
-      storeAgentMemPct: sz.storeAgentMetrics?.memPct ?? null,
-      cpuMemoryAvailable: sz.cpuMemoryMetricsState?.available,
-      cpuMemoryReason: sz.cpuMemoryMetricsState?.reason,
+      storeAgentCpuPct: sz.storeAgentMetrics?.cpuPct ?? cm?.storeAgent?.cpuPct ?? null,
+      storeAgentMemPct: sz.storeAgentMetrics?.memPct ?? cm?.storeAgent?.memPct ?? null,
+      zabbixCpuPct: cm?.zabbix?.primary?.cpu?.percent ?? null,
+      zabbixMemPct: cm?.zabbix?.primary?.memory?.percent ?? null,
+      cpuMemoryAvailable: cm?.available,
+      cpuMemoryReason: cm?.reason,
     }
   }
   return preview
@@ -1762,7 +1765,7 @@ export function formatContextForPrompt(context) {
     '- For zabbixInfra: use hosts[].ports for per-interface bandwidth. inRate/outRate are formatted; inBps/outBps are raw bytes/sec.',
     '- Rank or highlight busiest interfaces when the user asks about utilization — compute from inBps+outBps when helpful.',
     '- If hostFilter is an IP and hosts[] is empty, say no Zabbix host matched that SNMP/management IP.',
-    '- For storeZabbix: store PC CPU/RAM is in storeAgentMetrics (Influx agent), not Zabbix hosts[].cpu/memory. Use cpuMemoryMetricsState.nextAction when values are missing.',
+    '- For storeZabbix: CPU/RAM can come from BOTH hosts[].cpu/memory (Zabbix) and storeAgentMetrics (Influx agent). Use cpuMemoryMetricsState.zabbix and cpuMemoryMetricsState.storeAgent; report each source separately when both exist.',
     '',
     JSON.stringify(context),
     '=== END PORTAL CONTEXT ===',
