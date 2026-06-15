@@ -10,6 +10,11 @@ import {
   createUserApiToken,
   revokeUserApiToken,
 } from '../utils/jwtAuth.js'
+import {
+  normalizeCustomDashScope,
+  sanitizeCustomDashPrefs,
+  readCustomDashPrefs,
+} from '../utils/customDashPrefs.js'
 
 const router = Router()
 
@@ -204,6 +209,39 @@ router.delete('/api-tokens/:id', authenticate, requireSessionUser, async (req, r
     res.json({ ok: true })
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message })
+  }
+})
+
+/** GET /me/ui-prefs/custom-dashboard?scope=store-zabbix — per-user Custom Dashboard filters. */
+router.get('/me/ui-prefs/custom-dashboard', authenticate, requireSessionUser, async (req, res) => {
+  try {
+    const scope = normalizeCustomDashScope(req.query.scope)
+    const prefs = readCustomDashPrefs(req.user, scope)
+    res.json({ scope, prefs })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+/** PUT /me/ui-prefs/custom-dashboard — body: { scope, prefs } */
+router.put('/me/ui-prefs/custom-dashboard', authenticate, requireSessionUser, async (req, res) => {
+  try {
+    const scope = normalizeCustomDashScope(req.body?.scope)
+    const prefs = sanitizeCustomDashPrefs(req.body?.prefs)
+    const user = await User.findById(req.user._id)
+    if (!user) return res.status(404).json({ error: 'User not found' })
+    const uiPrefs = user.uiPrefs && typeof user.uiPrefs === 'object' ? { ...user.uiPrefs } : {}
+    const bucket = uiPrefs.customDashboard && typeof uiPrefs.customDashboard === 'object'
+      ? { ...uiPrefs.customDashboard }
+      : {}
+    bucket[scope] = prefs
+    uiPrefs.customDashboard = bucket
+    user.uiPrefs = uiPrefs
+    user.markModified('uiPrefs')
+    await user.save()
+    res.json({ scope, prefs })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
   }
 })
 

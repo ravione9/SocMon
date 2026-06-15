@@ -15,6 +15,14 @@ import {
 } from 'chart.js'
 import zoomPlugin from 'chartjs-plugin-zoom'
 import api from '../../api/client'
+import { useAuthStore } from '../../store/authStore.js'
+import {
+  customDashPrefsScope,
+  fetchCustomDashPrefs,
+  saveCustomDashPrefs,
+  serializeCustomDashPrefs,
+  resolveHostsByIds,
+} from '../../utils/customDashPrefs.js'
 import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../components/ui/ResizableTable.jsx'
 import { useThemeStore } from '../../store/themeStore.js'
 import { getThemeCssColors } from '../../utils/themeCssColors.js'
@@ -2176,6 +2184,7 @@ function CustomDashboardPanel({
   uptimeStats, uptimeStatsBusy,
   onOpenRebootModal, onOpenCrashModal,
   onRefresh,
+  prefsSavedAt, prefsBusy,
 }) {
   const dropdownRef = useRef(null)
   useEffect(() => {
@@ -2427,6 +2436,14 @@ function CustomDashboardPanel({
               style={{ padding: '7px 14px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 600 }}>
               ↻ Refresh
             </button>
+          )}
+          {prefsBusy && (
+            <span style={{ fontSize: 10, color: 'var(--accent)', fontFamily: 'var(--mono)' }}>Loading your saved filters…</span>
+          )}
+          {!prefsBusy && prefsSavedAt && (
+            <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }} title={prefsSavedAt}>
+              ✓ Filters saved to your profile
+            </span>
           )}
         </div>
 
@@ -3448,6 +3465,13 @@ export default function StoreZabbixPage({
   /** Modals shown when user clicks the Reboots / App-crash count cells. */
   const [customDashRebootModalHost, setCustomDashRebootModalHost] = useState(null)
   const [customDashCrashModalHost, setCustomDashCrashModalHost] = useState(null)
+  const authUser = useAuthStore((s) => s.user)
+  const customDashPrefsScopeKey = useMemo(() => customDashPrefsScope(apiBase), [apiBase])
+  const customDashPrefsLoadedRef = useRef(false)
+  const customDashPrefsSkipSaveRef = useRef(true)
+  const customDashPendingHostIdsRef = useRef(null)
+  const [customDashPrefsSavedAt, setCustomDashPrefsSavedAt] = useState(null)
+  const [customDashPrefsBusy, setCustomDashPrefsBusy] = useState(false)
 
   const ropDisconnectRangeLabel = useMemo(() => {
     if (ropRange === 'custom' && ropCustomEpoch?.from && ropCustomEpoch?.to) {
@@ -3889,6 +3913,91 @@ export default function StoreZabbixPage({
     if (!config?.configured || tab !== 'custom') return
     if (customDashHosts === null && !customDashHostsBusy) loadCustomDashHosts()
   }, [tab, config?.configured, customDashHosts, customDashHostsBusy, loadCustomDashHosts])
+
+  /** Load per-user Custom Dashboard filter prefs from the server profile. */
+  useEffect(() => {
+    if (!authUser?.id) return
+    let cancelled = false
+    customDashPrefsLoadedRef.current = false
+    customDashPrefsSkipSaveRef.current = true
+    setCustomDashPrefsBusy(true)
+    fetchCustomDashPrefs(customDashPrefsScopeKey)
+      .then((prefs) => {
+        if (cancelled || !prefs) return
+        if (prefs.range) setCustomDashRange(prefs.range)
+        if (prefs.customEpoch?.from && prefs.customEpoch?.to) {
+          setCustomDashCustomEpoch({ from: prefs.customEpoch.from, to: prefs.customEpoch.to })
+        } else {
+          setCustomDashCustomEpoch(null)
+        }
+        if (prefs.customFrom) setCustomDashCustomFrom(prefs.customFrom)
+        if (prefs.customTo) setCustomDashCustomTo(prefs.customTo)
+        setCustomDashBhEnabled(!!prefs.bhEnabled)
+        if (Number.isFinite(Number(prefs.bhStart))) setCustomDashBhStart(Number(prefs.bhStart))
+        if (Number.isFinite(Number(prefs.bhEnd))) setCustomDashBhEnd(Number(prefs.bhEnd))
+        if (Array.isArray(prefs.bhDays) && prefs.bhDays.length) {
+          setCustomDashBhDays(new Set(prefs.bhDays))
+        }
+        if ([500, 1000, 2000, 5000].includes(Number(prefs.eventLimit))) {
+          setCustomDashEventLimit(Number(prefs.eventLimit))
+        }
+        if (prefs.activeWidget) setCustomDashWidget(prefs.activeWidget)
+        if (prefs.selectedHostIds?.length) {
+          customDashPendingHostIdsRef.current = prefs.selectedHostIds
+          if (customDashHosts?.length) {
+            setCustomDashSelected(resolveHostsByIds(customDashHosts, prefs.selectedHostIds))
+            customDashPendingHostIdsRef.current = null
+          }
+        }
+        if (prefs.updatedAt) setCustomDashPrefsSavedAt(prefs.updatedAt)
+      })
+      .catch(() => { /* ignore — defaults are fine */ })
+      .finally(() => {
+        if (cancelled) return
+        customDashPrefsLoadedRef.current = true
+        setCustomDashPrefsBusy(false)
+        window.setTimeout(() => { customDashPrefsSkipSaveRef.current = false }, 0)
+      })
+    return () => { cancelled = true }
+  }, [authUser?.id, customDashPrefsScopeKey])
+
+  /** After the host picker list loads, resolve saved host ids into host rows. */
+  useEffect(() => {
+    const pending = customDashPendingHostIdsRef.current
+    if (!pending?.length || !customDashHosts?.length) return
+    setCustomDashSelected(resolveHostsByIds(customDashHosts, pending))
+    customDashPendingHostIdsRef.current = null
+  }, [customDashHosts])
+
+  /** Auto-save filter prefs for the signed-in user (debounced). */
+  useEffect(() => {
+    if (!authUser?.id || !customDashPrefsLoadedRef.current || customDashPrefsSkipSaveRef.current) return
+    const timer = window.setTimeout(() => {
+      const prefs = serializeCustomDashPrefs({
+        selectedHosts: customDashSelected,
+        range: customDashRange,
+        customEpoch: customDashCustomEpoch,
+        customFrom: customDashCustomFrom,
+        customTo: customDashCustomTo,
+        bhEnabled: customDashBhEnabled,
+        bhStart: customDashBhStart,
+        bhEnd: customDashBhEnd,
+        bhDays: customDashBhDays,
+        eventLimit: customDashEventLimit,
+        activeWidget: customDashWidget,
+      })
+      saveCustomDashPrefs(customDashPrefsScopeKey, prefs)
+        .then(() => setCustomDashPrefsSavedAt(new Date().toISOString()))
+        .catch(() => { /* silent */ })
+    }, 700)
+    return () => window.clearTimeout(timer)
+  }, [
+    authUser?.id, customDashPrefsScopeKey,
+    customDashSelected, customDashRange, customDashCustomEpoch,
+    customDashCustomFrom, customDashCustomTo,
+    customDashBhEnabled, customDashBhStart, customDashBhEnd, customDashBhDays,
+    customDashEventLimit, customDashWidget,
+  ])
 
   /** Resolves the active range to an [from, to] epoch tuple. */
   const customDashTimeWindow = useMemo(() => {
@@ -6545,6 +6654,8 @@ export default function StoreZabbixPage({
               loadCustomDashCrashes(hostnames, customDashTimeWindow.from, customDashTimeWindow.to)
             }
           }}
+          prefsSavedAt={customDashPrefsSavedAt}
+          prefsBusy={customDashPrefsBusy}
         />
       )}
 
