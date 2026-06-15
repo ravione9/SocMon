@@ -540,8 +540,8 @@ const BUILDERS = {
   storeMonitor: (detail) => buildStoreMonitorContext(10, detail),
   storeProblems: (_, opts) => buildStoreProblemsContext(opts?.userMessage || ''),
   soc: buildSocContext,
-  zabbixInfra: (_, opts) => buildZabbixInfraContext(opts?.userMessage || ''),
-  storeZabbix: (_, opts) => buildStoreZabbixContext(opts?.userMessage || ''),
+  zabbixInfra: (_, opts) => buildZabbixInfraContext(opts?.userMessage || '', opts),
+  storeZabbix: (_, opts) => buildStoreZabbixContext(opts?.userMessage || '', opts),
   orian: (_, opts) => buildSolarWindsContext(opts?.userMessage || ''),
 }
 
@@ -1496,7 +1496,7 @@ export async function buildPortalContext(user, moduleIds = [], opts = {}) {
         const data = id === 'storeMonitor'
           ? await builder(detail)
           : (id === 'zabbixInfra' || id === 'storeZabbix' || id === 'storeProblems' || id === 'orian')
-            ? await builder(detail, { userMessage: opts.userMessage || '' })
+            ? await builder(detail, opts)
             : await builder()
         modules[id] = data
         meta.push({

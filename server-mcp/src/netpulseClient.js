@@ -69,9 +69,9 @@ export class NetPulseClient {
   meta() { return this.request('GET', '/api/agent/meta') }
   modules() { return this.request('GET', '/api/agent/modules') }
 
-  context({ modules, question, autoModules = true, format = 'json' } = {}) {
+  context({ modules, question, autoModules = true, format = 'json', historyFrom, historyTo } = {}) {
     return this.request('POST', '/api/agent/context', {
-      body: { modules, question, autoModules, format },
+      body: { modules, question, autoModules, format, historyFrom, historyTo },
     })
   }
 

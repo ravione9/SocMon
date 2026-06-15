@@ -84,7 +84,7 @@ export async function tryDirectAgentAnswer(user, question, ctx, allowedPages) {
 
 /**
  * @param {import('../../models/User.js').default} user
- * @param {{ modules?: string[], question?: string, autoModules?: boolean }} opts
+ * @param {{ modules?: string[], question?: string, autoModules?: boolean, historyFrom?: number, historyTo?: number }} opts
  */
 export async function exportPortalContextForAgent(user, opts = {}) {
   const question = String(opts.question || '').trim()
@@ -122,7 +122,11 @@ export async function exportPortalContextForAgent(user, opts = {}) {
     }
   }
 
-  const portalContext = await buildPortalContext(user, moduleIds, { userMessage: question })
+  const portalContext = await buildPortalContext(user, moduleIds, {
+    userMessage: question,
+    historyFrom: opts.historyFrom,
+    historyTo: opts.historyTo,
+  })
   const contextPreview = buildContextPreview(portalContext)
 
   return {

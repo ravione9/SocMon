@@ -244,12 +244,19 @@ export function wantsCpuMemoryHistory(question) {
   const q = String(question || '')
   const hasMetric = /\b(cpu|memory|mem|ram)\b/i.test(q)
     || Boolean(extractStoreHostname(q) || extractIpv4(q))
+    || parseHistoryItemIds(q).length > 0
   if (!hasMetric) return false
   const hasTrendKw = /\b(graph|graphical|chart|visual|plot|timeline|trend|history|time\s*series)\b/i.test(q)
   const hasRangeKw = /\b(?:last|past|previous)\s+\d+\s*(?:d|day|days|h|hr|hrs|hour|hours)\b/i.test(q)
     || /\b\d+\s*(?:d|day|days|h|hr|hrs|hour|hours)\b/i.test(q)
     || /\b(30d|14d|7d|5d|2d|24h|12h|6h|3h|1h)\b/i.test(q)
-  return hasTrendKw || hasRangeKw
+  const hasDateKw = /\b\d{4}-\d{2}-\d{2}\b/.test(q)
+    || /\b\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(q)
+    || /\b(?:from|to|between|time_from|time_to|start|end)\b/i.test(q) && /\b\d{10}\b/.test(q)
+    || /\b(?:whole\s+day|entire\s+day|full\s+day)\b/i.test(q)
+    || /\bitem\s*#?\s*\d{4,}\b/i.test(q)
+    || /\b\d{1,2}:\d{2}\b/.test(q)
+  return hasTrendKw || hasRangeKw || hasDateKw
 }
 
 const ZABBIX_HISTORY_MAX_SEC = Math.min(
@@ -257,11 +264,117 @@ const ZABBIX_HISTORY_MAX_SEC = Math.min(
   60 * 86400,
 )
 
+const PORTAL_TZ_OFFSET = process.env.PORTAL_TZ_OFFSET || '+05:30'
+
+function pad2(n) {
+  return String(n).padStart(2, '0')
+}
+
+function monthIndex(name) {
+  const m = String(name || '').toLowerCase().slice(0, 3)
+  const map = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 }
+  return map[m] || null
+}
+
+function istUnix(year, month, day, hour = 0, min = 0, sec = 0) {
+  const iso = `${year}-${pad2(month)}-${pad2(day)}T${pad2(hour)}:${pad2(min)}:${pad2(sec)}${PORTAL_TZ_OFFSET}`
+  const ms = Date.parse(iso)
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null
+}
+
+function parseEpochSec(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n)
+}
+
+function formatHistoryWindowLabel(from, to) {
+  const span = to - from
+  if (span >= 86400 && span % 86400 < 7200) return `${Math.round(span / 86400)}d`
+  if (span >= 3600) return `${Math.round(span / 3600)}h`
+  return `${Math.max(1, Math.round(span / 60))}m`
+}
+
+function buildHistoryWindowResult(from, to, parseNote) {
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) return null
+  let clampedFrom = from
+  const span = to - from
+  if (span > ZABBIX_HISTORY_MAX_SEC) clampedFrom = to - ZABBIX_HISTORY_MAX_SEC
+  const rangeSec = to - clampedFrom
+  return {
+    from: clampedFrom,
+    to,
+    rangeSec,
+    windowLabel: formatHistoryWindowLabel(clampedFrom, to),
+    parseNote,
+  }
+}
+
+function extractCalendarParts(q) {
+  let m = q.match(/\b(\d{4})-(\d{2})-(\d{2})\b/)
+  if (m) return { y: Number(m[1]), mo: Number(m[2]), d: Number(m[3]) }
+  m = q.match(/\b(\d{1,2})(?:st|nd|rd|th)?[\s-]+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[\s-]+(\d{4})\b/i)
+  if (m) {
+    const mo = monthIndex(m[2])
+    if (mo) return { y: Number(m[3]), mo, d: Number(m[1]) }
+  }
+  return null
+}
+
+function parseExplicitUnixWindow(raw) {
+  const q = String(raw || '')
+  const fromMatch = q.match(/\b(?:from|time_from|start|since)\s*[=:]?\s*(\d{10})\b/i)
+  const toMatch = q.match(/\b(?:to|time_to|end|until)\s*[=:]?\s*(\d{10})\b/i)
+  if (fromMatch && toMatch) {
+    return buildHistoryWindowResult(Number(fromMatch[1]), Number(toMatch[1]), 'explicit unix from/to in question')
+  }
+  const stamps = [...q.matchAll(/\b(1\d{9})\b/g)]
+    .map((m) => Number(m[1]))
+    .filter((n) => n > 1_500_000_000 && n < 2_100_000_000)
+  if (stamps.length >= 2) {
+    const from = Math.min(stamps[0], stamps[1])
+    const to = Math.max(stamps[0], stamps[1])
+    return buildHistoryWindowResult(from, to, 'paired unix timestamps in question')
+  }
+  return null
+}
+
+function parseCalendarDateWindow(raw) {
+  const q = String(raw || '').toLowerCase()
+  const parts = extractCalendarParts(q)
+  if (!parts) return null
+
+  const timeRange = q.match(/\b(\d{1,2}):(\d{2})\s*(?:-|–|to)\s*(\d{1,2}):(\d{2})\b/)
+  if (timeRange) {
+    const from = istUnix(parts.y, parts.mo, parts.d, Number(timeRange[1]), Number(timeRange[2]))
+    const to = istUnix(parts.y, parts.mo, parts.d, Number(timeRange[3]), Number(timeRange[4]), 59)
+    return buildHistoryWindowResult(from, to, `calendar date ${parts.y}-${pad2(parts.mo)}-${pad2(parts.d)} + time range (IST)`)
+  }
+
+  const timePoint = q.match(/\b(?:at\s+)?(\d{1,2}):(\d{2})(?::(\d{2}))?\b/)
+  if (timePoint && !/\blast\s+\d+\s*(?:d|day|h|hour)/.test(q)) {
+    const center = istUnix(
+      parts.y, parts.mo, parts.d,
+      Number(timePoint[1]), Number(timePoint[2]), Number(timePoint[3] || 0),
+    )
+    if (center) {
+      return buildHistoryWindowResult(center - 900, center + 900, `±15m around ${timePoint[1]}:${timePoint[2]} on ${parts.y}-${pad2(parts.mo)}-${pad2(parts.d)} (IST)`)
+    }
+  }
+
+  const from = istUnix(parts.y, parts.mo, parts.d, 0, 0, 0)
+  const to = istUnix(parts.y, parts.mo, parts.d, 23, 59, 59)
+  const note = /\b(whole\s+day|entire\s+day|full\s+day)\b/.test(q)
+    ? `whole day ${parts.y}-${pad2(parts.mo)}-${pad2(parts.d)} (IST)`
+    : `calendar date ${parts.y}-${pad2(parts.mo)}-${pad2(parts.d)} (IST full day)`
+  return buildHistoryWindowResult(from, to, note)
+}
+
 function clampHistoryRangeSec(sec) {
   return Math.min(Math.max(Math.floor(sec), 3600), ZABBIX_HISTORY_MAX_SEC)
 }
 
-/** Parse CPU/RAM history window from natural language (default 24h, max 30d). */
+/** Parse CPU/RAM history window from natural language (default 24h ending now, max 30d). */
 function parseZabbixHistoryRangeSec(message) {
   const q = String(message || '').toLowerCase()
 
@@ -286,6 +399,57 @@ function parseZabbixHistoryRangeSec(message) {
   if (/\b(1\s*h|1h)\b/.test(q)) return 3600
   if (/\b(24\s*h|24h|last\s+24|last\s+day|past\s+day)\b/.test(q)) return 86400
   return 86400
+}
+
+/** Absolute or relative Zabbix history window for CPU/RAM series. */
+function parseZabbixHistoryWindow(message, opts = {}) {
+  const fromExplicit = parseEpochSec(opts.historyFrom)
+  const toExplicit = parseEpochSec(opts.historyTo)
+  if (fromExplicit != null && toExplicit != null) {
+    const built = buildHistoryWindowResult(fromExplicit, toExplicit, 'historyFrom/historyTo parameters')
+    if (built) return built
+  }
+
+  const raw = String(message || '')
+  const absolute = parseExplicitUnixWindow(raw) || parseCalendarDateWindow(raw)
+  if (absolute) return absolute
+
+  const now = Math.floor(Date.now() / 1000)
+  const rangeSec = parseZabbixHistoryRangeSec(message)
+  return {
+    from: now - rangeSec,
+    to: now,
+    rangeSec,
+    windowLabel: formatHistoryWindowLabel(now - rangeSec, now),
+    parseNote: 'relative window ending now',
+  }
+}
+
+function parseHistoryItemIds(message) {
+  const ids = new Set()
+  const q = String(message || '')
+  for (const m of q.matchAll(/\bitem\s*#?\s*(\d{4,})\b/gi)) ids.add(String(m[1]))
+  for (const m of q.matchAll(/\b(?:cpu|memory|mem|ram)\s+item\s+(\d{4,})\b/gi)) ids.add(String(m[1]))
+  return [...ids]
+}
+
+function nearestHistoryPoint(points, targetSec) {
+  if (!Array.isArray(points) || !points.length || !Number.isFinite(targetSec)) return null
+  let best = points[0]
+  let bestDelta = Math.abs(best.clock - targetSec)
+  for (const p of points) {
+    const d = Math.abs(p.clock - targetSec)
+    if (d < bestDelta) {
+      best = p
+      bestDelta = d
+    }
+  }
+  return {
+    clock: best.clock,
+    at: best.at,
+    percent: best.percent,
+    deltaSec: bestDelta,
+  }
 }
 
 function historyMaxPointsForRange(rangeSec) {
@@ -746,12 +910,12 @@ async function fetchItemHistorySeries(zabbixRpc, metric, from, to, maxPoints = 1
   }
 }
 
-async function fetchCpuMemoryHistory(zabbixRpc, cpuMemoryMetrics, matchedHosts, rangeSec, maxPoints = 120) {
+async function fetchCpuMemoryHistory(zabbixRpc, cpuMemoryMetrics, matchedHosts, window, maxPoints = 120) {
   const byHost = cpuMemoryMetrics?.byHost || {}
   const hostMeta = Object.fromEntries((matchedHosts || []).map(h => [String(h.hostid), h]))
-  const now = Math.floor(Date.now() / 1000)
-  const from = now - rangeSec
-  const to = now
+  const from = window.from
+  const to = window.to
+  const rangeSec = window.rangeSec
   const hosts = []
 
   for (const [hostid, metrics] of Object.entries(byHost)) {
@@ -773,13 +937,39 @@ async function fetchCpuMemoryHistory(zabbixRpc, cpuMemoryMetrics, matchedHosts, 
 
   return {
     windowSec: rangeSec,
-    windowLabel: rangeSec >= 86400 ? `${Math.round(rangeSec / 86400)}d` : `${Math.round(rangeSec / 3600)}h`,
+    windowLabel: window.windowLabel,
+    parseNote: window.parseNote,
     from,
     to,
     fromAt: formatPortalTimestamp(from * 1000),
     toAt: formatPortalTimestamp(to * 1000),
     hosts,
     note: 'Fetched via Zabbix history.get / trend.get on system.cpu.util and vm.memory.utilization item IDs. Windows >2d uses trend.get when available.',
+  }
+}
+
+async function fetchCpuMemoryHistoryByItemIds(zabbixRpc, itemIds, window, maxPoints = 120) {
+  const items = []
+  for (const itemid of itemIds) {
+    const series = await fetchItemHistorySeries(zabbixRpc, { itemid }, window.from, window.to, maxPoints)
+    if (series) {
+      const row = { itemid, ...series }
+      if (window.requestedAtSec) {
+        row.valueAt = nearestHistoryPoint(series.points, window.requestedAtSec)
+      }
+      items.push(row)
+    }
+  }
+  return {
+    windowSec: window.rangeSec,
+    windowLabel: window.windowLabel,
+    parseNote: window.parseNote,
+    from: window.from,
+    to: window.to,
+    fromAt: formatPortalTimestamp(window.from * 1000),
+    toAt: formatPortalTimestamp(window.to * 1000),
+    items,
+    note: 'Fetched by explicit Zabbix item ID(s) via history.get / trend.get.',
   }
 }
 
@@ -2364,7 +2554,7 @@ function buildCpuMemoryMetricsState(data, matchedHosts, includeCpuMemory, storeA
  * client they hit and how the result is labelled, so we centralise the
  * snapshot logic here to keep them in lockstep.
  */
-async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, missingError }, userMessage = '') {
+async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, missingError }, userMessage = '', opts = {}) {
   const fetchedAt = new Date().toISOString()
   const client = createZabbixClient(envName)
   if (!client.isZabbixConfigured()) {
@@ -2477,24 +2667,36 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   const cpuMemoryMetricsState = buildCpuMemoryMetricsState(data, matched, includeCpuMemory, storeAgentMetrics)
 
   let cpuMemoryHistory = null
-  if (includeCpuMemoryHistory && matched.length && data.cpuMemoryMetrics?.byHost) {
-    const historyRangeSec = parseZabbixHistoryRangeSec(userMessage)
-    const historyMaxPoints = historyMaxPointsForRange(historyRangeSec)
+  if (includeCpuMemoryHistory) {
+    const historyWindow = parseZabbixHistoryWindow(userMessage, opts)
+    const historyMaxPoints = historyMaxPointsForRange(historyWindow.rangeSec)
+    const historyItemIds = parseHistoryItemIds(userMessage)
     try {
-      cpuMemoryHistory = await fetchCpuMemoryHistory(
-        client.zabbixRpc,
-        data.cpuMemoryMetrics,
-        matched,
-        historyRangeSec,
-        historyMaxPoints,
-      )
+      if (historyItemIds.length) {
+        cpuMemoryHistory = await fetchCpuMemoryHistoryByItemIds(
+          client.zabbixRpc,
+          historyItemIds,
+          historyWindow,
+          historyMaxPoints,
+        )
+      } else if (matched.length && data.cpuMemoryMetrics?.byHost) {
+        cpuMemoryHistory = await fetchCpuMemoryHistory(
+          client.zabbixRpc,
+          data.cpuMemoryMetrics,
+          matched,
+          historyWindow,
+          historyMaxPoints,
+        )
+      }
     } catch (err) {
       cpuMemoryHistory = {
-        windowSec: historyRangeSec,
-        windowLabel: historyRangeSec >= 86400
-          ? `${Math.round(historyRangeSec / 86400)}d`
-          : `${Math.round(historyRangeSec / 3600)}h`,
+        windowSec: historyWindow.rangeSec,
+        windowLabel: historyWindow.windowLabel,
+        parseNote: historyWindow.parseNote,
+        from: historyWindow.from,
+        to: historyWindow.to,
         hosts: [],
+        items: [],
         error: err?.message || 'Failed to fetch Zabbix CPU/memory history',
       }
     }
@@ -2530,13 +2732,13 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   }
 }
 
-export async function buildZabbixInfraContext(userMessage = '') {
+export async function buildZabbixInfraContext(userMessage = '', opts = {}) {
   return buildZabbixContextFromClient({
     moduleId: 'zabbixInfra',
     envName: 'ZABBIX',
     sourceLabel: 'Infra Zabbix',
     missingError: 'ZABBIX_URL + ZABBIX_API_TOKEN not configured',
-  }, userMessage)
+  }, userMessage, opts)
 }
 
 function isDisconnectFocusedQuery(userMessage) {
@@ -2586,7 +2788,7 @@ async function buildStoreZabbixZabbixStub(userMessage = '') {
   }
 }
 
-export async function buildStoreZabbixContext(userMessage = '') {
+export async function buildStoreZabbixContext(userMessage = '', opts = {}) {
   const disconnectBlock = await buildStoreDisconnectMcpContext(userMessage)
   const hostScope = extractIpv4(userMessage) || extractStoreHostname(userMessage)
   const skipZabbixInventory = isDisconnectFocusedQuery(userMessage) && !hostScope
@@ -2598,7 +2800,7 @@ export async function buildStoreZabbixContext(userMessage = '') {
       envName: 'STORE_ZABBIX',
       sourceLabel: 'Store Zabbix',
       missingError: 'STORE_ZABBIX_URL + STORE_ZABBIX_API_TOKEN not configured',
-    }, userMessage)
+    }, userMessage, opts)
 
   const zabbixConfigured = zabbixBlock.configured !== false
   const zabbixError = zabbixBlock.error || null

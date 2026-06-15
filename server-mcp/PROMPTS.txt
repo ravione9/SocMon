@@ -279,10 +279,15 @@ IMPORTANT — fleet inventory (~3000 store hosts):
   * For "how many hosts", quote availability.total — NOT hosts.length
 
 IMPORTANT — CPU/RAM history trends (Zabbix history.get / trend.get):
-  Include trend / graph / history in the question. Specify the window explicitly:
-    "5 days", "120 hours", "7d", "last 14 days", "30d" (default 24h if omitted).
-  Response: cpuMemoryHistory.windowLabel, fromAt, toAt, hosts[].cpu/memory.points.
-  Windows >2d use trend.get when available. Max window 30d (env ZABBIX_CONTEXT_HISTORY_MAX_SEC).
+  hosts[].cpu/memory = LIVE snapshot (lastvalue). cpuMemoryHistory = time series.
+  Include trend / graph / history in the question. Window options:
+    • Relative: "last 5 days", "120 hours" (default 24h ending now)
+    • Calendar (IST): "11 June 2026 whole day", "2026-06-11 20:00-20:15"
+    • Unix: "from <epoch> to <epoch>" in question
+    • MCP params: historyFrom + historyTo (unix seconds) on netpulse_storeZabbix
+    • Item IDs: "CPU item 168356 memory item 168956" fetches those Zabbix items
+  Response: cpuMemoryHistory.windowLabel, parseNote, fromAt, toAt, points[].
+  For a point-in-time value use items[].valueAt when querying a specific clock.
 
 IMPORTANT — hostname search:
   Short tags work: RP911, LK973, LKST793. LKST793 aliases to RP793-* in

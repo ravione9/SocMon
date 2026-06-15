@@ -20,6 +20,21 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
+const historyWindowSchema = {
+  historyFrom: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe('Unix seconds (UTC) start of Zabbix CPU/RAM history window. Pair with historyTo.'),
+  historyTo: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe('Unix seconds (UTC) end of Zabbix CPU/RAM history window. Pair with historyFrom.'),
+}
+
 const SERVER_INFO = {
   name: 'netpulse-mcp',
   version: '0.2.0',
@@ -101,6 +116,7 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
           .boolean()
           .optional()
           .describe('When true (default), NetPulse picks modules based on the question.'),
+        ...historyWindowSchema,
       },
     },
     async (args) =>
@@ -110,6 +126,8 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
           question: args.question,
           autoModules: args.autoModules ?? true,
           format: 'json',
+          historyFrom: args.historyFrom,
+          historyTo: args.historyTo,
         }),
       ),
   )
@@ -233,6 +251,7 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
             .string()
             .optional()
             .describe(`Optional natural-language refinement for the ${moduleMeta.label} dashboard.`),
+          ...historyWindowSchema,
         },
       },
       async (args) =>
@@ -242,6 +261,8 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
             question: args?.question,
             autoModules: false,
             format: 'json',
+            historyFrom: args?.historyFrom,
+            historyTo: args?.historyTo,
           }),
         ),
     )

@@ -62,11 +62,13 @@ router.get('/modules', async (req, res) => {
 /** Export JSON context (+ optional LLM prompt block) without calling an LLM. */
 router.post('/context', async (req, res) => {
   try {
-    const { modules, question, autoModules = true, format = 'json' } = req.body || {}
+    const { modules, question, autoModules = true, format = 'json', historyFrom, historyTo } = req.body || {}
     const exported = await exportPortalContextForAgent(req.user, {
       modules,
       question: question ? String(question) : '',
       autoModules,
+      historyFrom,
+      historyTo,
     })
 
     const payload = {
