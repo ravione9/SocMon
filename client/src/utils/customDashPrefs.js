@@ -52,6 +52,46 @@ export async function saveCustomDashPrefs(scope, prefs) {
   await api.put('/api/auth/me/ui-prefs/custom-dashboard', { scope, prefs })
 }
 
+export async function fetchSavedFilters(scope) {
+  const { data } = await api.get('/api/auth/me/ui-prefs/custom-dashboard/saved', {
+    params: { scope },
+  })
+  return {
+    filters: Array.isArray(data?.filters) ? data.filters : [],
+    limits: data?.limits || { maxFilters: 30, maxNameLen: 60 },
+  }
+}
+
+export async function createSavedFilter(scope, name, prefs) {
+  const { data } = await api.post('/api/auth/me/ui-prefs/custom-dashboard/saved', {
+    scope,
+    name,
+    prefs,
+  })
+  return {
+    filters: Array.isArray(data?.filters) ? data.filters : [],
+    created: data?.created || null,
+  }
+}
+
+export async function updateSavedFilter(scope, id, patch) {
+  const { data } = await api.put(`/api/auth/me/ui-prefs/custom-dashboard/saved/${encodeURIComponent(id)}`, {
+    scope,
+    ...patch,
+  })
+  return {
+    filters: Array.isArray(data?.filters) ? data.filters : [],
+    updated: data?.updated || null,
+  }
+}
+
+export async function deleteSavedFilter(scope, id) {
+  const { data } = await api.delete(`/api/auth/me/ui-prefs/custom-dashboard/saved/${encodeURIComponent(id)}`, {
+    params: { scope },
+  })
+  return Array.isArray(data?.filters) ? data.filters : []
+}
+
 export function resolveHostsByIds(hosts, hostIds) {
   if (!hosts?.length || !hostIds?.length) return []
   const map = new Map(hosts.map((h) => [String(h.hostid), h]))

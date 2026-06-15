@@ -14,6 +14,10 @@ import {
   normalizeCustomDashScope,
   sanitizeCustomDashPrefs,
   readCustomDashPrefs,
+  readSavedFilters,
+  writeSavedFilters,
+  sanitizeSavedFilterEntry,
+  SAVED_FILTER_LIMITS,
 } from '../utils/customDashPrefs.js'
 
 const router = Router()
@@ -240,6 +244,81 @@ router.put('/me/ui-prefs/custom-dashboard', authenticate, requireSessionUser, as
     user.markModified('uiPrefs')
     await user.save()
     res.json({ scope, prefs })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+/** GET /me/ui-prefs/custom-dashboard/saved?scope=... — list of named filters. */
+router.get('/me/ui-prefs/custom-dashboard/saved', authenticate, requireSessionUser, async (req, res) => {
+  try {
+    const scope = normalizeCustomDashScope(req.query.scope)
+    res.json({ scope, filters: readSavedFilters(req.user, scope), limits: SAVED_FILTER_LIMITS })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+/** POST /me/ui-prefs/custom-dashboard/saved — body: { scope, name, prefs } → returns full list */
+router.post('/me/ui-prefs/custom-dashboard/saved', authenticate, requireSessionUser, async (req, res) => {
+  try {
+    const scope = normalizeCustomDashScope(req.body?.scope)
+    const entry = sanitizeSavedFilterEntry({
+      name: req.body?.name,
+      prefs: req.body?.prefs,
+    }, { keepId: false })
+    if (!entry) return res.status(400).json({ error: 'Invalid filter payload' })
+    const user = await User.findById(req.user._id)
+    if (!user) return res.status(404).json({ error: 'User not found' })
+    const existing = readSavedFilters(user, scope)
+    if (existing.length >= SAVED_FILTER_LIMITS.maxFilters) {
+      return res.status(400).json({ error: `Maximum ${SAVED_FILTER_LIMITS.maxFilters} saved filters reached` })
+    }
+    const next = [...existing, entry]
+    const filters = writeSavedFilters(user, scope, next)
+    await user.save()
+    res.status(201).json({ scope, filters, created: entry })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+/** PUT /me/ui-prefs/custom-dashboard/saved/:id — body: { scope, name?, prefs? } → returns full list */
+router.put('/me/ui-prefs/custom-dashboard/saved/:id', authenticate, requireSessionUser, async (req, res) => {
+  try {
+    const scope = normalizeCustomDashScope(req.body?.scope)
+    const id = String(req.params.id || '').trim()
+    if (!id) return res.status(400).json({ error: 'Missing filter id' })
+    const user = await User.findById(req.user._id)
+    if (!user) return res.status(404).json({ error: 'User not found' })
+    const list = readSavedFilters(user, scope)
+    const idx = list.findIndex((f) => f.id === id)
+    if (idx === -1) return res.status(404).json({ error: 'Filter not found' })
+    const merged = sanitizeSavedFilterEntry({
+      ...list[idx],
+      name: req.body?.name != null ? req.body.name : list[idx].name,
+      prefs: req.body?.prefs != null ? req.body.prefs : list[idx].prefs,
+    })
+    list[idx] = merged
+    const filters = writeSavedFilters(user, scope, list)
+    await user.save()
+    res.json({ scope, filters, updated: merged })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+/** DELETE /me/ui-prefs/custom-dashboard/saved/:id?scope=... → returns full list */
+router.delete('/me/ui-prefs/custom-dashboard/saved/:id', authenticate, requireSessionUser, async (req, res) => {
+  try {
+    const scope = normalizeCustomDashScope(req.query.scope)
+    const id = String(req.params.id || '').trim()
+    const user = await User.findById(req.user._id)
+    if (!user) return res.status(404).json({ error: 'User not found' })
+    const list = readSavedFilters(user, scope).filter((f) => f.id !== id)
+    const filters = writeSavedFilters(user, scope, list)
+    await user.save()
+    res.json({ scope, filters })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

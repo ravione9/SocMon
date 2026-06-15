@@ -22,6 +22,10 @@ import {
   saveCustomDashPrefs,
   serializeCustomDashPrefs,
   resolveHostsByIds,
+  fetchSavedFilters,
+  createSavedFilter,
+  updateSavedFilter,
+  deleteSavedFilter,
 } from '../../utils/customDashPrefs.js'
 import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../components/ui/ResizableTable.jsx'
 import { useThemeStore } from '../../store/themeStore.js'
@@ -2166,6 +2170,221 @@ function GraphPanel({ graph, series, chartData, chartOpts, busy, graphDataMode, 
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   SAVED FILTERS DROPDOWN — list / apply / rename / delete named filter presets
+   ═══════════════════════════════════════════════════════════════ */
+function CustomDashSavedFiltersDropdown({
+  filters, busy, error, appliedId,
+  onApply, onCreate, onDelete, onRename,
+}) {
+  const [open, setOpen] = useState(false)
+  const [draftName, setDraftName] = useState('')
+  const [renamingId, setRenamingId] = useState(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const wrapRef = useRef(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) {
+        setOpen(false); setRenamingId(null)
+      }
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [open])
+
+  const list = Array.isArray(filters) ? filters : []
+  const applied = list.find((f) => f.id === appliedId)
+
+  const submitCreate = async () => {
+    const name = draftName.trim()
+    if (!name) return
+    const created = await onCreate?.(name)
+    if (created) {
+      setDraftName('')
+    }
+  }
+
+  const submitRename = async (id) => {
+    const name = renameDraft.trim()
+    if (!name) { setRenamingId(null); return }
+    await onRename?.(id, { name })
+    setRenamingId(null)
+  }
+
+  const fmtPrefsSummary = (p) => {
+    if (!p) return ''
+    const parts = []
+    if (p.selectedHostIds?.length) parts.push(`${p.selectedHostIds.length} host${p.selectedHostIds.length > 1 ? 's' : ''}`)
+    if (p.range) parts.push(p.range === 'custom' ? 'custom range' : p.range)
+    if (p.bhEnabled) parts.push(`BH ${String(p.bhStart).padStart(2, '0')}–${String(p.bhEnd).padStart(2, '0')}`)
+    return parts.join(' · ')
+  }
+
+  return (
+    <div ref={wrapRef} style={{ position: 'relative', marginLeft: 'auto' }}>
+      <button type="button" onClick={() => setOpen((v) => !v)}
+        style={{
+          padding: '7px 12px', borderRadius: 8, border: '1px solid var(--border)',
+          background: open ? 'rgba(59,130,246,.12)' : 'var(--bg3)',
+          color: open ? 'var(--accent)' : 'var(--text2)',
+          fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 600,
+          display: 'inline-flex', alignItems: 'center', gap: 6,
+        }}
+        title="Save and apply named filter presets"
+      >
+        <span>★</span>
+        <span>Saved Filters</span>
+        {list.length > 0 && (
+          <span className="opm-pill" style={{ background: 'rgba(59,130,246,.15)', color: 'var(--accent)', fontSize: 9 }}>
+            {list.length}
+          </span>
+        )}
+        {applied && (
+          <span style={{ color: 'var(--text3)', fontWeight: 500, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            · {applied.name}
+          </span>
+        )}
+        <span style={{ fontSize: 10 }}>{open ? '▲' : '▼'}</span>
+      </button>
+
+      {open && (
+        <div style={{
+          position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 40,
+          width: 340, maxHeight: 440, display: 'flex', flexDirection: 'column',
+          border: '1px solid var(--border)', borderRadius: 10, background: 'var(--bg2)',
+          boxShadow: '0 12px 32px rgba(0,0,0,.32)',
+        }}>
+          <div style={{ padding: '10px 12px', borderBottom: '1px solid var(--border)', background: 'var(--bg3)' }}>
+            <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, letterSpacing: .5, textTransform: 'uppercase', marginBottom: 6 }}>
+              Save current filter
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input
+                type="text" value={draftName}
+                onChange={(e) => setDraftName(e.target.value.slice(0, 60))}
+                onKeyDown={(e) => { if (e.key === 'Enter') submitCreate() }}
+                placeholder="Filter name…"
+                style={{
+                  flex: 1, padding: '6px 10px', borderRadius: 6, fontSize: 11,
+                  fontFamily: 'var(--mono)', border: '1px solid var(--border)',
+                  background: 'var(--bg2)', color: 'var(--text)', outline: 'none',
+                }}
+              />
+              <button type="button" onClick={submitCreate}
+                disabled={!draftName.trim() || busy}
+                style={{
+                  padding: '6px 12px', borderRadius: 6, fontSize: 11, fontFamily: 'var(--mono)',
+                  fontWeight: 700, border: 'none',
+                  background: 'var(--accent)', color: '#fff',
+                  cursor: draftName.trim() && !busy ? 'pointer' : 'default',
+                  opacity: draftName.trim() && !busy ? 1 : .5,
+                }}>
+                Save
+              </button>
+            </div>
+          </div>
+
+          {error && (
+            <div style={{ padding: '8px 12px', fontSize: 10, color: '#ef4444', fontFamily: 'var(--mono)', borderBottom: '1px solid var(--border)' }}>
+              {error}
+            </div>
+          )}
+
+          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+            {!list.length && (
+              <div style={{ padding: 18, fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', textAlign: 'center' }}>
+                No saved filters yet. Configure your hosts/range/BH and save above.
+              </div>
+            )}
+            {list.map((f) => {
+              const active = f.id === appliedId
+              const renaming = renamingId === f.id
+              return (
+                <div key={f.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  padding: '8px 12px', borderBottom: '1px solid var(--border)',
+                  background: active ? 'rgba(59,130,246,.08)' : 'transparent',
+                  borderLeft: active ? '3px solid var(--accent)' : '3px solid transparent',
+                }}>
+                  {renaming ? (
+                    <input
+                      autoFocus type="text" value={renameDraft}
+                      onChange={(e) => setRenameDraft(e.target.value.slice(0, 60))}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') submitRename(f.id)
+                        if (e.key === 'Escape') { setRenamingId(null); setRenameDraft('') }
+                      }}
+                      onBlur={() => submitRename(f.id)}
+                      style={{
+                        flex: 1, padding: '4px 8px', borderRadius: 5, fontSize: 11,
+                        fontFamily: 'var(--mono)', border: '1px solid var(--accent)',
+                        background: 'var(--bg2)', color: 'var(--text)', outline: 'none',
+                      }}
+                    />
+                  ) : (
+                    <button type="button"
+                      onClick={() => { onApply?.(f); setOpen(false) }}
+                      style={{
+                        flex: 1, textAlign: 'left', minWidth: 0, padding: 0,
+                        border: 'none', background: 'transparent', cursor: 'pointer',
+                        display: 'flex', flexDirection: 'column', gap: 2,
+                      }}
+                      title="Click to apply this filter"
+                    >
+                      <span style={{
+                        fontSize: 12, fontWeight: 700, color: active ? 'var(--accent)' : 'var(--text)',
+                        fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>
+                        {f.name}
+                      </span>
+                      <span style={{
+                        fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)',
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>
+                        {fmtPrefsSummary(f.prefs)}
+                      </span>
+                    </button>
+                  )}
+                  {!renaming && (
+                    <>
+                      <button type="button"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setRenameDraft(f.name); setRenamingId(f.id)
+                        }}
+                        title="Rename"
+                        style={{
+                          border: 'none', background: 'transparent', cursor: 'pointer',
+                          color: 'var(--text3)', fontSize: 12, padding: 4,
+                        }}>
+                        ✎
+                      </button>
+                      <button type="button"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          if (window.confirm(`Delete saved filter "${f.name}"?`)) onDelete?.(f.id)
+                        }}
+                        title="Delete"
+                        style={{
+                          border: 'none', background: 'transparent', cursor: 'pointer',
+                          color: '#ef4444', fontSize: 12, padding: 4, fontWeight: 700,
+                        }}>
+                        ✕
+                      </button>
+                    </>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════
    CUSTOM DASHBOARD COMPONENT
    ═══════════════════════════════════════════════════════════════ */
 function CustomDashboardPanel({
@@ -2185,6 +2404,9 @@ function CustomDashboardPanel({
   onOpenRebootModal, onOpenCrashModal,
   onRefresh,
   prefsSavedAt, prefsBusy,
+  savedFilters, savedFiltersBusy, savedFiltersError,
+  appliedFilterId,
+  onApplySavedFilter, onCreateSavedFilter, onDeleteSavedFilter, onRenameSavedFilter,
 }) {
   const dropdownRef = useRef(null)
   useEffect(() => {
@@ -2445,6 +2667,17 @@ function CustomDashboardPanel({
               ✓ Filters saved to your profile
             </span>
           )}
+
+          <CustomDashSavedFiltersDropdown
+            filters={savedFilters}
+            busy={savedFiltersBusy}
+            error={savedFiltersError}
+            appliedId={appliedFilterId}
+            onApply={onApplySavedFilter}
+            onCreate={onCreateSavedFilter}
+            onDelete={onDeleteSavedFilter}
+            onRename={onRenameSavedFilter}
+          />
         </div>
 
         {/* Range chips */}
@@ -3472,6 +3705,11 @@ export default function StoreZabbixPage({
   const customDashPendingHostIdsRef = useRef(null)
   const [customDashPrefsSavedAt, setCustomDashPrefsSavedAt] = useState(null)
   const [customDashPrefsBusy, setCustomDashPrefsBusy] = useState(false)
+  /** Named filter presets the user has saved via the dropdown. */
+  const [customDashSavedFilters, setCustomDashSavedFilters] = useState([])
+  const [customDashSavedFiltersBusy, setCustomDashSavedFiltersBusy] = useState(false)
+  const [customDashSavedFiltersError, setCustomDashSavedFiltersError] = useState(null)
+  const [customDashAppliedFilterId, setCustomDashAppliedFilterId] = useState(null)
 
   const ropDisconnectRangeLabel = useMemo(() => {
     if (ropRange === 'custom' && ropCustomEpoch?.from && ropCustomEpoch?.to) {
@@ -3968,6 +4206,126 @@ export default function StoreZabbixPage({
     setCustomDashSelected(resolveHostsByIds(customDashHosts, pending))
     customDashPendingHostIdsRef.current = null
   }, [customDashHosts])
+
+  /** Load named saved filters for this user/scope. */
+  useEffect(() => {
+    if (!authUser?.id) return
+    let cancelled = false
+    setCustomDashSavedFiltersBusy(true)
+    setCustomDashSavedFiltersError(null)
+    fetchSavedFilters(customDashPrefsScopeKey)
+      .then((res) => {
+        if (cancelled) return
+        setCustomDashSavedFilters(res.filters || [])
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setCustomDashSavedFiltersError(e?.response?.data?.error || e?.message || 'Failed to load saved filters')
+      })
+      .finally(() => { if (!cancelled) setCustomDashSavedFiltersBusy(false) })
+    return () => { cancelled = true }
+  }, [authUser?.id, customDashPrefsScopeKey])
+
+  /** Build the prefs payload for the current state. Used by saved filters. */
+  const buildCurrentPrefsPayload = useCallback(() => {
+    return serializeCustomDashPrefs({
+      selectedHosts: customDashSelected,
+      range: customDashRange,
+      customEpoch: customDashCustomEpoch,
+      customFrom: customDashCustomFrom,
+      customTo: customDashCustomTo,
+      bhEnabled: customDashBhEnabled,
+      bhStart: customDashBhStart,
+      bhEnd: customDashBhEnd,
+      bhDays: customDashBhDays,
+      eventLimit: customDashEventLimit,
+      activeWidget: customDashWidget,
+    })
+  }, [
+    customDashSelected, customDashRange, customDashCustomEpoch,
+    customDashCustomFrom, customDashCustomTo,
+    customDashBhEnabled, customDashBhStart, customDashBhEnd, customDashBhDays,
+    customDashEventLimit, customDashWidget,
+  ])
+
+  /** Apply a saved filter's prefs to the live dashboard state. */
+  const applySavedFilter = useCallback((filter) => {
+    if (!filter?.prefs) return
+    const p = filter.prefs
+    customDashPrefsSkipSaveRef.current = true
+    setCustomDashRange(p.range || '24h')
+    if (p.customEpoch?.from && p.customEpoch?.to) {
+      setCustomDashCustomEpoch({ from: p.customEpoch.from, to: p.customEpoch.to })
+    } else {
+      setCustomDashCustomEpoch(null)
+    }
+    setCustomDashCustomFrom(p.customFrom || '')
+    setCustomDashCustomTo(p.customTo || '')
+    setCustomDashBhEnabled(!!p.bhEnabled)
+    if (Number.isFinite(Number(p.bhStart))) setCustomDashBhStart(Number(p.bhStart))
+    if (Number.isFinite(Number(p.bhEnd))) setCustomDashBhEnd(Number(p.bhEnd))
+    if (Array.isArray(p.bhDays) && p.bhDays.length) setCustomDashBhDays(new Set(p.bhDays))
+    if ([500, 1000, 2000, 5000].includes(Number(p.eventLimit))) {
+      setCustomDashEventLimit(Number(p.eventLimit))
+    }
+    setCustomDashWidget(p.activeWidget || null)
+    if (Array.isArray(p.selectedHostIds)) {
+      if (customDashHosts?.length) {
+        setCustomDashSelected(resolveHostsByIds(customDashHosts, p.selectedHostIds))
+      } else {
+        customDashPendingHostIdsRef.current = p.selectedHostIds
+      }
+    }
+    setCustomDashAppliedFilterId(filter.id)
+    window.setTimeout(() => { customDashPrefsSkipSaveRef.current = false }, 0)
+  }, [customDashHosts])
+
+  const handleCreateSavedFilter = useCallback(async (rawName) => {
+    const name = String(rawName || '').trim()
+    if (!name) return null
+    setCustomDashSavedFiltersBusy(true)
+    setCustomDashSavedFiltersError(null)
+    try {
+      const res = await createSavedFilter(customDashPrefsScopeKey, name, buildCurrentPrefsPayload())
+      setCustomDashSavedFilters(res.filters || [])
+      if (res.created?.id) setCustomDashAppliedFilterId(res.created.id)
+      return res.created
+    } catch (e) {
+      setCustomDashSavedFiltersError(e?.response?.data?.error || e?.message || 'Failed to save filter')
+      return null
+    } finally {
+      setCustomDashSavedFiltersBusy(false)
+    }
+  }, [customDashPrefsScopeKey, buildCurrentPrefsPayload])
+
+  const handleUpdateSavedFilter = useCallback(async (id, patch) => {
+    setCustomDashSavedFiltersBusy(true)
+    setCustomDashSavedFiltersError(null)
+    try {
+      const res = await updateSavedFilter(customDashPrefsScopeKey, id, patch)
+      setCustomDashSavedFilters(res.filters || [])
+      return res.updated
+    } catch (e) {
+      setCustomDashSavedFiltersError(e?.response?.data?.error || e?.message || 'Failed to update filter')
+      return null
+    } finally {
+      setCustomDashSavedFiltersBusy(false)
+    }
+  }, [customDashPrefsScopeKey])
+
+  const handleDeleteSavedFilter = useCallback(async (id) => {
+    setCustomDashSavedFiltersBusy(true)
+    setCustomDashSavedFiltersError(null)
+    try {
+      const filters = await deleteSavedFilter(customDashPrefsScopeKey, id)
+      setCustomDashSavedFilters(filters || [])
+      if (customDashAppliedFilterId === id) setCustomDashAppliedFilterId(null)
+    } catch (e) {
+      setCustomDashSavedFiltersError(e?.response?.data?.error || e?.message || 'Failed to delete filter')
+    } finally {
+      setCustomDashSavedFiltersBusy(false)
+    }
+  }, [customDashPrefsScopeKey, customDashAppliedFilterId])
 
   /** Auto-save filter prefs for the signed-in user (debounced). */
   useEffect(() => {
@@ -6656,6 +7014,14 @@ export default function StoreZabbixPage({
           }}
           prefsSavedAt={customDashPrefsSavedAt}
           prefsBusy={customDashPrefsBusy}
+          savedFilters={customDashSavedFilters}
+          savedFiltersBusy={customDashSavedFiltersBusy}
+          savedFiltersError={customDashSavedFiltersError}
+          appliedFilterId={customDashAppliedFilterId}
+          onApplySavedFilter={applySavedFilter}
+          onCreateSavedFilter={handleCreateSavedFilter}
+          onDeleteSavedFilter={handleDeleteSavedFilter}
+          onRenameSavedFilter={handleUpdateSavedFilter}
         />
       )}
 
