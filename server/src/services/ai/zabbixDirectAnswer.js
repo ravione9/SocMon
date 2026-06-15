@@ -239,25 +239,63 @@ export function wantsCpuMemoryUtil(question) {
     || Boolean(extractIpv4(q))
 }
 
-/** Zabbix history/trend time-series for CPU/RAM graphs (e.g. 24h trend). */
+/** Zabbix history/trend time-series for CPU/RAM graphs. */
 export function wantsCpuMemoryHistory(question) {
   const q = String(question || '')
-  if (!/\b(graph|graphical|chart|visual|plot|timeline|trend|history|time\s*series|24\s*h|24h|last\s+24)\b/i.test(q)) {
-    return false
-  }
-  return /\b(cpu|memory|mem|ram)\b/i.test(q)
+  const hasMetric = /\b(cpu|memory|mem|ram)\b/i.test(q)
     || Boolean(extractStoreHostname(q) || extractIpv4(q))
+  if (!hasMetric) return false
+  const hasTrendKw = /\b(graph|graphical|chart|visual|plot|timeline|trend|history|time\s*series)\b/i.test(q)
+  const hasRangeKw = /\b(?:last|past|previous)\s+\d+\s*(?:d|day|days|h|hr|hrs|hour|hours)\b/i.test(q)
+    || /\b\d+\s*(?:d|day|days|h|hr|hrs|hour|hours)\b/i.test(q)
+    || /\b(30d|14d|7d|5d|2d|24h|12h|6h|3h|1h)\b/i.test(q)
+  return hasTrendKw || hasRangeKw
 }
 
+const ZABBIX_HISTORY_MAX_SEC = Math.min(
+  Math.max(parseInt(process.env.ZABBIX_CONTEXT_HISTORY_MAX_SEC || String(30 * 86400), 10) || 30 * 86400, 3600),
+  60 * 86400,
+)
+
+function clampHistoryRangeSec(sec) {
+  return Math.min(Math.max(Math.floor(sec), 3600), ZABBIX_HISTORY_MAX_SEC)
+}
+
+/** Parse CPU/RAM history window from natural language (default 24h, max 30d). */
 function parseZabbixHistoryRangeSec(message) {
   const q = String(message || '').toLowerCase()
+
+  let m = q.match(/\b(?:last|past|previous)\s+(\d+)\s*(?:d|day|days)\b/)
+  if (m) return clampHistoryRangeSec(Number(m[1]) * 86400)
+  m = q.match(/\b(\d+)\s*(?:d|day|days)\b/)
+  if (m) return clampHistoryRangeSec(Number(m[1]) * 86400)
+
+  m = q.match(/\b(?:last|past|previous)\s+(\d+)\s*(?:h|hr|hrs|hour|hours)\b/)
+  if (m) return clampHistoryRangeSec(Number(m[1]) * 3600)
+  m = q.match(/\b(\d+)\s*(?:h|hr|hrs|hour|hours)\b/)
+  if (m) return clampHistoryRangeSec(Number(m[1]) * 3600)
+
   if (/\b(30\s*d|30d|last\s+30\s*days?)\b/.test(q)) return 30 * 86400
-  if (/\b(7\s*d|7d|last\s+week|one\s+week)\b/.test(q)) return 7 * 86400
+  if (/\b(14\s*d|14d|last\s+14\s*days?|two\s+weeks?|fortnight)\b/.test(q)) return 14 * 86400
+  if (/\b(7\s*d|7d|last\s+week|one\s+week|past\s+week)\b/.test(q)) return 7 * 86400
+  if (/\b(5\s*d|5d|last\s+5\s*days?|five\s+days?)\b/.test(q)) return 5 * 86400
+  if (/\b(2\s*d|2d|last\s+2\s*days?)\b/.test(q)) return 2 * 86400
   if (/\b(12\s*h|12h)\b/.test(q)) return 12 * 3600
   if (/\b(6\s*h|6h)\b/.test(q)) return 6 * 3600
   if (/\b(3\s*h|3h)\b/.test(q)) return 3 * 3600
   if (/\b(1\s*h|1h)\b/.test(q)) return 3600
+  if (/\b(24\s*h|24h|last\s+24|last\s+day|past\s+day)\b/.test(q)) return 86400
   return 86400
+}
+
+function historyMaxPointsForRange(rangeSec) {
+  const cap = Math.min(
+    Math.max(parseInt(process.env.ZABBIX_CONTEXT_HISTORY_MAX_POINTS || '240', 10) || 240, 60),
+    500,
+  )
+  if (rangeSec <= 86400) return Math.min(120, cap)
+  if (rangeSec <= 7 * 86400) return Math.min(168, cap)
+  return cap
 }
 
 /** Which resource metrics the user asked for (memory-only, cpu-only, or both). */
@@ -741,7 +779,7 @@ async function fetchCpuMemoryHistory(zabbixRpc, cpuMemoryMetrics, matchedHosts, 
     fromAt: formatPortalTimestamp(from * 1000),
     toAt: formatPortalTimestamp(to * 1000),
     hosts,
-    note: 'Fetched via Zabbix history.get / trend.get on system.cpu.util and vm.memory.utilization item IDs.',
+    note: 'Fetched via Zabbix history.get / trend.get on system.cpu.util and vm.memory.utilization item IDs. Windows >2d uses trend.get when available.',
   }
 }
 
@@ -2440,16 +2478,22 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
 
   let cpuMemoryHistory = null
   if (includeCpuMemoryHistory && matched.length && data.cpuMemoryMetrics?.byHost) {
+    const historyRangeSec = parseZabbixHistoryRangeSec(userMessage)
+    const historyMaxPoints = historyMaxPointsForRange(historyRangeSec)
     try {
       cpuMemoryHistory = await fetchCpuMemoryHistory(
         client.zabbixRpc,
         data.cpuMemoryMetrics,
         matched,
-        parseZabbixHistoryRangeSec(userMessage),
+        historyRangeSec,
+        historyMaxPoints,
       )
     } catch (err) {
       cpuMemoryHistory = {
-        windowSec: parseZabbixHistoryRangeSec(userMessage),
+        windowSec: historyRangeSec,
+        windowLabel: historyRangeSec >= 86400
+          ? `${Math.round(historyRangeSec / 86400)}d`
+          : `${Math.round(historyRangeSec / 3600)}h`,
         hosts: [],
         error: err?.message || 'Failed to fetch Zabbix CPU/memory history',
       }

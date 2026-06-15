@@ -55,8 +55,9 @@ Rules:
   * CPU/RAM for store PCs may come from BOTH sources — report each:
       - storeAgentMetrics / storeMonitor (Influx PowerShell agent)
       - hosts[].cpu / hosts[].memory (Zabbix utilization items)
-  * For 24h CPU/memory trend graphs, use keywords: trend, graph, history,
-    24h — response includes cpuMemoryHistory.points.
+  * For CPU/memory trend graphs, use keywords trend/graph/history and a time
+    window: "5 days", "120 hours", "7d", "30d" (default 24h). Response field
+    cpuMemoryHistory.points with windowLabel / fromAt / toAt (IST).
   * storeProblems global disconnect list is capped at 120 newest events;
     include a hostname in the question for store-scoped history (30-day window).
   * Store Zabbix ROP disconnect events use the same StoreProblemHistory source
@@ -277,10 +278,11 @@ IMPORTANT — fleet inventory (~3000 store hosts):
   * hosts[] may be capped (hostsListTruncated=true); prioritize down hosts
   * For "how many hosts", quote availability.total — NOT hosts.length
 
-IMPORTANT — 24h trend graphs:
-  Include trend / graph / history / 24h in the question. Response field:
-  cpuMemoryHistory.hosts[].cpu.points and .memory.points (IST timestamps).
-  Each point: { at, percent }. Item IDs are in hosts[].cpu.itemid.
+IMPORTANT — CPU/RAM history trends (Zabbix history.get / trend.get):
+  Include trend / graph / history in the question. Specify the window explicitly:
+    "5 days", "120 hours", "7d", "last 14 days", "30d" (default 24h if omitted).
+  Response: cpuMemoryHistory.windowLabel, fromAt, toAt, hosts[].cpu/memory.points.
+  Windows >2d use trend.get when available. Max window 30d (env ZABBIX_CONTEXT_HISTORY_MAX_SEC).
 
 IMPORTANT — hostname search:
   Short tags work: RP911, LK973, LKST793. LKST793 aliases to RP793-* in
