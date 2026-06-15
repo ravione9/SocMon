@@ -295,6 +295,19 @@ IMPORTANT — Interface bandwidth history (interfaceHistory):
   Response: interfaceHistory.hosts[].ports[].in/out.points[] with bps + rate (IST).
   Or pass net.if item IDs: "item 12345 item 12346 interface history trend".
 
+IMPORTANT — App crash events (InfluxDB, same as Store Zabbix /app-crashes):
+  crashEvents / crashSummary in storeZabbix context; netpulse_query direct crash
+  answers also respect custom windows (no longer hardcoded to last 24h).
+  Window options (IST calendar dates):
+    • Relative: "last 5 days", "last 7 days" (default 24h ending now)
+    • Calendar: "12 June 2026", "11 June 2026 whole day", "2026-06-12"
+    • Time range: "12 June 2026 20:00-20:15", "11 am to 8 pm on 3 June"
+    • Unix: time_from/time_to in question, or historyFrom + historyTo on
+      netpulse_storeZabbix / netpulse_query / netpulse_context
+  Event log (per-row timestamps): add "crash event log" or "with timestamps".
+  Example: "LKST64 app crash event log 12 June 2026"
+  Response: crashWindow.label, fromAt, toAt, crashEvents[] or crashSummary.
+
 IMPORTANT — hostname search:
   Short tags work: RP911, LK973, LKST793. LKST793 aliases to RP793-* in
   Zabbix host.get. Full RP hostnames (RP973-4CE510BDK) are strict match.

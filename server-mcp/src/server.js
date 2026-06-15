@@ -26,13 +26,13 @@ const historyWindowSchema = {
     .int()
     .positive()
     .optional()
-    .describe('Unix seconds (UTC) start of Zabbix CPU/RAM history window. Pair with historyTo.'),
+    .describe('Unix seconds start of history/crash window. Pair with historyTo. Used for Zabbix CPU/RAM and Influx app crashes.'),
   historyTo: z
     .number()
     .int()
     .positive()
     .optional()
-    .describe('Unix seconds (UTC) end of Zabbix CPU/RAM history window. Pair with historyFrom.'),
+    .describe('Unix seconds end of history/crash window. Pair with historyFrom.'),
 }
 
 const SERVER_INFO = {
@@ -148,6 +148,7 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
           .boolean()
           .optional()
           .describe('Include the resolved context payload in the response (default true).'),
+        ...historyWindowSchema,
       },
     },
     async (args) =>
@@ -157,6 +158,8 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
           modules: args.modules,
           autoModules: !args.modules || args.modules.length === 0,
           includeContext: args.includeContext ?? true,
+          historyFrom: args.historyFrom,
+          historyTo: args.historyTo,
         }),
       ),
   )

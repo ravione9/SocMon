@@ -24,8 +24,9 @@ const AGENT_PAYLOAD_VERSION = '1'
  * @param {string} question
  * @param {ReturnType<typeof resolveQueryContext>} ctx
  * @param {string[]} allowedPages
+ * @param {{ historyFrom?: number, historyTo?: number }} [opts]
  */
-export async function tryDirectAgentAnswer(user, question, ctx, allowedPages) {
+export async function tryDirectAgentAnswer(user, question, ctx, allowedPages, opts = {}) {
   const q = String(question || '').trim()
   if (!q) return null
 
@@ -34,7 +35,7 @@ export async function tryDirectAgentAnswer(user, question, ctx, allowedPages) {
     () => tryDirectZabbixAnswer(q, allowedPages, ctx),
     () => tryDirectSOCAnswer(q, allowedPages, ctx),
     () => tryDirectHostnameAnswer(q, allowedPages, ctx),
-    () => tryDirectCrashAnswer(q, allowedPages, ctx),
+    () => tryDirectCrashAnswer(q, allowedPages, ctx, opts),
   ]
 
   for (const run of attempts) {
@@ -94,9 +95,12 @@ export async function exportPortalContextForAgent(user, opts = {}) {
     ? opts.modules.filter(id => typeof id === 'string')
     : []
 
+  const queryContext = question
+    ? resolveQueryContext([{ role: 'user', content: question }])
+    : null
+
   if (opts.autoModules !== false && question) {
-    const ctx = resolveQueryContext([{ role: 'user', content: question }])
-    const suggested = suggestContextModules(question, allowedPages, ctx)
+    const suggested = suggestContextModules(question, allowedPages, queryContext)
     moduleIds = [...new Set([...moduleIds, ...suggested])]
   }
 
@@ -126,6 +130,7 @@ export async function exportPortalContextForAgent(user, opts = {}) {
     userMessage: question,
     historyFrom: opts.historyFrom,
     historyTo: opts.historyTo,
+    queryContext,
   })
   const contextPreview = buildContextPreview(portalContext)
 
@@ -140,7 +145,7 @@ export async function exportPortalContextForAgent(user, opts = {}) {
 
 /**
  * @param {import('../../models/User.js').default} user
- * @param {{ question: string, modules?: string[], autoModules?: boolean, includeContext?: boolean }} opts
+ * @param {{ question: string, modules?: string[], autoModules?: boolean, includeContext?: boolean, historyFrom?: number, historyTo?: number }} opts
  */
 export async function runAgentPortalQuery(user, opts = {}) {
   const question = String(opts.question || '').trim()
@@ -152,7 +157,11 @@ export async function runAgentPortalQuery(user, opts = {}) {
   const messages = [{ role: 'user', content: question }]
   const ctx = resolveQueryContext(messages)
 
-  const directAnswer = await tryDirectAgentAnswer(user, question, ctx, allowedPages)
+  const windowOpts = {
+    historyFrom: opts.historyFrom,
+    historyTo: opts.historyTo,
+  }
+  const directAnswer = await tryDirectAgentAnswer(user, question, ctx, allowedPages, windowOpts)
 
   let portalContext = null
   let contextPreview = {}
@@ -165,6 +174,8 @@ export async function runAgentPortalQuery(user, opts = {}) {
       modules: opts.modules,
       question,
       autoModules: opts.autoModules,
+      historyFrom: opts.historyFrom,
+      historyTo: opts.historyTo,
     })
     portalContext = exported.portalContext
     contextPreview = exported.contextPreview

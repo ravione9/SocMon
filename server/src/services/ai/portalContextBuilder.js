@@ -33,6 +33,7 @@ import {
   hasExplicitTimeRange,
   wantsCrashEventLog,
   extractStoreHostname,
+  resolveCrashQueryWindow,
 } from './queryContext.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 
@@ -550,8 +551,9 @@ const BUILDERS = {
  * @param {string} question
  * @param {string[]} allowedPages
  * @param {ReturnType<import('./queryContext.js').resolveQueryContext>} [ctx]
+ * @param {{ historyFrom?: number, historyTo?: number }} [opts]
  */
-export async function tryDirectCrashAnswer(question, allowedPages, ctx = null) {
+export async function tryDirectCrashAnswer(question, allowedPages, ctx = null, opts = {}) {
   const q = String(question || '')
   const qLower = q.toLowerCase()
 
@@ -589,13 +591,14 @@ export async function tryDirectCrashAnswer(question, allowedPages, ctx = null) {
 
   const appFilter = ctx?.appName || null
   const hostnameFilter = extractStoreHostname(q) || ctx?.hostname || null
-  const range = ctx?.range || parseQuestionTimeRange(qLower)
+  const crashWindow = resolveCrashQueryWindow(q, ctx, opts)
+  const range = crashWindow.range
   const fetchedAt = new Date().toISOString()
-  const rangeLabel = formatRangeLabelFromInflux(range)
+  const rangeLabel = crashWindow.label || formatRangeLabelFromInflux(range)
   const fmtTs = (v) => formatPortalTimestamp(v)
 
   if (wantsEvents || ctx?.wantsCrashEventList) {
-    const events = await fetchCrashEventList(range, undefined, undefined, {
+    const events = await fetchCrashEventList(range, crashWindow.fromSec, crashWindow.toSec, {
       appName: appFilter,
       hostname: hostnameFilter,
     })
@@ -638,6 +641,9 @@ export async function tryDirectCrashAnswer(question, allowedPages, ctx = null) {
       contextPreview: {
         crashes: {
           range,
+          fromSec: crashWindow.fromSec ?? null,
+          toSec: crashWindow.toSec ?? null,
+          windowLabel: rangeLabel,
           appFilter,
           totalEvents: totalCount,
           eventLog: true,
@@ -654,12 +660,14 @@ export async function tryDirectCrashAnswer(question, allowedPages, ctx = null) {
         appName: ctx.appName,
         isFollowUp: ctx.isFollowUp,
         range,
+        fromTs: crashWindow.fromSec ?? null,
+        toTs: crashWindow.toSec ?? null,
         eventLog: true,
       } : undefined,
     }
   }
 
-  let summary = await fetchCrashSummary(range)
+  let summary = await fetchCrashSummary(range, crashWindow.fromSec, crashWindow.toSec)
   if (appFilter) {
     summary = summary.filter(s => crashRecordMatches(s, appFilter, crashTypeLabel))
   }

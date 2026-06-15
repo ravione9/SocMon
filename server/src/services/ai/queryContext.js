@@ -25,6 +25,9 @@ export function parseQuestionTimeRange(q) {
   if (/\b(?:time range|range|window|past|last)?\s*24\s*hours?\b/.test(text)) return '-24h'
   if (/\b(?:time range|range|window|past|last)?\s*12\s*hours?\b/.test(text)) return '-12h'
   if (/\b(last week|7 day|7d|past week)\b/.test(text)) return '-7d'
+  if (/\b(5\s*day|5d|last\s+5\s*days?)\b/.test(text)) return '-5d'
+  if (/\b(14\s*day|14d|last\s+14\s*days?)\b/.test(text)) return '-14d'
+  if (/\b(30\s*day|30d|last\s+30\s*days?)\b/.test(text)) return '-30d'
   if (/\blast\b/.test(text)) return '-1h'
   return '-24h'
 }
@@ -249,7 +252,8 @@ export function resolveQueryContext(messages, opts = {}) {
   }
 
   const absWindow = parseAbsoluteTimeWindow(currentQuestion)
-    || (isFollowUp ? parseAbsoluteTimeWindow(priorUser) : null)
+    || parseCrashUnixWindow(currentQuestion)
+    || (isFollowUp ? (parseAbsoluteTimeWindow(priorUser) || parseCrashUnixWindow(priorUser)) : null)
 
   let range = parseQuestionTimeRange(currentQuestion)
   if (isFollowUp && !hasExplicitTimeRange(currentQuestion)) {
@@ -542,16 +546,20 @@ function formatIstWindowLabel(day, monthIndex, year, startHour, startMin, endHou
   return `${day} ${months[monthIndex]} ${year}, ${fmtClock(startHour, startMin)} – ${fmtClock(endHour, endMin)} IST`
 }
 
-/**
- * Parse absolute calendar windows, e.g. "3rd June 11 am to 8 pm IST".
- * @param {string} q
- * @returns {{ fromTs: number, toTs: number, label: string }|null}
- */
-export function parseAbsoluteTimeWindow(q) {
-  const text = String(q || '').toLowerCase().replace(/\u2013|\u2014/g, '-')
+function extractCalendarPartsFromQuestion(q) {
+  const text = String(q || '').toLowerCase()
+  const iso = text.match(/\b(\d{4})-(\d{2})-(\d{2})\b/)
+  if (iso) {
+    return {
+      day: Number(iso[3]),
+      monthIndex: Number(iso[2]) - 1,
+      year: Number(iso[1]),
+      hasExplicitYear: true,
+    }
+  }
+
   const dateM = text.match(ABS_DATE_RE)
-  const timeM = text.match(ABS_TIME_RE)
-  if (!dateM || !timeM) return null
+  if (!dateM) return null
 
   const day = parseInt(dateM[1] || dateM[4], 10)
   const monthToken = String(dateM[2] || dateM[3] || '').slice(0, 3)
@@ -559,29 +567,197 @@ export function parseAbsoluteTimeWindow(q) {
   if (!Number.isFinite(day) || monthIndex == null) return null
 
   let year = dateM[5] ? parseInt(dateM[5], 10) : new Date().getFullYear()
-  if (!dateM[5]) {
+  const hasExplicitYear = Boolean(dateM[5])
+  if (!hasExplicitYear) {
     const probe = istUnixSec(day, monthIndex, year, 0, 0)
     if (probe * 1000 > Date.now() + 86400000) year -= 1
   }
 
-  const start = parse12hClock(timeM[1], timeM[2], timeM[3])
-  const end = parse12hClock(timeM[4], timeM[5], timeM[6])
-  const fromTs = istUnixSec(day, monthIndex, year, start.hour, start.minute)
-  let toTs = istUnixSec(day, monthIndex, year, end.hour, end.minute)
-  if (toTs <= fromTs) toTs += 86400
+  return { day, monthIndex, year, hasExplicitYear }
+}
 
+function formatIstFullDayLabel(day, monthIndex, year) {
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  return `${day} ${months[monthIndex]} ${year} (full day IST)`
+}
+
+function formatIst24hWindowLabel(day, monthIndex, year, startHour, startMin, endHour, endMin) {
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${day} ${months[monthIndex]} ${year}, ${pad(startHour)}:${pad(startMin)} – ${pad(endHour)}:${pad(endMin)} IST`
+}
+
+function parseEpochSec(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n)
+}
+
+/**
+ * Parse explicit unix windows, e.g. time_from=1781188200 or paired 10-digit stamps.
+ * @param {string} q
+ * @returns {{ fromTs: number, toTs: number, label: string }|null}
+ */
+export function parseCrashUnixWindow(q) {
+  const text = String(q || '')
+  const fromMatch = text.match(/\b(?:from|time_from|start|since)\s*[=:]?\s*(\d{10})\b/i)
+  const toMatch = text.match(/\b(?:to|time_to|end|until)\s*[=:]?\s*(\d{10})\b/i)
+  if (fromMatch && toMatch) {
+    const fromTs = Number(fromMatch[1])
+    const toTs = Number(toMatch[1])
+    if (fromTs > 0 && toTs > fromTs) {
+      return { fromTs, toTs, label: `unix ${fromTs} – ${toTs}` }
+    }
+  }
+
+  const stamps = [...text.matchAll(/\b(1\d{9})\b/g)]
+    .map((m) => Number(m[1]))
+    .filter((n) => n > 1_500_000_000 && n < 2_100_000_000)
+  if (stamps.length >= 2) {
+    const fromTs = Math.min(stamps[0], stamps[1])
+    const toTs = Math.max(stamps[0], stamps[1])
+    if (toTs > fromTs) {
+      return { fromTs, toTs, label: `unix ${fromTs} – ${toTs}` }
+    }
+  }
+
+  return null
+}
+
+/**
+ * Parse absolute calendar windows, e.g. "3rd June 11 am to 8 pm IST" or "12 June 2026".
+ * @param {string} q
+ * @returns {{ fromTs: number, toTs: number, label: string }|null}
+ */
+export function parseAbsoluteTimeWindow(q) {
+  const text = String(q || '').toLowerCase().replace(/\u2013|\u2014/g, '-')
+  const dateM = text.match(ABS_DATE_RE)
+  const timeM = text.match(ABS_TIME_RE)
+  if (dateM && timeM) {
+    const day = parseInt(dateM[1] || dateM[4], 10)
+    const monthToken = String(dateM[2] || dateM[3] || '').slice(0, 3)
+    const monthIndex = MONTH_INDEX[monthToken]
+    if (!Number.isFinite(day) || monthIndex == null) return null
+
+    let year = dateM[5] ? parseInt(dateM[5], 10) : new Date().getFullYear()
+    if (!dateM[5]) {
+      const probe = istUnixSec(day, monthIndex, year, 0, 0)
+      if (probe * 1000 > Date.now() + 86400000) year -= 1
+    }
+
+    const start = parse12hClock(timeM[1], timeM[2], timeM[3])
+    const end = parse12hClock(timeM[4], timeM[5], timeM[6])
+    const fromTs = istUnixSec(day, monthIndex, year, start.hour, start.minute)
+    let toTs = istUnixSec(day, monthIndex, year, end.hour, end.minute)
+    if (toTs <= fromTs) toTs += 86400
+
+    return {
+      fromTs,
+      toTs,
+      label: formatIstWindowLabel(day, monthIndex, year, start.hour, start.minute, end.hour, end.minute),
+    }
+  }
+
+  const cal = extractCalendarPartsFromQuestion(text)
+  if (!cal) return null
+
+  const time24 = text.match(/\b(\d{1,2}):(\d{2})\s*(?:-|to)\s*(\d{1,2}):(\d{2})\b/)
+  if (time24) {
+    const startHour = Number(time24[1])
+    const startMin = Number(time24[2])
+    const endHour = Number(time24[3])
+    const endMin = Number(time24[4])
+    const fromTs = istUnixSec(cal.day, cal.monthIndex, cal.year, startHour, startMin)
+    let toTs = istUnixSec(cal.day, cal.monthIndex, cal.year, endHour, endMin)
+    if (toTs <= fromTs) toTs += 86400
+    return {
+      fromTs,
+      toTs,
+      label: formatIst24hWindowLabel(cal.day, cal.monthIndex, cal.year, startHour, startMin, endHour, endMin),
+    }
+  }
+
+  if (dateM || /\b\d{4}-\d{2}-\d{2}\b/.test(text)) {
+    const fromTs = istUnixSec(cal.day, cal.monthIndex, cal.year, 0, 0)
+    const toTs = istUnixSec(cal.day, cal.monthIndex, cal.year, 23, 59) + 59
+    return {
+      fromTs,
+      toTs,
+      label: formatIstFullDayLabel(cal.day, cal.monthIndex, cal.year),
+    }
+  }
+
+  return null
+}
+
+/**
+ * Resolve Influx crash query window from MCP params, query context, or natural language.
+ * @param {string} question
+ * @param {object} [ctx]
+ * @param {{ historyFrom?: number, historyTo?: number }} [opts]
+ */
+export function resolveCrashQueryWindow(question, ctx = {}, opts = {}) {
+  const fromOpt = parseEpochSec(opts.historyFrom)
+  const toOpt = parseEpochSec(opts.historyTo)
+  if (fromOpt != null && toOpt != null && fromOpt < toOpt) {
+    return {
+      range: '-24h',
+      fromSec: fromOpt,
+      toSec: toOpt,
+      label: ctx?.absoluteRangeLabel || `unix ${fromOpt} – ${toOpt}`,
+      parseNote: 'historyFrom/historyTo parameters',
+    }
+  }
+
+  if (ctx?.fromTs && ctx?.toTs && ctx.fromTs < ctx.toTs) {
+    return {
+      range: '-24h',
+      fromSec: ctx.fromTs,
+      toSec: ctx.toTs,
+      label: ctx.absoluteRangeLabel || `unix ${ctx.fromTs} – ${ctx.toTs}`,
+      parseNote: 'absolute window from query context',
+    }
+  }
+
+  const unix = parseCrashUnixWindow(question)
+  if (unix) {
+    return {
+      range: '-24h',
+      fromSec: unix.fromTs,
+      toSec: unix.toTs,
+      label: unix.label,
+      parseNote: unix.label,
+    }
+  }
+
+  const abs = parseAbsoluteTimeWindow(question)
+  if (abs) {
+    return {
+      range: '-24h',
+      fromSec: abs.fromTs,
+      toSec: abs.toTs,
+      label: abs.label,
+      parseNote: abs.label,
+    }
+  }
+
+  const range = ctx?.range || parseQuestionTimeRange(question)
   return {
-    fromTs,
-    toTs,
-    label: formatIstWindowLabel(day, monthIndex, year, start.hour, start.minute, end.hour, end.minute),
+    range,
+    fromSec: undefined,
+    toSec: undefined,
+    label: formatRangeLabelFromInflux(range),
+    parseNote: 'relative Influx range',
   }
 }
 
 function hasExplicitTimeRange(q) {
   return /\b(last|past)\s+\d+\s*(h|hr|hour|hours|m|min|d|day)/i.test(q)
-    || /\b(1 hr|12h|12 hour|12 hours|24h|24 hour|24 hours|last hour|last day|last week)\b/i.test(q)
+    || /\b(1 hr|12h|12 hour|12 hours|24h|24 hour|24 hours|last hour|last day|last week|5d|14d|30d)\b/i.test(q)
     || /\b(?:time range|range|window)?\s*(12|24)\s*hours?\b/i.test(q)
-    || (ABS_DATE_RE.test(q) && ABS_TIME_RE.test(q))
+    || ABS_DATE_RE.test(q)
+    || /\b\d{4}-\d{2}-\d{2}\b/.test(q)
+    || parseCrashUnixWindow(q) != null
 }
 
 export { hasExplicitTimeRange }
@@ -655,7 +831,10 @@ export function formatRangeLabelFromInflux(range) {
     '-12h': 'last 12 hours',
     '-24h': 'last 24 hours',
     '-2d': 'last 2 days',
+    '-5d': 'last 5 days',
     '-7d': 'last 7 days',
+    '-14d': 'last 14 days',
+    '-30d': 'last 30 days',
   }
   return labels[range] || range.replace(/^-/, 'last ')
 }

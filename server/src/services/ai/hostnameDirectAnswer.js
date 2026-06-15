@@ -15,6 +15,7 @@ import {
   isHostnameDataRequest,
   isStoreHostnamePortalQuery,
   parseQuestionTimeRange,
+  resolveCrashQueryWindow,
   shouldUseStoreCodeAlias,
 } from './queryContext.js'
 import { isNetworkInfraQuery, isZabbixQuestion, buildStoreZabbixContext } from './zabbixDirectAnswer.js'
@@ -156,8 +157,11 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
     || /\b(graph|graphical|chart|visual|plot|timeline)\b/i.test(question)
 
   const range = ctx?.range || parseQuestionTimeRange(question)
+  const crashWindow = resolveCrashQueryWindow(question, ctx)
   const rangeSec = rangeToSeconds(range)
-  const rangeLabel = formatRangeLabelFromInflux(range)
+  const rangeLabel = crashWindow.fromSec
+    ? (crashWindow.label || formatRangeLabelFromInflux(range))
+    : formatRangeLabelFromInflux(range)
   const fetchedAt = new Date().toISOString()
   const fmtTs = (v) => formatPortalTimestamp(v)
   const envOpts = { showEmptyModules: true, maxUsbSamples: 15 }
@@ -193,7 +197,7 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
 
   const [stores, crashRows, tracker] = await Promise.all([
     fetchStoreSnapshot(10, range),
-    wantsChart ? Promise.resolve([]) : fetchCrashSummary(range),
+    wantsChart ? Promise.resolve([]) : fetchCrashSummary(range, crashWindow.fromSec, crashWindow.toSec),
     wantsChart ? Promise.resolve({}) : getProblemSnapshotStatus(),
   ])
 

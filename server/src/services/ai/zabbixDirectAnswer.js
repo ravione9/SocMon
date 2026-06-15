@@ -1,6 +1,7 @@
 import { createZabbixClient } from '../../services/zabbix.js'
 import { fetchAllMonitoredHosts, ZABBIX_HOST_FETCH_MAX } from '../../services/zabbixHostFetch.js'
 import { buildStoreDisconnectMcpContext } from '../../services/storeDisconnectEvents.js'
+import { buildStoreCrashMcpContext } from '../../services/storeCrashEvents.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 import { isInfluxStoreConfigured, fetchStoreSnapshot, buildOverviewSummary } from '../influxStore.js'
 import { extractStoreCode, extractStoreHostname, isStoreHostnamePortalQuery, shouldUseStoreCodeAlias } from './queryContext.js'
@@ -2986,6 +2987,7 @@ async function buildStoreZabbixZabbixStub(userMessage = '') {
 
 export async function buildStoreZabbixContext(userMessage = '', opts = {}) {
   const disconnectBlock = await buildStoreDisconnectMcpContext(userMessage)
+  const crashBlock = await buildStoreCrashMcpContext(userMessage, opts, opts.queryContext || null)
   const hostScope = extractIpv4(userMessage) || extractStoreHostname(userMessage)
   const skipZabbixInventory = isDisconnectFocusedQuery(userMessage) && !hostScope
 
@@ -3004,6 +3006,7 @@ export async function buildStoreZabbixContext(userMessage = '', opts = {}) {
   return {
     ...zabbixBlock,
     ...disconnectBlock,
+    ...crashBlock,
     module: 'storeZabbix',
     configured: disconnectBlock.disconnectConfigured !== false || zabbixConfigured,
     zabbixConfigured,
@@ -3011,6 +3014,7 @@ export async function buildStoreZabbixContext(userMessage = '', opts = {}) {
     zabbixError,
     note: [
       disconnectBlock.disconnectNote,
+      crashBlock.crashNote,
       zabbixConfigured && !zabbixError
         ? 'Zabbix host metrics (ping, interfaces, CPU/RAM) from STORE_ZABBIX API.'
         : (zabbixError || 'Zabbix metrics unavailable — set STORE_ZABBIX_URL + STORE_ZABBIX_API_TOKEN in server .env.'),

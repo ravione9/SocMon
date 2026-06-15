@@ -75,9 +75,9 @@ export class NetPulseClient {
     })
   }
 
-  query({ question, modules, autoModules = true, includeContext = true } = {}) {
+  query({ question, modules, autoModules = true, includeContext = true, historyFrom, historyTo } = {}) {
     return this.request('POST', '/api/agent/query', {
-      body: { question, modules, autoModules, includeContext },
+      body: { question, modules, autoModules, includeContext, historyFrom, historyTo },
     })
   }
 }

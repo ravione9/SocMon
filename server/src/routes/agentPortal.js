@@ -102,6 +102,8 @@ router.post('/query', async (req, res) => {
       modules,
       autoModules = true,
       includeContext = true,
+      historyFrom,
+      historyTo,
     } = req.body || {}
 
     const result = await runAgentPortalQuery(req.user, {
@@ -109,6 +111,8 @@ router.post('/query', async (req, res) => {
       modules,
       autoModules,
       includeContext,
+      historyFrom,
+      historyTo,
     })
 
     const envelope = buildAgentPayload({
