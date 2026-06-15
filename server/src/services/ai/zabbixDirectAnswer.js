@@ -259,6 +259,30 @@ export function wantsCpuMemoryHistory(question) {
   return hasTrendKw || hasRangeKw || hasDateKw
 }
 
+/** Zabbix net.if.in/out time-series (same window rules as cpuMemoryHistory). */
+export function wantsInterfaceHistory(question) {
+  const q = String(question || '')
+  const hasIface = /\b(interface|interfaces|bandwidth|throughput|traffic|net\.if|ports?)\b/i.test(q)
+    || wantsBandwidthUtil(q)
+  if (!hasIface) return false
+  const hasTrendKw = /\b(graph|graphical|chart|visual|plot|timeline|trend|history|time\s*series)\b/i.test(q)
+  const hasRangeKw = /\b(?:last|past|previous)\s+\d+\s*(?:d|day|days|h|hr|hrs|hour|hours)\b/i.test(q)
+    || /\b\d+\s*(?:d|day|days|h|hr|hrs|hour|hours)\b/i.test(q)
+    || /\b(30d|14d|7d|5d|2d|24h|12h|6h|3h|1h)\b/i.test(q)
+  const hasDateKw = /\b\d{4}-\d{2}-\d{2}\b/.test(q)
+    || /\b\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(q)
+    || (/\b(?:from|to|between|time_from|time_to|start|end)\b/i.test(q) && /\b\d{10}\b/.test(q))
+    || /\b(?:whole\s+day|entire\s+day|full\s+day)\b/i.test(q)
+    || /\bitem\s*#?\s*\d{4,}\b/i.test(q)
+    || /\b\d{1,2}:\d{2}\b/.test(q)
+  return hasTrendKw || hasRangeKw || hasDateKw
+}
+
+const ZABBIX_INTERFACE_HISTORY_MAX_PORTS = Math.min(
+  Math.max(parseInt(process.env.ZABBIX_INTERFACE_HISTORY_MAX_PORTS || '8', 10) || 8, 1),
+  20,
+)
+
 const ZABBIX_HISTORY_MAX_SEC = Math.min(
   Math.max(parseInt(process.env.ZABBIX_CONTEXT_HISTORY_MAX_SEC || String(30 * 86400), 10) || 30 * 86400, 3600),
   60 * 86400,
@@ -689,7 +713,15 @@ async function fetchInterfaceMetrics(zabbixRpc, hostids) {
     const v = parseFloat(it.lastvalue)
     const clock = Number(it.lastclock) || 0
     if (Number.isFinite(v) && (row.inPoll == null || clock >= row.inPoll)) {
-      row.in = v; row.inPoll = clock
+      row.in = v
+      row.inPoll = clock
+      row.inItem = {
+        itemid: String(it.itemid),
+        key: it.key_,
+        itemName: it.name,
+        units: it.units || 'bps',
+        valueType: Number(it.value_type),
+      }
     }
   }
   for (const it of outItems || []) {
@@ -699,7 +731,15 @@ async function fetchInterfaceMetrics(zabbixRpc, hostids) {
     const v = parseFloat(it.lastvalue)
     const clock = Number(it.lastclock) || 0
     if (Number.isFinite(v) && (row.outPoll == null || clock >= row.outPoll)) {
-      row.out = v; row.outPoll = clock
+      row.out = v
+      row.outPoll = clock
+      row.outItem = {
+        itemid: String(it.itemid),
+        key: it.key_,
+        itemName: it.name,
+        units: it.units || 'bps',
+        valueType: Number(it.value_type),
+      }
     }
   }
   for (const it of statusItems || []) {
@@ -812,7 +852,8 @@ function downsampleHistoryPoints(points, maxPoints) {
   return out
 }
 
-async function fetchItemHistorySeries(zabbixRpc, metric, from, to, maxPoints = 120) {
+async function fetchItemHistorySeries(zabbixRpc, metric, from, to, maxPoints = 120, opts = {}) {
+  const valueMode = opts.valueMode === 'traffic' ? 'traffic' : 'percent'
   const itemid = String(metric?.itemid || '').trim()
   if (!itemid) return null
 
@@ -902,11 +943,17 @@ async function fetchItemHistorySeries(zabbixRpc, metric, from, to, maxPoints = 1
     from,
     to,
     pointCount: points.length,
-    points: points.map((p) => ({
-      clock: p.clock,
-      at: formatPortalTimestamp(p.clock * 1000),
-      percent: Math.round(Math.max(0, Math.min(100, p.value)) * 10) / 10,
-    })),
+    points: points.map((p) => {
+      const base = { clock: p.clock, at: formatPortalTimestamp(p.clock * 1000) }
+      if (valueMode === 'traffic') {
+        const bps = Math.round(Number(p.value) * 10) / 10
+        return { ...base, bps, rate: formatBytesPerSec(bps) }
+      }
+      return {
+        ...base,
+        percent: Math.round(Math.max(0, Math.min(100, p.value)) * 10) / 10,
+      }
+    }),
   }
 }
 
@@ -945,6 +992,112 @@ async function fetchCpuMemoryHistory(zabbixRpc, cpuMemoryMetrics, matchedHosts, 
     toAt: formatPortalTimestamp(to * 1000),
     hosts,
     note: 'Fetched via Zabbix history.get / trend.get on system.cpu.util and vm.memory.utilization item IDs. Windows >2d uses trend.get when available.',
+  }
+}
+
+async function fetchInterfaceHistory(zabbixRpc, interfaceMetrics, matchedHosts, window, maxPoints = 120) {
+  const byHost = interfaceMetrics?.byHost || {}
+  const nameMap = interfaceMetrics?.indexToNameByHost || {}
+  const hosts = []
+
+  for (const h of matchedHosts || []) {
+    const hid = String(h.hostid || '')
+    if (!hid) continue
+    const ifaceEntries = Object.entries(byHost[hid] || {})
+      .filter(([, m]) => m.inItem?.itemid || m.outItem?.itemid)
+      .sort((a, b) => ((b[1].in ?? 0) + (b[1].out ?? 0)) - ((a[1].in ?? 0) + (a[1].out ?? 0)))
+      .slice(0, ZABBIX_INTERFACE_HISTORY_MAX_PORTS)
+
+    const ports = []
+    for (const [idx, m] of ifaceEntries) {
+      const portRow = {
+        interface: nameMap[hid]?.[idx] || idx,
+        snmpIndex: idx,
+        in: null,
+        out: null,
+      }
+      if (m.inItem?.itemid) {
+        portRow.in = await fetchItemHistorySeries(
+          zabbixRpc, m.inItem, window.from, window.to, maxPoints, { valueMode: 'traffic' },
+        )
+      }
+      if (m.outItem?.itemid) {
+        portRow.out = await fetchItemHistorySeries(
+          zabbixRpc, m.outItem, window.from, window.to, maxPoints, { valueMode: 'traffic' },
+        )
+      }
+      if (portRow.in || portRow.out) ports.push(portRow)
+    }
+    if (ports.length) {
+      hosts.push({
+        hostid: hid,
+        name: h.name || h.host || hid,
+        ports,
+      })
+    }
+  }
+
+  return {
+    windowSec: window.rangeSec,
+    windowLabel: window.windowLabel,
+    parseNote: window.parseNote,
+    from: window.from,
+    to: window.to,
+    fromAt: formatPortalTimestamp(window.from * 1000),
+    toAt: formatPortalTimestamp(window.to * 1000),
+    hosts,
+    note: 'Fetched via Zabbix history.get / trend.get on net.if.in / net.if.out item IDs. hosts[].ports[].in/out.points use bps + rate.',
+  }
+}
+
+async function fetchInterfaceHistoryByItemIds(zabbixRpc, itemIds, window, maxPoints = 120) {
+  const items = []
+  for (const itemid of itemIds) {
+    const series = await fetchItemHistorySeries(
+      zabbixRpc, { itemid }, window.from, window.to, maxPoints, { valueMode: 'traffic' },
+    )
+    if (series) {
+      const row = {
+        itemid,
+        direction: /net\.if\.out/i.test(series.key || '') ? 'out' : 'in',
+        ...series,
+      }
+      if (window.requestedAtSec) {
+        row.valueAt = nearestTrafficPoint(series.points, window.requestedAtSec)
+      }
+      items.push(row)
+    }
+  }
+  return {
+    windowSec: window.rangeSec,
+    windowLabel: window.windowLabel,
+    parseNote: window.parseNote,
+    from: window.from,
+    to: window.to,
+    fromAt: formatPortalTimestamp(window.from * 1000),
+    toAt: formatPortalTimestamp(window.to * 1000),
+    items,
+    note: 'Fetched by explicit Zabbix net.if item ID(s) via history.get / trend.get.',
+  }
+}
+
+function nearestTrafficPoint(points, targetSec) {
+  if (!Array.isArray(points) || !points.length || !Number.isFinite(targetSec)) return null
+  let best = points[0]
+  let bestDelta = Math.abs(best.clock - targetSec)
+  for (const p of points) {
+    const d = Math.abs(p.clock - targetSec)
+    if (d < bestDelta) {
+      best = p
+      bestDelta = d
+    }
+  }
+  return {
+    clock: best.clock,
+    at: best.at,
+    bps: best.bps,
+    rate: best.rate,
+    deltaSec: bestDelta,
   }
 }
 
@@ -1222,7 +1375,7 @@ async function fetchItemsChunked(zabbixRpc, hostids, searchKey) {
     const chunk = hostids.slice(i, i + 400)
     const batch = await zabbixRpc('item.get', {
       hostids: chunk,
-      output: ['itemid', 'hostid', 'key_', 'lastvalue', 'lastclock', 'name', 'units'],
+      output: ['itemid', 'hostid', 'key_', 'lastvalue', 'lastclock', 'name', 'units', 'value_type'],
       search: { key_: `${searchKey}*` },
       searchWildcardsEnabled: true,
       limit: 500,
@@ -2337,6 +2490,8 @@ function hostPortsFromSnapshot(data, host) {
       outBps: m.out,
       inRate: formatBytesPerSec(m.in),
       outRate: formatBytesPerSec(m.out),
+      inItemId: m.inItem?.itemid || null,
+      outItemId: m.outItem?.itemid || null,
       status: m.status || null,
     }))
 }
@@ -2574,10 +2729,12 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   // is the critical selector. Without this, we'd fetch broad host sets and the
   // resulting item.get fan-out could exceed Claude Desktop's tool timeout.
   const hostFilter = ip || hostname || ''
+  const includeInterfaceHistory = wantsInterfaceHistory(userMessage)
+  const includeCpuMemoryHistory = wantsCpuMemoryHistory(userMessage)
   const includePing = wantsPingStatus(userMessage)
   const includeBandwidth = wantsBandwidthUtil(userMessage)
     || /\b(bandwidth|utilization|utilisation|interface|port|traffic|throughput)\b/i.test(String(userMessage || ''))
-  const includeCpuMemoryHistory = wantsCpuMemoryHistory(userMessage)
+    || includeInterfaceHistory
   const includeCpuMemory = wantsCpuMemoryUtil(userMessage)
     || /\b(cpu|memory|mem|ram)\b/i.test(String(userMessage || ''))
     || Boolean(hostFilter)
@@ -2667,10 +2824,16 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   const cpuMemoryMetricsState = buildCpuMemoryMetricsState(data, matched, includeCpuMemory, storeAgentMetrics)
 
   let cpuMemoryHistory = null
-  if (includeCpuMemoryHistory) {
-    const historyWindow = parseZabbixHistoryWindow(userMessage, opts)
-    const historyMaxPoints = historyMaxPointsForRange(historyWindow.rangeSec)
-    const historyItemIds = parseHistoryItemIds(userMessage)
+  let interfaceHistory = null
+  const historyWindow = (includeCpuMemoryHistory || includeInterfaceHistory)
+    ? parseZabbixHistoryWindow(userMessage, opts)
+    : null
+  const historyMaxPoints = historyWindow
+    ? historyMaxPointsForRange(historyWindow.rangeSec)
+    : 120
+  const historyItemIds = parseHistoryItemIds(userMessage)
+
+  if (includeCpuMemoryHistory && historyWindow) {
     try {
       if (historyItemIds.length) {
         cpuMemoryHistory = await fetchCpuMemoryHistoryByItemIds(
@@ -2702,6 +2865,38 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     }
   }
 
+  if (includeInterfaceHistory && historyWindow) {
+    try {
+      if (historyItemIds.length) {
+        interfaceHistory = await fetchInterfaceHistoryByItemIds(
+          client.zabbixRpc,
+          historyItemIds,
+          historyWindow,
+          historyMaxPoints,
+        )
+      } else if (matched.length && data.interfaceMetrics?.byHost) {
+        interfaceHistory = await fetchInterfaceHistory(
+          client.zabbixRpc,
+          data.interfaceMetrics,
+          matched,
+          historyWindow,
+          historyMaxPoints,
+        )
+      }
+    } catch (err) {
+      interfaceHistory = {
+        windowSec: historyWindow.rangeSec,
+        windowLabel: historyWindow.windowLabel,
+        parseNote: historyWindow.parseNote,
+        from: historyWindow.from,
+        to: historyWindow.to,
+        hosts: [],
+        items: [],
+        error: err?.message || 'Failed to fetch Zabbix interface history',
+      }
+    }
+  }
+
   return {
     module: moduleId,
     freshness: 'live',
@@ -2709,8 +2904,8 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     configured: true,
     source: `${sourceLabel} API (host.get + item.get net.if.*)`,
     note: moduleId === 'storeZabbix'
-      ? 'CPU/RAM from both sources when available: hosts[].cpu/memory (Zabbix items) and storeAgentMetrics (Influx store PC agent). Report both; do not say metrics are only in Influx.'
-      : 'Live SNMP/interface metrics at send time. inBps/outBps are raw bytes/sec from Zabbix net.if.in/out items. hosts[].cpu/memory are Zabbix utilization items when requested.',
+      ? 'CPU/RAM from both sources when available: hosts[].cpu/memory (Zabbix items) and storeAgentMetrics (Influx store PC agent). hosts[].ports = live net.if traffic; interfaceHistory = historical net.if.in/out series. Report both live and history when present.'
+      : 'Live SNMP/interface metrics at send time. inBps/outBps are raw bytes/sec from Zabbix net.if.in/out items. interfaceHistory provides historical net.if series when trend/history keywords are used.',
     version: data.version,
     hostFilter: data.hostFilter,
     deviceTypeFilter: data.deviceTypeFilter,
@@ -2728,6 +2923,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     interfaceMetricsState,
     cpuMemoryMetricsState,
     cpuMemoryHistory,
+    interfaceHistory,
     pingSummary: includePing && data.pingMetrics ? data.pingMetrics.summary : undefined,
   }
 }

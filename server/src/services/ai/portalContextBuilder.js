@@ -1668,7 +1668,7 @@ export function formatContextForPrompt(context) {
     '- For storeZabbix/zabbixInfra fleet counts: availability.total is the full inventory; hosts[] may be capped (see hostsListTruncated, monitoredHostTotal, hostsReturned). Quote availability.total for "how many hosts" — not hosts.length.',
     '- For storeZabbix: disconnectEvents + activeDisconnectEvents are BH-filtered Mongo (ROP tab) and work even when Zabbix API is down. zabbixConfigured/zabbixError describe STORE_ZABBIX metrics only.',
     '- For storeProblems disconnect events: same BH fields as storeZabbix disconnect block. Do NOT use Zabbix availability.unavailable as disconnect events.',
-    '- For 24h CPU/memory trend graphs, use cpuMemoryHistory.hosts[].cpu/memory.points (Zabbix history.get / trend.get). REST equivalent: GET /api/store-zabbix/items/{itemId}/history?from=&to=',
+    '- For CPU/memory trend graphs, use cpuMemoryHistory (Zabbix history.get / trend.get). For interface bandwidth history, use interfaceHistory.hosts[].ports[].in/out.points (net.if.in/out). Live ports also expose inItemId/outItemId. REST equivalent: GET /api/store-zabbix/items/{itemId}/history?from=&to=',
     '- For orian (SolarWinds Orion): summary.nodes/alerts are fleet counts by status/severity; nodes[] has cpu, memory, responseTime, packetLoss; nodeDetail has interfaces (inBps/outBps) when a single node matched nodeFilter.',
     '',
     JSON.stringify(context),

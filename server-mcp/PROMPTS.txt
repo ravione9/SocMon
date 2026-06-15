@@ -287,7 +287,13 @@ IMPORTANT — CPU/RAM history trends (Zabbix history.get / trend.get):
     • MCP params: historyFrom + historyTo (unix seconds) on netpulse_storeZabbix
     • Item IDs: "CPU item 168356 memory item 168956" fetches those Zabbix items
   Response: cpuMemoryHistory.windowLabel, parseNote, fromAt, toAt, points[].
-  For a point-in-time value use items[].valueAt when querying a specific clock.
+
+IMPORTANT — Interface bandwidth history (interfaceHistory):
+  hosts[].ports = LIVE net.if.in/out (inBps/outBps + inItemId/outItemId).
+  interfaceHistory = historical series (same window rules as cpuMemoryHistory).
+  Example: "LKST64 interface bandwidth history 11 June 2026 20:00-20:15"
+  Response: interfaceHistory.hosts[].ports[].in/out.points[] with bps + rate (IST).
+  Or pass net.if item IDs: "item 12345 item 12346 interface history trend".
 
 IMPORTANT — hostname search:
   Short tags work: RP911, LK973, LKST793. LKST793 aliases to RP793-* in
