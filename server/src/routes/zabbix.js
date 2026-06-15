@@ -3,6 +3,13 @@ import { createZabbixClient } from '../services/zabbix.js'
 import { fetchAllMonitoredHosts, ZABBIX_HOST_FETCH_MAX } from '../services/zabbixHostFetch.js'
 import { fetchRopUptimeReport, fetchRopStoreDisconnectEvents, fetchRopGroupDisconnectEvents } from '../services/ropUptimeReport.js'
 import { buildRopDisconnectEventsReport, buildRopSingleStoreDisconnectReport } from '../services/storeReports.js'
+import {
+  isInfluxStoreConfigured,
+  fetchCrashEvents,
+  buildCrashEventList,
+  crashSeverity,
+  crashTypeLabel,
+} from '../services/influxStore.js'
 
 export function createZabbixRouter(client) {
   const {
@@ -1041,6 +1048,21 @@ router.get('/events', async (req, res) => {
       return undefined
     })()
 
+    /** Optional: scope events to one or more Zabbix hosts (?hostid= or ?hostids=a,b,c). */
+    const hostidsParam = (() => {
+      const single = String(req.query.hostid || '').trim()
+      const multi = String(req.query.hostids || '').trim()
+      const list = (multi || single)
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => /^\d+$/.test(s))
+      return list.length ? list : undefined
+    })()
+
+    /** Optional: case-insensitive substring filter on event name (e.g. "usb", "ping"). */
+    const searchTerm = String(req.query.search || req.query.q || '').trim()
+    const searchLc = searchTerm ? searchTerm.toLowerCase() : ''
+
     const baseOutput = ['eventid', 'source', 'object', 'clock', 'name', 'severity', 'value', 'acknowledged', 'r_eventid']
     const baseParams = {
       output: baseOutput,
@@ -1048,6 +1070,7 @@ router.get('/events', async (req, res) => {
       sortorder: 'DESC',
       limit,
       ...(timeFrom ? { time_from: timeFrom } : {}),
+      ...(hostidsParam ? { hostids: hostidsParam } : {}),
     }
 
     const attempts = [
@@ -1056,7 +1079,7 @@ router.get('/events', async (req, res) => {
       { ...baseParams, source: 0, selectHosts: ['hostid', 'host', 'name'] },
       { ...baseParams, selectHosts: ['hostid', 'host', 'name'] },
       { ...baseParams },
-      { output: 'extend', sortfield: ['clock'], sortorder: 'DESC', limit, ...(timeFrom ? { time_from: timeFrom } : {}) },
+      { output: 'extend', sortfield: ['clock'], sortorder: 'DESC', limit, ...(timeFrom ? { time_from: timeFrom } : {}), ...(hostidsParam ? { hostids: hostidsParam } : {}) },
     ]
 
     let rows = null
@@ -1072,7 +1095,7 @@ router.get('/events', async (req, res) => {
     }
     if (rows == null) rows = []
 
-    const events = (rows || []).map((ev) => ({
+    let events = (rows || []).map((ev) => ({
       eventid: ev.eventid,
       clock: ev.clock,
       name: ev.name || '',
@@ -1095,9 +1118,75 @@ router.get('/events', async (req, res) => {
         clock: a.clock,
       })),
     }))
+
+    if (hostidsParam && hostidsParam.length) {
+      const hostidSet = new Set(hostidsParam.map((s) => String(s)))
+      events = events.filter((ev) => (ev.hosts || []).some((h) => hostidSet.has(String(h.hostid))))
+    }
+    if (searchLc) {
+      events = events.filter((ev) => String(ev.name || '').toLowerCase().includes(searchLc))
+    }
+
     res.json({ events, totalReturned: events.length, attemptUsed })
   } catch (e) {
     return sendZabbixError(res, e)
+  }
+})
+
+/**
+ * GET /app-crashes — InfluxDB-backed application/service crash events.
+ *
+ * The crash data lives in InfluxDB (measurements: app_crash, app_hang,
+ * dotnet_crash, app_critical, service_crash, unexpected_shutdown,
+ * bsod_kernel_power, app_crash_wer, app_wer_report).
+ *
+ * Query params:
+ *   - hostnames=a,b,c   : restrict to these store_tag/hostname values (case-insensitive)
+ *   - time_from=epoch   : start of window (seconds)
+ *   - time_to=epoch     : end of window (seconds, defaults to now)
+ *   - limit=2000        : cap on returned events
+ */
+router.get('/app-crashes', async (req, res) => {
+  if (!isInfluxStoreConfigured()) {
+    return res.status(503).json({ error: 'InfluxDB not configured for store crash events' })
+  }
+  try {
+    const fromSec = req.query.time_from ? parseInt(String(req.query.time_from), 10) : undefined
+    const toSec = req.query.time_to ? parseInt(String(req.query.time_to), 10) : undefined
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || '2000'), 10) || 2000, 1), 10000)
+    const hostnames = String(req.query.hostnames || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    const hostnameSet = new Set(hostnames.map((s) => s.toLowerCase()))
+    const rawRange = (!fromSec || !Number.isFinite(fromSec)) ? '-24h' : undefined
+
+    const rows = await fetchCrashEvents(rawRange || `${-Math.max(60, Math.floor(Date.now() / 1000) - fromSec)}s`, fromSec, toSec)
+    let events = buildCrashEventList(rows)
+
+    if (hostnameSet.size) {
+      events = events.filter((ev) => {
+        const h = String(ev.hostname || '').toLowerCase()
+        const t = String(ev.storeTag || '').toLowerCase()
+        return hostnameSet.has(h) || hostnameSet.has(t)
+      })
+    }
+
+    events = events.slice(0, limit).map((ev) => ({
+      ...ev,
+      crashTypeLabel: crashTypeLabel(ev.crashType),
+      severity: crashSeverity(ev.crashType),
+    }))
+
+    res.json({
+      events,
+      totalReturned: events.length,
+      timeFrom: fromSec || null,
+      timeTo: toSec || null,
+      hostnames,
+    })
+  } catch (e) {
+    return res.status(502).json({ error: e?.message || 'Failed to fetch crash events from InfluxDB' })
   }
 })
 

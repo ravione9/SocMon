@@ -13,6 +13,7 @@ import {
   Legend,
   Filler,
 } from 'chart.js'
+import zoomPlugin from 'chartjs-plugin-zoom'
 import api from '../../api/client'
 import { useResizableColumns, ResizableColGroup, ResizableTh } from '../../components/ui/ResizableTable.jsx'
 import { useThemeStore } from '../../store/themeStore.js'
@@ -22,7 +23,7 @@ import { useUrlTab } from '../../hooks/useUrlTab.js'
 import { RP_OUTAGE_LABELS, ROP_SUBTABS, isRpGroupKey } from '../../utils/storeRopGrouping.js'
 import { parseManualStoreCodes } from '../../config/manualRopSdwanStoreCodes.js'
 
-const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'rop', 'reports']
+const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'rop', 'reports', 'custom']
 
 const ROP_GROUP_LABELS = {
   rp: 'All ROP',
@@ -41,7 +42,73 @@ const ROP_RANGE_CHIPS = [
   { id: 'custom', label: 'Custom' },
 ]
 
-ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, BarController, ArcElement, Tooltip, Legend, Filler)
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, BarController, ArcElement, Tooltip, Legend, Filler, zoomPlugin)
+
+/**
+ * Chart.js plugin that paints a gray overlay over the parts of the X-axis
+ * timeline that fall OUTSIDE the configured business-hours window.
+ *
+ * Activated per-chart via `options.plugins.bhShade`:
+ *   { enabled: true, bhStart: 9, bhEnd: 18, bhDays: Set([1,2,3,4,5]) }
+ *
+ * Requires the X-axis to be a `linear` epoch-ms scale (which our charts use).
+ */
+const bhShadePlugin = {
+  id: 'bhShade',
+  beforeDatasetsDraw(chart) {
+    const opts = chart.options?.plugins?.bhShade
+    if (!opts?.enabled) return
+    const xScale = chart.scales?.x
+    const area = chart.chartArea
+    if (!xScale || !area || typeof xScale.getPixelForValue !== 'function') return
+    const bhStartHr = Number(opts.bhStart) || 0
+    const bhEndHr = Number(opts.bhEnd) || 0
+    const bhDays = opts.bhDays
+    if (!bhDays || typeof bhDays.has !== 'function') return
+
+    const fromMs = Number(xScale.min)
+    const toMs = Number(xScale.max)
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) return
+
+    const ctx = chart.ctx
+    ctx.save()
+    /* Clip drawing to the chart plot area so the overlay doesn't bleed onto
+       axes / legend. */
+    ctx.beginPath()
+    ctx.rect(area.left, area.top, area.right - area.left, area.bottom - area.top)
+    ctx.clip()
+    ctx.fillStyle = 'rgba(128, 128, 144, 0.16)'
+
+    const shadeMs = (a, b) => {
+      const xa = Math.max(area.left, Math.min(area.right, xScale.getPixelForValue(Math.max(fromMs, a))))
+      const xb = Math.max(area.left, Math.min(area.right, xScale.getPixelForValue(Math.min(toMs, b))))
+      if (xb > xa) ctx.fillRect(xa, area.top, xb - xa, area.bottom - area.top)
+    }
+
+    /* Walk day by day in local time across the visible range. */
+    const startDay = new Date(fromMs); startDay.setHours(0, 0, 0, 0)
+    const dayMs = 86400 * 1000
+    const hourMs = 3600 * 1000
+    for (let cursor = startDay.getTime(); cursor < toMs; cursor += dayMs) {
+      const dow = new Date(cursor).getDay()
+      const dayStart = cursor
+      const dayEnd = cursor + dayMs
+      if (!bhDays.has(dow)) {
+        shadeMs(dayStart, dayEnd)
+        continue
+      }
+      if (bhEndHr <= bhStartHr) {
+        /* Overnight BH (e.g. 22:00 – 06:00) — shade the middle of the day. */
+        shadeMs(dayStart + bhEndHr * hourMs, dayStart + bhStartHr * hourMs)
+      } else {
+        shadeMs(dayStart, dayStart + bhStartHr * hourMs)
+        shadeMs(dayStart + bhEndHr * hourMs, dayEnd)
+      }
+    }
+    ctx.restore()
+  },
+}
+ChartJS.register(bhShadePlugin)
 
 /* ─── Theme colors ─── */
 const C = {
@@ -175,14 +242,105 @@ function toLocalInput(ts) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/api/zabbix' }) {
-  const [range, setRange] = useState('1h')
+/**
+ * Convert a Zabbix `system.uptime` time series into a step-shaped availability
+ * series of (clock, 0|100). The graph plotted from this is the canonical
+ * "up vs down" chart — flat 100% while the host was reporting, drops to 0%
+ * across reboots and data-outage windows.
+ *
+ * Heuristics:
+ *   - Continuous samples (no value drop, gap ≤ GAP_THRESHOLD_SEC) → up.
+ *   - A drop in value → reboot. Down between the previous sample and the
+ *     inferred boot time `bootAt = curClock - curValue`.
+ *   - A gap > GAP_THRESHOLD_SEC = host wasn't reporting → counted as down.
+ *   - Pre-range / post-range silence > GAP_THRESHOLD_SEC → also down.
+ */
+function buildAvailabilitySteps(points, fromTs, toTs, gapThresholdSec = 240) {
+  const out = []
+  const fromN = Number(fromTs), toN = Number(toTs)
+  if (!Number.isFinite(fromN) || !Number.isFinite(toN) || toN <= fromN) return out
+  if (!points?.length) {
+    out.push({ clock: fromN, value: 0 })
+    out.push({ clock: toN, value: 0 })
+    return out
+  }
+  if (points[0].clock - fromN > gapThresholdSec) {
+    out.push({ clock: fromN, value: 0 })
+    out.push({ clock: points[0].clock - 1, value: 0 })
+    out.push({ clock: points[0].clock, value: 100 })
+  } else {
+    out.push({ clock: fromN, value: 100 })
+    out.push({ clock: points[0].clock, value: 100 })
+  }
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i - 1]
+    const cur = points[i]
+    const gap = cur.clock - prev.clock
+    if (cur.value < prev.value) {
+      const bootAt = Math.max(prev.clock + 1, cur.clock - cur.value)
+      out.push({ clock: prev.clock, value: 100 })
+      out.push({ clock: prev.clock + 1, value: 0 })
+      out.push({ clock: bootAt, value: 0 })
+      out.push({ clock: bootAt + 1, value: 100 })
+      out.push({ clock: cur.clock, value: 100 })
+    } else if (gap > gapThresholdSec) {
+      out.push({ clock: prev.clock, value: 100 })
+      out.push({ clock: prev.clock + 1, value: 0 })
+      out.push({ clock: cur.clock - 1, value: 0 })
+      out.push({ clock: cur.clock, value: 100 })
+    } else {
+      out.push({ clock: cur.clock, value: 100 })
+    }
+  }
+  const last = points[points.length - 1]
+  if (toN - last.clock > gapThresholdSec) {
+    out.push({ clock: last.clock + 1, value: 0 })
+    out.push({ clock: toN, value: 0 })
+  } else {
+    out.push({ clock: toN, value: 100 })
+  }
+  return out
+}
+
+function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/api/zabbix', defaultRange, displayMode = 'value', valueScale = 1, bh }) {
+  /* When a defaultRange (epoch from/to) is supplied, the chart starts in custom mode
+     using that window so it matches the parent dashboard's range selection. */
+  const initialEpoch = useMemo(() => {
+    if (defaultRange?.from && defaultRange?.to) {
+      const f = Number(defaultRange.from), t = Number(defaultRange.to)
+      if (Number.isFinite(f) && Number.isFinite(t) && f < t) return { from: f, to: t }
+    }
+    return null
+  }, [defaultRange])
+  const [range, setRange] = useState(initialEpoch ? 'custom' : '1h')
   const [data, setData] = useState(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState(null)
-  const [customFrom, setCustomFrom] = useState('')
-  const [customTo, setCustomTo] = useState('')
-  const [customEpoch, setCustomEpoch] = useState(null)
+  const [customFrom, setCustomFrom] = useState(initialEpoch ? toLocalInput(initialEpoch.from) : '')
+  const [customTo, setCustomTo] = useState(initialEpoch ? toLocalInput(initialEpoch.to) : '')
+  const [customEpoch, setCustomEpoch] = useState(initialEpoch)
+  const chartRef = useRef(null)
+  /** focused = zoom to BH segment / data; full = entire selected range */
+  const [viewMode, setViewMode] = useState(() => (bh?.bhEnabled ? 'focused' : 'full'))
+  const [isZoomed, setIsZoomed] = useState(false)
+
+  useEffect(() => {
+    setViewMode(bh?.bhEnabled ? 'focused' : 'full')
+  }, [bh?.bhEnabled, bh?.bhStart, bh?.bhEnd, bh?.bhDays])
+
+  /* Keep this chart synchronized with the parent dashboard range.
+     When the top-level selected range changes, force this chart to follow it
+     immediately (instead of staying on an old local range). */
+  useEffect(() => {
+    if (!defaultRange?.from || !defaultRange?.to) return
+    const from = Number(defaultRange.from)
+    const to = Number(defaultRange.to)
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) return
+    setRange('custom')
+    setCustomEpoch((prev) => (prev?.from === from && prev?.to === to ? prev : { from, to }))
+    setCustomFrom(toLocalInput(from))
+    setCustomTo(toLocalInput(to))
+  }, [defaultRange?.from, defaultRange?.to])
 
   const selectPreset = useCallback((key) => {
     setRange(key)
@@ -228,23 +386,184 @@ function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/
     return () => { cancelled = true }
   }, [itemId, range, customEpoch, apiBase])
 
+  const isAvail = displayMode === 'availability'
+
+  /** Resolve the active range into [fromTs, toTs] (epoch seconds). */
+  const timeBounds = useMemo(() => {
+    if (range === 'custom' && customEpoch) return { fromTs: customEpoch.from, toTs: customEpoch.to }
+    const sec = HISTORY_RANGES.find((r) => r.key === range)?.sec || 3600
+    const toTs = Math.floor(Date.now() / 1000)
+    return { fromTs: toTs - sec, toTs }
+  }, [range, customEpoch])
+
+  /* When BH is on, charts only plot data inside BH windows (gaps elsewhere). */
+  const allPoints = useMemo(() => data?.points || [], [data])
+
   const chartData = useMemo(() => {
-    if (!data?.points?.length) return null
-    const labels = data.points.map((p) => new Date(p.clock * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }))
+    const { fromTs, toTs } = timeBounds
+    if (isAvail) {
+      const series = buildAvailabilityChartPoints(allPoints, fromTs, toTs, bh)
+      if (!series.length) return null
+      const color = '#22c55e'
+      const downColor = '#ef4444'
+      return {
+        datasets: [{
+          label: (itemName || 'Availability').replace(/^VMware:\s*/i, '') + ' (%)',
+          data: series,
+          borderColor: color, backgroundColor: `${color}22`,
+          stepped: 'before',
+          spanGaps: false, pointRadius: 0,
+          pointHoverRadius: 5, pointHoverBackgroundColor: color,
+          pointHoverBorderColor: '#fff', pointHoverBorderWidth: 2,
+          borderWidth: 2, fill: { target: 'origin', above: `${color}22`, below: `${downColor}22` },
+          parsing: false,
+          segment: {
+            borderColor: (ctx) => {
+              const v0 = ctx.p0?.parsed?.y, v1 = ctx.p1?.parsed?.y
+              if (v0 === 0 || v1 === 0) return downColor
+              return color
+            },
+            backgroundColor: (ctx) => {
+              const v0 = ctx.p0?.parsed?.y, v1 = ctx.p1?.parsed?.y
+              if (v0 === 0 || v1 === 0) return `${downColor}30`
+              return `${color}22`
+            },
+          },
+        }],
+      }
+    }
+    if (!allPoints.length) return null
     const color = '#3b82f6'
+    const scale = Number.isFinite(Number(valueScale)) && Number(valueScale) > 0 ? Number(valueScale) : 1
+    const raw = allPoints.map((p) => ({ x: p.clock * 1000, y: p.value * scale }))
+    const series = clipChartSeriesToBh(raw, fromTs, toTs, bh)
+    if (!series.length) return null
     return {
-      labels,
       datasets: [{
         label: (itemName || 'Value').replace(/^VMware:\s*/i, '') + (itemUnits ? ` (${itemUnits})` : ''),
-        data: data.points.map((p) => p.value),
+        data: series,
         borderColor: color, backgroundColor: `${color}18`,
-        tension: 0.35, spanGaps: true, pointRadius: 0,
+        tension: 0.35, spanGaps: false, pointRadius: 0,
         pointHoverRadius: 5, pointHoverBackgroundColor: color,
         pointHoverBorderColor: '#fff', pointHoverBorderWidth: 2,
         borderWidth: 2, fill: true,
+        parsing: false,
       }],
     }
-  }, [data, itemName, itemUnits])
+  }, [allPoints, itemName, itemUnits, isAvail, timeBounds, valueScale, bh])
+
+  const seriesPoints = useMemo(() => chartData?.datasets?.[0]?.data || [], [chartData])
+
+  const xBounds = useMemo(() => {
+    const { fromTs, toTs } = timeBounds
+    return resolveChartXBounds(fromTs, toTs, bh, seriesPoints, viewMode)
+  }, [timeBounds, bh, seriesPoints, viewMode])
+
+  const resetChartZoom = useCallback(() => {
+    chartRef.current?.resetZoom?.()
+    setIsZoomed(false)
+  }, [])
+
+  useEffect(() => {
+    resetChartZoom()
+  }, [
+    timeBounds.fromTs, timeBounds.toTs, viewMode, itemId,
+    bh?.bhEnabled, bh?.bhStart, bh?.bhEnd, bh?.bhDays,
+    resetChartZoom,
+  ])
+
+  /**
+   * Replace the default category x-axis with a `linear` numeric axis whose
+   * values are epoch-millis, so:
+   *   - Long data gaps (host offline) render proportional to real time
+   *     (a category axis collapses a 12-hour gap to ≈1 px).
+   *   - The chart fills the full selected range even when there are very
+   *     few samples or BH filtering removes most points.
+   * Availability mode additionally locks Y to 0–100 % and shows Up/Down
+   * labels in the tooltip.
+   */
+  const effectiveChartOpts = useMemo(() => {
+    const { fromTs, toTs } = timeBounds
+    const spanSec = Math.max(1, toTs - fromTs)
+    const visibleSpanSec = Math.max(1, (xBounds.max - xBounds.min) / 1000)
+    const fmtTick = (msVal) => {
+      const d = new Date(Number(msVal))
+      if (!Number.isFinite(d.getTime())) return ''
+      const useDate = visibleSpanSec > 2 * 86400 || spanSec > 2 * 86400
+      return useDate
+        ? d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+        : d.toLocaleString(undefined, { hour: '2-digit', minute: '2-digit' })
+    }
+    return {
+      ...chartOpts,
+      parsing: false,
+      scales: {
+        ...(chartOpts?.scales || {}),
+        x: {
+          ...(chartOpts?.scales?.x || {}),
+          type: 'linear',
+          min: xBounds.min,
+          max: xBounds.max,
+          ticks: {
+            ...(chartOpts?.scales?.x?.ticks || {}),
+            maxRotation: 0, autoSkip: true, maxTicksLimit: 10,
+            callback: (v) => fmtTick(v),
+          },
+        },
+        ...(isAvail ? {
+          y: {
+            ...(chartOpts?.scales?.y || {}),
+            min: 0, max: 100,
+            ticks: { ...(chartOpts?.scales?.y?.ticks || {}), stepSize: 25, callback: (v) => `${v} %` },
+            grid: { ...(chartOpts?.scales?.y?.grid || {}) },
+          },
+        } : {}),
+      },
+      plugins: {
+        ...(chartOpts?.plugins || {}),
+        tooltip: {
+          ...(chartOpts?.plugins?.tooltip || {}),
+          callbacks: {
+            title: (items) => {
+              const ms = items?.[0]?.parsed?.x
+              return Number.isFinite(Number(ms)) ? new Date(Number(ms)).toLocaleString() : ''
+            },
+            ...(isAvail ? {
+              label: (ctx) => `${ctx.parsed.y >= 50 ? 'Up' : 'Down'} (${ctx.parsed.y}%)`,
+            } : {}),
+          },
+        },
+        bhShade: {
+          enabled: false,
+          bhStart: bh?.bhStart,
+          bhEnd: bh?.bhEnd,
+          bhDays: bh?.bhDays,
+        },
+        zoom: {
+          pan: { enabled: false },
+          zoom: {
+            wheel: { enabled: false },
+            pinch: { enabled: false },
+            drag: {
+              enabled: true,
+              backgroundColor: 'rgba(59,130,246,.14)',
+              borderColor: 'rgba(59,130,246,.55)',
+              borderWidth: 1,
+            },
+            mode: 'x',
+            onZoomComplete: () => setIsZoomed(true),
+          },
+          limits: {
+            x: {
+              min: xBounds.fullMin,
+              max: xBounds.fullMax,
+              minRange: 60 * 1000,
+            },
+          },
+        },
+      },
+    }
+  }, [chartOpts, isAvail, timeBounds, xBounds, bh?.bhStart, bh?.bhEnd, bh?.bhDays])
 
   const displayName = (itemName || '').replace(/^VMware:\s*/i, '')
 
@@ -255,10 +574,13 @@ function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/
           <span style={{ width: 10, height: 10, borderRadius: 2, background: '#3b82f6' }} />
           <span className="opm-widget-title" style={{ textTransform: 'none', fontSize: 12, letterSpacing: 0 }}>{displayName}</span>
           {data?.aggregated && <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: '#3b82f6' }}>Trend</span>}
-          {data?.lastvalue != null && (
+          {!isAvail && data?.lastvalue != null && (
             <span style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)', marginLeft: 4 }}>
               Current: <strong style={{ color: 'var(--text)' }}>{fmtValue(Number(data.lastvalue), itemUnits)}</strong>
             </span>
+          )}
+          {isAvail && bh?.bhEnabled && (
+            <span className="opm-pill" style={{ background: 'rgba(245,158,11,.12)', color: '#f59e0b', fontSize: 10 }}>BH only</span>
           )}
         </div>
       </div>
@@ -307,6 +629,41 @@ function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/
           {range === 'custom' && <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: '#3b82f6', fontSize: 10 }}>Custom Range Active</span>}
         </div>
 
+        {!busy && chartData && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+            <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text3)', fontFamily: 'var(--mono)', letterSpacing: .3 }}>View:</span>
+            <button type="button" onClick={() => setViewMode('focused')}
+              style={{
+                padding: '3px 10px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600,
+                border: viewMode === 'focused' ? '1px solid var(--accent)' : '1px solid var(--border)',
+                background: viewMode === 'focused' ? 'rgba(59,130,246,.12)' : 'transparent',
+                color: viewMode === 'focused' ? 'var(--accent)' : 'var(--text3)', cursor: 'pointer',
+              }}>
+              {bh?.bhEnabled ? 'Focus BH' : 'Focus data'}
+            </button>
+            <button type="button" onClick={() => setViewMode('full')}
+              style={{
+                padding: '3px 10px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600,
+                border: viewMode === 'full' ? '1px solid var(--accent)' : '1px solid var(--border)',
+                background: viewMode === 'full' ? 'rgba(59,130,246,.12)' : 'transparent',
+                color: viewMode === 'full' ? 'var(--accent)' : 'var(--text3)', cursor: 'pointer',
+              }}>
+              Full range
+            </button>
+            <span style={{ width: 1, height: 16, background: 'var(--border)' }} />
+            <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Drag on chart to select zoom</span>
+            <button type="button" onClick={resetChartZoom}
+              style={{
+                padding: '3px 10px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600,
+                border: '1px solid var(--border)', background: 'var(--bg3)',
+                color: isZoomed ? 'var(--accent)' : 'var(--text2)',
+                cursor: 'pointer',
+              }}>
+              Clear zoom
+            </button>
+          </div>
+        )}
+
         {busy && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center', padding: '40px 0', color: 'var(--text3)', fontSize: 12, fontFamily: 'var(--mono)' }}>
             <span className="np-page-loading-dot" style={{ width: 14, height: 14 }} />Loading history…
@@ -315,7 +672,7 @@ function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/
         {!busy && err && <p style={{ margin: 0, color: '#ef4444', fontSize: 12, fontFamily: 'var(--mono)', padding: '16px 0' }}>{err}</p>}
         {!busy && chartData && (
           <div style={{ height: 280, position: 'relative' }}>
-            <Line data={chartData} options={chartOpts} />
+            <Line ref={chartRef} data={chartData} options={effectiveChartOpts} />
           </div>
         )}
         {!busy && !err && data && !chartData && (
@@ -554,6 +911,332 @@ function LatestMetricsView({ latestData, chartOpts, apiBase = '/api/zabbix' }) {
     </div>
   )
 }
+
+/* ─── Custom Dashboard helpers ─── */
+/* Patterns are listed in priority order — earlier patterns are preferred matches.
+   Aggregate items (no per-mode/per-iface params) always rank ahead of subset items. */
+const CUSTOM_DASH_KEY_RES = {
+  cpu: [
+    /^system\.cpu\.utilization(\b|\[)/i,    // 0: explicit aggregate
+    /^system\.cpu\.util(\b|\[)/i,           // 1: aggregate + per-mode variants
+    /^vmware\.vm\.cpu\.utilization/i,       // 2: VMware aggregates
+    /^vmware\.hv\.cpu\.utilization/i,
+    /^vmware\.vm\.cpu\.usage\.perf/i,
+    /^vmware\.hv\.cpu\.usage\.perf/i,
+    /^perf_counter\[.*_Total.*Processor.*Time/i, // 6: Windows total
+    /^perf_counter\[.*Processor.*Time/i,    // 7: any processor counter
+  ],
+  memory: [
+    /^vm\.memory\.utilization(\b|\[)/i,
+    /^vm\.memory\.util(\b|\[)/i,
+    /^vmware\.vm\.memory\.utilization/i,
+    /^vmware\.hv\.memory\.utilization/i,
+    /^vmware\.vm\.memory\.usage/i,
+    /^vmware\.hv\.memory\.usage/i,
+    /^vm\.memory\.size\[pused/i,
+    /^vm\.memory\.size\[pavailable/i,       // inverted
+  ],
+  uptime: [
+    /^system\.uptime(\b|\[)/i,              // canonical Linux/Windows agent
+    /^vm\.uptime(\b|\[)/i,
+    /^sysuptime(\b|\[)/i,                   // SNMP sysUpTime
+    /^system\.hw\.uptime(\b|\[)/i,
+    /^agent\.uptime(\b|\[)/i,               // Zabbix agent uptime (last resort)
+    /^system\.net\.uptime(\b|\[)/i,         // network/interface uptime — lowest priority
+  ],
+  /* Network latency / round-trip time. Values are normalized to milliseconds
+     (icmppingsec returns seconds → multiplied by 1000 in pickCustomDashItem). */
+  latency: [
+    /^custom\.ping\.ms(\b|\[)/i,            // app-specific ms metric (preferred)
+    /^icmppingsec(\b|\[)/i,                 // standard Zabbix ICMP RTT in seconds
+    /^net\.tcp\.service\.perf(\b|\[)/i,     // TCP service latency in seconds
+    /^vfs\.dev\.read(\b|\[).*latency/i,     // disk read latency (rare)
+  ],
+}
+const CUSTOM_DASH_INVERT_RE = /pavailable|pfree/i
+/** Per-mode CPU keys that are NOT the aggregate (we deprioritize these). */
+const CUSTOM_DASH_PER_MODE_RE = /\[\s*[^\]]*?(user|system|iowait|idle|steal|nice|kernel|softirq|hardirq|interrupt)/i
+/** Items that must be excluded from CPU/memory aggregates entirely. */
+const CUSTOM_DASH_CPU_IDLE_RE = /\[\s*[^\]]*?idle/i
+
+/**
+ * Pick the best matching item from the host's `latest` list for a given metric.
+ *
+ * Scoring heuristic (lower score = better match):
+ *  - pattern priority      (earlier in list → big bonus)
+ *  - has key parameters    (penalty)
+ *  - per-mode CPU subkey   (large penalty — prefer aggregate)
+ *  - longer key            (small penalty)
+ *  - "idle" CPU items      (excluded outright)
+ */
+function pickCustomDashItem(items, metric) {
+  if (!items?.length) return null
+  const patterns = CUSTOM_DASH_KEY_RES[metric] || []
+  const candidates = []
+  for (let i = 0; i < patterns.length; i++) {
+    const re = patterns[i]
+    for (const it of items) {
+      const k = String(it.key || '')
+      if (!re.test(k)) continue
+      if (metric === 'cpu' && CUSTOM_DASH_CPU_IDLE_RE.test(k)) continue
+      const v = Number(it.value)
+      if (!Number.isFinite(v) || v < 0) continue
+      if (metric !== 'uptime' && !it.numeric) continue
+      let score = i * 1000
+      if (k.includes('[')) score += 200
+      if (metric === 'cpu' && CUSTOM_DASH_PER_MODE_RE.test(k)) score += 600
+      if (metric === 'uptime' && /^system\.net\.uptime/i.test(k)) score += 800
+      score += k.length
+      candidates.push({ item: it, score, value: v, patternIdx: i })
+    }
+  }
+  if (!candidates.length) return null
+  // Lowest score wins; for ties, prefer the larger value (e.g. true system uptime ≥ network uptime)
+  candidates.sort((a, b) => (a.score - b.score) || (b.value - a.value))
+  const best = candidates[0]
+  const v = best.value
+  if (metric === 'latency') {
+    /* Normalize to ms regardless of source unit. Items reporting seconds are
+       converted (×1000); ms / unit-less items are left as-is. */
+    const u = String(best.item.units || '').toLowerCase().trim()
+    const k = String(best.item.key || '').toLowerCase()
+    const isSec = u === 's' || u === 'sec' || u === 'seconds' || /icmppingsec|net\.tcp\.service\.perf/.test(k)
+    const ms = isSec ? v * 1000 : v
+    return { ...best.item, _displayValue: ms, _inverted: false, _normalizedUnit: 'ms' }
+  }
+  const inverted = metric !== 'uptime' && CUSTOM_DASH_INVERT_RE.test(String(best.item.key || ''))
+  const display = inverted ? Math.max(0, 100 - v) : v
+  return { ...best.item, _displayValue: display, _inverted: inverted }
+}
+
+/** Classify a single Zabbix event row for the custom dashboard.
+ *  App-crash data is intentionally NOT classified here — it lives in InfluxDB
+ *  and is fetched separately via /app-crashes. */
+function classifyCustomDashEvent(ev) {
+  const name = String(ev?.name || '').toLowerCase()
+  if (!name) return null
+  if (/(usb|removable\s*media|removable\s*drive|removable\s*storage)/.test(name)) return 'usb'
+  if (/(internet|isp|wan\b|gateway|uplink|circuit|outage)/.test(name)) return 'internet'
+  if (/(unreachable|host\s*down|icmp|ping|loss\s*of\s*connect|connection\s*lost|lost\s*connection|interface\s*down|link\s*down|network\s*down|disconnect)/.test(name)) return 'internet'
+  return null
+}
+
+/** Returns true if `clock` (epoch seconds) is within the BH window (local time). */
+function isInBhWindow(clock, bhStart, bhEnd, bhDays) {
+  const n = Number(clock)
+  if (!Number.isFinite(n) || n <= 0) return false
+  const d = new Date(n * 1000)
+  const dow = d.getDay()
+  if (bhDays && typeof bhDays.has === 'function' && !bhDays.has(dow)) return false
+  const minutesOfDay = d.getHours() * 60 + d.getMinutes()
+  const startM = (Number(bhStart) || 0) * 60
+  const endM = (Number(bhEnd) || 0) * 60
+  if (endM <= startM) return minutesOfDay >= startM || minutesOfDay < endM
+  return minutesOfDay >= startM && minutesOfDay < endM
+}
+
+/** List every [from, to] epoch-second span inside the range that falls in the BH window. */
+function enumerateBhIntervals(fromTs, toTs, bh) {
+  if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || toTs <= fromTs) return []
+  if (!bh?.bhEnabled) return [{ from: fromTs, to: toTs }]
+  const bhStartHr = Number(bh.bhStart) || 0
+  const bhEndHr = Number(bh.bhEnd) || 0
+  const days = bh.bhDays || new Set()
+  const intervals = []
+  const startDay = new Date(fromTs * 1000)
+  startDay.setHours(0, 0, 0, 0)
+  for (let cursor = Math.floor(startDay.getTime() / 1000); cursor < toTs; cursor += 86400) {
+    const dow = new Date(cursor * 1000).getDay()
+    if (!days.has(dow)) continue
+    if (bhEndHr <= bhStartHr) {
+      intervals.push({ from: cursor, to: cursor + bhEndHr * 3600 })
+      intervals.push({ from: cursor + bhStartHr * 3600, to: cursor + 86400 })
+    } else {
+      intervals.push({ from: cursor + bhStartHr * 3600, to: cursor + bhEndHr * 3600 })
+    }
+  }
+  return intervals
+    .map(({ from, to }) => ({ from: Math.max(from, fromTs), to: Math.min(to, toTs) }))
+    .filter(({ from, to }) => to > from)
+}
+
+/**
+ * Split a {x,y} chart series so nothing is drawn outside BH windows.
+ * Inserts `y: null` breaks between BH segments (works with spanGaps: false).
+ */
+function clipChartSeriesToBh(points, fromTs, toTs, bh) {
+  const list = points || []
+  if (!bh?.bhEnabled) return list
+  const intervals = enumerateBhIntervals(fromTs, toTs, bh)
+  if (!intervals.length) return []
+  const out = []
+  for (const { from, to } of intervals) {
+    const fromMs = from * 1000
+    const toMs = to * 1000
+    const chunk = list.filter((p) => p.x >= fromMs && p.x <= toMs)
+    if (!chunk.length) continue
+    if (out.length) out.push({ x: chunk[0].x, y: null })
+    out.push(...chunk)
+  }
+  return out
+}
+
+/** Availability step chart data restricted to BH windows when BH is on. */
+function buildAvailabilityChartPoints(allPoints, fromTs, toTs, bh) {
+  if (!bh?.bhEnabled) {
+    return buildAvailabilitySteps(allPoints, fromTs, toTs).map((s) => ({ x: s.clock * 1000, y: s.value }))
+  }
+  const intervals = enumerateBhIntervals(fromTs, toTs, bh)
+  const out = []
+  for (const { from, to } of intervals) {
+    const steps = buildAvailabilitySteps(allPoints, from, to)
+    const mapped = steps.map((s) => ({ x: s.clock * 1000, y: s.value }))
+    if (!mapped.length) continue
+    if (out.length) out.push({ x: mapped[0].x, y: null })
+    out.push(...mapped)
+  }
+  return out
+}
+
+/** X-axis bounds for chart focus: BH segment or data extent vs full selected range. */
+function resolveChartXBounds(fromTs, toTs, bh, series, viewMode = 'focused') {
+  const fullMin = fromTs * 1000
+  const fullMax = toTs * 1000
+  const padMs = 3 * 60 * 1000
+  if (viewMode === 'full') return { min: fullMin, max: fullMax, fullMin, fullMax }
+
+  const finite = (series || []).filter((p) => p.y != null && Number.isFinite(p.x))
+  if (!finite.length) return { min: fullMin, max: fullMax, fullMin, fullMax }
+
+  if (bh?.bhEnabled) {
+    const intervals = enumerateBhIntervals(fromTs, toTs, bh)
+    const withData = intervals.filter((iv) =>
+      finite.some((p) => p.x >= iv.from * 1000 && p.x <= iv.to * 1000)
+    )
+    const pick = withData.length ? withData[withData.length - 1] : intervals[intervals.length - 1]
+    if (pick) {
+      return {
+        min: Math.max(fullMin, pick.from * 1000 - padMs),
+        max: Math.min(fullMax, pick.to * 1000 + padMs),
+        fullMin,
+        fullMax,
+      }
+    }
+  }
+
+  const xs = finite.map((p) => p.x)
+  const dataMin = Math.min(...xs)
+  const dataMax = Math.max(...xs)
+  const span = Math.max(dataMax - dataMin, 60000)
+  const extra = span * 0.03
+  return {
+    min: Math.max(fullMin, dataMin - extra),
+    max: Math.min(fullMax, dataMax + extra),
+    fullMin,
+    fullMax,
+  }
+}
+
+/** Apply BH filter only when enabled; also enforces the active time window. */
+function applyCustomDashFilters(events, { bhEnabled, bhStart, bhEnd, bhDays, timeWindow }) {
+  let out = events || []
+  if (timeWindow?.from || timeWindow?.to) {
+    const from = Number(timeWindow.from) || 0
+    const to = Number(timeWindow.to) || Math.floor(Date.now() / 1000)
+    out = out.filter((ev) => {
+      const c = Number(ev.clock)
+      if (!Number.isFinite(c)) return false
+      return c >= from && c <= to
+    })
+  }
+  if (bhEnabled) {
+    out = out.filter((ev) => isInBhWindow(Number(ev.clock), bhStart, bhEnd, bhDays))
+  }
+  return out
+}
+
+/** Total seconds inside a (from, to) window restricted to the BH definition. */
+function bhSecondsInRange(fromTs, toTs, bh) {
+  if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || toTs <= fromTs) return 0
+  if (!bh?.bhEnabled) return Math.max(0, toTs - fromTs)
+  const bhStart = (Number(bh.bhStart) || 0) * 3600
+  const bhEnd = (Number(bh.bhEnd) || 0) * 3600
+  const days = bh.bhDays || new Set()
+  let total = 0
+  const startDay = new Date(fromTs * 1000); startDay.setHours(0, 0, 0, 0)
+  for (let cursor = Math.floor(startDay.getTime() / 1000); cursor < toTs; cursor += 86400) {
+    const d = new Date(cursor * 1000)
+    if (!days.has(d.getDay())) continue
+    if (bhEnd <= bhStart) {
+      total += clipSpan(fromTs, toTs, cursor + 0, cursor + bhEnd)
+      total += clipSpan(fromTs, toTs, cursor + bhStart, cursor + 86400)
+    } else {
+      total += clipSpan(fromTs, toTs, cursor + bhStart, cursor + bhEnd)
+    }
+  }
+  return Math.max(0, total)
+}
+function clipSpan(rangeFrom, rangeTo, spanFrom, spanTo) {
+  return Math.max(0, Math.min(rangeTo, spanTo) - Math.max(rangeFrom, spanFrom))
+}
+function bhClippedSpan(fromTs, toTs, bh) {
+  if (!bh?.bhEnabled) return Math.max(0, toTs - fromTs)
+  return bhSecondsInRange(fromTs, toTs, bh)
+}
+
+/**
+ * Detect reboots from a Zabbix `system.uptime` time series + compute uptime%.
+ *
+ * Heuristics:
+ *   - A `value` drop between consecutive points → reboot. Boot time ≈ next sample
+ *     time − new uptime value (clamped after the previous sample).
+ *   - A data gap > GAP_THRESHOLD_SEC = host wasn't reporting → counted as down.
+ *   - Pre-first-sample / post-last-sample silences are also counted as down.
+ *   - All "down" segments are intersected with the BH window before being summed,
+ *     so the resulting uptime% reflects only business-hours minutes when BH is on.
+ */
+function computeUptimeStats(points, fromTs, toTs, bh) {
+  const GAP_THRESHOLD_SEC = 240
+  const totalSec = bhSecondsInRange(fromTs, toTs, bh)
+  if (!points?.length) {
+    return { rebootCount: 0, reboots: [], upSec: 0, totalSec, downSec: totalSec, uptimePct: totalSec > 0 ? 0 : null, lastReboot: null }
+  }
+  const reboots = []
+  let downSec = 0
+  if (points[0].clock - fromTs > GAP_THRESHOLD_SEC) {
+    downSec += bhClippedSpan(fromTs, points[0].clock, bh)
+  }
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i - 1], cur = points[i]
+    const gap = cur.clock - prev.clock
+    if (cur.value < prev.value) {
+      const bootAt = cur.clock - cur.value
+      const at = bootAt > prev.clock ? bootAt : cur.clock
+      reboots.push({ at, downSec: at > prev.clock ? bhClippedSpan(prev.clock, at, bh) : 0 })
+      if (at > prev.clock) downSec += bhClippedSpan(prev.clock, at, bh)
+    } else if (gap > GAP_THRESHOLD_SEC) {
+      downSec += bhClippedSpan(prev.clock, cur.clock, bh)
+    }
+  }
+  if (toTs - points[points.length - 1].clock > GAP_THRESHOLD_SEC) {
+    downSec += bhClippedSpan(points[points.length - 1].clock, toTs, bh)
+  }
+  const upSec = Math.max(0, totalSec - downSec)
+  const uptimePct = totalSec > 0 ? Math.max(0, Math.min(100, (upSec / totalSec) * 100)) : null
+  const lastReboot = reboots.length ? reboots[reboots.length - 1].at : null
+  return { rebootCount: reboots.length, reboots, upSec, totalSec, downSec, uptimePct, lastReboot }
+}
+
+/** Day-of-week labels (Sun-first, matches getDay()). */
+const CUSTOM_DASH_DAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S']
+const CUSTOM_DASH_DAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+const CUSTOM_DASH_RANGE_CHIPS = [
+  { id: '24h', label: '24h' },
+  { id: '7d', label: '7d' },
+  { id: '14d', label: '14d' },
+  { id: '30d', label: '30d' },
+  { id: 'custom', label: 'Custom' },
+]
 
 /* ─── Inline styles (injected once) ─── */
 const INLINE_CSS = `
@@ -1475,6 +2158,1158 @@ function GraphPanel({ graph, series, chartData, chartOpts, busy, graphDataMode, 
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   CUSTOM DASHBOARD COMPONENT
+   ═══════════════════════════════════════════════════════════════ */
+function CustomDashboardPanel({
+  apiBase, chartOpts,
+  hosts, hostsBusy, search, onSearch,
+  selectedHosts, onSetSelected,
+  dropdownOpen, onToggleDropdown, onCloseDropdown,
+  latestByHost, latestBusy,
+  events, eventsBusy, eventLimit, onEventLimit,
+  activeWidget, onSelectWidget,
+  range, onRangeChange,
+  customFrom, onCustomFrom, customTo, onCustomTo, customEpoch, onApplyCustomRange, timeWindow,
+  bhEnabled, onBhEnabled, bhStart, onBhStart, bhEnd, onBhEnd, bhDays, onBhDays,
+  expandedItem, onExpandItem,
+  crashes, crashesBusy, crashesError,
+  uptimeStats, uptimeStatsBusy,
+  onOpenRebootModal, onOpenCrashModal,
+  onRefresh,
+}) {
+  const dropdownRef = useRef(null)
+  useEffect(() => {
+    if (!dropdownOpen) return
+    const onDoc = (e) => { if (dropdownRef.current && !dropdownRef.current.contains(e.target)) onCloseDropdown() }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [dropdownOpen, onCloseDropdown])
+
+  const filteredHosts = useMemo(() => {
+    const q = (search || '').trim().toLowerCase()
+    if (!hosts) return []
+    if (!q) return hosts.slice(0, 500)
+    return hosts.filter((h) => {
+      const n = String(h.name || '').toLowerCase()
+      const k = String(h.host || '').toLowerCase()
+      const ip = String(h.ip || '').toLowerCase()
+      return n.includes(q) || k.includes(q) || ip.includes(q)
+    }).slice(0, 500)
+  }, [hosts, search])
+
+  const selectedIdSet = useMemo(() => new Set((selectedHosts || []).map((h) => String(h.hostid))), [selectedHosts])
+  const toggleHost = useCallback((h) => {
+    const id = String(h.hostid)
+    if (selectedIdSet.has(id)) onSetSelected((selectedHosts || []).filter((x) => String(x.hostid) !== id))
+    else onSetSelected([...(selectedHosts || []), h])
+  }, [selectedIdSet, selectedHosts, onSetSelected])
+  const selectAllVisible = useCallback(() => {
+    const next = [...(selectedHosts || [])]
+    const ids = new Set(next.map((x) => String(x.hostid)))
+    for (const h of filteredHosts) {
+      if (!ids.has(String(h.hostid))) { next.push(h); ids.add(String(h.hostid)) }
+    }
+    onSetSelected(next)
+  }, [filteredHosts, selectedHosts, onSetSelected])
+  const clearAll = useCallback(() => onSetSelected([]), [onSetSelected])
+
+  /* ── Per-host metric items ── */
+  const hostMetricItems = useMemo(() => {
+    return (selectedHosts || []).map((h) => {
+      const data = latestByHost?.[String(h.hostid)]
+      const items = data?.latest || []
+      return {
+        host: h,
+        cpu: pickCustomDashItem(items, 'cpu'),
+        memory: pickCustomDashItem(items, 'memory'),
+        uptime: pickCustomDashItem(items, 'uptime'),
+        latency: pickCustomDashItem(items, 'latency'),
+      }
+    })
+  }, [selectedHosts, latestByHost])
+
+  /* ── Filtered events (range + BH) ── */
+  const filteredEvents = useMemo(
+    () => applyCustomDashFilters(events || [], { bhEnabled, bhStart, bhEnd, bhDays, timeWindow }),
+    [events, bhEnabled, bhStart, bhEnd, bhDays, timeWindow]
+  )
+  const eventBuckets = useMemo(() => {
+    const buckets = { internet: [], usb: [] }
+    for (const ev of filteredEvents) {
+      const cat = classifyCustomDashEvent(ev)
+      if (cat) buckets[cat].push(ev)
+    }
+    return buckets
+  }, [filteredEvents])
+
+  /* ── Aggregates for tiles ── */
+  const cpuAgg = useMemo(() => aggregateMetric(hostMetricItems, 'cpu'), [hostMetricItems])
+  const memAgg = useMemo(() => aggregateMetric(hostMetricItems, 'memory'), [hostMetricItems])
+  /* Uptime tile shows range-aware uptime% (BH-aware) instead of the
+     last-value snapshot. Big number = worst host in range, sub-text = fleet avg. */
+  const upAgg = useMemo(() => {
+    const rows = (hostMetricItems || []).map((row) => {
+      const stat = uptimeStats?.[String(row.host.hostid)]
+      return { host: row.host, item: row.uptime, uptimePct: stat?.uptimePct }
+    })
+    const reporting = rows.filter((r) => r.item && r.uptimePct != null)
+    if (!reporting.length) {
+      return { reporting: [], total: rows.length, kind: 'uptimePct', summary: null, busy: uptimeStatsBusy }
+    }
+    const min = reporting.reduce((acc, r) => (acc == null || r.uptimePct < acc.uptimePct ? r : acc), null)
+    const avg = reporting.reduce((s, r) => s + r.uptimePct, 0) / reporting.length
+    return { reporting, total: rows.length, kind: 'uptimePct', summary: { value: min.uptimePct, host: min.host, avg }, busy: uptimeStatsBusy }
+  }, [hostMetricItems, uptimeStats, uptimeStatsBusy])
+  const latAgg = useMemo(() => aggregateMetric(hostMetricItems, 'latency'), [hostMetricItems])
+
+  /** Index InfluxDB crash events by lowercase host/store key for fast per-host lookup. */
+  const crashesByHost = useMemo(() => {
+    const map = new Map()
+    for (const ev of crashes || []) {
+      const keys = new Set([
+        String(ev.hostname || '').toLowerCase(),
+        String(ev.storeTag || '').toLowerCase(),
+      ].filter(Boolean))
+      for (const k of keys) {
+        if (!map.has(k)) map.set(k, [])
+        map.get(k).push(ev)
+      }
+    }
+    return map
+  }, [crashes])
+
+  const hostStatusColor = (h) => h?.availability === 'Available' ? '#22c55e' : h?.availability === 'Unavailable' ? '#ef4444' : '#64748b'
+
+  const rangeLabel = useMemo(() => {
+    if (range === 'custom' && customEpoch?.from && customEpoch?.to) {
+      const fromStr = new Date(customEpoch.from * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      const toStr = new Date(customEpoch.to * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      return `${fromStr} – ${toStr}`
+    }
+    const m = { '24h': 'Last 24 hours', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days' }
+    return m[range] || range
+  }, [range, customEpoch])
+
+  const bhLabel = useMemo(() => {
+    if (!bhEnabled) return 'OFF (24/7)'
+    const dayList = [...(bhDays || [])].sort((a, b) => a - b)
+    const allDays = dayList.length === 7
+    const weekdays = dayList.length === 5 && [1, 2, 3, 4, 5].every((d) => bhDays.has(d))
+    const dayShort = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+    const dayLabel = allDays ? 'Every day' : weekdays ? 'Mon–Fri' : dayList.map((d) => dayShort[d]).join(', ')
+    return `${String(bhStart).padStart(2, '0')}:00–${String(bhEnd).padStart(2, '0')}:00 · ${dayLabel}`
+  }, [bhEnabled, bhStart, bhEnd, bhDays])
+
+  const toggleBhDay = (d) => {
+    const next = new Set(bhDays)
+    if (next.has(d)) next.delete(d); else next.add(d)
+    if (next.size === 0) return
+    onBhDays(next)
+  }
+  const presetWeekdays = () => onBhDays(new Set([1, 2, 3, 4, 5]))
+  const presetEveryday = () => onBhDays(new Set([0, 1, 2, 3, 4, 5, 6]))
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* ── Toolbar: host search + select ── */}
+      <div className="opm-toolbar">
+        <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span className="opm-toolbar-label">Hosts</span>
+          <div ref={dropdownRef} style={{ position: 'relative', flex: '1 1 320px', maxWidth: 560 }}>
+            <button
+              type="button"
+              onClick={onToggleDropdown}
+              style={{
+                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '8px 14px', borderRadius: 9, border: dropdownOpen ? '1px solid var(--accent)' : '1px solid var(--border)',
+                background: 'var(--bg3)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', cursor: 'pointer',
+                boxShadow: dropdownOpen ? '0 0 0 3px rgba(59,130,246,.12)' : 'none',
+              }}
+            >
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
+                {selectedHosts?.length
+                  ? <>
+                      <span className="opm-pill" style={{ background: 'rgba(59,130,246,.12)', color: 'var(--accent)' }}>{selectedHosts.length}</span>
+                      <span style={{ fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {selectedHosts.length === 1
+                          ? (selectedHosts[0].name || selectedHosts[0].host)
+                          : `${selectedHosts.length} hosts selected`}
+                      </span>
+                    </>
+                  : <span style={{ color: 'var(--text3)' }}>Search and select one or more hostnames…</span>}
+              </span>
+              <span style={{ fontSize: 10, color: 'var(--text3)' }}>{dropdownOpen ? '▲' : '▼'}</span>
+            </button>
+
+            {dropdownOpen && (
+              <div style={{
+                position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0, zIndex: 30,
+                border: '1px solid var(--border)', borderRadius: 10, background: 'var(--bg2)',
+                boxShadow: '0 12px 32px rgba(0,0,0,.28)', maxHeight: 420, display: 'flex', flexDirection: 'column',
+              }}>
+                <div style={{ padding: 8, borderBottom: '1px solid var(--border)', background: 'var(--bg3)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div className="opm-search">
+                    <input
+                      autoFocus
+                      type="search"
+                      value={search}
+                      onChange={(e) => onSearch(e.target.value)}
+                      placeholder="Search by name, host, or IP…"
+                    />
+                    <span className="opm-search-icon">⌕</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>
+                    <span>{selectedHosts?.length || 0} selected · {filteredHosts.length} visible</span>
+                    <button type="button" onClick={selectAllVisible} disabled={!filteredHosts.length}
+                      style={{ marginLeft: 'auto', padding: '3px 10px', borderRadius: 5, fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 700, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--accent)', cursor: filteredHosts.length ? 'pointer' : 'not-allowed', opacity: filteredHosts.length ? 1 : .4 }}>
+                      Select visible
+                    </button>
+                    <button type="button" onClick={clearAll} disabled={!selectedHosts?.length}
+                      style={{ padding: '3px 10px', borderRadius: 5, fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 700, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text3)', cursor: selectedHosts?.length ? 'pointer' : 'not-allowed', opacity: selectedHosts?.length ? 1 : .4 }}>
+                      Clear all
+                    </button>
+                  </div>
+                </div>
+                <div style={{ overflowY: 'auto', flex: 1 }}>
+                  {hostsBusy && (
+                    <div style={{ padding: 16, fontSize: 12, color: 'var(--text3)', fontFamily: 'var(--mono)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span className="np-page-loading-dot" style={{ width: 12, height: 12 }} />Loading hosts…
+                    </div>
+                  )}
+                  {!hostsBusy && filteredHosts.map((h) => {
+                    const checked = selectedIdSet.has(String(h.hostid))
+                    return (
+                      <button
+                        key={h.hostid}
+                        type="button"
+                        onClick={() => toggleHost(h)}
+                        style={{
+                          width: '100%', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 10,
+                          padding: '8px 12px', border: 'none', borderBottom: '1px solid var(--border)',
+                          background: checked ? 'rgba(59,130,246,.10)' : 'transparent',
+                          color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', cursor: 'pointer',
+                        }}
+                        className="opm-row-hover"
+                      >
+                        <span style={{
+                          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                          width: 16, height: 16, borderRadius: 4,
+                          border: checked ? '1px solid var(--accent)' : '1px solid var(--border)',
+                          background: checked ? 'var(--accent)' : 'var(--bg2)', color: '#fff', fontSize: 11, fontWeight: 800, flexShrink: 0,
+                        }}>{checked ? '✓' : ''}</span>
+                        <span style={{ width: 8, height: 8, borderRadius: '50%', background: hostStatusColor(h), flexShrink: 0 }} />
+                        <span style={{ flex: 1, overflow: 'hidden' }}>
+                          <div style={{ fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{h.name || h.host}</div>
+                          <div style={{ fontSize: 10, color: 'var(--text3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {h.host}{h.ip && h.ip !== h.host ? ` · ${h.ip}` : ''}
+                          </div>
+                        </span>
+                      </button>
+                    )
+                  })}
+                  {!hostsBusy && hosts && filteredHosts.length === 0 && (
+                    <div style={{ padding: 16, fontSize: 12, color: 'var(--text3)', fontFamily: 'var(--mono)', textAlign: 'center' }}>
+                      No hosts match &quot;{search}&quot;.
+                    </div>
+                  )}
+                  {!hostsBusy && hosts && search.trim() === '' && hosts.length > 500 && (
+                    <div style={{ padding: '8px 12px', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', textAlign: 'center', borderTop: '1px solid var(--border)' }}>
+                      Showing first 500 of {hosts.length}. Type to filter.
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {!!selectedHosts?.length && (
+            <button type="button" onClick={onRefresh}
+              style={{ padding: '7px 14px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 600 }}>
+              ↻ Refresh
+            </button>
+          )}
+        </div>
+
+        {/* Range chips */}
+        <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span className="opm-toolbar-label">Range</span>
+          {CUSTOM_DASH_RANGE_CHIPS.map((r) => {
+            const active = range === r.id
+            return (
+              <button key={r.id} type="button" onClick={() => onRangeChange(r.id)}
+                style={{
+                  padding: '4px 12px', borderRadius: 6, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600,
+                  border: active ? '1px solid var(--accent)' : '1px solid var(--border)',
+                  background: active ? 'rgba(59,130,246,.12)' : 'transparent',
+                  color: active ? 'var(--accent)' : 'var(--text3)', cursor: 'pointer', transition: 'all .12s',
+                }}>
+                {r.label}
+              </button>
+            )
+          })}
+          <span style={{ width: 1, height: 14, background: 'var(--border)', margin: '0 4px' }} />
+          <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 600 }}>
+            {rangeLabel}
+          </span>
+        </div>
+
+        {range === 'custom' && (
+          <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span className="opm-toolbar-label">Custom</span>
+            <input type="datetime-local" value={customFrom} onChange={(e) => onCustomFrom(e.target.value)}
+              style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none' }} />
+            <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>to</span>
+            <input type="datetime-local" value={customTo} onChange={(e) => onCustomTo(e.target.value)}
+              style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none' }} />
+            <button type="button" onClick={onApplyCustomRange} disabled={!customFrom || !customTo}
+              style={{ padding: '5px 14px', borderRadius: 5, fontSize: 11, fontWeight: 700, fontFamily: 'var(--mono)', border: 'none', background: 'var(--accent)', color: '#fff', cursor: customFrom && customTo ? 'pointer' : 'not-allowed', opacity: customFrom && customTo ? 1 : .4 }}>
+              Apply
+            </button>
+            {customEpoch && <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', fontSize: 10 }}>Custom range active</span>}
+          </div>
+        )}
+
+        {/* Business hours toolbar */}
+        <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span className="opm-toolbar-label">Business hours</span>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text2)', cursor: 'pointer' }}>
+            <input type="checkbox" checked={!!bhEnabled} onChange={(e) => onBhEnabled(e.target.checked)} />
+            Apply BH filter
+          </label>
+          <span style={{ width: 1, height: 14, background: 'var(--border)' }} />
+          <select value={bhStart} onChange={(e) => onBhStart(Number(e.target.value))} disabled={!bhEnabled}
+            style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: bhEnabled ? 1 : .5 }}>
+            {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+          </select>
+          <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>to</span>
+          <select value={bhEnd} onChange={(e) => onBhEnd(Number(e.target.value))} disabled={!bhEnabled}
+            style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: bhEnabled ? 1 : .5 }}>
+            {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+          </select>
+          <span style={{ width: 1, height: 14, background: 'var(--border)' }} />
+          <div style={{ display: 'inline-flex', gap: 4 }}>
+            {CUSTOM_DASH_DAY_LABELS.map((lbl, idx) => {
+              const on = bhDays.has(idx)
+              return (
+                <button key={idx} type="button" onClick={() => toggleBhDay(idx)} disabled={!bhEnabled}
+                  title={CUSTOM_DASH_DAY_FULL[idx]}
+                  style={{
+                    width: 24, height: 24, borderRadius: 5, fontSize: 10, fontWeight: 700, fontFamily: 'var(--mono)',
+                    border: on ? '1px solid var(--accent)' : '1px solid var(--border)',
+                    background: on ? 'rgba(59,130,246,.18)' : 'var(--bg3)',
+                    color: on ? 'var(--accent)' : 'var(--text3)', cursor: bhEnabled ? 'pointer' : 'not-allowed', opacity: bhEnabled ? 1 : .5,
+                  }}>
+                  {lbl}
+                </button>
+              )
+            })}
+          </div>
+          <button type="button" onClick={presetWeekdays} disabled={!bhEnabled}
+            style={{ padding: '3px 10px', borderRadius: 5, fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text3)', cursor: bhEnabled ? 'pointer' : 'not-allowed', opacity: bhEnabled ? 1 : .5 }}>
+            Mon–Fri
+          </button>
+          <button type="button" onClick={presetEveryday} disabled={!bhEnabled}
+            style={{ padding: '3px 10px', borderRadius: 5, fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text3)', cursor: bhEnabled ? 'pointer' : 'not-allowed', opacity: bhEnabled ? 1 : .5 }}>
+            All days
+          </button>
+          <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>{bhLabel}</span>
+        </div>
+      </div>
+
+      {!selectedHosts?.length && (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, border: '1px dashed var(--border)', borderRadius: 12, background: 'var(--bg2)', padding: 60 }}>
+          <span style={{ fontSize: 40, opacity: .25 }}>🧩</span>
+          <span style={{ fontSize: 14, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Pick one or more hosts to see the custom dashboard</span>
+          <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', opacity: .65 }}>
+            CPU · Memory · Uptime · Avg Latency · Internet disconnects · USB connect/disconnect · App crashes
+          </span>
+        </div>
+      )}
+
+      {!!selectedHosts?.length && (
+        <>
+          {/* Selected hosts chips */}
+          <div className="opm-toolbar" style={{ padding: '8px 12px' }}>
+            <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <span className="opm-toolbar-label">Selected</span>
+              {selectedHosts.slice(0, 30).map((h) => (
+                <span key={h.hostid} className="opm-pill"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: 'var(--bg3)', color: 'var(--text2)', border: '1px solid var(--border)', fontSize: 11 }}>
+                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: hostStatusColor(h) }} />
+                  {h.name || h.host}
+                  <button type="button" onClick={() => onSetSelected(selectedHosts.filter((x) => x.hostid !== h.hostid))}
+                    title="Remove"
+                    style={{ border: 'none', background: 'transparent', color: 'var(--text3)', cursor: 'pointer', fontSize: 12, padding: 0, lineHeight: 1 }}>
+                    ✕
+                  </button>
+                </span>
+              ))}
+              {selectedHosts.length > 30 && (
+                <span className="opm-pill" style={{ background: 'var(--bg3)', color: 'var(--text3)' }}>+{selectedHosts.length - 30} more</span>
+              )}
+            </div>
+          </div>
+
+          {/* Widget grid */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+            <CustomDashMetricTile
+              kind="cpu" active={activeWidget === 'cpu'} onClick={() => onSelectWidget('cpu')}
+              title="CPU Usage" icon="◇" color="#3b82f6"
+              busy={latestBusy} agg={cpuAgg}
+            />
+            <CustomDashMetricTile
+              kind="memory" active={activeWidget === 'memory'} onClick={() => onSelectWidget('memory')}
+              title="Memory Usage" icon="▤" color="#8b5cf6"
+              busy={latestBusy} agg={memAgg}
+            />
+            <CustomDashMetricTile
+              kind="uptime" active={activeWidget === 'uptime'} onClick={() => onSelectWidget('uptime')}
+              title={bhEnabled ? 'Uptime % (BH)' : 'Uptime % (range)'} icon="↑" color="#22c55e"
+              busy={latestBusy || uptimeStatsBusy} agg={upAgg}
+              contextLine={`${rangeLabel}${bhEnabled ? ` · ${bhLabel}` : ''}`}
+            />
+            <CustomDashMetricTile
+              kind="latency" active={activeWidget === 'latency'} onClick={() => onSelectWidget('latency')}
+              title="Avg Latency" icon="⇅" color="#06b6d4"
+              busy={latestBusy} agg={latAgg}
+            />
+            <CustomDashEventTile
+              kind="internet" active={activeWidget === 'internet'} onClick={() => onSelectWidget('internet')}
+              title="Internet Disconnect" icon="📡" color="#f97316"
+              busy={eventsBusy} bucket={eventBuckets.internet}
+            />
+            <CustomDashEventTile
+              kind="usb" active={activeWidget === 'usb'} onClick={() => onSelectWidget('usb')}
+              title="USB Connect / Disconnect" icon="🔌" color="#06b6d4"
+              busy={eventsBusy} bucket={eventBuckets.usb}
+            />
+            <CustomDashCrashTile
+              active={activeWidget === 'appCrash'} onClick={() => onSelectWidget('appCrash')}
+              busy={crashesBusy} crashes={crashes} error={crashesError}
+            />
+          </div>
+
+          {/* Detail panel for the active widget */}
+          <CustomDashDetailPanel
+            apiBase={apiBase}
+            chartOpts={chartOpts}
+            widget={activeWidget}
+            hostMetricItems={hostMetricItems}
+            internetEvents={eventBuckets.internet}
+            usbEvents={eventBuckets.usb}
+            crashEvents={crashes}
+            crashesBusy={crashesBusy}
+            crashesError={crashesError}
+            crashesByHost={crashesByHost}
+            eventsBusy={eventsBusy}
+            eventLimit={eventLimit}
+            onEventLimit={onEventLimit}
+            expandedItem={expandedItem}
+            onExpandItem={onExpandItem}
+            rangeLabel={rangeLabel}
+            bhEnabled={bhEnabled}
+            bhStart={bhStart}
+            bhEnd={bhEnd}
+            bhDays={bhDays}
+            bhLabel={bhLabel}
+            timeWindow={timeWindow}
+            uptimeStats={uptimeStats}
+            uptimeStatsBusy={uptimeStatsBusy}
+            onOpenRebootModal={onOpenRebootModal}
+            onOpenCrashModal={onOpenCrashModal}
+          />
+        </>
+      )}
+    </div>
+  )
+}
+
+/** Aggregate CPU / memory / uptime values across selected hosts. */
+function aggregateMetric(hostMetricItems, kind) {
+  const rows = (hostMetricItems || []).map((row) => {
+    const it = row[kind]
+    const v = it ? Number(it._displayValue ?? it.value) : null
+    return { host: row.host, item: it, value: Number.isFinite(v) ? v : null }
+  })
+  const reporting = rows.filter((r) => r.item && r.value != null)
+  if (kind === 'uptime') {
+    if (!reporting.length) return { reporting: [], total: rows.length, kind, summary: null }
+    const min = reporting.reduce((acc, r) => (acc == null || r.value < acc.value ? r : acc), null)
+    return { reporting, total: rows.length, kind, summary: { value: min.value, host: min.host } }
+  }
+  if (!reporting.length) return { reporting: [], total: rows.length, kind, summary: null }
+  const sum = reporting.reduce((s, r) => s + r.value, 0)
+  const avg = sum / reporting.length
+  const max = reporting.reduce((acc, r) => (acc == null || r.value > acc.value ? r : acc), null)
+  return { reporting, total: rows.length, kind, summary: { value: avg, max } }
+}
+
+/** Format a latency value (in ms) for display. */
+function fmtLatencyMs(v) {
+  if (!Number.isFinite(v)) return '—'
+  if (v >= 1000) return `${(v / 1000).toFixed(2)} s`
+  if (v >= 100) return `${v.toFixed(0)} ms`
+  if (v >= 10) return `${v.toFixed(1)} ms`
+  return `${v.toFixed(2)} ms`
+}
+
+/** Aggregate-aware metric tile (CPU / memory / uptime% / latency). */
+function CustomDashMetricTile({ active, onClick, title, icon, color, busy, agg, contextLine }) {
+  let bigText = '—'
+  let subText = ''
+  let keyHint = ''
+  let meterPct = 0
+  /* Allow the tile to override the accent color for context-sensitive metrics
+     (e.g. uptime% green/amber/red by health threshold). */
+  let bigColor = color
+  const isLoading = busy || agg?.busy
+  if (isLoading && !agg?.summary) {
+    bigText = '…'
+  } else if (agg?.summary) {
+    if (agg.kind === 'uptimePct') {
+      /* Range-aware uptime%: big number is the worst host's %, subtext shows fleet avg. */
+      const pct = agg.summary.value
+      bigText = `${pct.toFixed(2)}%`
+      meterPct = Math.min(100, Math.max(0, pct))
+      bigColor = pct >= 99 ? '#22c55e' : pct >= 95 ? '#eab308' : '#ef4444'
+      const avgTxt = Number.isFinite(agg.summary.avg) ? `Avg ${agg.summary.avg.toFixed(2)}%` : ''
+      const hostTxt = agg.summary.host ? ` · Min ${agg.summary.host.name || agg.summary.host.host}` : ''
+      subText = `${avgTxt}${hostTxt}`
+    } else if (agg.kind === 'uptime') {
+      /* Legacy snapshot uptime (kept for compatibility — not used by the tile). */
+      bigText = fmtValue(Number(agg.summary.value), 'uptime')
+      subText = agg.summary.host ? `Min · ${agg.summary.host.name || agg.summary.host.host}` : ''
+    } else if (agg.kind === 'latency') {
+      bigText = fmtLatencyMs(agg.summary.value)
+      meterPct = Math.min(100, Math.max(0, (agg.summary.value / 200) * 100))
+      subText = agg.summary.max ? `Peak ${fmtLatencyMs(agg.summary.max.value)} · ${agg.summary.max.host.name || agg.summary.max.host.host}` : ''
+    } else {
+      bigText = `${agg.summary.value.toFixed(1)}%`
+      meterPct = Math.min(100, Math.max(0, agg.summary.value))
+      subText = agg.summary.max ? `Peak ${agg.summary.max.value.toFixed(1)}% · ${agg.summary.max.host.name || agg.summary.max.host.host}` : ''
+    }
+  } else if (agg && !agg.summary && !isLoading) {
+    /* Reporting list is empty (e.g. no matching items on the selected hosts). */
+    bigText = '—'
+  }
+  /** Show the most-common matched item key so the user can verify the source. */
+  const sourceKey = useMemo(() => {
+    const keys = new Map()
+    for (const r of agg?.reporting || []) {
+      const k = r.item?.key || ''
+      if (!k) continue
+      keys.set(k, (keys.get(k) || 0) + 1)
+    }
+    if (!keys.size) return ''
+    let best = ''
+    let max = 0
+    for (const [k, n] of keys) { if (n > max) { max = n; best = k } }
+    return keys.size === 1 ? best : `${best} (+${keys.size - 1} variants)`
+  }, [agg])
+  if (sourceKey) keyHint = sourceKey
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="opm-row-hover"
+      title={keyHint || undefined}
+      style={{
+        position: 'relative', textAlign: 'left',
+        padding: 14, borderRadius: 12, cursor: 'pointer',
+        background: 'linear-gradient(135deg,var(--bg2) 0%,var(--bg3) 100%)',
+        border: active ? '1px solid var(--accent)' : '1px solid var(--border)',
+        boxShadow: active ? '0 0 0 3px rgba(59,130,246,.12)' : 'none',
+        transition: 'all .18s', overflow: 'hidden',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text3)', letterSpacing: .6, textTransform: 'uppercase', fontFamily: 'var(--mono)' }}>{title}</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, borderRadius: 7, background: `${color}20`, color, fontSize: 13 }}>{icon}</span>
+      </div>
+      <div style={{ marginTop: 8, fontSize: 24, fontWeight: 800, color: bigColor, fontFamily: 'var(--mono)', lineHeight: 1.1 }}>
+        {bigText}
+      </div>
+      {agg?.kind !== 'uptime' && agg?.summary && (
+        <div style={{ marginTop: 10, height: 5, borderRadius: 3, background: 'var(--bg4)', overflow: 'hidden' }}>
+          <div style={{ width: `${meterPct}%`, height: '100%', background: bigColor, transition: 'width .35s' }} />
+        </div>
+      )}
+      <div style={{ marginTop: 6, fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+        {agg ? `${agg.reporting.length}/${agg.total} hosts reporting` : ''}
+      </div>
+      {contextLine && (
+        <div style={{ marginTop: 2, fontSize: 9, color: 'var(--text3)', fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={contextLine}>
+          {contextLine}
+        </div>
+      )}
+      {subText && (
+        <div style={{ marginTop: 2, fontSize: 10, color: 'var(--text2)', fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {subText}
+        </div>
+      )}
+      {keyHint && (
+        <div style={{ marginTop: 2, fontSize: 9, color: 'var(--text3)', fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={keyHint}>
+          src: {keyHint}
+        </div>
+      )}
+      <div style={{ marginTop: 4, fontSize: 9, color: active ? color : 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+        Click for full per-host log →
+      </div>
+    </button>
+  )
+}
+
+/** Tile for an event bucket (internet / usb). */
+/** Tile for InfluxDB-backed application crash events (independent of Zabbix events). */
+function CustomDashCrashTile({ active, onClick, busy, crashes, error }) {
+  const list = crashes || []
+  const total = list.reduce((acc, ev) => acc + (Number(ev.count) || 1), 0)
+  const critical = list.filter((ev) => ev.severity === 'critical').reduce((acc, ev) => acc + (Number(ev.count) || 1), 0)
+  const types = new Set(list.map((ev) => ev.crashType).filter(Boolean)).size
+  const color = '#ef4444'
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="opm-row-hover"
+      title={error || undefined}
+      style={{
+        position: 'relative', textAlign: 'left',
+        padding: 14, borderRadius: 12, cursor: 'pointer',
+        background: 'linear-gradient(135deg,var(--bg2) 0%,var(--bg3) 100%)',
+        border: active ? '1px solid var(--accent)' : '1px solid var(--border)',
+        boxShadow: active ? '0 0 0 3px rgba(59,130,246,.12)' : 'none',
+        transition: 'all .18s', overflow: 'hidden',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text3)', letterSpacing: .6, textTransform: 'uppercase', fontFamily: 'var(--mono)' }}>App Crash Events</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, borderRadius: 7, background: `${color}20`, color, fontSize: 13 }}>⚠</span>
+      </div>
+      <div style={{ marginTop: 8, fontSize: 24, fontWeight: 800, color, fontFamily: 'var(--mono)', lineHeight: 1.1 }}>
+        {busy ? '…' : total.toLocaleString()}
+      </div>
+      <div style={{ marginTop: 6, display: 'flex', gap: 10, fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)', flexWrap: 'wrap' }}>
+        <span><span style={{ color: '#ef4444', fontWeight: 700 }}>{critical}</span> critical</span>
+        <span><span style={{ color: 'var(--text2)', fontWeight: 700 }}>{types}</span> types</span>
+        <span><span style={{ color: 'var(--text2)', fontWeight: 700 }}>{list.length}</span> entries</span>
+      </div>
+      {error
+        ? <div style={{ marginTop: 4, fontSize: 9, color: '#ef4444', fontFamily: 'var(--mono)', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={error}>
+            InfluxDB: {error}
+          </div>
+        : <div style={{ marginTop: 4, fontSize: 9, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700 }}>src: InfluxDB · app_crash, app_hang, bsod_kernel_power…</div>}
+      <div style={{ marginTop: 4, fontSize: 9, color: active ? color : 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+        Click for full event log →
+      </div>
+    </button>
+  )
+}
+
+function CustomDashEventTile({ active, onClick, title, icon, color, busy, bucket }) {
+  const total = bucket?.length || 0
+  const problems = (bucket || []).filter((e) => e.status === 'PROBLEM').length
+  const resolved = total - problems
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="opm-row-hover"
+      style={{
+        position: 'relative', textAlign: 'left',
+        padding: 14, borderRadius: 12, cursor: 'pointer',
+        background: 'linear-gradient(135deg,var(--bg2) 0%,var(--bg3) 100%)',
+        border: active ? '1px solid var(--accent)' : '1px solid var(--border)',
+        boxShadow: active ? '0 0 0 3px rgba(59,130,246,.12)' : 'none',
+        transition: 'all .18s', overflow: 'hidden',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text3)', letterSpacing: .6, textTransform: 'uppercase', fontFamily: 'var(--mono)' }}>{title}</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, borderRadius: 7, background: `${color}20`, color, fontSize: 13 }}>{icon}</span>
+      </div>
+      <div style={{ marginTop: 8, fontSize: 24, fontWeight: 800, color, fontFamily: 'var(--mono)', lineHeight: 1.1 }}>
+        {busy ? '…' : total.toLocaleString()}
+      </div>
+      <div style={{ marginTop: 6, display: 'flex', gap: 10, fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>
+        <span><span style={{ color: '#ef4444', fontWeight: 700 }}>{problems}</span> active</span>
+        <span><span style={{ color: '#22c55e', fontWeight: 700 }}>{resolved}</span> resolved</span>
+      </div>
+      <div style={{ marginTop: 4, fontSize: 9, color: active ? color : 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+        Click for full event log →
+      </div>
+    </button>
+  )
+}
+
+/** Detail panel rendered below the widget grid. */
+function CustomDashDetailPanel({
+  apiBase, chartOpts, widget,
+  hostMetricItems,
+  internetEvents, usbEvents,
+  crashEvents, crashesBusy, crashesError, crashesByHost,
+  eventsBusy, eventLimit, onEventLimit,
+  expandedItem, onExpandItem,
+  rangeLabel, bhEnabled, bhStart, bhEnd, bhDays, bhLabel, timeWindow,
+  uptimeStats, uptimeStatsBusy,
+  onOpenRebootModal, onOpenCrashModal,
+}) {
+  if (!widget) {
+    return (
+      <Widget title="Details">
+        <div style={{ padding: '24px 8px', textAlign: 'center', color: 'var(--text3)', fontSize: 12, fontFamily: 'var(--mono)' }}>
+          Click any widget above to see its full per-host log here.
+        </div>
+      </Widget>
+    )
+  }
+  if (widget === 'cpu' || widget === 'memory' || widget === 'uptime' || widget === 'latency') {
+    const titleMap = {
+      cpu: 'CPU Usage — per-host detail',
+      memory: 'Memory Usage — per-host detail',
+      uptime: 'Uptime — per-host detail',
+      latency: 'Avg Latency — per-host detail',
+    }
+    const rows = (hostMetricItems || []).map((row) => ({ host: row.host, item: row[widget] }))
+    const reporting = rows.filter((r) => r.item)
+    const isUptimeWidget = widget === 'uptime'
+    const isLatencyWidget = widget === 'latency'
+    return (
+      <Widget title={titleMap[widget]} badge={`${reporting.length}/${rows.length}`} badgeColor="blue" noPad>
+        <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 14, fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text3)', flexWrap: 'wrap' }}>
+          <span>Range: <strong style={{ color: 'var(--text2)' }}>{rangeLabel}</strong></span>
+          {bhEnabled && <span>BH window: <strong style={{ color: 'var(--text2)' }}>{bhLabel}</strong> <em style={{ color: 'var(--text3)' }}>(stats + charts use BH window only)</em></span>}
+          {isUptimeWidget && uptimeStatsBusy && <span style={{ color: 'var(--accent)' }}>Computing range uptime…</span>}
+        </div>
+        {!rows.length && (
+          <div style={{ padding: 24, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12, textAlign: 'center' }}>
+            No hosts selected.
+          </div>
+        )}
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {rows.map(({ host, item }) => {
+            const isExp = expandedItem && expandedItem.hostid === host.hostid && expandedItem.metric === widget
+            const v = item ? Number(item._displayValue ?? item.value) : null
+            const display = item
+              ? (widget === 'uptime'
+                  ? fmtValue(Number(item.value), 'uptime')
+                  : (isLatencyWidget ? fmtLatencyMs(v) : fmtValue(v, item.units)))
+              : '—'
+            const isPct = item && (String(item.units || '').includes('%') || item.units === 'percent')
+            /* For latency, drive the meter with a 0–200 ms scale and color it
+               by RTT health (green ≤50, amber ≤150, red >150). */
+            const latencyMeter = isLatencyWidget && Number.isFinite(v)
+              ? Math.min(100, Math.max(0, (v / 200) * 100))
+              : 0
+            const meterPct = isLatencyWidget
+              ? latencyMeter
+              : (isPct && Number.isFinite(v) ? Math.min(100, Math.max(0, v)) : 0)
+            const valueColor = isLatencyWidget
+              ? (v >= 150 ? '#ef4444' : v >= 50 ? '#eab308' : '#22c55e')
+              : (isPct && v >= 90 ? '#ef4444' : isPct && v >= 75 ? '#eab308' : 'var(--accent)')
+            /* Range-based uptime stats — only present for the uptime widget. */
+            const upStat = isUptimeWidget ? uptimeStats?.[String(host.hostid)] : null
+            const upPct = upStat?.uptimePct
+            const upPctColor = upPct == null ? 'var(--text3)' : upPct >= 99 ? '#22c55e' : upPct >= 95 ? '#eab308' : '#ef4444'
+            /* Per-host crash count from InfluxDB (uptime widget only). */
+            const hostKey1 = String(host.host || host.name || '').toLowerCase()
+            const hostKey2 = String(host.name || '').toLowerCase()
+            const hostCrashEvents = isUptimeWidget
+              ? ((crashesByHost?.get(hostKey1) || crashesByHost?.get(hostKey2) || []))
+              : []
+            const hostCrashCount = hostCrashEvents.reduce((acc, ev) => acc + (Number(ev.count) || 1), 0)
+            const stopAndCall = (e, fn) => { e.preventDefault(); e.stopPropagation(); fn?.(host) }
+            return (
+              <div key={host.hostid} style={{ borderBottom: '1px solid var(--border)' }}>
+                <div
+                  onClick={() => item && onExpandItem(isExp ? null : { hostid: host.hostid, metric: widget, item })}
+                  className="opm-row-hover"
+                  style={{
+                    width: '100%', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 12,
+                    padding: '10px 14px', background: isExp ? 'rgba(59,130,246,.06)' : 'transparent',
+                    cursor: item ? 'pointer' : 'default', fontSize: 12, fontFamily: 'var(--mono)', color: 'var(--text)',
+                  }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: host.availability === 'Available' ? '#22c55e' : host.availability === 'Unavailable' ? '#ef4444' : '#64748b', flexShrink: 0 }} />
+                  <div style={{ flex: '1 1 200px', minWidth: 160, overflow: 'hidden' }}>
+                    <div style={{ fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{host.name || host.host}</div>
+                    <div style={{ fontSize: 10, color: 'var(--text3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item?.key ? `${item.name || ''}\n${item.key}` : ''}>
+                      {item ? (
+                        <>
+                          {item.name || '—'}
+                          {item.key && <span style={{ marginLeft: 6, opacity: .65 }}>· {item.key}</span>}
+                        </>
+                      ) : 'No metric'}
+                    </div>
+                  </div>
+                  {!isUptimeWidget && (
+                    <div style={{ flex: '0 1 220px', minWidth: 120, display: (isPct || isLatencyWidget) ? 'flex' : 'none', alignItems: 'center', gap: 8 }}>
+                      <div style={{ flex: 1, height: 5, borderRadius: 3, background: 'var(--bg4)', overflow: 'hidden' }}>
+                        <div style={{ width: `${meterPct}%`, height: '100%', background: valueColor, transition: 'width .3s' }} />
+                      </div>
+                    </div>
+                  )}
+                  {/* Range-based uptime columns */}
+                  {isUptimeWidget && (
+                    <>
+                      <div style={{ width: 100, textAlign: 'right' }} title="Uptime % over selected range (BH-aware)">
+                        <div style={{ fontSize: 10, color: 'var(--text3)' }}>Uptime ({bhEnabled ? 'BH' : 'range'})</div>
+                        <div style={{ fontWeight: 700, color: upPctColor }}>{upPct == null ? '—' : `${upPct.toFixed(2)}%`}</div>
+                      </div>
+                      <button type="button" onClick={(e) => upStat?.rebootCount > 0 && stopAndCall(e, onOpenRebootModal)}
+                        title={upStat?.rebootCount > 0 ? `View ${upStat.rebootCount} reboot${upStat.rebootCount > 1 ? 's' : ''} for ${host.name || host.host}` : 'No reboots in range'}
+                        disabled={!upStat?.rebootCount}
+                        style={{ width: 80, textAlign: 'right', border: 'none', background: 'transparent', padding: 0, cursor: upStat?.rebootCount ? 'pointer' : 'default' }}>
+                        <div style={{ fontSize: 10, color: 'var(--text3)' }}>Reboots</div>
+                        <div style={{ fontWeight: 700, color: upStat?.rebootCount ? '#f97316' : 'var(--text2)', textDecoration: upStat?.rebootCount ? 'underline dotted' : 'none' }}>
+                          {upStat?.rebootCount ?? '—'}
+                        </div>
+                      </button>
+                      <button type="button" onClick={(e) => hostCrashCount > 0 && stopAndCall(e, onOpenCrashModal)}
+                        title={hostCrashCount > 0 ? `View ${hostCrashCount} crash event${hostCrashCount > 1 ? 's' : ''} for ${host.name || host.host}` : 'No crashes in range'}
+                        disabled={!hostCrashCount}
+                        style={{ width: 90, textAlign: 'right', border: 'none', background: 'transparent', padding: 0, cursor: hostCrashCount ? 'pointer' : 'default' }}>
+                        <div style={{ fontSize: 10, color: 'var(--text3)' }}>App Crashes</div>
+                        <div style={{ fontWeight: 700, color: hostCrashCount ? '#ef4444' : 'var(--text2)', textDecoration: hostCrashCount ? 'underline dotted' : 'none' }}>
+                          {crashesBusy ? '…' : (hostCrashCount || (crashEvents ? 0 : '—'))}
+                        </div>
+                      </button>
+                      <div style={{ width: 100, textAlign: 'right' }} title="Total downtime detected in range (BH-aware)">
+                        <div style={{ fontSize: 10, color: 'var(--text3)' }}>Downtime</div>
+                        <div style={{ fontWeight: 700, color: upStat?.downSec ? '#ef4444' : 'var(--text2)' }}>{upStat ? fmtValue(upStat.downSec || 0, 'uptime') : '—'}</div>
+                      </div>
+                      <div style={{ width: 130, fontSize: 10, color: 'var(--text3)', textAlign: 'right' }} title="Most recent reboot detected within range">
+                        <div>Last reboot</div>
+                        <div style={{ color: upStat?.lastReboot ? 'var(--text2)' : 'var(--text3)', fontWeight: 600 }}>
+                          {upStat?.lastReboot ? fmtClock(upStat.lastReboot) : (upStat ? 'none' : '—')}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                  <div style={{ minWidth: 80, fontWeight: 700, color: valueColor, textAlign: 'right' }}
+                    title={isUptimeWidget ? 'Current uptime (latest value)' : isLatencyWidget ? 'Latest latency reading (ms)' : 'Latest value'}>
+                    {display}
+                  </div>
+                  {!isUptimeWidget && (
+                    <div style={{ width: 130, fontSize: 10, color: 'var(--text3)', textAlign: 'right' }}>
+                      {item ? <>{fmtClock(item.lastclock)}<div style={{ fontSize: 9 }}>{relAge(item.lastclock)} ago</div></> : '—'}
+                    </div>
+                  )}
+                  <span style={{ width: 14, color: 'var(--text3)', textAlign: 'right' }}>{item ? (isExp ? '▴' : '▾') : ''}</span>
+                </div>
+                {isExp && item && (
+                  <div style={{ padding: '8px 14px 14px', borderTop: '1px dashed var(--border)' }}>
+                    <ItemHistoryChart
+                      key={`${host.hostid}-${item.itemid}-${widget}`}
+                      itemId={item.itemid}
+                      itemName={`${host.name || host.host} · ${isUptimeWidget ? 'Availability' : isLatencyWidget ? 'Latency' : (item.name || item.key)}`}
+                      itemUnits={isUptimeWidget ? '%' : isLatencyWidget ? 'ms' : item.units}
+                      chartOpts={chartOpts}
+                      apiBase={apiBase}
+                      defaultRange={timeWindow}
+                      displayMode={isUptimeWidget ? 'availability' : 'value'}
+                      valueScale={
+                        isLatencyWidget && (
+                          /^(s|sec|seconds)$/i.test(String(item.units || '').trim()) ||
+                          /icmppingsec|net\.tcp\.service\.perf/i.test(String(item.key || ''))
+                        ) ? 1000 : 1
+                      }
+                      bh={{ bhEnabled, bhStart, bhEnd, bhDays }}
+                    />
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </Widget>
+    )
+  }
+
+  /* Crash log uses InfluxDB (different shape) — render its own table. */
+  if (widget === 'appCrash') {
+    return (
+      <Widget
+        title="App crash — full event log"
+        badge={(crashEvents || []).length}
+        badgeColor="red"
+        noPad
+      >
+        <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 14, fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text3)', flexWrap: 'wrap' }}>
+          <span>Source: <strong style={{ color: 'var(--text2)' }}>InfluxDB</strong></span>
+          <span>Range: <strong style={{ color: 'var(--text2)' }}>{rangeLabel}</strong></span>
+          {bhEnabled && <span>BH: <strong style={{ color: 'var(--text2)' }}>{bhLabel}</strong> <em>(applies to Zabbix events only)</em></span>}
+        </div>
+        {crashesError && (
+          <div style={{ padding: '10px 14px', color: '#ef4444', fontFamily: 'var(--mono)', fontSize: 12 }}>
+            InfluxDB error: {crashesError}
+          </div>
+        )}
+        {crashesBusy
+          ? <div style={{ padding: 24, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="np-page-loading-dot" style={{ width: 14, height: 14 }} />Loading crash events from InfluxDB…
+            </div>
+          : <CustomDashCrashTable rows={crashEvents || []} />}
+      </Widget>
+    )
+  }
+
+  const evTitleMap = {
+    internet: 'Internet disconnect — full event log',
+    usb: 'USB connect / disconnect — full event log',
+  }
+  const evRowsMap = { internet: internetEvents, usb: usbEvents }
+  const evBadgeColorMap = { internet: 'amber', usb: 'cyan' }
+  const evTitle = evTitleMap[widget] || 'Event log'
+  const evRows = evRowsMap[widget] || []
+  return (
+    <Widget
+      title={evTitle}
+      badge={evRows?.length ?? 0}
+      badgeColor={evBadgeColorMap[widget] || 'blue'}
+      noPad
+      actions={
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 600 }}>SCAN:</span>
+          {[500, 1000, 2000, 5000].map((n) => (
+            <button key={n} type="button" onClick={() => onEventLimit(n)}
+              style={{ padding: '2px 8px', borderRadius: 4, fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600,
+                border: eventLimit === n ? '1px solid var(--accent)' : '1px solid var(--border)',
+                background: eventLimit === n ? 'rgba(59,130,246,.12)' : 'transparent',
+                color: eventLimit === n ? 'var(--accent)' : 'var(--text3)', cursor: 'pointer' }}>
+              {n}
+            </button>
+          ))}
+        </div>
+      }
+    >
+      <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 14, fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text3)', flexWrap: 'wrap' }}>
+        <span>Range: <strong style={{ color: 'var(--text2)' }}>{rangeLabel}</strong></span>
+        <span>BH: <strong style={{ color: 'var(--text2)' }}>{bhLabel}</strong></span>
+      </div>
+      {eventsBusy
+        ? <div style={{ padding: 24, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="np-page-loading-dot" style={{ width: 14, height: 14 }} />Loading events…
+          </div>
+        : <CustomDashEventTable rows={evRows || []} />}
+    </Widget>
+  )
+}
+
+/** Renders InfluxDB-shaped crash events (ts/hostname/storeTag/appName/crashType/count/message). */
+/** Generic centered modal — backdrop + content card with header/close. */
+function CustomDashModalShell({ open, title, subtitle, onClose, badge, children, width = 880 }) {
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e) => { if (e.key === 'Escape') onClose?.() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [open, onClose])
+  if (!open) return null
+  return (
+    <div onClick={onClose}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(8,10,14,.55)', backdropFilter: 'blur(2px)', zIndex: 60, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '60px 16px 32px' }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ width: '100%', maxWidth: width, background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 12, boxShadow: '0 20px 50px rgba(0,0,0,.45)', overflow: 'hidden', display: 'flex', flexDirection: 'column', maxHeight: 'calc(100vh - 90px)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--border)', background: 'linear-gradient(180deg,var(--bg3) 0%,var(--bg2) 100%)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, overflow: 'hidden' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="opm-widget-title">{title}</span>
+              {badge != null && <span className="badge badge-blue">{badge}</span>}
+            </div>
+            {subtitle && <div style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{subtitle}</div>}
+          </div>
+          <button type="button" onClick={onClose}
+            style={{ padding: '5px 10px', borderRadius: 7, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', fontSize: 12, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 700 }}>
+            ✕ Close
+          </button>
+        </div>
+        <div style={{ overflow: 'auto', flex: 1 }}>{children}</div>
+      </div>
+    </div>
+  )
+}
+
+/** Modal showing the reboot list for a single host. */
+function CustomDashRebootModal({ host, stats, rangeLabel, bhEnabled, onClose }) {
+  const reboots = stats?.reboots || []
+  return (
+    <CustomDashModalShell
+      open={!!host}
+      title={host ? `Reboots — ${host.name || host.host}` : 'Reboots'}
+      subtitle={host ? `Range: ${rangeLabel}${bhEnabled ? ' · BH' : ''}` : ''}
+      badge={reboots.length}
+      onClose={onClose}
+      width={680}
+    >
+      <div style={{ padding: '12px 16px', display: 'flex', gap: 18, flexWrap: 'wrap', fontSize: 12, fontFamily: 'var(--mono)', color: 'var(--text3)', borderBottom: '1px solid var(--border)' }}>
+        <span>Uptime%: <strong style={{ color: 'var(--text)' }}>{stats?.uptimePct == null ? '—' : `${stats.uptimePct.toFixed(2)}%`}</strong></span>
+        <span>Reboots: <strong style={{ color: '#f97316' }}>{stats?.rebootCount ?? 0}</strong></span>
+        <span>Total downtime: <strong style={{ color: '#ef4444' }}>{stats ? fmtValue(stats.downSec || 0, 'uptime') : '—'}</strong></span>
+      </div>
+      {!reboots.length
+        ? <div style={{ padding: 24, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12, textAlign: 'center' }}>No reboots detected in this range.</div>
+        : (
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, fontFamily: 'var(--mono)' }}>
+            <thead>
+              <tr style={{ background: 'var(--bg3)', borderBottom: '1px solid var(--border)', textAlign: 'left' }}>
+                {['#', 'Boot time', 'When', 'Downtime before reboot'].map((h) => (
+                  <th key={h} style={{ padding: '8px 12px', fontSize: 10, fontWeight: 700, color: 'var(--text3)', letterSpacing: .5, textTransform: 'uppercase' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {reboots.map((r, i) => (
+                <tr key={`${r.at}-${i}`} style={{ borderBottom: '1px solid var(--border)' }} className="opm-row-hover">
+                  <td style={{ padding: '8px 12px', color: 'var(--text3)' }}>{i + 1}</td>
+                  <td style={{ padding: '8px 12px', color: 'var(--text)' }}>{fmtClock(r.at)}</td>
+                  <td style={{ padding: '8px 12px', color: 'var(--text2)' }}>{relAge(r.at)} ago</td>
+                  <td style={{ padding: '8px 12px', color: r.downSec > 0 ? '#ef4444' : 'var(--text3)' }}>
+                    {r.downSec > 0 ? fmtValue(r.downSec, 'uptime') : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )
+      }
+    </CustomDashModalShell>
+  )
+}
+
+/** Modal showing crash events for a single host (InfluxDB-shaped). */
+function CustomDashCrashModal({ host, events, busy, error, rangeLabel, onClose }) {
+  return (
+    <CustomDashModalShell
+      open={!!host}
+      title={host ? `App crashes — ${host.name || host.host}` : 'App crashes'}
+      subtitle={host ? `Source: InfluxDB · Range: ${rangeLabel}` : ''}
+      badge={(events || []).length}
+      onClose={onClose}
+      width={1024}
+    >
+      {error && (
+        <div style={{ padding: '12px 16px', color: '#ef4444', fontFamily: 'var(--mono)', fontSize: 12 }}>InfluxDB error: {error}</div>
+      )}
+      {busy
+        ? <div style={{ padding: 24, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="np-page-loading-dot" style={{ width: 14, height: 14 }} />Loading crash events from InfluxDB…
+          </div>
+        : <CustomDashCrashTable rows={events || []} />}
+    </CustomDashModalShell>
+  )
+}
+
+function CustomDashCrashTable({ rows }) {
+  if (!rows?.length) {
+    return <div style={{ padding: 24, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12, textAlign: 'center' }}>
+      No crash events in this range for the selected hosts.
+    </div>
+  }
+  const fmtIso = (iso) => iso ? new Date(iso).toLocaleString() : '—'
+  const sevColorByName = (sev) => sev === 'critical' ? '#ef4444' : '#f59e0b'
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, fontFamily: 'var(--mono)' }}>
+        <thead>
+          <tr style={{ background: 'var(--bg3)', borderBottom: '1px solid var(--border)', textAlign: 'left' }}>
+            {['Time', 'Severity', 'Type', 'Host', 'App', 'Count', 'Event ID', 'Message'].map((h) => (
+              <th key={h} style={{ padding: '8px 10px', fontSize: 10, fontWeight: 700, color: 'var(--text3)', letterSpacing: .5, textTransform: 'uppercase' }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((ev, idx) => {
+            const sev = sevColorByName(ev.severity)
+            return (
+              <tr key={`${ev.ts}-${ev.hostname}-${idx}`} style={{ borderBottom: '1px solid var(--border)' }} className="opm-row-hover">
+                <td style={{ padding: '7px 10px', whiteSpace: 'nowrap' }}>
+                  <div style={{ color: 'var(--text)' }}>{fmtIso(ev.ts)}</div>
+                </td>
+                <td style={{ padding: '7px 10px', whiteSpace: 'nowrap' }}>
+                  <span className="opm-pill" style={{ background: `${sev}22`, color: sev, textTransform: 'capitalize' }}>{ev.severity || '—'}</span>
+                </td>
+                <td style={{ padding: '7px 10px', color: 'var(--text)', whiteSpace: 'nowrap' }} title={ev.crashType || ''}>
+                  {ev.crashTypeLabel || ev.crashType || '—'}
+                </td>
+                <td style={{ padding: '7px 10px', color: 'var(--text2)', whiteSpace: 'nowrap' }}>
+                  {ev.hostname || ev.storeTag || '—'}
+                </td>
+                <td style={{ padding: '7px 10px', color: 'var(--text2)', whiteSpace: 'nowrap', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }} title={ev.appName || ''}>
+                  {ev.appName || '—'}
+                </td>
+                <td style={{ padding: '7px 10px', color: 'var(--text)', whiteSpace: 'nowrap', fontWeight: 700 }}>{Number(ev.count) || 1}</td>
+                <td style={{ padding: '7px 10px', color: 'var(--text3)', whiteSpace: 'nowrap' }}>{ev.eventId || '—'}</td>
+                <td style={{ padding: '7px 10px', color: 'var(--text3)', maxWidth: 480, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={ev.message || ''}>
+                  {ev.message || '—'}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function CustomDashEventTable({ rows }) {
+  if (!rows?.length) {
+    return <div style={{ padding: 24, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12, textAlign: 'center' }}>No matching events.</div>
+  }
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, fontFamily: 'var(--mono)' }}>
+        <thead>
+          <tr style={{ background: 'var(--bg3)', borderBottom: '1px solid var(--border)', textAlign: 'left' }}>
+            {['Time', 'Severity', 'Status', 'Event Name', 'Host', 'Acknowledged', 'Acks'].map((h) => (
+              <th key={h} style={{ padding: '8px 10px', fontSize: 10, fontWeight: 700, color: 'var(--text3)', letterSpacing: .5, textTransform: 'uppercase' }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((ev) => {
+            const sev = sevColor(ev.severity)
+            return (
+              <tr key={ev.eventid} style={{ borderBottom: '1px solid var(--border)' }} className="opm-row-hover">
+                <td style={{ padding: '7px 10px', whiteSpace: 'nowrap' }}>
+                  <div style={{ color: 'var(--text)' }}>{fmtClock(ev.clock)}</div>
+                  <div style={{ color: 'var(--text3)', fontSize: 10 }}>{relAge(ev.clock)} ago</div>
+                </td>
+                <td style={{ padding: '7px 10px', whiteSpace: 'nowrap' }}>
+                  <span className="opm-pill" style={{ background: `${sev}22`, color: sev }}>{ev.severityLabel || '—'}</span>
+                </td>
+                <td style={{ padding: '7px 10px', whiteSpace: 'nowrap' }}>
+                  <span className="opm-pill" style={{ background: ev.status === 'PROBLEM' ? 'rgba(239,68,68,.14)' : 'rgba(34,197,94,.14)', color: ev.status === 'PROBLEM' ? '#ef4444' : '#22c55e' }}>
+                    {ev.status}
+                  </span>
+                </td>
+                <td style={{ padding: '7px 10px', color: 'var(--text)', wordBreak: 'break-word' }}>{ev.name || '—'}</td>
+                <td style={{ padding: '7px 10px', color: 'var(--text2)', whiteSpace: 'nowrap' }}>
+                  {(ev.hosts || []).map((h) => h.name || h.host).join(', ') || '—'}
+                </td>
+                <td style={{ padding: '7px 10px', whiteSpace: 'nowrap', color: ev.acknowledged ? 'var(--text)' : 'var(--text3)' }}>
+                  {ev.acknowledged ? 'Yes' : 'No'}
+                </td>
+                <td style={{ padding: '7px 10px', color: 'var(--text3)' }}>
+                  {(ev.acks || []).length
+                    ? <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        {ev.acks.map((a, i) => (
+                          <span key={i} title={a.message || ''} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 280, display: 'block' }}>
+                            <strong style={{ color: 'var(--text2)' }}>{a.user || '—'}</strong>{a.message ? `: ${a.message}` : ''}
+                          </span>
+                        ))}
+                      </div>
+                    : '—'}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════
    MAIN COMPONENT
    ═══════════════════════════════════════════════════════════════ */
 export default function StoreZabbixPage({
@@ -1577,6 +3412,43 @@ export default function StoreZabbixPage({
   const [ropExportBusy, setRopExportBusy] = useState(false)
   const [ropStoreExportBusy, setRopStoreExportBusy] = useState(false)
 
+  /* ── Custom Dashboard tab state ── */
+  const [customDashHosts, setCustomDashHosts] = useState(null)            // full host list for picker
+  const [customDashHostsBusy, setCustomDashHostsBusy] = useState(false)
+  const [customDashSearch, setCustomDashSearch] = useState('')
+  const [customDashSelected, setCustomDashSelected] = useState([])        // array of selected host objects
+  const [customDashOpen, setCustomDashOpen] = useState(false)
+  /** Map<hostid, { hostid, latest, totalItems, withValue }> for selected hosts. */
+  const [customDashLatestByHost, setCustomDashLatestByHost] = useState({})
+  const [customDashLatestBusy, setCustomDashLatestBusy] = useState(false)
+  const [customDashEvents, setCustomDashEvents] = useState(null)
+  const [customDashEventsBusy, setCustomDashEventsBusy] = useState(false)
+  const [customDashEventLimit, setCustomDashEventLimit] = useState(2000)
+  /** Active widget for the detail panel: 'cpu' | 'memory' | 'uptime' | 'internet' | 'usb' | null */
+  const [customDashWidget, setCustomDashWidget] = useState(null)
+  /** Range chip: '24h' | '7d' | '14d' | '30d' | 'custom' */
+  const [customDashRange, setCustomDashRange] = useState('24h')
+  const [customDashCustomFrom, setCustomDashCustomFrom] = useState('')
+  const [customDashCustomTo, setCustomDashCustomTo] = useState('')
+  const [customDashCustomEpoch, setCustomDashCustomEpoch] = useState(null)
+  /** BH window — same shape as ROP. bhEnabled toggles whether BH is applied at all. */
+  const [customDashBhEnabled, setCustomDashBhEnabled] = useState(false)
+  const [customDashBhStart, setCustomDashBhStart] = useState(9)
+  const [customDashBhEnd, setCustomDashBhEnd] = useState(18)
+  const [customDashBhDays, setCustomDashBhDays] = useState(() => new Set([1, 2, 3, 4, 5]))
+  /** Per-host expanded item id for inline history chart in metric detail panel. */
+  const [customDashExpandedItem, setCustomDashExpandedItem] = useState(null)
+  /** App crash events fetched from InfluxDB (not Zabbix). */
+  const [customDashCrashes, setCustomDashCrashes] = useState(null)
+  const [customDashCrashesBusy, setCustomDashCrashesBusy] = useState(false)
+  const [customDashCrashesError, setCustomDashCrashesError] = useState(null)
+  /** Per-host uptime stats over selected range (reboots/downtime/%). */
+  const [customDashUptimeStats, setCustomDashUptimeStats] = useState({})
+  const [customDashUptimeStatsBusy, setCustomDashUptimeStatsBusy] = useState(false)
+  /** Modals shown when user clicks the Reboots / App-crash count cells. */
+  const [customDashRebootModalHost, setCustomDashRebootModalHost] = useState(null)
+  const [customDashCrashModalHost, setCustomDashCrashModalHost] = useState(null)
+
   const ropDisconnectRangeLabel = useMemo(() => {
     if (ropRange === 'custom' && ropCustomEpoch?.from && ropCustomEpoch?.to) {
       const from = new Date(ropCustomEpoch.from).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
@@ -1646,6 +3518,105 @@ export default function StoreZabbixPage({
     const { data } = await api.get(`${apiBase}/graphs/${encodeURIComponent(graphId)}/series?${qs}`); return data
   }, [apiBase])
   const loadEvents = useCallback(async (lim) => { const { data } = await api.get(`${apiBase}/events?limit=${lim || eventLimit}`); setEvents(data.events || []) }, [apiBase, eventLimit])
+
+  /* ── Custom Dashboard loaders ── */
+  const loadCustomDashHosts = useCallback(async () => {
+    setCustomDashHostsBusy(true)
+    try {
+      const { data } = await api.get(`${apiBase}/hosts?limit=10000`)
+      setCustomDashHosts(data.hosts || [])
+    } catch (e) {
+      const { message, hint } = parseErr(e); setError(message); setErrorHint(hint)
+    } finally {
+      setCustomDashHostsBusy(false)
+    }
+  }, [apiBase, parseErr])
+  /** Fetches latest items for all selected hosts in parallel and stores by hostid. */
+  const loadCustomDashLatest = useCallback(async (hostids) => {
+    const ids = (hostids || []).filter(Boolean)
+    if (!ids.length) { setCustomDashLatestByHost({}); return }
+    setCustomDashLatestBusy(true)
+    try {
+      const pairs = await Promise.all(ids.map(async (hid) => {
+        try {
+          const { data } = await api.get(`${apiBase}/hosts/${encodeURIComponent(hid)}/items/latest?limit=250`)
+          return [String(hid), data]
+        } catch {
+          return [String(hid), { hostid: String(hid), latest: [] }]
+        }
+      }))
+      setCustomDashLatestByHost(Object.fromEntries(pairs))
+    } catch (e) {
+      const { message, hint } = parseErr(e); setError(message); setErrorHint(hint)
+    } finally {
+      setCustomDashLatestBusy(false)
+    }
+  }, [apiBase, parseErr])
+  const loadCustomDashEvents = useCallback(async (hostids, lim, timeFrom) => {
+    const ids = (hostids || []).filter(Boolean)
+    if (!ids.length) { setCustomDashEvents([]); return }
+    setCustomDashEventsBusy(true)
+    try {
+      const qs = new URLSearchParams({ limit: String(lim || customDashEventLimit), hostids: ids.join(',') })
+      if (Number.isFinite(Number(timeFrom)) && Number(timeFrom) > 0) qs.set('time_from', String(Math.floor(Number(timeFrom))))
+      const { data } = await api.get(`${apiBase}/events?${qs}`)
+      setCustomDashEvents(data.events || [])
+    } catch (e) {
+      const { message, hint } = parseErr(e); setError(message); setErrorHint(hint); setCustomDashEvents([])
+    } finally {
+      setCustomDashEventsBusy(false)
+    }
+  }, [apiBase, parseErr, customDashEventLimit])
+
+  /**
+   * Fetch the matched uptime item history per host over [from, to] and compute
+   * reboot count, downtime, and uptime%. Honors the supplied BH window.
+   */
+  const loadCustomDashUptimeStats = useCallback(async (uptimeItemPairs, fromTs, toTs, bh) => {
+    const pairs = (uptimeItemPairs || []).filter((p) => p?.itemid && p?.hostid)
+    if (!pairs.length) { setCustomDashUptimeStats({}); return }
+    setCustomDashUptimeStatsBusy(true)
+    try {
+      const results = await Promise.all(pairs.map(async ({ hostid, itemid }) => {
+        try {
+          const qs = new URLSearchParams({ from: String(Math.floor(fromTs)), to: String(Math.floor(toTs)), maxPoints: '1500' })
+          const { data } = await api.get(`${apiBase}/items/${encodeURIComponent(itemid)}/history?${qs}`)
+          const points = (data?.points || []).map((p) => ({ clock: Number(p.clock), value: Number(p.value) }))
+            .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+          const stats = computeUptimeStats(points, fromTs, toTs, bh)
+          return [String(hostid), { itemid, ...stats }]
+        } catch {
+          return [String(hostid), { itemid, error: true, rebootCount: 0, reboots: [], upSec: 0, totalSec: 0, downSec: 0, uptimePct: null, lastReboot: null }]
+        }
+      }))
+      setCustomDashUptimeStats(Object.fromEntries(results))
+    } finally {
+      setCustomDashUptimeStatsBusy(false)
+    }
+  }, [apiBase])
+
+  /**
+   * Fetch app/service crash events from InfluxDB for the selected hosts over [from, to].
+   * Backed by the InfluxDB-aware /app-crashes endpoint — independent of Zabbix events.
+   */
+  const loadCustomDashCrashes = useCallback(async (hostnames, fromTs, toTs) => {
+    const hosts = (hostnames || []).filter(Boolean)
+    if (!hosts.length) { setCustomDashCrashes([]); setCustomDashCrashesError(null); return }
+    setCustomDashCrashesBusy(true); setCustomDashCrashesError(null)
+    try {
+      const qs = new URLSearchParams({ hostnames: hosts.join(',') })
+      if (Number.isFinite(Number(fromTs))) qs.set('time_from', String(Math.floor(Number(fromTs))))
+      if (Number.isFinite(Number(toTs))) qs.set('time_to', String(Math.floor(Number(toTs))))
+      const { data } = await api.get(`${apiBase}/app-crashes?${qs}`)
+      setCustomDashCrashes(data?.events || [])
+    } catch (e) {
+      const msg = e?.response?.data?.error || e?.message || 'Failed to load crash events from InfluxDB'
+      setCustomDashCrashesError(msg)
+      setCustomDashCrashes([])
+    } finally {
+      setCustomDashCrashesBusy(false)
+    }
+  }, [apiBase])
   const loadTopUtil = useCallback(async (lim, group) => {
     const qs = new URLSearchParams({ limit: String(lim || topLimit) })
     const g = group ?? topMonGroup
@@ -1912,6 +3883,62 @@ export default function StoreZabbixPage({
       .finally(() => { if (!c) setTabBusy(false) })
     return () => { c = true }
   }, [tab, config?.configured, eventLimit, parseErr, apiBase])
+
+  /* Custom Dashboard: load host list when tab opens */
+  useEffect(() => {
+    if (!config?.configured || tab !== 'custom') return
+    if (customDashHosts === null && !customDashHostsBusy) loadCustomDashHosts()
+  }, [tab, config?.configured, customDashHosts, customDashHostsBusy, loadCustomDashHosts])
+
+  /** Resolves the active range to an [from, to] epoch tuple. */
+  const customDashTimeWindow = useMemo(() => {
+    const now = Math.floor(Date.now() / 1000)
+    if (customDashRange === 'custom' && customDashCustomEpoch?.from && customDashCustomEpoch?.to) {
+      return { from: customDashCustomEpoch.from, to: customDashCustomEpoch.to }
+    }
+    const dayMap = { '24h': 1, '7d': 7, '14d': 14, '30d': 30 }
+    const days = dayMap[customDashRange] || 1
+    return { from: now - days * 86400, to: now }
+  }, [customDashRange, customDashCustomEpoch])
+
+  /* Custom Dashboard: when host selection or range changes, reload data */
+  useEffect(() => {
+    if (!config?.configured || tab !== 'custom') return
+    const ids = (customDashSelected || []).map((h) => h.hostid).filter(Boolean)
+    const hostnames = (customDashSelected || []).map((h) => h.host || h.name).filter(Boolean)
+    if (!ids.length) {
+      setCustomDashLatestByHost({}); setCustomDashEvents([]); setCustomDashCrashes([]); setCustomDashCrashesError(null); setCustomDashUptimeStats({})
+      return
+    }
+    loadCustomDashLatest(ids)
+    loadCustomDashEvents(ids, customDashEventLimit, customDashTimeWindow.from)
+    loadCustomDashCrashes(hostnames, customDashTimeWindow.from, customDashTimeWindow.to)
+  }, [
+    tab, config?.configured, customDashSelected, customDashEventLimit,
+    customDashTimeWindow.from, customDashTimeWindow.to,
+    loadCustomDashLatest, loadCustomDashEvents, loadCustomDashCrashes,
+  ])
+
+  /* Custom Dashboard: preload per-host uptime stats whenever the selected
+     hosts, range, or BH window changes. The Uptime tile shows range-aware
+     uptime% so we need this regardless of which widget is currently active. */
+  useEffect(() => {
+    if (!config?.configured || tab !== 'custom') return
+    const pairs = []
+    for (const h of customDashSelected || []) {
+      const data = customDashLatestByHost?.[String(h.hostid)]
+      const uItem = pickCustomDashItem(data?.latest, 'uptime')
+      if (uItem?.itemid) pairs.push({ hostid: String(h.hostid), itemid: uItem.itemid })
+    }
+    if (!pairs.length) { setCustomDashUptimeStats({}); return }
+    const bh = { bhEnabled: customDashBhEnabled, bhStart: customDashBhStart, bhEnd: customDashBhEnd, bhDays: customDashBhDays }
+    loadCustomDashUptimeStats(pairs, customDashTimeWindow.from, customDashTimeWindow.to, bh)
+  }, [
+    tab, config?.configured, customDashSelected, customDashLatestByHost,
+    customDashTimeWindow.from, customDashTimeWindow.to,
+    customDashBhEnabled, customDashBhStart, customDashBhEnd, customDashBhDays,
+    loadCustomDashUptimeStats,
+  ])
 
   useEffect(() => {
     if (!config?.configured || tab !== 'problems') return; let c = false; setTabBusy(true); setError(null); setErrorHint(null)
@@ -2249,6 +4276,16 @@ export default function StoreZabbixPage({
         sla: ropSla,
       })
       if (tab === 'hostGraphs') { await loadAllHosts(); if (selectedHost?.hostid) { const g = await loadHostGraphs(selectedHost.hostid); if (!g.length) await loadHostItemsLatest(selectedHost.hostid); else setHostItemsLatest(null); if (selectedGraphId) { const d = await fetchGraphSeries(selectedGraphId, graphRange, graphDataMode); setGraphSeries(d) } } }
+      if (tab === 'custom') {
+        await loadCustomDashHosts()
+        const ids = (customDashSelected || []).map((h) => h.hostid).filter(Boolean)
+        if (ids.length) {
+          await Promise.all([
+            loadCustomDashLatest(ids),
+            loadCustomDashEvents(ids, customDashEventLimit, customDashTimeWindow.from),
+          ])
+        }
+      }
     } catch (e) { const r = parseErr(e); setError(r.message); setErrorHint(r.hint) }
     finally { setLoading(false) }
   }, [tab, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries, loadTopUtil, topLimit, topMonGroup, refetchProblems, apiBase, urlEnvVar, loadNetHealth, netHealthGroup, netBizStart, netBizEnd, loadRopUptime, ropRange, ropCustomEpoch, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla])
@@ -2318,6 +4355,7 @@ export default function StoreZabbixPage({
     { id: 'netHealth', label: 'Network Health', icon: '📶' },
     { id: 'rop', label: 'ROP Dashboard', icon: '🏪', badge: ropUptime?.summary?.totalStores },
     { id: 'reports', label: 'Reports', icon: '📊' },
+    { id: 'custom', label: 'Custom Dashboard', icon: '🧩' },
   ]
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 0, minHeight: 0 }}>
@@ -4432,6 +6470,123 @@ export default function StoreZabbixPage({
           </div>
         )
       })()}
+
+      {/* ═══════════ CUSTOM DASHBOARD TAB ═══════════ */}
+      {configured && reachable && tab === 'custom' && (
+        <CustomDashboardPanel
+          apiBase={apiBase}
+          chartOpts={chartOpts}
+          hosts={customDashHosts}
+          hostsBusy={customDashHostsBusy}
+          search={customDashSearch}
+          onSearch={setCustomDashSearch}
+          selectedHosts={customDashSelected}
+          onSetSelected={(next) => {
+            setCustomDashSelected(next)
+            setCustomDashWidget(null)
+            setCustomDashExpandedItem(null)
+          }}
+          dropdownOpen={customDashOpen}
+          onToggleDropdown={() => setCustomDashOpen((v) => !v)}
+          onCloseDropdown={() => setCustomDashOpen(false)}
+          latestByHost={customDashLatestByHost}
+          latestBusy={customDashLatestBusy}
+          events={customDashEvents}
+          eventsBusy={customDashEventsBusy}
+          eventLimit={customDashEventLimit}
+          onEventLimit={setCustomDashEventLimit}
+          activeWidget={customDashWidget}
+          onSelectWidget={(w) => { setCustomDashWidget(w); setCustomDashExpandedItem(null) }}
+          /* Range */
+          range={customDashRange}
+          onRangeChange={setCustomDashRange}
+          customFrom={customDashCustomFrom}
+          onCustomFrom={setCustomDashCustomFrom}
+          customTo={customDashCustomTo}
+          onCustomTo={setCustomDashCustomTo}
+          customEpoch={customDashCustomEpoch}
+          onApplyCustomRange={() => {
+            if (!customDashCustomFrom || !customDashCustomTo) return
+            const from = Math.floor(new Date(customDashCustomFrom).getTime() / 1000)
+            const to = Math.floor(new Date(customDashCustomTo).getTime() / 1000)
+            if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) return
+            setCustomDashRange('custom')
+            setCustomDashCustomEpoch({ from, to })
+          }}
+          timeWindow={customDashTimeWindow}
+          /* BH */
+          bhEnabled={customDashBhEnabled}
+          onBhEnabled={setCustomDashBhEnabled}
+          bhStart={customDashBhStart}
+          onBhStart={setCustomDashBhStart}
+          bhEnd={customDashBhEnd}
+          onBhEnd={setCustomDashBhEnd}
+          bhDays={customDashBhDays}
+          onBhDays={setCustomDashBhDays}
+          /* Inline expansion */
+          expandedItem={customDashExpandedItem}
+          onExpandItem={setCustomDashExpandedItem}
+          /* App crash events from InfluxDB (independent of Zabbix events) */
+          crashes={customDashCrashes}
+          crashesBusy={customDashCrashesBusy}
+          crashesError={customDashCrashesError}
+          /* Range-based uptime stats */
+          uptimeStats={customDashUptimeStats}
+          uptimeStatsBusy={customDashUptimeStatsBusy}
+          /* Modal callbacks */
+          onOpenRebootModal={(h) => setCustomDashRebootModalHost(h)}
+          onOpenCrashModal={(h) => setCustomDashCrashModalHost(h)}
+          onRefresh={() => {
+            const ids = (customDashSelected || []).map((h) => h.hostid).filter(Boolean)
+            const hostnames = (customDashSelected || []).map((h) => h.host || h.name).filter(Boolean)
+            if (ids.length) {
+              loadCustomDashLatest(ids)
+              loadCustomDashEvents(ids, customDashEventLimit, customDashTimeWindow.from)
+              loadCustomDashCrashes(hostnames, customDashTimeWindow.from, customDashTimeWindow.to)
+            }
+          }}
+        />
+      )}
+
+      {/* Click-popups launched from the Uptime per-host detail panel */}
+      <CustomDashRebootModal
+        host={customDashRebootModalHost}
+        stats={customDashRebootModalHost ? customDashUptimeStats?.[String(customDashRebootModalHost.hostid)] : null}
+        rangeLabel={(() => {
+          const r = customDashRange
+          if (r === 'custom' && customDashCustomEpoch?.from && customDashCustomEpoch?.to) {
+            const f = new Date(customDashCustomEpoch.from * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+            const t = new Date(customDashCustomEpoch.to * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+            return `${f} – ${t}`
+          }
+          return ({ '24h': 'Last 24 hours', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days' })[r] || r
+        })()}
+        bhEnabled={customDashBhEnabled}
+        onClose={() => setCustomDashRebootModalHost(null)}
+      />
+      <CustomDashCrashModal
+        host={customDashCrashModalHost}
+        events={customDashCrashModalHost
+          ? (customDashCrashes || []).filter((ev) => {
+              const h = String(ev.hostname || '').toLowerCase()
+              const t = String(ev.storeTag || '').toLowerCase()
+              const target = String(customDashCrashModalHost.host || customDashCrashModalHost.name || '').toLowerCase()
+              return h === target || t === target
+            })
+          : []}
+        busy={customDashCrashesBusy}
+        error={customDashCrashesError}
+        rangeLabel={(() => {
+          const r = customDashRange
+          if (r === 'custom' && customDashCustomEpoch?.from && customDashCustomEpoch?.to) {
+            const f = new Date(customDashCustomEpoch.from * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+            const t = new Date(customDashCustomEpoch.to * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+            return `${f} – ${t}`
+          }
+          return ({ '24h': 'Last 24 hours', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days' })[r] || r
+        })()}
+        onClose={() => setCustomDashCrashModalHost(null)}
+      />
 
       <RopDisconnectModal
         open={!!ropDisconnectStore}
