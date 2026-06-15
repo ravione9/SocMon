@@ -24,8 +24,12 @@ api.interceptors.response.use(res => res, err => {
     reqUrl.includes('sentinel-one') ||
     reqUrl.includes('/api/sentinel-one')
   const nexsProxy = reqUrl.includes('/api/nexs')
-  // Only Netpulse JWT expiry should force logout — not upstream 401 from proxied integrations.
-  if (status === 401 && !sentinelOneProxy && !nexsProxy) {
+  const authAttempt =
+    reqUrl.includes('/api/auth/login') ||
+    reqUrl.includes('/api/auth/register')
+  const hadAuthHeader = Boolean(err.config?.headers?.Authorization)
+  // Only expired Netpulse JWT should force logout — not failed login/register or upstream 401 from proxied integrations.
+  if (status === 401 && !sentinelOneProxy && !nexsProxy && !authAttempt && hadAuthHeader) {
     useAuthStore.getState().logout()
     window.location.href = '/login'
   }

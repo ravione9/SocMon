@@ -10,18 +10,26 @@ export default function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
   const { setAuth } = useAuthStore()
   const navigate = useNavigate()
   async function handleLogin(e) {
-    e.preventDefault(); setLoading(true)
+    e.preventDefault()
+    setError('')
+    setLoading(true)
     try {
       const { data } = await api.post('/api/auth/login', { email, password })
       setAuth(data.token, data.user)
       useThemeStore.getState().syncFromUser(data.user)
       navigate(getFirstAllowedPath(data.user))
       toast.success(`Welcome back, ${data.user.name}`)
-    } catch (err) { toast.error(err.response?.data?.error || 'Login failed') }
-    finally { setLoading(false) }
+    } catch (err) {
+      const msg = err.response?.data?.error || 'Login failed'
+      setError(msg)
+      toast.error(msg)
+    } finally {
+      setLoading(false)
+    }
   }
   return (
     <div style={{ minHeight:'var(--app-vh, 100vh)', background:'var(--bg)', display:'flex', alignItems:'center', justifyContent:'center' }}>
@@ -49,6 +57,21 @@ export default function LoginPage() {
               />
             </div>
           ))}
+          {error && (
+            <div
+              role="alert"
+              style={{
+                fontSize: 12,
+                padding: '10px 12px',
+                borderRadius: 8,
+                color: 'var(--red)',
+                background: 'color-mix(in srgb, var(--red) 12%, var(--bg3))',
+                fontFamily: 'var(--mono)',
+              }}
+            >
+              {error}
+            </div>
+          )}
           <button type="submit" disabled={loading}
             style={{ marginTop:8, padding:11, borderRadius:8, background: loading ? 'var(--bg4)' : 'var(--accent)', border:'none', color:'var(--on-accent)', fontSize:13, fontWeight:600, fontFamily:'var(--sans)', cursor: loading ? 'not-allowed' : 'pointer' }}>
             {loading ? 'Signing in...' : 'Sign in'}
