@@ -888,6 +888,7 @@ const CPU_KEY_RES = [
   // Common shorthand keys vendors expose (e.g. "cpu_usage_pct")
   /\bcpu[_.]?usage(_pct)?\b/i,
   /\bcpu[_.]?load(_pct)?\b/i,
+  /\bcpu\b.*\b(usage|utili[sz]ation|load)\b/i,
 ]
 
 const MEMORY_KEY_RES = [
@@ -908,14 +909,18 @@ const MEMORY_KEY_RES = [
   // Generic vendor shorthand keys
   /\bmem(?:ory)?[_.]?usage(_pct)?\b/i,
   /\bmem(?:ory)?[_.]?used(_pct)?\b/i,
+  /\bmem(?:ory)?\b.*\b(usage|utili[sz]ation|used)\b/i,
 ]
 const MEMORY_INVERT_KEY_RE = /pavailable|memoryfree|memfree|memavail/i
 
 function readPctUtilItem(it, inverted = false) {
   const u = String(it.units || '').trim()
-  if (u !== '%' && !/%/.test(u)) return null
   const v = parseFloat(it.lastvalue)
   if (!Number.isFinite(v)) return null
+  const keyOrName = `${String(it.key_ || '')} ${String(it.name || '')}`.toLowerCase()
+  const percentLike = u === '%' || /%/.test(u)
+    || /\b(percent|pct|usage|utili[sz]ation|cpu|memory|mem)\b/.test(keyOrName)
+  if (!percentLike || v < 0 || v > 100) return null
   const pct = inverted ? 100 - v : v
   return Math.round(Math.max(0, Math.min(100, pct)) * 10) / 10
 }
@@ -1264,15 +1269,17 @@ function pickHostPctMetric(itemRows, hostid, patterns, invertRe = null) {
     for (const it of itemRows) {
       if (String(it.hostid) !== String(hostid)) continue
       const key = String(it.key_ || '')
-      if (!re.test(key)) continue
-      const inverted = invertRe && invertRe.test(key)
+      const name = String(it.name || '')
+      const haystack = `${key} ${name}`
+      if (!re.test(haystack)) continue
+      const inverted = invertRe && invertRe.test(haystack)
       const pct = readPctUtilItem(it, inverted)
       if (pct == null) continue
       const clock = Number(it.lastclock) || 0
       if (!best || clock >= best.clock) {
         best = {
           percent: pct,
-          itemName: it.name || key,
+          itemName: name || key,
           key,
           clock,
           itemid: String(it.itemid),
