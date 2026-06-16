@@ -1051,11 +1051,12 @@ VALUE EXTRACTION — STRICT SOURCE RULES (no cross-source fallbacks):
 
   Ping delay (ms)       → STORE ZABBIX (icmppingsec / custom.ping.ms /
                           latency / response time / ping time history)
-                          PRIMARY:   hosts[].pingAtSession.avgMs
-                          SECONDARY: pingHistory.byHost[<hostid>].avgMs
-                          Also include min/max when available:
-                            hosts[].pingAtSession.minMs / maxMs
-                            pingHistory.byHost[<hostid>].minMs / maxMs
+                          PRIMARY:   hosts[].latencyAtSession.avgMs / minMs / maxMs
+                          SECONDARY: latencyHistory.byHost[<hostid>].avgMs / minMs / maxMs
+                          EXACT Store Zabbix UI item:
+                            custom.ping.ms[8.8.8.8] (Ping Google DNS)
+                          TERTIARY: hosts[].pingAtSession.avgMs / minMs / maxMs
+                                    or pingHistory.byHost[<hostid>].avgMs / minMs / maxMs
                           Last resort (only if window is within last hour):
                             hosts[].ping.ms (live lastvalue).
                           DO NOT use storeMonitor ping. Empty → "0".
@@ -1172,6 +1173,8 @@ OUTPUT VALUE RULES (strict):
          hosts[].uptimeAtSession.{label, seconds}
          uptimeHistory.hosts[].uptime.sessionSnapshot.{label, seconds}
        Ping / Loss:
+         hosts[].latencyAtSession.{avgMs, minMs, maxMs}
+         latencyHistory.byHost[<hostid>].{avgMs, minMs, maxMs}
          hosts[].pingAtSession.{avgMs, minMs, maxMs, avgLossPct}
          pingHistory.byHost[<hostid>].{avgMs, minMs, maxMs, avgLossPct}
     If ANY of these is populated, USE IT — do not write "0".

@@ -2012,6 +2012,123 @@ function applySessionPingToHosts(hosts, pingHistory) {
   }
 }
 
+async function fetchLatencyHistorySnapshot(zabbixRpc, matchedHosts, window) {
+  if (!window || !matchedHosts?.length) return null
+  const hostids = matchedHosts.map((h) => String(h.hostid)).filter(Boolean)
+  const items = await fetchItemsChunked(zabbixRpc, hostids, 'custom.ping.ms')
+  const chosenByHost = {}
+  for (const it of items || []) {
+    const hid = String(it.hostid)
+    const key = String(it.key_ || '')
+    const prev = chosenByHost[hid]
+    const exact = key.includes('[8.8.8.8]')
+    const prevExact = prev ? String(prev.key_ || '').includes('[8.8.8.8]') : false
+    const clock = Number(it.lastclock) || 0
+    const prevClock = Number(prev?.lastclock) || 0
+    if (!prev || (exact && !prevExact) || (exact === prevExact && clock >= prevClock)) {
+      chosenByHost[hid] = it
+    }
+  }
+
+  async function getPoints(it) {
+    const hk = zabbixHistoryKind(Number(it.value_type))
+    if (!hk) return { points: [], source: null }
+    const historyRows = await zabbixRpc('history.get', {
+      history: hk.history,
+      itemids: [String(it.itemid)],
+      time_from: window.from,
+      time_till: window.to,
+      output: ['clock', 'value'],
+      sortfield: 'clock',
+      sortorder: 'ASC',
+      limit: 5000,
+    }).catch(() => [])
+    let points = (historyRows || [])
+      .map((r) => ({ clock: Number(r.clock), value: hk.parse(r.value) }))
+      .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+    if (points.length) return { points, source: 'history' }
+    if (!hk.trends) return { points: [], source: null }
+    const trendWindow = trendQueryBounds(window.from, window.to)
+    const trendRows = await zabbixRpc('trend.get', {
+      itemids: [String(it.itemid)],
+      time_from: trendWindow.from,
+      time_till: trendWindow.to,
+      output: ['clock', 'value_avg'],
+      sortfield: 'clock',
+      sortorder: 'ASC',
+      limit: 5000,
+    }).catch(() => [])
+    points = (trendRows || [])
+      .map((r) => ({ clock: Number(r.clock), value: Number(r.value_avg) }))
+      .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+    return { points, source: points.length ? 'trend' : null }
+  }
+
+  const byHost = {}
+  const diagnostics = {
+    hostsChecked: hostids.length,
+    latencyItemsFound: items.length,
+    chosenItemKeys: [],
+    pointsTotal: 0,
+  }
+
+  for (const h of matchedHosts) {
+    const hid = String(h.hostid)
+    const it = chosenByHost[hid]
+    if (!it) continue
+    if (it.key_ && diagnostics.chosenItemKeys.length < 10) diagnostics.chosenItemKeys.push(it.key_)
+    const { points, source } = await getPoints(it)
+    diagnostics.pointsTotal += points.length
+    if (!points.length) continue
+    const vals = points.map((p) => Number(p.value)).filter(Number.isFinite)
+    if (!vals.length) continue
+    byHost[hid] = {
+      itemid: String(it.itemid),
+      key: it.key_ || '',
+      itemName: it.name || it.key_ || '',
+      source,
+      pointCount: vals.length,
+      avgMs: Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10,
+      minMs: Math.round(Math.min(...vals) * 10) / 10,
+      maxMs: Math.round(Math.max(...vals) * 10) / 10,
+      points: points.map((p) => ({
+        clock: p.clock,
+        at: formatPortalTimestamp(p.clock * 1000),
+        ms: Math.round(Number(p.value) * 10) / 10,
+      })),
+    }
+  }
+
+  return {
+    windowSec: window.rangeSec,
+    windowLabel: window.windowLabel,
+    parseNote: window.parseNote,
+    from: window.from,
+    to: window.to,
+    fromAt: formatPortalTimestamp(window.from * 1000),
+    toAt: formatPortalTimestamp(window.to * 1000),
+    byHost,
+    diagnostics,
+    note: 'Fetched from Store Zabbix custom.ping.ms* items, preferring custom.ping.ms[8.8.8.8], using history.get with trend.get hour-bucket fallback.',
+  }
+}
+
+function applySessionLatencyToHosts(hosts, latencyHistory) {
+  if (!Array.isArray(hosts) || !latencyHistory?.byHost) return
+  for (const host of hosts) {
+    const row = latencyHistory.byHost[String(host.hostid)]
+    if (!row) continue
+    host.latencyAtSession = {
+      avgMs: row.avgMs,
+      minMs: row.minMs,
+      maxMs: row.maxMs,
+      source: row.source,
+      key: row.key,
+      pointCount: row.pointCount,
+    }
+  }
+}
+
 async function fetchUptimeHistorySnapshot(zabbixRpc, matchedHosts, window, maxPoints = 120) {
   if (!window || !matchedHosts?.length) return null
   const hostids = matchedHosts.map((h) => String(h.hostid)).filter(Boolean)
@@ -3431,6 +3548,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   let cpuMemoryHistory = null
   let interfaceHistory = null
   let pingHistory = null
+  let latencyHistory = null
   let uptimeHistory = null
   const historyWindow = historyWindowForFetch
   const historyMaxPoints = historyWindow
@@ -3492,6 +3610,26 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
         to: historyWindow.to,
         byHost: {},
         error: err?.message || 'Failed to fetch Zabbix ping history',
+      }
+    }
+  }
+
+  if (includePing && historyWindow && matched.length) {
+    try {
+      latencyHistory = await fetchLatencyHistorySnapshot(
+        client.zabbixRpc,
+        matched,
+        historyWindow,
+      )
+      if (latencyHistory) applySessionLatencyToHosts(hosts, latencyHistory)
+    } catch (err) {
+      latencyHistory = {
+        windowSec: historyWindow.rangeSec,
+        windowLabel: historyWindow.windowLabel,
+        from: historyWindow.from,
+        to: historyWindow.to,
+        byHost: {},
+        diagnostics: { error: err?.message || 'Failed to fetch Store Zabbix custom.ping.ms history' },
       }
     }
   }
@@ -3581,6 +3719,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     cpuMemoryHistory,
     interfaceHistory,
     pingHistory,
+    latencyHistory,
     uptimeHistory,
     pingSummary: includePing && data.pingMetrics ? data.pingMetrics.summary : undefined,
   }
