@@ -955,6 +955,15 @@ function downsampleHistoryPoints(points, maxPoints) {
   return out
 }
 
+function trendQueryBounds(from, to) {
+  const fromHour = Math.floor(Number(from) / 3600) * 3600
+  const toHour = Math.ceil(Number(to) / 3600) * 3600
+  return {
+    from: Number.isFinite(fromHour) ? fromHour : from,
+    to: Number.isFinite(toHour) && toHour > fromHour ? toHour : to,
+  }
+}
+
 async function fetchItemHistorySeries(zabbixRpc, metric, from, to, maxPoints = 120, opts = {}) {
   const valueMode = opts.valueMode === 'traffic' ? 'traffic' : 'percent'
   const itemid = String(metric?.itemid || '').trim()
@@ -988,10 +997,11 @@ async function fetchItemHistorySeries(zabbixRpc, metric, from, to, maxPoints = 1
 
   async function fetchTrends() {
     if (!hk.trends) return []
+    const trendWindow = trendQueryBounds(from, to)
     const tr = await zabbixRpc('trend.get', {
       itemids: [itemid],
-      time_from: from,
-      time_till: to,
+      time_from: trendWindow.from,
+      time_till: trendWindow.to,
       output: ['clock', 'value_avg'],
       sortfield: 'clock',
       sortorder: 'ASC',
@@ -1749,10 +1759,11 @@ async function fetchPingHistorySnapshot(zabbixRpc, items, hostids, window) {
       .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
     if (points.length) return { points, source: 'history' }
     if (!hk.trends) return { points: [], source: null }
+    const trendWindow = trendQueryBounds(window.from, window.to)
     const trendRows = await zabbixRpc('trend.get', {
       itemids: [itemid],
-      time_from: window.from,
-      time_till: window.to,
+      time_from: trendWindow.from,
+      time_till: trendWindow.to,
       output: ['clock', 'value_avg', 'num'],
       sortfield: 'clock',
       sortorder: 'ASC',

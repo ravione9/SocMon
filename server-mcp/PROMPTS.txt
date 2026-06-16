@@ -993,7 +993,7 @@ TOOL CALLS (5 in parallel — replace <STORE>, <CODE>, <DATE>, <FROM>, <TO>):
      historyFrom: <unix>   historyTo: <unix>
 
   3) netpulse_storeZabbix
-     question: "<STORE> app crash event log application name <DATE> <FROM>-<TO> IST"
+     question: "<STORE> app crash event log crashEventsTotal appName <DATE> <FROM>-<TO> IST"
      historyFrom: <unix>   historyTo: <unix>
 
   4) netpulse_query
