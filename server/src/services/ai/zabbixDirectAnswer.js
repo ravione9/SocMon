@@ -1652,7 +1652,144 @@ async function fetchPingMetrics(zabbixRpc, hostids) {
     summary.maxMs = msVals[msVals.length - 1]
   }
 
-  return { summary, byHost }
+  return {
+    summary,
+    byHost,
+    items: {
+      agent: agentPingItems || [],
+      icmp: filterExactItemKey(icmpPingItems, 'icmpping'),
+      icmpSec: filterExactItemKey(icmpSecItems, 'icmppingsec'),
+      icmpLoss: filterExactItemKey(icmpLossItems, 'icmppingloss'),
+    },
+  }
+}
+
+/**
+ * Pull Zabbix history.get points for ping items inside a session window
+ * and compute uptime% (agent.ping or icmpping), avg latency (icmppingsec),
+ * avg loss (icmppingloss). Used by storeZabbix dossier session snapshots.
+ *
+ * @param {(method: string, params: object) => Promise<any>} zabbixRpc
+ * @param {{ agent: any[], icmp: any[], icmpSec: any[], icmpLoss: any[] }} items
+ * @param {string[]} hostids
+ * @param {{ from: number, to: number, rangeSec: number, windowLabel?: string, parseNote?: string }} window
+ */
+async function fetchPingHistorySnapshot(zabbixRpc, items, hostids, window) {
+  if (!window || !hostids?.length) return null
+  const itemsByHost = (list, key) => {
+    const map = {}
+    for (const it of list || []) {
+      const hid = String(it.hostid)
+      if (!map[hid]) map[hid] = []
+      map[hid].push({ itemid: String(it.itemid), valueType: Number(it.value_type), key })
+    }
+    return map
+  }
+  const agentBy = itemsByHost(items.agent || [], 'agent.ping')
+  const icmpBy = itemsByHost(items.icmp || [], 'icmpping')
+  const secBy = itemsByHost(items.icmpSec || [], 'icmppingsec')
+  const lossBy = itemsByHost(items.icmpLoss || [], 'icmppingloss')
+
+  async function getPoints(itemid, valueType) {
+    const hk = zabbixHistoryKind(valueType)
+    if (!hk) return []
+    const rows = await zabbixRpc('history.get', {
+      history: hk.history,
+      itemids: [itemid],
+      time_from: window.from,
+      time_till: window.to,
+      output: ['clock', 'value'],
+      sortfield: 'clock',
+      sortorder: 'ASC',
+      limit: 5000,
+    }).catch(() => [])
+    return (rows || [])
+      .map((r) => ({ clock: Number(r.clock), value: hk.parse(r.value) }))
+      .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+  }
+
+  const byHost = {}
+  for (const hid of hostids.map(String)) {
+    const agentItems = agentBy[hid] || []
+    const icmpItems = icmpBy[hid] || []
+    const secItems = secBy[hid] || []
+    const lossItems = lossBy[hid] || []
+
+    const reachItems = agentItems.length ? agentItems : icmpItems
+    const reachKey = agentItems.length ? 'agent.ping' : 'icmpping'
+
+    let totalSamples = 0
+    let upSamples = 0
+    for (const it of reachItems) {
+      const points = await getPoints(it.itemid, it.valueType)
+      for (const p of points) {
+        totalSamples += 1
+        if (Number(p.value) >= 1) upSamples += 1
+      }
+    }
+
+    const msPoints = []
+    for (const it of secItems) msPoints.push(...await getPoints(it.itemid, it.valueType))
+    const lossPoints = []
+    for (const it of lossItems) lossPoints.push(...await getPoints(it.itemid, it.valueType))
+
+    const avgMs = msPoints.length
+      ? Math.round((msPoints.reduce((s, p) => s + p.value * 1000, 0) / msPoints.length) * 10) / 10
+      : null
+    const maxMs = msPoints.length
+      ? Math.round(Math.max(...msPoints.map((p) => p.value * 1000)) * 10) / 10
+      : null
+    const avgLossPct = lossPoints.length
+      ? Math.round((lossPoints.reduce((s, p) => s + p.value, 0) / lossPoints.length) * 10) / 10
+      : null
+    const uptimePct = totalSamples > 0
+      ? Math.round((upSamples / totalSamples) * 10000) / 100
+      : null
+
+    if (totalSamples || msPoints.length || lossPoints.length) {
+      byHost[hid] = {
+        uptimePct,
+        upSamples,
+        totalSamples,
+        reachSource: reachKey,
+        avgMs,
+        maxMs,
+        msSamples: msPoints.length,
+        avgLossPct,
+        lossSamples: lossPoints.length,
+      }
+    }
+  }
+
+  return {
+    windowSec: window.rangeSec,
+    windowLabel: window.windowLabel,
+    parseNote: window.parseNote,
+    from: window.from,
+    to: window.to,
+    fromAt: formatPortalTimestamp(window.from * 1000),
+    toAt: formatPortalTimestamp(window.to * 1000),
+    byHost,
+    note: 'Computed from Zabbix history.get on agent.ping / icmpping / icmppingsec / icmppingloss in the requested window. uptimePct = up samples ÷ total samples × 100.',
+  }
+}
+
+function applySessionPingToHosts(hosts, pingHistory) {
+  if (!Array.isArray(hosts) || !pingHistory?.byHost) return
+  for (const host of hosts) {
+    const row = pingHistory.byHost[String(host.hostid)]
+    if (!row) continue
+    host.pingAtSession = {
+      uptimePct: row.uptimePct,
+      avgMs: row.avgMs,
+      maxMs: row.maxMs,
+      avgLossPct: row.avgLossPct,
+      reachSource: row.reachSource,
+      totalSamples: row.totalSamples,
+      msSamples: row.msSamples,
+      lossSamples: row.lossSamples,
+    }
+  }
 }
 
 function formatPingLine(name, ping) {
@@ -2816,6 +2953,8 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   const includeInterfaceHistory = shouldIncludeInterfaceHistory(userMessage, opts)
   const includeCpuMemoryHistory = shouldIncludeCpuMemoryHistory(userMessage, opts)
   const includePing = wantsPingStatus(userMessage)
+    || /\b(ping|icmp|latency|packet\s*loss|uptime|availability|drops?|disconnect)\b/i.test(String(userMessage || ''))
+    || (Boolean(hostFilter) && hasQueryHistoryWindow(resolvedQueryWindow))
   const includeBandwidth = wantsBandwidthUtil(userMessage)
     || /\b(bandwidth|utilization|utilisation|interface|port|traffic|throughput)\b/i.test(String(userMessage || ''))
     || includeInterfaceHistory
@@ -2926,6 +3065,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
 
   let cpuMemoryHistory = null
   let interfaceHistory = null
+  let pingHistory = null
   const historyWindow = historyWindowForFetch
   const historyMaxPoints = historyWindow
     ? historyMaxPointsForRange(historyWindow.rangeSec)
@@ -2964,6 +3104,28 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
         hosts: [],
         items: [],
         error: err?.message || 'Failed to fetch Zabbix CPU/memory history',
+      }
+    }
+  }
+
+  if (includePing && historyWindow && data.pingMetrics?.items) {
+    try {
+      const hostids = matched.map((h) => String(h.hostid))
+      pingHistory = await fetchPingHistorySnapshot(
+        client.zabbixRpc,
+        data.pingMetrics.items,
+        hostids,
+        historyWindow,
+      )
+      if (pingHistory) applySessionPingToHosts(hosts, pingHistory)
+    } catch (err) {
+      pingHistory = {
+        windowSec: historyWindow.rangeSec,
+        windowLabel: historyWindow.windowLabel,
+        from: historyWindow.from,
+        to: historyWindow.to,
+        byHost: {},
+        error: err?.message || 'Failed to fetch Zabbix ping history',
       }
     }
   }
@@ -3011,8 +3173,8 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     queryWindow: formatQueryWindowMeta(resolvedQueryWindow),
     source: `${sourceLabel} API (host.get + item.get net.if.*)`,
     note: moduleId === 'storeZabbix'
-      ? 'CPU/RAM: for past sessions use hosts[].cpuAtSession/memoryAtSession or cpuMemoryHistory.sessionSnapshot (Zabbix history/trend). hosts[].cpu/memory = live lastvalue (labeled live_lastvalue when query window is historical). storeAgentMetrics = Influx agent snapshot. interfaceHistory = historical net.if series when window/history keywords apply.'
-      : 'Live SNMP/interface metrics at send time. For past windows use cpuMemoryHistory.sessionSnapshot / cpuAtSession. interfaceHistory provides historical net.if series when an absolute window or trend/history keywords are used.',
+      ? 'Session window data (use these for past sessions, NOT live hosts[].cpu/memory/ping which is current poll): hosts[].cpuAtSession / memoryAtSession (Zabbix CPU/RAM history.get) · hosts[].pingAtSession (Zabbix agent.ping/icmpping history → uptimePct, avgMs, avgLossPct) · cpuMemoryHistory · interfaceHistory · pingHistory · disconnectEvents (BH or query-window-overlap mode). storeAgentMetrics = Influx agent snapshot (alternate source).'
+      : 'Live SNMP/interface metrics at send time. For past windows use cpuMemoryHistory.sessionSnapshot / cpuAtSession and pingHistory (Zabbix agent.ping/icmpping history). interfaceHistory provides historical net.if series when an absolute window or trend/history keywords are used.',
     version: data.version,
     hostFilter: data.hostFilter,
     deviceTypeFilter: data.deviceTypeFilter,
@@ -3031,6 +3193,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     cpuMemoryMetricsState,
     cpuMemoryHistory,
     interfaceHistory,
+    pingHistory,
     pingSummary: includePing && data.pingMetrics ? data.pingMetrics.summary : undefined,
   }
 }

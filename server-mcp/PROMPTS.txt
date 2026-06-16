@@ -795,6 +795,8 @@ Render ONE markdown report with this metric table (quote tool values only):
   | CPU Usage (%) | storeZabbix cpuMemoryHistory or hosts[].cpu | … |
   | RAM Usage (%) | storeZabbix | … |
   | Internet type (WiFi/Ethernet) | storeMonitor internetType | … |
+  | Download bandwidth (Mbps) | storeZabbix interfaceHistory / ports inBps | … |
+  | Upload bandwidth (Mbps) | storeZabbix interfaceHistory / ports outBps | … |
   | # Internet Drops | storeZabbix disconnectEvents | … |
   | Avg latency (ms) | storeMonitor ping | … |
   | Packet loss (%) | storeMonitor ping | … |
@@ -817,6 +819,8 @@ Output ONLY this table — two columns, no notes or caveats in the table:
   | CPU Usage (%) | |
   | RAM Usage (%) | |
   | Internet type (WiFi/Ethernet) | |
+  | Download bandwidth (Mbps) | |
+  | Upload bandwidth (Mbps) | |
   | # Internet Drops | |
   | Avg latency (ms) | |
   | Packet loss (%) | |
@@ -831,6 +835,8 @@ Output ONLY this table — two columns, no notes or caveats in the table:
 DATA RULES (where each row comes from):
   • CPU/RAM session → storeZabbix cpuAtSession / memoryAtSession (NOT hosts[].cpu live poll)
   • Internet type → storeMonitor stores[].internetType — value MUST be WiFi, Ethernet, Both, or Unknown (not gateway vendor)
+  • Download / Upload bandwidth → storeZabbix interfaceHistory (net.if.in/out bps → Mbps) at session window;
+    fallback hosts[].ports[].inBps/outBps or rate on primary WAN port (NOT storeMonitor speedtest)
   • Internet Drops → storeZabbix disconnectEventsCount in session window
   • Latency / loss → storeMonitor ping stats (prefer over Zabbix ping for store agent)
   • USB / phoropter → netpulse_query hostname report in session window only
@@ -843,7 +849,7 @@ ALIAS: LKST<CODE> → RP<CODE> for Zabbix/Orion. Influx agent hostname is LK<COD
 Run these 5 tool calls in parallel (example LKST64, 11 June 2026, 20:00–20:15 IST):
 
   netpulse_storeZabbix
-    question: "LKST64 RP64 CPU memory history ping disconnect 11 June 2026 20:00-20:15 IST"
+    question: "LKST64 RP64 CPU memory history interface bandwidth upload download ping disconnect 11 June 2026 20:00-20:15 IST"
   netpulse_storeMonitor
     question: "LKST64 wifi ethernet active interface connState speedtest ping packet loss 11 June 2026 20:00-20:15 IST"
   netpulse_storeZabbix
@@ -858,6 +864,291 @@ If no data in session window, write "0" or "N/A" — do not paste live/today val
 ----------------------------------------------------------------------
 
 ----------------------------------------------------------------------
+[LKST EYE-TEST — EXCEL ROW]  (general template — fill from spreadsheet)
+Use one Excel row per store session. Map columns → placeholders below.
+
+  Excel column          Placeholder        Example
+  ----------------      -------------      -----------------
+  LKST Code             <CODE>             64  →  LKST64 / RP64
+  Session Date          <DATE>             11 June 2026
+  Query Start (IST)     <FROM>             20:00   (use ±5–15 min buffer around call)
+  Query End (IST)       <TO>               20:15
+  Call Start (IST)      <CALL-FROM>        20:08:07  (optional — for Call duration row)
+  Call End (IST)        <CALL-TO>          20:09:27  (optional)
+
+Rules:
+  • <CODE> = numeric store code only (64, 793) — prefix LKST/RP in tool questions.
+  • Query window <FROM>-<TO> = data pull window (Influx/Zabbix/Mongo). Can be wider
+    than the call; use call times only for Call duration row.
+  • Output ONLY the 2-column table (Metric | Value) — no extra text.
+  • Internet type value = WiFi | Ethernet | Both | Unknown only.
+
+Paste this block; replace ALL <…> from your Excel row:
+
+  [LKST EYE-TEST / VIDEO CALL DOSSIER] LKST<CODE>
+  Session date: <DATE>
+  Query window: <FROM>–<TO> IST
+  Call duration window (if in Excel): <CALL-FROM> – <CALL-TO> IST
+
+  Run 5 netpulse tools in parallel, then fill ONLY this table:
+
+  | Metric | Value |
+  | CPU Usage (%) | |
+  | RAM Usage (%) | |
+  | Internet type (WiFi/Ethernet) | |
+  | Download bandwidth (Mbps) | |
+  | Upload bandwidth (Mbps) | |
+  | # Internet Drops | |
+  | Avg latency (ms) | |
+  | Packet loss (%) | |
+  | Phoropter BT disconnects | |
+  | Phoropter Wired disconnects | |
+  | USB Mic events | |
+  | USB Speaker events | |
+  | App crash count | |
+  | Dual SD-WAN link | |
+  | Call duration | |
+
+  netpulse_storeZabbix → "LKST<CODE> RP<CODE> CPU memory history interface bandwidth upload download ping disconnect <DATE> <FROM>-<TO> IST"
+  netpulse_storeMonitor → "LKST<CODE> wifi ethernet active interface connState speedtest ping packet loss <DATE> <FROM>-<TO> IST"
+  netpulse_storeZabbix → "LKST<CODE> app crash event log <DATE> <FROM>-<TO> IST"
+  netpulse_query → "LKST<CODE> hostname report USB phoropter bluetooth wired mic speaker <DATE> <FROM>-<TO> IST"
+  netpulse_orian → "LKST<CODE> RP<CODE> dual link link_status custom properties snapshot"
+
+  cpuAtSession/memoryAtSession · internetType · interfaceHistory in/out Mbps ·
+  disconnectEventsCount · storeMonitor ping · crashEventsTotal (Influx) · DUAL_LINKS
+  · Call duration = <CALL-TO> − <CALL-FROM>.
+
+One-line macro (fill from Excel):
+  lkst eye <CODE> <DATE> <FROM>-<TO>
+  Example: lkst eye 64 11 June 2026 20:00-20:15
+----------------------------------------------------------------------
+
+======================================================================
+[LKST EYE-TEST REPORT — SELF-CONTAINED PROMPT]
+For: anyone (no Cursor / NetPulse / API knowledge needed).
+How:  copy the entire block between the "BEGIN" and "END" lines into
+      Claude Desktop. Fill ONLY the EXCEL section. Send.
+======================================================================
+
+============================ BEGIN ===================================
+
+You are connected to an MCP server called "netpulse". Call these tools —
+do not guess values:
+  netpulse_storeZabbix     — Store Zabbix metrics, interface bandwidth,
+                              disconnect events, and app crashes (Influx)
+  netpulse_storeMonitor    — InfluxDB store agent live snapshot + ping
+  netpulse_query           — hostname report (USB / peripherals)
+  netpulse_orian           — SolarWinds Orion node + custom properties
+
+Below is one Excel row to investigate. Run all 5 tool calls in PARALLEL.
+Reply with the STORE DETAILS block + answer table only.
+
+======================== EXCEL ROW ===================================
+Store Code          :
+Store Name          :
+City                :
+Date                :          (DD-MM-YYYY or YYYY-MM-DD)
+Check time FROM     :          (optional — e.g. 13:45:00 IST)
+Check time TO       :          (optional — e.g. 14:05:00 IST)
+Video call START    :          (e.g. 13:49:35 IST)
+Video call END      :          (e.g. 14:00:00 IST)
+Excel row number    :
+Notes               :
+======================================================================
+
+================ RULES (you MUST follow these) =======================
+
+ALIAS:
+  • Store Code given as LKST<N>, LK<N>, or RP<N> all mean the same store.
+    LKST371 → also try RP371, RP0371, LK371. Use ALL aliases.
+  • Influx agent hostname is usually RP<N>-* (e.g. RP371-XXXX).
+  • Zabbix gear hostname is usually RP<N>-* (e.g. RP371-XXXX).
+  • Orion Caption must contain the EXACT same store code
+    (LKST64 must NOT match LKST649). Verify orionNodeResolve.caption.
+
+TIME WINDOW:
+  • If "Check time FROM/TO" are filled → use those.
+    Else use Video call START/END (with ±2 min buffer if call is short).
+  • Convert to unix seconds, Asia/Kolkata (+05:30).
+  • Pass historyFrom + historyTo on every tool call.
+  • Also include the date and HH:MM-HH:MM in the question text.
+  • Use the SAME window on all 5 tools — do not widen to whole day.
+  • Date "12-06-2026" = 12 June 2026 (DD-MM-YYYY).
+
+TOOL CALLS (5 in parallel — replace <STORE>, <CODE>, <DATE>, <FROM>, <TO>):
+
+  1) netpulse_storeZabbix
+     question: "<STORE> RP<CODE> CPU memory history net.if.in net.if.out
+     interface bandwidth upload download bps Mbps icmpping packet loss
+     agent.ping availability uptime history disconnect <DATE> <FROM>-<TO> IST"
+     historyFrom: <unix>   historyTo: <unix>
+     (Force Zabbix to return: cpuMemoryHistory, interfaceHistory,
+      hosts[].ping (icmpping loss/ms), agent.ping history for uptime,
+      disconnectEvents.)
+
+  2) netpulse_storeMonitor
+     question: "<STORE> wifi ethernet active interface connState speedtest
+     ping packet loss <DATE> <FROM>-<TO> IST"
+     historyFrom: <unix>   historyTo: <unix>
+
+  3) netpulse_storeZabbix
+     question: "<STORE> app crash event log application name <DATE> <FROM>-<TO> IST"
+     historyFrom: <unix>   historyTo: <unix>
+
+  4) netpulse_query
+     question: "<STORE> hostname report USB phoropter bluetooth wired mic
+     speaker <DATE> <FROM>-<TO> IST"
+     historyFrom: <unix>   historyTo: <unix>
+
+  5) netpulse_orian
+     question: "<STORE> RP<CODE> dual link link_status custom properties
+     snapshot"
+
+VALUE EXTRACTION — STRICT SOURCE RULES (no cross-source fallbacks):
+
+  CPU usage (%)         → STORE ZABBIX ONLY
+                          cpuMemoryHistory.hosts[].sessionSnapshot.cpu.percent
+                          → cpuAtSession.percent (Zabbix history.get)
+                          DO NOT use storeAgentMetrics.cpuPct (Influx agent).
+                          DO NOT use live hosts[].cpu (current poll).
+                          If Zabbix history is empty → write "0".
+
+  RAM usage (%)         → STORE ZABBIX ONLY
+                          cpuMemoryHistory.hosts[].sessionSnapshot.memory.percent
+                          → memoryAtSession.percent
+                          DO NOT use storeAgentMetrics.memPct (Influx agent).
+                          If Zabbix history is empty → write "0".
+
+  Internet (WiFi/Ethernet) → storeMonitor stores[].internetType
+                          (exact word: WiFi | Ethernet | Both | Unknown)
+
+  Download speed (Mbps) → STORE ZABBIX INTERFACE ONLY
+                          interfaceHistory primary WAN port net.if.in
+                          peak (or session avg) bps ÷ 1_000_000.
+                          Fallback (still Zabbix): hosts[].ports[].in.rate
+                          or inBps ÷ 1_000_000.
+                          DO NOT use storeMonitor speedtest downloadMbps.
+                          If Zabbix interface history is empty → write "0".
+
+  Upload speed (Mbps)   → STORE ZABBIX INTERFACE ONLY
+                          same as Download but net.if.out / outBps.
+                          DO NOT use storeMonitor speedtest uploadMbps.
+
+  Internet drops        → storeZabbix disconnectEventsCount (window overlap)
+                          Fallback: pingHistory.byHost[hid].totalSamples
+                          minus upSamples (count of agent.ping=0 samples).
+
+  Uptime (%)            → STORE ZABBIX (agent.ping / icmpping history)
+                          PRIMARY:   hosts[].pingAtSession.uptimePct
+                          SECONDARY: pingHistory.byHost[<hostid>].uptimePct
+                          (MCP pre-computes this in-window:
+                           100 × upSamples ÷ totalSamples, 2 decimals.)
+                          DO NOT derive from disconnect minutes.
+                          Empty → "0".
+
+  Ping delay (ms)       → STORE ZABBIX (icmppingsec / custom.ping.ms history)
+                          PRIMARY:   hosts[].pingAtSession.avgMs
+                          SECONDARY: pingHistory.byHost[<hostid>].avgMs
+                          Last resort (only if window is within last hour):
+                            hosts[].ping.ms (live lastvalue).
+                          DO NOT use storeMonitor ping. Empty → "0".
+
+  Packet loss (%)       → STORE ZABBIX (icmppingloss / custom.ping.loss history)
+                          PRIMARY:   hosts[].pingAtSession.avgLossPct
+                          SECONDARY: pingHistory.byHost[<hostid>].avgLossPct
+                          Last resort (live): hosts[].ping.loss
+                          DO NOT use storeMonitor packet_loss_pct.
+                          Empty → "0".
+
+  Phoropter Bluetooth   → netpulse_query hostname: bluetooth/phoropter
+                          disconnect events INSIDE the window
+  Phoropter cable       → netpulse_query hostname: wired/phoropter events in window
+  USB microphone        → netpulse_query hostname: mic events in window
+  USB speaker           → netpulse_query hostname: speaker events in window
+
+  App crashes           → storeZabbix crashEventsTotal in window
+                          ALSO list distinct application names from
+                          crashEvents[].appName (e.g. "1 (Microsoft Edge)")
+
+  Dual internet link    → orian nodeDetail.nodeCustomProperties[]:
+                          DUAL_LINKS or LINK_STATUS (1=dual, 0=single)
+
+  Video call length     → Video call END − Video call START in IST
+                          format: "X min Y s"
+
+EXTRA HEADER FIELDS (add only from tool output, never invent):
+  RP host (Zabbix)   → storeZabbix hosts[].host (RP<N>-* — gear identifier)
+  Orion node         → orian orionNodeResolve.caption (must match LKST<N>)
+  (Do NOT show "Store PC name" / "LK<N>-*" / "Network box name" rows.
+   The RP host is the only equipment identifier needed.)
+
+OUTPUT FORMAT (reply with this only — no extra commentary):
+
+  --- STORE DETAILS ---
+  Store Code     : <echo from Excel>
+  Store Name     : <echo from Excel or "Not found">
+  City           : <echo from Excel or "Not found">
+  Date           : <echo from Excel>
+  Time Window    : <FROM> – <TO> IST   (use Check time, else Video call)
+  Call Window    : <Video START> – <Video END> IST
+  RP host        : <storeZabbix hosts[].host or "Not found">
+  Orion node     : <orion orionNodeResolve.caption or "Not found">
+  Excel row      : <echo or blank>
+  Notes          : <echo or blank>
+  ---------------------
+
+  | What we check                       | Result |
+  | CPU usage (%)                       |        |
+  | RAM usage (%)                       |        |
+  | Internet (WiFi or Ethernet)         |        |
+  | Download speed (Mbps)               |        |
+  | Upload speed (Mbps)                 |        |
+  | Uptime (%)                          |        |
+  | Internet drops (count in window)    |        |
+  | Ping delay (ms)                     |        |
+  | Packet loss (%)                     |        |
+  | Phoropter Bluetooth issues          |        |
+  | Phoropter cable issues              |        |
+  | USB microphone issues               |        |
+  | USB speaker issues                  |        |
+  | App crashes (count + apps)          |        |
+  | Dual internet link (1=yes, 0=no)    |        |
+  | Video call length                   |        |
+
+OUTPUT VALUE RULES (strict):
+  • Clean values only — do NOT cite tool/source names in the table.
+  • Sources are LOCKED (see VALUE EXTRACTION). Never substitute another
+    source: e.g. if Zabbix CPU is missing, value is "0" — never use
+    Influx storeAgent. Same for RAM, Download, Upload, Uptime, Ping
+    delay, Packet loss.
+  • Zabbix CPU/RAM/interface/ping history WILL be present for valid
+    stores. Before writing "0", check ALL of these in the storeZabbix
+    response:
+       CPU/RAM:
+         cpuMemoryHistory.hosts[].sessionSnapshot.cpu.percent / .memory.percent
+         cpuMemoryHistory.hosts[].cpu.points[] / .memory.points[]   (window avg)
+         hosts[].cpuAtSession.percent / hosts[].memoryAtSession.percent
+         cpuMemoryMetricsState.zabbix.hosts[]   (lastvalue OK if its
+                                                  polledAt is in window)
+       Bandwidth:
+         interfaceHistory.hosts[].ports[].in.points[] / .out.points[]
+         hosts[].ports[].in.rate / .out.rate / .inBps / .outBps
+       Ping / Uptime / Loss:
+         hosts[].pingAtSession.{uptimePct, avgMs, avgLossPct}
+         pingHistory.byHost[<hostid>].{uptimePct, avgMs, avgLossPct}
+    If ANY of these is populated, USE IT — do not write "0".
+  • If a value is genuinely not available from the locked source: write
+    0 (counts / % / Mbps / ms) or "Not found" for text-only fields.
+  • NEVER fall back to today's live values for a past session.
+  • App crashes format: "<count> (<app1>, <app2>)"; if 0, just "0".
+  • Examples: "8.8%", "WiFi", "12.5 Mbps", "0", "99.97%", "1 min 20 s".
+  • No caveats / footnotes / explanations after the table.
+
+============================== END ===================================
+
+Tip: for the next Excel row in the same chat, just paste a new EXCEL ROW
+section. The rules stay in chat memory.
 [STORE CPU/RAM 24H TREND]
 For <STORE-HOSTNAME>, pull a 24-hour CPU and memory trend:
   1. netpulse_storeZabbix question: "<STORE-HOSTNAME> CPU memory 24h trend graph"
@@ -918,8 +1209,9 @@ From now on, in this chat:
   "trend <HOST>"     -> netpulse_storeZabbix 24h cpuMemoryHistory graph.
   "lkst <CODE>"      -> run [LKST FULL STORE DOSSIER] for LKST<CODE>
                         (e.g. lkst 64 -> LKST64, lkst 793 -> LKST793).
-  "lkst eye <CODE> <DATE>" -> run [LKST EYE-TEST / VIDEO CALL DOSSIER]
-                        (e.g. lkst eye 64 11 June 2026).
+  "lkst eye"           -> run [LKST EYE-TEST REPORT — SELF-CONTAINED PROMPT];
+                          user fills only the EXCEL ROW section.
+  "lkst header"        -> same as lkst eye (single self-contained prompt).
   "orian snap <NAME>" -> netpulse_orian snapshot + nodeCustomProperties +
                         per-link customProperties for Orion caption/IP.
 Always quote numbers verbatim from tool output. Never invent data.
