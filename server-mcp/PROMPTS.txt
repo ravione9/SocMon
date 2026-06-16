@@ -727,54 +727,111 @@ bhDurationMin, totalDurationMin, stillOffline. Use netpulse_storeProblems
 
 ----------------------------------------------------------------------
 [LKST FULL STORE DOSSIER]
-Build a complete operational dossier for <LKST-CODE> (example: LKST793).
-LKST### aliases to RP### in Store Zabbix host search only (not strict hostname).
+Build a complete operational dossier for store code <LKST-CODE> (example: LKST64).
 
-Call each tool below — include <LKST-CODE> in every question:
+CRITICAL ALIAS (read before every tool call):
+  • Zabbix / Orion / disconnect / crash queries: LKST<CODE> → RP<CODE>
+    (LKST64 → RP64, LKST793 → RP793). Orion Caption is RP64-PG04NPFY style.
+  • Influx store agent may still show LK64-* or LKST64-* — report both if seen.
+  • NEVER rely on netpulse_query alone for this dossier — call each module tool.
 
-  1. netpulse_query question:
-     "<LKST-CODE> full hostname details ping CPU memory gateway ISP
-     connectivity crashes problems"
-     (deep Influx store-agent report — fastest per-host summary)
+DATE WINDOW (required for historical sessions — no default 24h):
+  Pass historyFrom + historyTo (unix seconds) on EVERY tool below, OR include
+  calendar text in each question, e.g. "11 June 2026 whole day IST" or
+  "11 June 2026 20:00-20:30 IST" for a video-call window.
 
-  2. netpulse_storeMonitor question:
-     "<LKST-CODE> online status connState lastSeen speedtest issues"
-     Find the matching row in the snapshot (match LKST/LK/RP store code).
+Run ALL of these in parallel (replace <CODE>, <DATE>, <FROM>, <TO>):
 
-  3. netpulse_storeZabbix question:
-     "<LKST-CODE> status ping interfaces bandwidth CPU memory problems
-     alerts disconnect events"
-     Report: every matched hosts[], storeAgentMetrics, hosts[].ping,
-     hosts[].ports, hosts[].cpu/memory, problems[], disconnectEvents[],
-     activeDisconnectEvents[].
+  1. netpulse_storeZabbix
+     question: "LKST<CODE> RP<CODE> status ping CPU memory utilization
+     disconnect events <DATE> <FROM>-<TO> IST"
+     historyFrom / historyTo: session or full-day unix bounds
+     Extract verbatim:
+       CPU Usage (%)     → hosts[].cpu.percent OR cpuMemoryHistory.points[]
+                           OR storeAgentMetrics.cpuPct (label source)
+       RAM Usage (%)     → hosts[].memory.percent OR storeAgentMetrics.memPct
+       Avg latency (ms)  → hosts[].ping.ms (per target; also check storeMonitor)
+       Packet loss (%)   → hosts[].ping.loss (latest + max if in history)
+       # Internet Drops  → disconnectEvents[] in window (count + IST times)
+     If hosts[] empty: re-query with "RP<CODE>" only.
 
-  4. netpulse_storeProblems question:
-     "<LKST-CODE> disconnect events last 30 days active problems"
-     Table: disconnectedAt, backUpAt, bhDurationMin, totalDurationMin,
-     stillOffline (IST). Include activeProblems[].
+  2. netpulse_storeMonitor
+     question: "LKST<CODE> online connState active interface gateway vendor
+     speedtest ping packet loss <DATE>"
+     Extract:
+       Internet type     → connState, activeInterface, gatewayVendor
+       Ping / loss       → ping targets (1.1.1.1, 8.8.8.8, google.com) if present
 
-  5. netpulse_sentinelXdr question:
-     "<LKST-CODE> threats alerts endpoints"
-     Skip this section if empty or not configured.
+  3. netpulse_storeZabbix  (crashes — same module, explicit window)
+     question: "LKST<CODE> app crash event log <DATE>"
+     OR netpulse_storeProblems with same question + historyFrom/historyTo
+     Extract: crashEvents[] total count + app breakdown (NOT last 24h default)
 
-  6. netpulse_orian (match by store caption or gear IP from Zabbix):
-     "<LKST-CODE> snapshot custom properties interfaces carrier"
-     Report nodeDetail.nodeCustomProperties[] (CITY, DUAL_LINKS, LINK_STATUS,
-     LKST_BU, ORGANIZATION, STATE) and each interface link with
-     customProperties[] (CarrierName, etc.).
+  4. netpulse_query  (USB / phoropter — NOT netpulse_sentinelXdr context alone)
+     question: "LKST<CODE> hostname report USB mic speaker phoropter bluetooth
+     wired disconnect <DATE> <FROM>-<TO> IST"
+     Extract from directAnswer / Sentinel environment sections:
+       Phoropter Bluetooth disconnects
+       Phoropter Wired disconnects
+       USB Mic connect/disconnect events
+       USB Speaker connect/disconnect events
 
-Render ONE markdown report with sections:
-  • Verdict — Green / Yellow / Red (one-line why)
-  • Identity — resolved hostname, storeTag, store groups
-  • Orion custom properties — node CPs + per-link carrier CPs (if orian matched)
-  • Live agent — Influx / storeMonitor (online, ping, speedtest, agent CPU/RAM)
-  • Network gear — Zabbix hosts, ping, top interfaces, CPU/RAM (label Zabbix vs agent)
-  • Disconnect history — BH minutes, IST times, still offline?
-  • Active problems & Zabbix alerts
-  • Security — SentinelOne (if any)
-  • Gaps & mismatches — sources that disagree or returned no data
+  5. netpulse_orian
+     question: "RP<CODE> snapshot dual link link_status custom properties"
+     (Use RP<CODE> — LKST alias applied automatically if you say LKST<CODE>)
+     Extract nodeDetail.nodeCustomProperties[]:
+       DUAL_LINKS or LINK_STATUS → 1 = dual SD-WAN, 0 = single link
+     If nodes[] empty: question must include RP<CODE> or LKST<CODE>, not broad list.
 
-Quote every number verbatim. Never invent hostnames or timestamps.
+Optional call timeline (user-supplied iBank / video events):
+  • List every event with IST timestamp
+  • Call duration = last event time − first event time (seconds)
+
+Render ONE markdown report with this metric table (quote tool values only):
+
+  | Metric | Source module | Value |
+  | CPU Usage (%) | storeZabbix | … |
+  | RAM Usage (%) | storeZabbix | … |
+  | Internet type | storeMonitor | … |
+  | # Internet Drops | storeZabbix disconnectEvents | … |
+  | Avg latency (ms) | storeZabbix / storeMonitor | … |
+  | Packet loss (%) | storeZabbix / storeMonitor | … |
+  | Phoropter BT disconnects | netpulse_query (hostname) | … |
+  | Phoropter Wired disconnects | netpulse_query (hostname) | … |
+  | USB Mic events | netpulse_query (hostname) | … |
+  | USB Speaker events | netpulse_query (hostname) | … |
+  | App crash count | storeZabbix crashEvents | … |
+  | Dual SD-WAN link | orian DUAL_LINKS/LINK_STATUS | 1 or 0 |
+  | Call duration | user event list | … |
+
+  • Verdict — Green / Yellow / Red
+  • Gaps — any module error, empty hosts[], or "not reported"
+
+Never invent numbers. If storeZabbix returned an error, say so and cite queryWindow.
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+[LKST EYE-TEST / VIDEO CALL DOSSIER]  (macro: "lkst eye <CODE> <DATE>")
+Same as [LKST FULL STORE DOSSIER] but REQUIRED inputs:
+  • Store code: LKST<CODE> (e.g. LKST64)
+  • Session date: <DATE> (e.g. 11 June 2026)
+  • Session IST window: <FROM>-<TO> (e.g. 20:08-20:10) for metrics
+  • Optional: paste iBank/video event list for duration + RCA narrative
+
+Example tool bundle for LKST64 session 2026-06-11 20:08–20:10 IST:
+
+  netpulse_storeZabbix
+    question: "LKST64 RP64 CPU memory ping packet loss disconnect 11 June 2026 20:00-20:15 IST"
+  netpulse_storeMonitor
+    question: "LKST64 connState gateway speedtest ping 11 June 2026 20:00-20:15 IST"
+  netpulse_storeZabbix
+    question: "LKST64 app crash event log 11 June 2026"
+  netpulse_query
+    question: "LKST64 hostname USB phoropter bluetooth wired mic speaker 11 June 2026 20:00-20:15 IST"
+  netpulse_orian
+    question: "RP64 dual link link_status custom properties snapshot"
+
+Then append user call events table + duration (first→last IST).
 ----------------------------------------------------------------------
 
 ----------------------------------------------------------------------
@@ -837,7 +894,9 @@ From now on, in this chat:
                         CPU/RAM; label Zabbix vs Influx agent.
   "trend <HOST>"     -> netpulse_storeZabbix 24h cpuMemoryHistory graph.
   "lkst <CODE>"      -> run [LKST FULL STORE DOSSIER] for LKST<CODE>
-                        (e.g. lkst 793 -> LKST793).
+                        (e.g. lkst 64 -> LKST64, lkst 793 -> LKST793).
+  "lkst eye <CODE> <DATE>" -> run [LKST EYE-TEST / VIDEO CALL DOSSIER]
+                        (e.g. lkst eye 64 11 June 2026).
   "orian snap <NAME>" -> netpulse_orian snapshot + nodeCustomProperties +
                         per-link customProperties for Orion caption/IP.
 Always quote numbers verbatim from tool output. Never invent data.

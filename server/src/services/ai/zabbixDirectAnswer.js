@@ -2905,7 +2905,8 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
 
   return {
     module: moduleId,
-    freshness: historyWindow.from && historyWindow.to && (historyWindow.to < Math.floor(Date.now() / 1000) - 3600)
+    freshness: historyWindow?.from && historyWindow?.to
+      && historyWindow.to < Math.floor(Date.now() / 1000) - 3600
       ? 'historical'
       : 'live',
     fetchedAt,

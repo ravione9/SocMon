@@ -10,7 +10,13 @@ import {
   findNodeIdByCaption,
 } from '../solarwindsNodeSnapshot.js'
 import { extractIpv4 } from './zabbixDirectAnswer.js'
-import { formatQueryWindowMeta, resolveQueryWindow } from './queryContext.js'
+import {
+  extractStoreCode,
+  extractStoreHostname,
+  formatQueryWindowMeta,
+  resolveQueryWindow,
+  shouldUseStoreCodeAlias,
+} from './queryContext.js'
 
 const NODE_STATUS = {
   0: 'Unknown', 1: 'Up', 2: 'Down', 3: 'Warning',
@@ -68,6 +74,17 @@ function detectNodeStatusFilter(question) {
 function extractNodeSearch(question) {
   const ip = extractIpv4(question)
   if (ip) return ip
+
+  const host = extractStoreHostname(question)
+  if (host) {
+    // LKST64 → Orion stores gear as RP64-* ; search RP<code> not LKST tag.
+    if (shouldUseStoreCodeAlias(question)) {
+      const code = extractStoreCode(question)
+      if (code) return `RP${code}`
+    }
+    return host
+  }
+
   const quoted = String(question || '').match(/\b(?:node|host|caption|orion)\s+["']([^"']{2,})["']/i)
   if (quoted?.[1]) return quoted[1].trim()
   const bare = String(question || '').match(/\bfor\s+([A-Za-z0-9][A-Za-z0-9._-]{2,})\b/i)
@@ -203,8 +220,8 @@ export async function buildSolarWindsContext(userMessage = '', opts = {}) {
       activeAlertCount: alerts.length,
       nodeDetail,
       note: nodeFilter
-        ? `Orion nodes filtered by "${nodeFilter}". nodeDetail includes nodeCustomProperties (CITY, DUAL_LINKS, LINK_STATUS, LKST_BU, ORGANIZATION, STATE, …) and interfaces[].customProperties (CarrierName, Comments, … per link) when a single node matched.`
-        : 'Orion NPM live snapshot. nodes[] has cpu, memory, responseTime, packetLoss from SWIS. Use node/host name in question for drill-down with custom properties.',
+        ? `Orion nodes filtered by "${nodeFilter}"${shouldUseStoreCodeAlias(userMessage) ? ' (LKST→RP alias applied for gear search)' : ''}. nodeDetail includes nodeCustomProperties (CITY, DUAL_LINKS, LINK_STATUS, LKST_BU, ORGANIZATION, STATE, …) and interfaces[].customProperties (CarrierName, Comments, … per link) when a single node matched. DUAL_LINKS/LINK_STATUS: 1 = dual SD-WAN, 0 = single link when set.`
+        : 'Orion NPM live snapshot. nodes[] has cpu, memory, responseTime, packetLoss from SWIS. Use RP<code> or LKST<code> in question for drill-down (LKST aliases to RP for Orion search).',
     }
   } catch (err) {
     return {
