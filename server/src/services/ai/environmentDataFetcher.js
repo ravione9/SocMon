@@ -3,6 +3,7 @@ import {
   getSentinelIndex,
   USB_PERIPHERAL_EVENT_BOOL,
   USB_PERIPHERAL_DISCONNECT_FILTER,
+  BLUETOOTH_DEVICE_EVENT_BOOL,
   THREAT_DETECTED_BOOL,
   ACTIVE_THREAT_BOOL,
   AGENT_CONNECTED_BOOL,
@@ -36,7 +37,77 @@ export function sentinelLookbackPreset(range) {
 }
 
 function esTimeRange(preset) {
-  return { gte: `now-${preset}` }
+  return { gte: `now-${preset}`, lte: 'now' }
+}
+
+/** Build ES @timestamp filter — absolute session window or relative now-N preset. */
+function buildEsTimestampRange({ fromSec, toSec, range, windowLabel } = {}) {
+  if (fromSec != null && toSec != null && fromSec < toSec) {
+    return {
+      absolute: true,
+      clause: {
+        range: {
+          '@timestamp': {
+            gte: new Date(fromSec * 1000).toISOString(),
+            lte: new Date(toSec * 1000).toISOString(),
+          },
+        },
+      },
+      label: windowLabel || `unix ${fromSec}–${toSec}`,
+    }
+  }
+  const preset = influxRangeToEsPreset(range || '-24h')
+  return {
+    absolute: false,
+    preset,
+    clause: { range: { '@timestamp': esTimeRange(preset) } },
+    label: windowLabel || `last ${preset}`,
+  }
+}
+
+function peripheralTextBlob(sample) {
+  return `${sample?.device || ''} ${sample?.message || ''} ${sample?.action || ''}`.toLowerCase()
+}
+
+function isPhoropterText(text) {
+  return /phoropter|refractor|auto[\s-]?refractor|vision[\s-]?pro/i.test(text)
+}
+
+function isBluetoothText(text) {
+  return /\bbluetooth\b|\bbt\b|bluetooth device|bluetooth radio/i.test(text)
+}
+
+function isMicText(text) {
+  return /microphone|\bmic\b|headset|audio input|webcam/i.test(text)
+}
+
+function isSpeakerText(text) {
+  return /speaker|\bspk\b|audio output|sound output/i.test(text)
+}
+
+/** Classify USB/BT samples for LKST dossier peripheral rows. */
+export function categorizePeripheralEvents(usbSamples = [], btSamples = []) {
+  const counts = {
+    phoropterBluetooth: 0,
+    phoropterCable: 0,
+    usbMicrophone: 0,
+    usbSpeaker: 0,
+    otherUsb: 0,
+    otherBluetooth: 0,
+  }
+  for (const s of btSamples || []) {
+    const t = peripheralTextBlob(s)
+    if (isPhoropterText(t) || isBluetoothText(t)) counts.phoropterBluetooth += 1
+    else counts.otherBluetooth += 1
+  }
+  for (const s of usbSamples || []) {
+    const t = peripheralTextBlob(s)
+    if (isPhoropterText(t)) counts.phoropterCable += 1
+    else if (isMicText(t)) counts.usbMicrophone += 1
+    else if (isSpeakerText(t)) counts.usbSpeaker += 1
+    else counts.otherUsb += 1
+  }
+  return counts
 }
 
 function endpointMustClause(hostname, storeTag = '', aliasHostnames = []) {
@@ -193,9 +264,17 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
   const storeTag = String(opts.storeTag || '').trim()
   const aliasHostnames = Array.isArray(opts.aliasHostnames) ? opts.aliasHostnames : []
   const agentHost = String(opts.agentHostname || hostname || '').trim()
-  const userPreset = influxRangeToEsPreset(range)
-  const sentinelPreset = opts.extendSentinelWindow ? sentinelLookbackPreset(range) : userPreset
-  const userTr = esTimeRange(userPreset)
+  const userWindow = buildEsTimestampRange({
+    fromSec: opts.fromSec,
+    toSec: opts.toSec,
+    range,
+    windowLabel: opts.windowLabel,
+  })
+  const extendSentinelWindow = opts.extendSentinelWindow !== false && !userWindow.absolute
+  const sentinelPreset = extendSentinelWindow ? sentinelLookbackPreset(range) : influxRangeToEsPreset(range)
+  const searchWindow = extendSentinelWindow
+    ? buildEsTimestampRange({ range: `-${sentinelPreset}`, windowLabel: `last ${sentinelPreset}` })
+    : userWindow
   const out = {}
 
   if (allowedPages.includes('sentinel')) {
@@ -204,8 +283,7 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
     } else {
       const index = getSentinelIndex()
       const endpoint = endpointMustClause(agentHost, storeTag, aliasHostnames)
-      const tr = esTimeRange(sentinelPreset)
-      const baseMust = [{ range: { '@timestamp': tr } }, endpoint]
+      const baseMust = [searchWindow.clause, endpoint]
 
       const usbBase = [...baseMust, USB_PERIPHERAL_EVENT_BOOL]
       const usbConnectedMust = [...usbBase, { bool: { must_not: [USB_PERIPHERAL_DISCONNECT_FILTER] } }]
@@ -213,6 +291,7 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
       const threatMust = [...baseMust, THREAT_DETECTED_BOOL, { bool: { must_not: [USB_PERIPHERAL_EVENT_BOOL] } }]
       const activeThreatMust = [...baseMust, ACTIVE_THREAT_BOOL, { bool: { must_not: [USB_PERIPHERAL_EVENT_BOOL] } }]
       const usbSampleSize = opts.usbSampleSize || 20
+      const btSampleSize = opts.btSampleSize || usbSampleSize
 
       const usbFields = [
         '@timestamp', 'message', 'event.action', 'event.original',
@@ -220,21 +299,28 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
         'sentinel_one.activity.data', 'data.eventType', 'data.deviceName', 'data.productName', 'data.ruleName',
         'agentRealtimeInfo.agentComputerName',
       ]
+      const btBase = [...baseMust, BLUETOOTH_DEVICE_EVENT_BOOL]
 
-      const userWindowFetch = (opts.extendSentinelWindow && sentinelPreset !== userPreset)
+      const userWindowFetch = (extendSentinelWindow && searchWindow.preset !== influxRangeToEsPreset(range))
         ? (async () => {
-          const userBase = [{ range: { '@timestamp': userTr } }, endpoint]
+          const userBase = [userWindow.clause, endpoint]
           const userUsbBase = [...userBase, USB_PERIPHERAL_EVENT_BOOL]
-          const [uc, ud, us] = await Promise.all([
+          const userBtBase = [...userBase, BLUETOOTH_DEVICE_EVENT_BOOL]
+          const [uc, ud, us, bs] = await Promise.all([
             esCount(index, [...userUsbBase, { bool: { must_not: [USB_PERIPHERAL_DISCONNECT_FILTER] } }]),
             esCount(index, [...userUsbBase, USB_PERIPHERAL_DISCONNECT_FILTER]),
-            esSearch(index, userUsbBase, 10, usbFields),
+            esSearch(index, userUsbBase, usbSampleSize, usbFields),
+            esSearch(index, userBtBase, btSampleSize, usbFields),
           ])
+          const usbMapped = us.map(mapUsbSample)
+          const btMapped = bs.map(mapUsbSample)
           return {
-            window: userPreset,
+            window: userWindow.label,
             usbConnected: uc.count,
             usbDisconnected: ud.count,
-            usbSamples: us.map(mapUsbSample),
+            usbSamples: usbMapped,
+            bluetoothSamples: btMapped,
+            peripheralCounts: categorizePeripheralEvents(usbMapped, btMapped),
           }
         })()
         : Promise.resolve(null)
@@ -247,6 +333,7 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
         agentDisconnected,
         agentConnected,
         usbSamples,
+        btSamples,
         threatSamples,
         usbInUserWindow,
       ] = await Promise.all([
@@ -257,6 +344,7 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
         esCount(index, [...baseMust, AGENT_DISCONNECTED_BOOL]),
         esCount(index, [...baseMust, AGENT_CONNECTED_BOOL]),
         esSearch(index, usbBase, usbSampleSize, usbFields),
+        esSearch(index, btBase, btSampleSize, usbFields),
         esSearch(index, threatMust, 8, ['@timestamp', 'message', 'threatInfo.threatName', 'threatInfo.filePath', 'event.action']),
         userWindowFetch,
       ])
@@ -285,18 +373,32 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
         }
       }
 
+      const usbMapped = usbSamples.map(mapUsbSample)
+      const btMapped = btSamples.map(mapUsbSample)
+      const peripheralCounts = usbInUserWindow?.peripheralCounts
+        || categorizePeripheralEvents(usbMapped, btMapped)
+
       out.sentinel = {
         configured: true,
-        searchWindow: sentinelPreset,
-        userSearchWindow: userPreset,
+        source: 'Elasticsearch sentinel-* (Device Control / peripheral logs)',
+        agentHostnameUsed: agentHost,
+        aliasHostnamesUsed: [...aliasHostnames],
+        searchWindow: searchWindow.label,
+        searchWindowAbsolute: searchWindow.absolute,
+        searchFromSec: opts.fromSec ?? null,
+        searchToSec: opts.toSec ?? null,
+        userSearchWindow: userWindow.label,
         usbInUserWindow,
         usbConnected: usbConnected.count,
         usbDisconnected: usbDisconnected.count,
+        bluetoothEventCount: btMapped.length,
+        peripheralCounts,
         threatsDetected: threatsDetected.count,
         activeThreats: activeThreats.count,
         agentDisconnected: agentDisconnected.count,
         agentConnected: agentConnected.count,
-        usbSamples: usbSamples.map(mapUsbSample),
+        usbSamples: usbMapped,
+        bluetoothSamples: btMapped,
         threatSamples: threatSamples.map(s => ({
           ts: s['@timestamp'],
           name: s.threatInfo?.threatName || pickMessage(s).slice(0, 100),
@@ -313,7 +415,7 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
       out.soc = { configured: false, error: 'Elasticsearch not configured' }
     } else {
       const hostFilter = firewallHostMustClause(hostname)
-      const baseMust = [{ range: { '@timestamp': userTr } }, hostFilter]
+      const baseMust = [userWindow.clause, hostFilter]
       const [total, denies, ips, utm, samples] = await Promise.all([
         esCount('firewall-*', baseMust),
         esCount('firewall-*', [...baseMust, { term: { 'fgt.action.keyword': 'deny' } }]),
@@ -345,7 +447,7 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
       out.noc = { configured: false, error: 'Elasticsearch not configured' }
     } else {
       const hostFilter = ciscoHostMustClause(hostname)
-      const baseMust = [{ range: { '@timestamp': userTr } }, hostFilter]
+      const baseMust = [userWindow.clause, hostFilter]
       const [total, updown, macflap, vlanMismatch, samples] = await Promise.all([
         esCount('cisco-*', baseMust),
         esCount('cisco-*', [...baseMust, { term: { 'cisco_mnemonic.keyword': 'UPDOWN' } }]),
@@ -405,16 +507,23 @@ export function formatEnvironmentSections(env, rangeLabel, formatTs, opts = {}) 
       if (hasSentinelData || showEmpty) {
         const extendedWindow = s.searchWindow && s.searchWindow !== s.userSearchWindow
         pushHeader(`── Sentinel / USB (LIVE — Elasticsearch) ──`)
-        if (extendedWindow && s.usbInUserWindow) {
-          lines.push(`  USB in query window (last ${s.userSearchWindow}): connected ${s.usbInUserWindow.usbConnected} · disconnected ${s.usbInUserWindow.usbDisconnected}`)
-          lines.push(`  USB in extended window (last ${s.searchWindow}): connected ${s.usbConnected} · disconnected ${s.usbDisconnected}`)
+        if (s.searchWindowAbsolute) {
+          lines.push(`  Search window: ${s.userSearchWindow || s.searchWindow} (absolute session bounds)`)
+        } else if (extendedWindow && s.usbInUserWindow) {
+          lines.push(`  USB in query window (${s.userSearchWindow || s.searchWindow}): connected ${s.usbInUserWindow.usbConnected} · disconnected ${s.usbInUserWindow.usbDisconnected}`)
+          lines.push(`  USB in extended window (${s.searchWindow}): connected ${s.usbConnected} · disconnected ${s.usbDisconnected}`)
           if (s.usbInUserWindow.usbConnected === 0 && s.usbInUserWindow.usbDisconnected === 0 && (s.usbConnected > 0 || s.usbDisconnected > 0)) {
             lines.push('  Note: No USB activity in the query window — recent USB events below are from the extended search.')
           }
         } else if (!hasSentinelData) {
-          lines.push(`  No USB, threat, or agent events matched this hostname in the search window.`)
+          lines.push(`  No USB, threat, or agent events matched this hostname in ${s.userSearchWindow || s.searchWindow || rangeLabel}.`)
+          if (s.agentHostnameUsed) lines.push(`  Agent filter: ${s.agentHostnameUsed}`)
         } else {
           lines.push(`  USB connected: ${s.usbConnected} · disconnected: ${s.usbDisconnected}`)
+        }
+        if (s.peripheralCounts) {
+          const p = s.peripheralCounts
+          lines.push(`  Phoropter BT: ${p.phoropterBluetooth} · Phoropter cable/USB: ${p.phoropterCable} · Mic: ${p.usbMicrophone} · Speaker: ${p.usbSpeaker}`)
         }
         if (hasSentinelData) {
           lines.push(`  Threats detected: ${s.threatsDetected} · active: ${s.activeThreats}`)

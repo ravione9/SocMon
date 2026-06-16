@@ -19,6 +19,7 @@ import {
   buildStoreHostAliases,
   resolveQueryWindow,
   shouldUseStoreCodeAlias,
+  hasQueryHistoryWindow,
 } from './queryContext.js'
 import { isNetworkInfraQuery, isZabbixQuestion, buildStoreZabbixContext } from './zabbixDirectAnswer.js'
 
@@ -147,7 +148,7 @@ export function isHostnameDetailQuery(question, ctx = null) {
  * @param {string[]} allowedPages
  * @param {ReturnType<import('./queryContext.js').resolveQueryContext>} [ctx]
  */
-export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null) {
+export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null, opts = {}) {
   if (!isHostnameDetailQuery(question, ctx)) return null
   if (!allowedPages.some(p => ['storeMonitor', 'sentinel', 'soc', 'noc'].includes(p))) return null
 
@@ -158,12 +159,12 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
     ctx?.followUpKind === 'chart'
     || /\b(graph|graphical|chart|visual|plot|timeline)\b/i.test(question)
 
-  const range = ctx?.range || parseQuestionTimeRange(question)
-  const crashWindow = resolveQueryWindow(question, ctx)
+  const queryWindow = resolveQueryWindow(question, ctx, opts)
+  const range = queryWindow.range || ctx?.range || parseQuestionTimeRange(question)
+  const crashWindow = queryWindow
   const rangeSec = rangeToSeconds(range)
-  const rangeLabel = crashWindow.fromSec
-    ? (crashWindow.label || formatRangeLabelFromInflux(range))
-    : formatRangeLabelFromInflux(range)
+  const rangeLabel = queryWindow.label || formatRangeLabelFromInflux(range)
+  const absoluteWindow = hasQueryHistoryWindow(queryWindow)
   const fetchedAt = new Date().toISOString()
   const fmtTs = (v) => formatPortalTimestamp(v)
   const envOpts = { showEmptyModules: true, maxUsbSamples: 15 }
@@ -174,8 +175,12 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
       storeTag,
       agentHostname: agentHostname || hostname,
       aliasHostnames: aliases,
-      extendSentinelWindow: true,
-      usbSampleSize: 20,
+      extendSentinelWindow: !absoluteWindow,
+      fromSec: queryWindow.fromSec,
+      toSec: queryWindow.toSec,
+      windowLabel: rangeLabel,
+      usbSampleSize: absoluteWindow ? 100 : 20,
+      btSampleSize: absoluteWindow ? 100 : 20,
     }))
 
   const influxOk = isInfluxStoreConfigured() && allowedPages.includes('storeMonitor')
@@ -395,12 +400,12 @@ function buildHostnameResponse(lines, hostname, range, fetchedAt, env, ctx, stat
   }
   if (env.sentinel?.configured) {
     contextMeta.push({
-      id: 'sentinelXdr',
-      label: 'Sentinel',
+      id: 'sentinel',
+      label: 'Sentinel peripheral (ES)',
       freshness: 'live',
       fetchedAt,
       configured: true,
-      note: `USB ${env.sentinel.usbConnected}/${env.sentinel.usbDisconnected} · threats ${env.sentinel.threatsDetected}`,
+      note: `USB ${env.sentinel.usbConnected}/${env.sentinel.usbDisconnected} · ES ${env.sentinel.userSearchWindow || env.sentinel.searchWindow || ''}`,
     })
   }
   if (env.soc?.configured) {
@@ -439,9 +444,17 @@ function buildHostnameResponse(lines, hostname, range, fetchedAt, env, ctx, stat
       problemCount: stats.problemCount,
       historySeries: stats.historySeries,
       sentinel: env.sentinel ? {
+        source: env.sentinel.source,
+        agentHostnameUsed: env.sentinel.agentHostnameUsed,
+        searchWindow: env.sentinel.userSearchWindow || env.sentinel.searchWindow,
+        searchWindowAbsolute: env.sentinel.searchWindowAbsolute,
         usbConnected: env.sentinel.usbConnected,
         usbDisconnected: env.sentinel.usbDisconnected,
+        peripheralCounts: env.sentinel.peripheralCounts,
+        bluetoothEventCount: env.sentinel.bluetoothEventCount,
         threats: env.sentinel.threatsDetected,
+        configured: env.sentinel.configured !== false,
+        error: env.sentinel.error || null,
       } : undefined,
       soc: env.soc ? { total: env.soc.total, denies: env.soc.denies } : undefined,
       noc: env.noc ? { total: env.noc.total, updown: env.noc.updown } : undefined,

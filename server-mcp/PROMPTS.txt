@@ -938,7 +938,9 @@ do not guess values:
   netpulse_storeZabbix     — Store Zabbix metrics, interface bandwidth,
                               disconnect events, and app crashes (Influx)
   netpulse_storeMonitor    — InfluxDB store agent live snapshot + ping
-  netpulse_query           — hostname report (USB / peripherals)
+  netpulse_query           — hostname report (USB / phoropter / Bluetooth peripherals)
+                              Source: Elasticsearch sentinel-* Device Control logs.
+                              NOT netpulse_sentinelXdr (XDR PowerQuery has no USB rows).
   netpulse_orian           — SolarWinds Orion node + custom properties
 
 Below is one Excel row to investigate. Run all 5 tool calls in PARALLEL.
@@ -1070,11 +1072,21 @@ VALUE EXTRACTION — STRICT SOURCE RULES (no cross-source fallbacks):
                           DO NOT use storeMonitor packet_loss_pct.
                           Empty → "0".
 
-  Phoropter Bluetooth   → netpulse_query hostname: bluetooth/phoropter
-                          disconnect events INSIDE the window
-  Phoropter cable       → netpulse_query hostname: wired/phoropter events in window
-  USB microphone        → netpulse_query hostname: mic events in window
-  USB speaker           → netpulse_query hostname: speaker events in window
+  Phoropter Bluetooth   → netpulse_query ONLY (NOT netpulse_sentinelXdr)
+                          directAnswer.contextPreview.sentinel.peripheralCounts.phoropterBluetooth
+                          OR hostname report "Phoropter BT" line
+  Phoropter cable       → netpulse_query peripheralCounts.phoropterCable
+  USB microphone        → netpulse_query peripheralCounts.usbMicrophone
+  USB speaker           → netpulse_query peripheralCounts.usbSpeaker
+
+  IMPORTANT — USB/phoropter source:
+    • Use tool #4 netpulse_query with "hostname report USB phoropter…"
+    • Data lives in Elasticsearch sentinel-* (Device Control), returned on
+      directAnswer.contextPreview.sentinel — NOT on netpulse_sentinelXdr.
+    • netpulse_sentinelXdr is XDR PowerQuery (threats/logins) — empty USB
+      payload there does NOT mean zero peripheral events.
+    • Pass historyFrom + historyTo so ES searches the session window, not
+      "last 24h" rolling from now.
 
   App crashes           → storeZabbix crashEventsTotal in window
                           ALSO list distinct application names from
@@ -1152,6 +1164,16 @@ OUTPUT VALUE RULES (strict):
         Crashes         → crashConfigured, crashHostnameFilter
         Internet type   → storeMonitor stores[] empty / agent offline
         Orion link      → orionNodeResolve.matchedBy
+        USB/Phoropter   → directAnswer.contextPreview.sentinel:
+                            configured, agentHostnameUsed, searchWindow,
+                            searchWindowAbsolute, peripheralCounts,
+                            usbConnected, usbDisconnected
+                          If configured=true but all peripheralCounts are 0,
+                          cite agentHostnameUsed + searchWindow. If
+                          configured=false or missing sentinel block → ES
+                          not queried (wrong tool or no sentinel page access).
+                          Do NOT cite netpulse_sentinelXdr empty payload as
+                          proof of zero USB events.
 
       Example WHY ZERO bullets (terse — one line each):
         "CPU/RAM: 0 hosts matched CPU items (RP371 has no system.cpu.util / fgSysCpuUsage)"

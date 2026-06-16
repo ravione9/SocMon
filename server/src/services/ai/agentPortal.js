@@ -34,7 +34,7 @@ export async function tryDirectAgentAnswer(user, question, ctx, allowedPages, op
     () => tryDirectXdrAnswer(q, allowedPages, ctx),
     () => tryDirectZabbixAnswer(q, allowedPages, ctx),
     () => tryDirectSOCAnswer(q, allowedPages, ctx),
-    () => tryDirectHostnameAnswer(q, allowedPages, ctx),
+    () => tryDirectHostnameAnswer(q, allowedPages, ctx, opts),
     () => tryDirectCrashAnswer(q, allowedPages, ctx, opts),
   ]
 
