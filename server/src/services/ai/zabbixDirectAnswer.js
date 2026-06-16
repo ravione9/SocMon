@@ -1999,7 +1999,9 @@ function applySessionPingToHosts(hosts, pingHistory) {
     const row = pingHistory.byHost[String(host.hostid)]
     if (!row) continue
     host.pingAtSession = {
-      uptimePct: row.uptimePct,
+      // Availability percentage from agent.ping/icmpping samples, not device
+      // uptime duration. Do not use this for the dossier "Uptime" row.
+      availabilityPct: row.uptimePct,
       avgMs: row.avgMs,
       minMs: row.minMs,
       maxMs: row.maxMs,
@@ -2270,7 +2272,14 @@ function applySessionUptimeToHosts(hosts, uptimeHistory) {
   )
   for (const host of hosts) {
     const row = byHost[String(host.hostid)]
-    if (row) host.uptimeAtSession = row
+    if (row) {
+      const value = {
+        ...row,
+        type: 'zabbix_device_uptime_duration',
+      }
+      host.uptimeAtSession = value
+      host.zabbixUptimeAtSession = value
+    }
   }
 }
 
@@ -3698,8 +3707,8 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     queryWindow: formatQueryWindowMeta(resolvedQueryWindow),
     source: `${sourceLabel} API (host.get + item.get net.if.*)`,
     note: moduleId === 'storeZabbix'
-      ? 'Session window data (use these for past sessions, NOT live hosts[].cpu/memory/ping which is current poll): hosts[].cpuAtSession / memoryAtSession (Zabbix CPU/RAM history.get) · hosts[].pingAtSession (Zabbix agent.ping/icmpping history → uptimePct, avgMs, avgLossPct) · cpuMemoryHistory · interfaceHistory · pingHistory · disconnectEvents (BH or query-window-overlap mode). storeAgentMetrics = Influx agent snapshot (alternate source).'
-      : 'Live SNMP/interface metrics at send time. For past windows use cpuMemoryHistory.sessionSnapshot / cpuAtSession and pingHistory (Zabbix agent.ping/icmpping history). interfaceHistory provides historical net.if series when an absolute window or trend/history keywords are used.',
+      ? 'Session window data (use these for past sessions, NOT live hosts[].cpu/memory/ping which is current poll): hosts[].cpuAtSession / memoryAtSession (Zabbix CPU/RAM history.get) · hosts[].zabbixUptimeAtSession or uptimeAtSession (Zabbix uptime counter duration; this is the Store Zabbix Uptime graph) · hosts[].latencyAtSession (custom.ping.ms[8.8.8.8] avg/min/max) · hosts[].pingAtSession (agent.ping/icmpping availabilityPct + loss) · cpuMemoryHistory · interfaceHistory · uptimeHistory · latencyHistory · pingHistory · disconnectEvents. storeAgentMetrics = Influx agent snapshot (alternate source).'
+      : 'Live SNMP/interface metrics at send time. For past windows use cpuMemoryHistory.sessionSnapshot / cpuAtSession, uptimeHistory (device uptime counter duration), latencyHistory (custom.ping.ms[8.8.8.8] avg/min/max), and pingHistory (agent.ping/icmpping availability/loss). interfaceHistory provides historical net.if series when an absolute window or trend/history keywords are used.',
     version: data.version,
     hostFilter: data.hostFilter,
     deviceTypeFilter: data.deviceTypeFilter,

@@ -1041,12 +1041,14 @@ VALUE EXTRACTION — STRICT SOURCE RULES (no cross-source fallbacks):
                           minus upSamples (count of agent.ping=0 samples).
 
   Uptime                → STORE ZABBIX uptime counter (NOT availability %)
-                          PRIMARY:   hosts[].uptimeAtSession.label
-                          SECONDARY: uptimeHistory.hosts[].uptime.sessionSnapshot.label
+                          PRIMARY:   hosts[].zabbixUptimeAtSession.label
+                          SECONDARY: hosts[].uptimeAtSession.label
+                          TERTIARY:  uptimeHistory.hosts[].uptime.sessionSnapshot.label
                           Raw seconds also available as .seconds.
                           This matches Zabbix graph item "Uptime (uptime)" /
                           system.uptime / sysUpTime / hrSystemUptime.
-                          DO NOT use pingAtSession.uptimePct for this row.
+                          DO NOT use pingAtSession.availabilityPct or any
+                          availability percentage for this row.
                           Empty → "0".
 
   Ping delay (ms)       → STORE ZABBIX (icmppingsec / custom.ping.ms /
@@ -1170,6 +1172,7 @@ OUTPUT VALUE RULES (strict):
          interfaceHistory.hosts[].ports[].in.points[] / .out.points[]
          hosts[].ports[].in.rate / .out.rate / .inBps / .outBps
        Uptime counter:
+         hosts[].zabbixUptimeAtSession.{label, seconds}
          hosts[].uptimeAtSession.{label, seconds}
          uptimeHistory.hosts[].uptime.sessionSnapshot.{label, seconds}
        Ping / Loss:
