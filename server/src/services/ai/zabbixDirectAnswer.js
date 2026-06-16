@@ -877,6 +877,17 @@ const CPU_KEY_RES = [
   /^vmware\.hv\.cpu\.usage\.perf/i,
   /^vmware\.vm\.cpu\.utilization/i,
   /^vmware\.hv\.cpu\.utilization/i,
+  // FortiGate / FortiOS SNMP CPU
+  /\bfgsyscpuusage\b/i,
+  /\bfgcpuusage\b/i,
+  // Cisco SNMP CPU (5-min average is most stable)
+  /\bcpmcputotal5min(rev)?\b/i,
+  /\bcpmcputotal1min(rev)?\b/i,
+  // Generic SNMP HOST-RESOURCES CPU load
+  /\bhrprocessorload\b/i,
+  // Common shorthand keys vendors expose (e.g. "cpu_usage_pct")
+  /\bcpu[_.]?usage(_pct)?\b/i,
+  /\bcpu[_.]?load(_pct)?\b/i,
 ]
 
 const MEMORY_KEY_RES = [
@@ -888,8 +899,17 @@ const MEMORY_KEY_RES = [
   /^vmware\.vm\.memory\.utilization/i,
   /^vmware\.hv\.memory\.utilization/i,
   /^vm\.memory\.size\[pavailable/i,
+  // FortiGate / FortiOS SNMP memory %
+  /\bfgsysmemusage\b/i,
+  /\bfgmemusage\b/i,
+  // Cisco memory pool used (%)
+  /\bciscomemorypoolused\b/i,
+  /\bcempmempoolusedpct\b/i,
+  // Generic vendor shorthand keys
+  /\bmem(?:ory)?[_.]?usage(_pct)?\b/i,
+  /\bmem(?:ory)?[_.]?used(_pct)?\b/i,
 ]
-const MEMORY_INVERT_KEY_RE = /pavailable/i
+const MEMORY_INVERT_KEY_RE = /pavailable|memoryfree|memfree|memavail/i
 
 function readPctUtilItem(it, inverted = false) {
   const u = String(it.units || '').trim()
@@ -1047,6 +1067,14 @@ async function fetchCpuMemoryHistory(zabbixRpc, cpuMemoryMetrics, matchedHosts, 
   const to = window.to
   const rangeSec = window.rangeSec
   const hosts = []
+  const diagnostics = {
+    hostsWithCpuItem: 0,
+    hostsWithMemoryItem: 0,
+    cpuPointsTotal: 0,
+    memoryPointsTotal: 0,
+    cpuItemKeys: [],
+    memoryItemKeys: [],
+  }
 
   for (const [hostid, metrics] of Object.entries(byHost)) {
     const meta = hostMeta[hostid]
@@ -1057,10 +1085,20 @@ async function fetchCpuMemoryHistory(zabbixRpc, cpuMemoryMetrics, matchedHosts, 
       memory: null,
     }
     if (metrics?.cpu) {
+      diagnostics.hostsWithCpuItem += 1
+      if (metrics.cpu.key && diagnostics.cpuItemKeys.length < 5) {
+        diagnostics.cpuItemKeys.push(metrics.cpu.key)
+      }
       row.cpu = await fetchItemHistorySeries(zabbixRpc, metrics.cpu, from, to, maxPoints)
+      if (row.cpu?.points?.length) diagnostics.cpuPointsTotal += row.cpu.points.length
     }
     if (metrics?.memory) {
+      diagnostics.hostsWithMemoryItem += 1
+      if (metrics.memory.key && diagnostics.memoryItemKeys.length < 5) {
+        diagnostics.memoryItemKeys.push(metrics.memory.key)
+      }
       row.memory = await fetchItemHistorySeries(zabbixRpc, metrics.memory, from, to, maxPoints)
+      if (row.memory?.points?.length) diagnostics.memoryPointsTotal += row.memory.points.length
     }
     if (row.cpu || row.memory) hosts.push(row)
   }
@@ -1074,7 +1112,8 @@ async function fetchCpuMemoryHistory(zabbixRpc, cpuMemoryMetrics, matchedHosts, 
     fromAt: formatPortalTimestamp(from * 1000),
     toAt: formatPortalTimestamp(to * 1000),
     hosts,
-    note: 'Fetched via Zabbix history.get / trend.get on system.cpu.util and vm.memory.utilization item IDs. Windows >2d uses trend.get when available.',
+    diagnostics,
+    note: 'Fetched via Zabbix history.get → trend.get fallback on CPU/memory % items (system.cpu.util, fgSysCpuUsage, hrProcessorLoad, etc.). diagnostics.cpuItemKeys lists which keys were actually matched per host.',
   }
 }
 

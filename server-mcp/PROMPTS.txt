@@ -1122,6 +1122,32 @@ OUTPUT VALUE RULES (strict):
     source: e.g. if Zabbix CPU is missing, value is "0" — never use
     Influx storeAgent. Same for RAM, Download, Upload, Uptime, Ping
     delay, Packet loss.
+
+  • IF ANY metric is "0" or "Not found", you MUST append a "WHY ZERO"
+    block AFTER the table — short bullets only, citing diagnostics from
+    the storeZabbix response. Show only the fields that are actually
+    empty so the user can fix the data source.
+
+      Diagnostics fields to cite (only when relevant):
+        CPU/RAM         → cpuMemoryHistory.diagnostics
+                          { hostsWithCpuItem, hostsWithMemoryItem,
+                            cpuItemKeys, memoryItemKeys,
+                            cpuPointsTotal, memoryPointsTotal }
+        Bandwidth       → interfaceHistory.hosts[].ports[] (null in/out)
+                          + hosts[].ports stale poll
+        Uptime/Ping/    → pingHistory.diagnostics
+        Loss              { itemCounts: { agent, icmp, icmpSec, icmpLoss },
+                            sourcesUsed: { uptime, ms, loss } }
+        Drops           → disconnectEventsCount, disconnectFilterMode
+        Crashes         → crashConfigured, crashHostnameFilter
+        Internet type   → storeMonitor stores[] empty / agent offline
+        Orion link      → orionNodeResolve.matchedBy
+
+      Example WHY ZERO bullets (terse — one line each):
+        "CPU/RAM: 0 hosts matched CPU items (RP371 has no system.cpu.util / fgSysCpuUsage)"
+        "Uptime/Ping: itemCounts {agent:0, icmp:0} — host lacks ICMP/agent template"
+        "Bandwidth: net.if items found but lastclock is 7d old"
+
   • Zabbix CPU/RAM/interface/ping history WILL be present for valid
     stores. Before writing "0", check ALL of these in the storeZabbix
     response:
