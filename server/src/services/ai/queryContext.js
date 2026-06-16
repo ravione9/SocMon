@@ -503,6 +503,26 @@ export function shouldUseStoreCodeAlias(text) {
   return /\bLKST\s*0*\d{2,6}(?:-[A-Z0-9]{2,})?\b/.test(raw)
 }
 
+/** Hostname/tag search variants for LKST/LK/RP store codes (Orion, Sentinel ES). */
+export function buildStoreHostAliases(text, extra = []) {
+  const aliases = new Set()
+  for (const x of extra || []) {
+    if (x) aliases.add(String(x).toUpperCase())
+  }
+  const host = extractStoreHostname(text)
+  const code = extractStoreCode(text)
+  if (host) aliases.add(host.toUpperCase())
+  if (code) {
+    const pad3 = String(code).padStart(3, '0')
+    aliases.add(`LKST${code}`)
+    aliases.add(`LK${code}`)
+    aliases.add(`LK${pad3}`)
+    aliases.add(`RP${code}`)
+    aliases.add(`RP${pad3}`)
+  }
+  return [...aliases].filter(Boolean)
+}
+
 const MONTH_INDEX = {
   jan: 0, january: 0,
   feb: 1, february: 1,

@@ -8,6 +8,7 @@ import {
   fetchActiveAlerts,
   fetchNodeSnapshot,
   findNodeIdByCaption,
+  resolveOrionNodeIdForStore,
 } from '../solarwindsNodeSnapshot.js'
 import { extractIpv4 } from './zabbixDirectAnswer.js'
 import {
@@ -16,6 +17,7 @@ import {
   formatQueryWindowMeta,
   resolveQueryWindow,
   shouldUseStoreCodeAlias,
+  buildStoreHostAliases,
 } from './queryContext.js'
 
 const NODE_STATUS = {
@@ -127,14 +129,21 @@ async function fetchOrionOverview() {
   }
 }
 
-async function fetchOrionNodes({ q = '', statusFilter = '', limit = 50 } = {}) {
+async function fetchOrionNodes({ q = '', statusFilter = '', limit = 50, searchPatterns = [] } = {}) {
   let swql = `SELECT TOP ${Math.min(Math.max(limit, 1), 500)} NodeID, Caption, IPAddress, Status, StatusDescription,
     ResponseTime, PercentLoss, CPULoad, PercentMemoryUsed,
     Vendor, MachineType
     FROM Orion.Nodes`
   const conditions = []
-  const search = String(q || '').trim().replace(/'/g, '')
-  if (search) {
+  const patterns = [...new Set([q, ...searchPatterns].filter(Boolean))]
+  if (patterns.length) {
+    const likes = patterns.map((p) => {
+      const v = String(p).trim().replace(/'/g, '')
+      return `(Caption LIKE '%${v}%' OR IPAddress LIKE '%${v}%')`
+    })
+    conditions.push(`(${likes.join(' OR ')})`)
+  } else if (q) {
+    const search = String(q).trim().replace(/'/g, '')
     conditions.push(`(Caption LIKE '%${search}%' OR IPAddress LIKE '%${search}%')`)
   }
   if (statusFilter === 'down') conditions.push('Status = 2')
@@ -167,36 +176,60 @@ export async function buildSolarWindsContext(userMessage = '', opts = {}) {
   }
 
   const nodeFilter = extractNodeSearch(userMessage)
+  const searchPatterns = buildStoreHostAliases(userMessage)
   const statusFilter = detectNodeStatusFilter(userMessage)
   const wantsDetail = Boolean(nodeFilter)
+    || extractStoreCode(userMessage)
     || /\b(snapshot|interfaces|interface|traffic|detail|events|custom\s*propert|dual\s*link|link\s*status|carrier|lkst_bu|organization|city)\b/i.test(userMessage)
 
   try {
-    const [summary, nodesData, alerts] = await Promise.all([
+    const [summary, nodesData, alerts, resolved] = await Promise.all([
       fetchOrionOverview(),
       fetchOrionNodes({
         q: nodeFilter,
+        searchPatterns,
         statusFilter,
-        limit: nodeFilter ? 25 : 50,
+        limit: nodeFilter || searchPatterns.length ? 25 : 50,
       }),
       fetchActiveAlerts(40),
+      (nodeFilter || searchPatterns.length)
+        ? resolveOrionNodeIdForStore(userMessage)
+        : Promise.resolve(null),
     ])
 
+    let nodes = nodesData.nodes
     let nodeDetail = null
+    let orionNodeResolve = resolved
+      ? { nodeId: resolved.nodeId, caption: resolved.caption, matchedBy: resolved.matchedBy }
+      : null
+
     if (wantsDetail) {
-      let nodeId = nodesData.nodes?.[0]?.id ?? null
+      let nodeId = resolved?.nodeId ?? nodes[0]?.id ?? null
       if (!nodeId && nodeFilter && !extractIpv4(nodeFilter)) {
         nodeId = await findNodeIdByCaption(nodeFilter)
+      }
+      if (!nodeId && searchPatterns.length) {
+        for (const pat of searchPatterns) {
+          nodeId = await findNodeIdByCaption(pat)
+          if (nodeId) {
+            orionNodeResolve = { nodeId, caption: pat, matchedBy: `Caption fallback ${pat}` }
+            break
+          }
+        }
       }
       if (nodeId) {
         const snap = await fetchNodeSnapshot(nodeId).catch(() => null)
         if (snap?.found) {
+          if (!nodes.length) nodes = [snap.node]
           nodeDetail = {
             node: snap.node,
             nodeCustomProperties: snap.nodeCustomProperties || [],
             interfaces: (snap.interfaces || []).slice(0, 30),
             alerts: (snap.alerts || []).slice(0, 12),
             events: (snap.events || []).slice(0, 15),
+          }
+          if (orionNodeResolve) {
+            orionNodeResolve.caption = snap.node?.name || orionNodeResolve.caption
           }
         }
       }
@@ -214,13 +247,14 @@ export async function buildSolarWindsContext(userMessage = '', opts = {}) {
       nodeFilter: nodeFilter || null,
       statusFilter: statusFilter || null,
       summary,
-      nodes: nodesData.nodes,
-      nodeCount: nodesData.total,
+      nodes,
+      nodeCount: nodes.length,
+      orionNodeResolve,
       activeAlerts: alerts.slice(0, 25),
       activeAlertCount: alerts.length,
       nodeDetail,
       note: nodeFilter
-        ? `Orion nodes filtered by "${nodeFilter}"${shouldUseStoreCodeAlias(userMessage) ? ' (LKST→RP alias applied for gear search)' : ''}. nodeDetail includes nodeCustomProperties (CITY, DUAL_LINKS, LINK_STATUS, LKST_BU, ORGANIZATION, STATE, …) and interfaces[].customProperties (CarrierName, Comments, … per link) when a single node matched. DUAL_LINKS/LINK_STATUS: 1 = dual SD-WAN, 0 = single link when set.`
+        ? `Orion nodes filtered by "${nodeFilter}"${shouldUseStoreCodeAlias(userMessage) ? ' (LKST→RP alias applied for gear search)' : ''}. Also tries RP zero-padded (RP064), LKST_BU custom property, and multiple caption patterns — see orionNodeResolve.matchedBy. nodeDetail includes nodeCustomProperties (CITY, DUAL_LINKS, LINK_STATUS, LKST_BU, …). DUAL_LINKS/LINK_STATUS: 1 = dual SD-WAN, 0 = single link when set.`
         : 'Orion NPM live snapshot. nodes[] has cpu, memory, responseTime, packetLoss from SWIS. Use RP<code> or LKST<code> in question for drill-down (LKST aliases to RP for Orion search).',
     }
   } catch (err) {

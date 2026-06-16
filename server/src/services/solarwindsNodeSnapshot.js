@@ -4,6 +4,12 @@
 
 import { orionSwisQuery, withOrionTimeout } from './solarwinds.js'
 import {
+  buildStoreHostAliases,
+  extractStoreCode,
+  extractStoreHostname,
+} from './ai/queryContext.js'
+import { extractIpv4 } from './ai/zabbixDirectAnswer.js'
+import {
   discoverNodeCPFields,
   discoverIfaceCPFields,
   fetchInterfacesBulk,
@@ -148,9 +154,72 @@ async function queryAlertDetailRow(alertId, objectHint = '') {
 export async function findNodeIdByCaption(caption) {
   const cap = swqlEscape(String(caption || '').trim())
   if (!cap) return null
-  const data = await orionSwisQuery(`SELECT TOP 1 NodeID FROM Orion.Nodes WHERE Caption='${cap}'`)
-  const id = data?.results?.[0]?.NodeID
-  return id != null ? Number(id) : null
+  let data = await orionSwisQuery(`SELECT TOP 1 NodeID, Caption FROM Orion.Nodes WHERE Caption='${cap}'`)
+  let row = data?.results?.[0]
+  if (row?.NodeID != null) return Number(row.NodeID)
+  data = await orionSwisQuery(`SELECT TOP 1 NodeID, Caption FROM Orion.Nodes WHERE Caption LIKE '%${cap}%'`)
+  row = data?.results?.[0]
+  return row?.NodeID != null ? Number(row.NodeID) : null
+}
+
+/**
+ * Resolve Orion NodeID for a store code / hostname (LKST64 → RP64, RP064, LKST_BU).
+ * @param {string} question
+ * @returns {Promise<{ nodeId: number, caption: string, matchedBy: string }|null>}
+ */
+export async function resolveOrionNodeIdForStore(question) {
+  const ip = extractIpv4(question)
+  if (ip) {
+    const data = await withOrionTimeout(
+      orionSwisQuery(`SELECT TOP 1 NodeID, Caption FROM Orion.Nodes WHERE IPAddress='${swqlEscape(ip)}'`),
+      'node lookup',
+    )
+    const row = data?.results?.[0]
+    if (row?.NodeID != null) {
+      return { nodeId: Number(row.NodeID), caption: row.Caption, matchedBy: `IPAddress=${ip}` }
+    }
+  }
+
+  const captionPatterns = buildStoreHostAliases(question)
+  for (const pat of captionPatterns) {
+    const v = swqlEscape(pat)
+    const data = await withOrionTimeout(
+      orionSwisQuery(`SELECT TOP 5 NodeID, Caption FROM Orion.Nodes WHERE Caption LIKE '%${v}%'`),
+      'node lookup',
+    )
+    const row = data?.results?.[0]
+    if (row?.NodeID != null) {
+      return { nodeId: Number(row.NodeID), caption: row.Caption, matchedBy: `Caption LIKE %${pat}%` }
+    }
+  }
+
+  const code = extractStoreCode(question)
+  if (code) {
+    const nodeFields = await discoverNodeCPFields()
+    const buField = nodeFields.find((f) => /^LKST_BU$/i.test(f))
+    if (buField) {
+      const buValues = [code, `LKST${code}`, `RP${code}`, `LK${code}`]
+      for (const buVal of buValues) {
+        const v = swqlEscape(buVal)
+        const swql = `SELECT TOP 5 n.NodeID, n.Caption FROM Orion.Nodes n
+          INNER JOIN Orion.NodesCustomProperties ncp ON n.NodeID = ncp.NodeID
+          WHERE ncp.${buField} LIKE '%${v}%'`
+        const data = await withOrionTimeout(orionSwisQuery(swql), 'node lookup')
+        const row = data?.results?.[0]
+        if (row?.NodeID != null) {
+          return { nodeId: Number(row.NodeID), caption: row.Caption, matchedBy: `${buField} LIKE %${buVal}%` }
+        }
+      }
+    }
+  }
+
+  const host = extractStoreHostname(question)
+  if (host) {
+    const id = await findNodeIdByCaption(host)
+    if (id) return { nodeId: id, caption: host, matchedBy: 'Caption exact/LIKE fallback' }
+  }
+
+  return null
 }
 
 function mapCpEntries(fields, row, entity = 'node') {

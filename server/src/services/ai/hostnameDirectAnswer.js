@@ -16,6 +16,7 @@ import {
   isStoreHostnamePortalQuery,
   parseQuestionTimeRange,
   resolveCrashQueryWindow,
+  buildStoreHostAliases,
   resolveQueryWindow,
   shouldUseStoreCodeAlias,
 } from './queryContext.js'
@@ -166,10 +167,13 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
   const fetchedAt = new Date().toISOString()
   const fmtTs = (v) => formatPortalTimestamp(v)
   const envOpts = { showEmptyModules: true, maxUsbSamples: 15 }
-  const fetchEnv = (storeTag = '') => (wantsChart
+  const aliases = buildStoreHostAliases(question)
+  const fetchEnv = (storeTag = '', agentHostname = '') => (wantsChart
     ? Promise.resolve({})
-    : fetchHostnameEnvironments(hostname, range, allowedPages, {
+    : fetchHostnameEnvironments(agentHostname || hostname, range, allowedPages, {
       storeTag,
+      agentHostname: agentHostname || hostname,
+      aliasHostnames: aliases,
       extendSentinelWindow: true,
       usbSampleSize: 20,
     }))
@@ -203,7 +207,7 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
   ])
 
   const store = stores.find(s => hostnameMatchesStore(s, hostname))
-  const env = await fetchEnv(store?.storeTag || '')
+  const env = await fetchEnv(store?.storeTag || '', store?.hostname || hostname)
 
   if (!store) {
     const lines = [

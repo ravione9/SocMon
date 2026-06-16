@@ -39,39 +39,40 @@ function esTimeRange(preset) {
   return { gte: `now-${preset}` }
 }
 
-function endpointMustClause(hostname, storeTag = '') {
-  const h = String(hostname || '').trim()
-  const tag = String(storeTag || '').trim()
-  const esc = h.replace(/[\\*?]/g, '')
+function endpointMustClause(hostname, storeTag = '', aliasHostnames = []) {
+  const names = new Set()
+  for (const n of [hostname, storeTag, ...(aliasHostnames || [])]) {
+    if (n) names.add(String(n).trim())
+  }
   const should = []
 
-  const exactFields = [
-    'agentRealtimeInfo.agentComputerName.keyword',
-    'agent_realtime_info.agentComputerName.keyword',
-    'agentDetectionInfo.agentComputerName.keyword',
-    'host.name.keyword',
-    'host.hostname.keyword',
-    'computer_name.keyword',
-    'data.computerName.keyword',
-    'data.computer_name.keyword',
-  ]
-
-  for (const f of exactFields) {
-    should.push({ term: { [f]: h } })
-    if (tag && tag !== h) should.push({ term: { [f]: tag } })
-  }
-
-  if (esc) {
-    for (const f of [
+  for (const h of names) {
+    const esc = h.replace(/[\\*?]/g, '')
+    const exactFields = [
       'agentRealtimeInfo.agentComputerName.keyword',
       'agent_realtime_info.agentComputerName.keyword',
       'agentDetectionInfo.agentComputerName.keyword',
-    ]) {
-      should.push({ wildcard: { [f]: `${esc}*` } })
-      should.push({ wildcard: { [f]: `*${esc}*` } })
+      'host.name.keyword',
+      'host.hostname.keyword',
+      'computer_name.keyword',
+      'data.computerName.keyword',
+      'data.computer_name.keyword',
+    ]
+    for (const f of exactFields) {
+      should.push({ term: { [f]: h } })
     }
-    should.push({ wildcard: { 'host.name.keyword': `*${esc}*` } })
-    should.push({ wildcard: { 'computer_name.keyword': `*${esc}*` } })
+    if (esc) {
+      for (const f of [
+        'agentRealtimeInfo.agentComputerName.keyword',
+        'agent_realtime_info.agentComputerName.keyword',
+        'agentDetectionInfo.agentComputerName.keyword',
+      ]) {
+        should.push({ wildcard: { [f]: `${esc}*` } })
+        should.push({ wildcard: { [f]: `*${esc}*` } })
+      }
+      should.push({ wildcard: { 'host.name.keyword': `*${esc}*` } })
+      should.push({ wildcard: { 'computer_name.keyword': `*${esc}*` } })
+    }
   }
 
   return { bool: { should, minimum_should_match: 1 } }
@@ -190,6 +191,8 @@ function mapUsbSample(s) {
  */
 export async function fetchHostnameEnvironments(hostname, range, allowedPages = [], opts = {}) {
   const storeTag = String(opts.storeTag || '').trim()
+  const aliasHostnames = Array.isArray(opts.aliasHostnames) ? opts.aliasHostnames : []
+  const agentHost = String(opts.agentHostname || hostname || '').trim()
   const userPreset = influxRangeToEsPreset(range)
   const sentinelPreset = opts.extendSentinelWindow ? sentinelLookbackPreset(range) : userPreset
   const userTr = esTimeRange(userPreset)
@@ -200,7 +203,7 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
       out.sentinel = { configured: false, error: 'Elasticsearch not configured' }
     } else {
       const index = getSentinelIndex()
-      const endpoint = endpointMustClause(hostname, storeTag)
+      const endpoint = endpointMustClause(agentHost, storeTag, aliasHostnames)
       const tr = esTimeRange(sentinelPreset)
       const baseMust = [{ range: { '@timestamp': tr } }, endpoint]
 
