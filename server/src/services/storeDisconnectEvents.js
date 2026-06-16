@@ -7,6 +7,9 @@ import StoreProblemHistory from '../models/StoreProblemHistory.js'
 import {
   extractStoreCode,
   extractStoreHostname,
+  formatQueryWindowMeta,
+  hasQueryHistoryWindow,
+  resolveQueryWindow,
   shouldUseStoreCodeAlias,
 } from './ai/queryContext.js'
 
@@ -182,16 +185,26 @@ export function buildDisconnectHostScope(userMessage) {
  * BH-filtered disconnect payload for MCP (Store Zabbix ROP semantics).
  * Uses Mongo only — works when Zabbix API is down or not configured.
  * @param {string} [userMessage]
+ * @param {{ queryWindow?: object, queryContext?: object, historyFrom?: number, historyTo?: number }} [opts]
  */
-export async function buildStoreDisconnectMcpContext(userMessage = '') {
+export async function buildStoreDisconnectMcpContext(userMessage = '', opts = {}) {
   const fetchedAt = new Date().toISOString()
   const nowMs = Date.now()
   const hostScope = buildDisconnectHostScope(userMessage)
-  const DISCONNECT_LOOKBACK_DAYS = hostScope ? 30 : 14
+  const queryWindow = opts.queryWindow || resolveQueryWindow(userMessage, opts.queryContext, opts)
   const DISCONNECT_FETCH_LIMIT = hostScope ? 300 : 400
   const DISCONNECT_EVENT_LIMIT = hostScope ? 100 : 120
-  const fromMs = nowMs - DISCONNECT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000
-  const toMs = nowMs
+
+  let fromMs
+  let toMs
+  if (hasQueryHistoryWindow(queryWindow)) {
+    fromMs = queryWindow.fromSec * 1000
+    toMs = queryWindow.toSec * 1000
+  } else {
+    const lookbackDays = hostScope ? 30 : 14
+    fromMs = nowMs - lookbackDays * 24 * 60 * 60 * 1000
+    toMs = nowMs
+  }
   const scopeFilter = hostScope?.filter
 
   const disconnectQuery = {
@@ -259,7 +272,8 @@ export async function buildStoreDisconnectMcpContext(userMessage = '') {
     disconnectFetchedAt: fetchedAt,
     activeDisconnectCount: activeDisconnectEvents.length,
     activeDisconnectEvents,
-    disconnectEventsWindowDays: DISCONNECT_LOOKBACK_DAYS,
+    queryWindow: formatQueryWindowMeta(queryWindow),
+    disconnectEventsWindowDays: Math.max(1, Math.ceil((toMs - fromMs) / (24 * 60 * 60 * 1000))),
     disconnectEventsLimit: DISCONNECT_EVENT_LIMIT,
     disconnectEventsFilter: hostScope
       ? { hostname: hostScope.hostname, storeCode: hostScope.code, scoped: true }

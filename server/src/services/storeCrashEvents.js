@@ -11,7 +11,7 @@ import {
 } from './influxStore.js'
 import {
   extractStoreHostname,
-  resolveCrashQueryWindow,
+  resolveQueryWindow,
   wantsCrashEventLog,
   crashRecordMatches,
 } from './ai/queryContext.js'
@@ -52,7 +52,7 @@ export async function buildStoreCrashMcpContext(userMessage = '', opts = {}, que
 
   const hostnameFilter = extractStoreHostname(userMessage) || queryContext?.hostname || null
   const appFilter = queryContext?.appName || null
-  const window = resolveCrashQueryWindow(userMessage, queryContext, opts)
+  const window = opts.queryWindow || resolveQueryWindow(userMessage, queryContext, opts)
   const wantsEvents = wantsCrashEventLog(userMessage, queryContext)
     || queryContext?.wantsCrashEventList
     || /\b(event log|each crash|list crash|timestamps?)\b/i.test(userMessage)

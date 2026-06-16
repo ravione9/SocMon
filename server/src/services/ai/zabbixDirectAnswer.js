@@ -4,7 +4,7 @@ import { buildStoreDisconnectMcpContext } from '../../services/storeDisconnectEv
 import { buildStoreCrashMcpContext } from '../../services/storeCrashEvents.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 import { isInfluxStoreConfigured, fetchStoreSnapshot, buildOverviewSummary } from '../influxStore.js'
-import { extractStoreCode, extractStoreHostname, isStoreHostnamePortalQuery, shouldUseStoreCodeAlias } from './queryContext.js'
+import { extractStoreCode, extractStoreHostname, formatQueryWindowMeta, isStoreHostnamePortalQuery, resolveQueryWindow, shouldUseStoreCodeAlias } from './queryContext.js'
 import { isSocReportQuery } from './socDirectAnswer.js'
 import { isXdrQuestion } from './xdrDirectAnswer.js'
 import { isGeoConnectionQuery } from './geoConnectionQuery.js'
@@ -284,10 +284,8 @@ const ZABBIX_INTERFACE_HISTORY_MAX_PORTS = Math.min(
   20,
 )
 
-const ZABBIX_HISTORY_MAX_SEC = Math.min(
-  Math.max(parseInt(process.env.ZABBIX_CONTEXT_HISTORY_MAX_SEC || String(30 * 86400), 10) || 30 * 86400, 3600),
-  60 * 86400,
-)
+/** 0 = no cap (default). Set ZABBIX_CONTEXT_HISTORY_MAX_SEC to limit span in seconds. */
+const ZABBIX_HISTORY_MAX_SEC = parseInt(process.env.ZABBIX_CONTEXT_HISTORY_MAX_SEC || '0', 10) || 0
 
 const PORTAL_TZ_OFFSET = process.env.PORTAL_TZ_OFFSET || '+05:30'
 
@@ -324,7 +322,9 @@ function buildHistoryWindowResult(from, to, parseNote) {
   if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) return null
   let clampedFrom = from
   const span = to - from
-  if (span > ZABBIX_HISTORY_MAX_SEC) clampedFrom = to - ZABBIX_HISTORY_MAX_SEC
+  if (ZABBIX_HISTORY_MAX_SEC > 0 && span > ZABBIX_HISTORY_MAX_SEC) {
+    clampedFrom = to - ZABBIX_HISTORY_MAX_SEC
+  }
   const rangeSec = to - clampedFrom
   return {
     from: clampedFrom,
@@ -396,7 +396,18 @@ function parseCalendarDateWindow(raw) {
 }
 
 function clampHistoryRangeSec(sec) {
-  return Math.min(Math.max(Math.floor(sec), 3600), ZABBIX_HISTORY_MAX_SEC)
+  const n = Math.max(Math.floor(sec), 3600)
+  if (ZABBIX_HISTORY_MAX_SEC <= 0) return n
+  return Math.min(n, ZABBIX_HISTORY_MAX_SEC)
+}
+
+function relativeRangeToSec(range) {
+  const m = String(range || '-24h').match(/^-(\d+)(m|h|d)$/)
+  if (!m) return 86400
+  const n = Number(m[1])
+  if (m[2] === 'm') return clampHistoryRangeSec(n * 60)
+  if (m[2] === 'h') return clampHistoryRangeSec(n * 3600)
+  return clampHistoryRangeSec(n * 86400)
 }
 
 /** Parse CPU/RAM history window from natural language (default 24h ending now, max 30d). */
@@ -426,27 +437,21 @@ function parseZabbixHistoryRangeSec(message) {
   return 86400
 }
 
-/** Absolute or relative Zabbix history window for CPU/RAM series. */
+/** Absolute or relative Zabbix history window for CPU/RAM / interface series. */
 function parseZabbixHistoryWindow(message, opts = {}) {
-  const fromExplicit = parseEpochSec(opts.historyFrom)
-  const toExplicit = parseEpochSec(opts.historyTo)
-  if (fromExplicit != null && toExplicit != null) {
-    const built = buildHistoryWindowResult(fromExplicit, toExplicit, 'historyFrom/historyTo parameters')
+  const w = resolveQueryWindow(message, opts.queryContext, opts)
+  if (w.fromSec && w.toSec) {
+    const built = buildHistoryWindowResult(w.fromSec, w.toSec, w.parseNote)
     if (built) return built
   }
-
-  const raw = String(message || '')
-  const absolute = parseExplicitUnixWindow(raw) || parseCalendarDateWindow(raw)
-  if (absolute) return absolute
-
   const now = Math.floor(Date.now() / 1000)
-  const rangeSec = parseZabbixHistoryRangeSec(message)
+  const rangeSec = parseZabbixHistoryRangeSec(message) || relativeRangeToSec(w.range)
   return {
     from: now - rangeSec,
     to: now,
     rangeSec,
-    windowLabel: formatHistoryWindowLabel(now - rangeSec, now),
-    parseNote: 'relative window ending now',
+    windowLabel: w.label || formatHistoryWindowLabel(now - rangeSec, now),
+    parseNote: w.parseNote || 'relative window ending now',
   }
 }
 
@@ -2900,9 +2905,12 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
 
   return {
     module: moduleId,
-    freshness: 'live',
+    freshness: historyWindow.from && historyWindow.to && (historyWindow.to < Math.floor(Date.now() / 1000) - 3600)
+      ? 'historical'
+      : 'live',
     fetchedAt,
     configured: true,
+    queryWindow: formatQueryWindowMeta(opts.queryWindow || resolveQueryWindow(userMessage, opts.queryContext, opts)),
     source: `${sourceLabel} API (host.get + item.get net.if.*)`,
     note: moduleId === 'storeZabbix'
       ? 'CPU/RAM from both sources when available: hosts[].cpu/memory (Zabbix items) and storeAgentMetrics (Influx store PC agent). hosts[].ports = live net.if traffic; interfaceHistory = historical net.if.in/out series. Report both live and history when present.'
@@ -2986,7 +2994,7 @@ async function buildStoreZabbixZabbixStub(userMessage = '') {
 }
 
 export async function buildStoreZabbixContext(userMessage = '', opts = {}) {
-  const disconnectBlock = await buildStoreDisconnectMcpContext(userMessage)
+  const disconnectBlock = await buildStoreDisconnectMcpContext(userMessage, opts)
   const crashBlock = await buildStoreCrashMcpContext(userMessage, opts, opts.queryContext || null)
   const hostScope = extractIpv4(userMessage) || extractStoreHostname(userMessage)
   const skipZabbixInventory = isDisconnectFocusedQuery(userMessage) && !hostScope

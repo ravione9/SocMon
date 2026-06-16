@@ -24,6 +24,16 @@ Tools you have access to (auto-grown from NetPulse on connect):
   netpulse_zabbixInfra     -- infra Zabbix: ping, host avail, traffic, CPU/RAM
   netpulse_orian           -- SolarWinds Orion SWIS: nodes, alerts, interfaces
 
+IMPORTANT — history windows (ALL modules, no 24h cap when you specify a range):
+  Every netpulse_* tool accepts historyFrom + historyTo (unix seconds).
+  Natural language also works on any module question:
+    • Calendar (IST): "12 June 2026", "11 June 2026 20:00-20:15", "2026-06-12"
+    • Relative: "last 5 days", "last 7 days", "last 30 days"
+    • Unix: time_from/time_to in question text
+  Response includes queryWindow { label, fromAt, toAt, absolute } on each module.
+  storeMonitor / storeProblems / storeZabbix / soc / zabbixInfra honor the window.
+  Default when no range given: live snapshot (storeMonitor -1h, soc -1h) — NOT forced 24h.
+
 Built-in prompts:
   noc_status_summary       -- preset NOC executive summary
 
@@ -47,6 +57,10 @@ netpulse_query alone. Available tools:
   netpulse_sentinelXdr                    (SentinelOne XDR data lake)
   netpulse_zabbixInfra                    (infra Zabbix: ping, host avail, traffic, CPU/RAM)
   netpulse_orian                          (SolarWinds Orion NPM: nodes, alerts, interfaces)
+
+History: every tool accepts historyFrom + historyTo (unix sec) or calendar dates in
+the question — no 24h cap when a window is specified. Each module returns queryWindow.
+Default with no range: live snapshot (not forced 24h).
 
 Rules:
   * Always include a store hostname/tag in the question when you need

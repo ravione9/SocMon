@@ -16,6 +16,7 @@ import {
   isStoreHostnamePortalQuery,
   parseQuestionTimeRange,
   resolveCrashQueryWindow,
+  resolveQueryWindow,
   shouldUseStoreCodeAlias,
 } from './queryContext.js'
 import { isNetworkInfraQuery, isZabbixQuestion, buildStoreZabbixContext } from './zabbixDirectAnswer.js'
@@ -157,7 +158,7 @@ export async function tryDirectHostnameAnswer(question, allowedPages, ctx = null
     || /\b(graph|graphical|chart|visual|plot|timeline)\b/i.test(question)
 
   const range = ctx?.range || parseQuestionTimeRange(question)
-  const crashWindow = resolveCrashQueryWindow(question, ctx)
+  const crashWindow = resolveQueryWindow(question, ctx)
   const rangeSec = rangeToSeconds(range)
   const rangeLabel = crashWindow.fromSec
     ? (crashWindow.label || formatRangeLabelFromInflux(range))

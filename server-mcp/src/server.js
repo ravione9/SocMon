@@ -26,13 +26,13 @@ const historyWindowSchema = {
     .int()
     .positive()
     .optional()
-    .describe('Unix seconds start of history/crash window. Pair with historyTo. Used for Zabbix CPU/RAM and Influx app crashes.'),
+    .describe('Unix seconds start of query window (all modules). Pair with historyTo. No default 24h cap when set.'),
   historyTo: z
     .number()
     .int()
     .positive()
     .optional()
-    .describe('Unix seconds end of history/crash window. Pair with historyFrom.'),
+    .describe('Unix seconds end of query window (all modules). Pair with historyFrom.'),
 }
 
 const SERVER_INFO = {

@@ -691,12 +691,13 @@ export function parseAbsoluteTimeWindow(q) {
 }
 
 /**
- * Resolve Influx crash query window from MCP params, query context, or natural language.
+ * Shared history window for all MCP modules (Influx, Mongo, ES, Zabbix).
  * @param {string} question
  * @param {object} [ctx]
  * @param {{ historyFrom?: number, historyTo?: number }} [opts]
+ * @returns {{ range: string, fromSec?: number, toSec?: number, label: string, parseNote: string }}
  */
-export function resolveCrashQueryWindow(question, ctx = {}, opts = {}) {
+export function resolveQueryWindow(question, ctx = {}, opts = {}) {
   const fromOpt = parseEpochSec(opts.historyFrom)
   const toOpt = parseEpochSec(opts.historyTo)
   if (fromOpt != null && toOpt != null && fromOpt < toOpt) {
@@ -750,6 +751,54 @@ export function resolveCrashQueryWindow(question, ctx = {}, opts = {}) {
     parseNote: 'relative Influx range',
   }
 }
+
+/** @deprecated alias — use resolveQueryWindow */
+export const resolveCrashQueryWindow = resolveQueryWindow
+
+/** True when the window is absolute (calendar/unix/MCP params), not a rolling relative range. */
+export function hasQueryHistoryWindow(window) {
+  return Boolean(window?.fromSec && window?.toSec)
+}
+
+/** Map resolveQueryWindow output to Influx fetchCrashEvents / fetchStoreSnapshot args. */
+export function queryWindowForInflux(window) {
+  return {
+    range: window?.range || '-24h',
+    fromSec: window?.fromSec,
+    toSec: window?.toSec,
+    label: window?.label,
+    parseNote: window?.parseNote,
+  }
+}
+
+/** Convert relative range to absolute unix bounds ending now. */
+export function queryWindowToAbsolute(window) {
+  if (window?.fromSec && window?.toSec) {
+    return { fromSec: window.fromSec, toSec: window.toSec, label: window.label }
+  }
+  const m = String(window?.range || '-24h').match(/^-(\d+)(m|h|d)$/)
+  if (!m) return { fromSec: undefined, toSec: undefined, label: window?.label }
+  const n = Number(m[1])
+  const mult = m[2] === 'm' ? 60 : m[2] === 'h' ? 3600 : 86400
+  const toSec = Math.floor(Date.now() / 1000)
+  return { fromSec: toSec - n * mult, toSec, label: window?.label }
+}
+
+function formatQueryWindowMeta(window) {
+  if (!window) return null
+  return {
+    range: window.range || null,
+    fromSec: window.fromSec ?? null,
+    toSec: window.toSec ?? null,
+    label: window.label || null,
+    parseNote: window.parseNote || null,
+    fromAt: window.fromSec ? new Date(window.fromSec * 1000).toISOString() : null,
+    toAt: window.toSec ? new Date(window.toSec * 1000).toISOString() : null,
+    absolute: hasQueryHistoryWindow(window),
+  }
+}
+
+export { formatQueryWindowMeta }
 
 function hasExplicitTimeRange(q) {
   return /\b(last|past)\s+\d+\s*(h|hr|hour|hours|m|min|d|day)/i.test(q)

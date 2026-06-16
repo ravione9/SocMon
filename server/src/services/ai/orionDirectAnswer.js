@@ -10,6 +10,7 @@ import {
   findNodeIdByCaption,
 } from '../solarwindsNodeSnapshot.js'
 import { extractIpv4 } from './zabbixDirectAnswer.js'
+import { formatQueryWindowMeta, resolveQueryWindow } from './queryContext.js'
 
 const NODE_STATUS = {
   0: 'Unknown', 1: 'Up', 2: 'Down', 3: 'Warning',
@@ -133,9 +134,11 @@ async function fetchOrionNodes({ q = '', statusFilter = '', limit = 50 } = {}) {
 /**
  * Live SolarWinds Orion context for MCP / agent portal.
  * @param {string} [userMessage]
+ * @param {{ queryWindow?: object, queryContext?: object, historyFrom?: number, historyTo?: number }} [opts]
  */
-export async function buildSolarWindsContext(userMessage = '') {
+export async function buildSolarWindsContext(userMessage = '', opts = {}) {
   const fetchedAt = new Date().toISOString()
+  const queryWindow = opts.queryWindow || resolveQueryWindow(userMessage, opts.queryContext, opts)
   if (!isOrionConfigured()) {
     return {
       module: 'orian',
@@ -188,6 +191,7 @@ export async function buildSolarWindsContext(userMessage = '') {
       fetchedAt,
       configured: true,
       reachable: true,
+      queryWindow: formatQueryWindowMeta(queryWindow),
       source: 'SolarWinds Orion SWIS API',
       orionUrl: parseOrionWebUrl().origin,
       nodeFilter: nodeFilter || null,

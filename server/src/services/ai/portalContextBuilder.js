@@ -34,6 +34,11 @@ import {
   wantsCrashEventLog,
   extractStoreHostname,
   resolveCrashQueryWindow,
+  resolveQueryWindow,
+  queryWindowForInflux,
+  hasQueryHistoryWindow,
+  queryWindowToAbsolute,
+  formatQueryWindowMeta,
 } from './queryContext.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 
@@ -340,35 +345,60 @@ function problemSeverityRank(severity, online = false) {
   return 4
 }
 
-async function buildStoreMonitorContext(staleMinutes = 10, detail = 'standard') {
+async function buildStoreMonitorContext(staleMinutes = 10, detail = 'standard', opts = {}) {
   const fetchedAt = new Date().toISOString()
+  const userMessage = opts?.userMessage || ''
+  const queryWindow = opts.queryWindow || resolveQueryWindow(userMessage, opts.queryContext, opts)
+  const influx = queryWindowForInflux(queryWindow)
+  const historical = hasQueryHistoryWindow(queryWindow) || hasExplicitTimeRange(userMessage)
+
   if (!isInfluxStoreConfigured()) {
     return {
       module: 'storeMonitor',
-      freshness: 'live',
+      freshness: historical ? 'historical' : 'live',
       fetchedAt,
       configured: false,
       error: 'InfluxDB not configured',
+      queryWindow: formatQueryWindowMeta(queryWindow),
     }
   }
 
-  const stores = await fetchStoreSnapshot(staleMinutes, '-1h')
+  const metricRange = historical ? influx.range : '-1h'
+  const stores = await fetchStoreSnapshot(
+    staleMinutes,
+    metricRange,
+    influx.fromSec,
+    influx.toSec,
+  )
   const summary = buildOverviewSummary(stores)
   const offline = stores.filter(s => !s.online).map(summarizeStore)
 
+  let wifiHistory = null
+  if (historical) {
+    try {
+      wifiHistory = await fetchWifiConnectivityHistory(influx.range, influx.fromSec, influx.toSec)
+    } catch {
+      wifiHistory = null
+    }
+  }
+
   const base = {
     module: 'storeMonitor',
-    freshness: 'live',
+    freshness: historical ? 'historical' : 'live',
     fetchedAt,
     configured: true,
     staleMinutes,
+    queryWindow: formatQueryWindowMeta(queryWindow),
     source: 'InfluxDB (PowerShell store agents)',
-    note: `Online = heartbeat within last ${staleMinutes} min. Queried live when you sent the message.`,
+    note: historical
+      ? `Historical window: ${queryWindow.label}. Snapshot = last agent values per store inside window.`
+      : `Online = heartbeat within last ${staleMinutes} min. Queried live when you sent the message.`,
     summary,
     groupSummaries: buildGroupSummaries(stores),
     groupConnectivityStats: buildGroupConnectivityStats(stores),
     groupOfflineHostnames: buildGroupOfflineHostnames(stores),
     offlineCount: offline.length,
+    ...(wifiHistory ? { wifiConnectivityHistory: wifiHistory } : {}),
   }
 
   if (detail === 'summary') {
@@ -429,12 +459,13 @@ function buildStoreProblemHostFilter(userMessage) {
   return buildDisconnectHostScope(userMessage)
 }
 
-async function buildStoreProblemsContext(userMessage = '') {
+async function buildStoreProblemsContext(userMessage = '', opts = {}) {
   const fetchedAt = new Date().toISOString()
   const tracker = getProblemSnapshotStatus()
   const intervalMin = Math.round((tracker.intervalMs || 120000) / 60000)
   const hostScope = buildStoreProblemHostFilter(userMessage)
-  const disconnectBlock = await buildStoreDisconnectMcpContext(userMessage)
+  const disconnectBlock = await buildStoreDisconnectMcpContext(userMessage, opts)
+  const queryWindow = opts.queryWindow || resolveQueryWindow(userMessage, opts.queryContext, opts)
 
   if (!isInfluxStoreConfigured()) {
     return {
@@ -471,6 +502,7 @@ async function buildStoreProblemsContext(userMessage = '') {
     freshness: 'periodic',
     fetchedAt,
     configured: true,
+    queryWindow: formatQueryWindowMeta(queryWindow),
     source: disconnectBlock.disconnectSource || `MongoDB StoreProblemHistory (code='${OFFLINE_CODE}')`,
     snapshotIntervalMinutes: intervalMin,
     lastBackgroundSnapAt: tracker.lastSnapAt || null,
@@ -491,14 +523,26 @@ async function buildStoreProblemsContext(userMessage = '') {
   }
 }
 
-async function buildSocContext() {
+async function buildSocContext(opts = {}) {
   const fetchedAt = new Date().toISOString()
+  const userMessage = opts?.userMessage || ''
+  const queryWindow = opts.queryWindow || resolveQueryWindow(userMessage, opts.queryContext, opts)
+  const abs = queryWindowToAbsolute(queryWindow)
+  const historical = hasQueryHistoryWindow(queryWindow) || hasExplicitTimeRange(userMessage)
+
+  let esRange
+  if (abs.fromSec && abs.toSec) {
+    esRange = { range: { '@timestamp': { gte: abs.fromSec * 1000, lte: abs.toSec * 1000 } } }
+  } else {
+    esRange = { range: { '@timestamp': { gte: `now${queryWindow.range || '-1h'}` } } }
+  }
+
   try {
     const result = await getESClient().search({
       index: 'firewall-*',
       body: {
         size: 0,
-        query: { bool: { must: [{ range: { '@timestamp': { gte: 'now-1h' } } }] } },
+        query: { bool: { must: [esRange] } },
         aggs: {
           totalEvents: { value_count: { field: '@timestamp' } },
           denies: { filter: { term: { 'fgt.action.keyword': 'deny' } } },
@@ -512,12 +556,15 @@ async function buildSocContext() {
     const aggs = result.aggregations || {}
     return {
       module: 'soc',
-      freshness: 'live',
+      freshness: historical ? 'historical' : 'live',
       fetchedAt,
       configured: true,
       source: 'Elasticsearch firewall-*',
-      window: 'last 1 hour',
-      note: 'Aggregations queried live at send time.',
+      queryWindow: formatQueryWindowMeta(queryWindow),
+      window: queryWindow.label || 'last 1 hour',
+      note: historical
+        ? `Aggregations for ${queryWindow.label} (no 1h cap).`
+        : 'Aggregations queried live at send time (default last 1 hour).',
       stats: {
         totalEvents: aggs.totalEvents?.value ?? 0,
         denies: aggs.denies?.doc_count ?? 0,
@@ -538,12 +585,12 @@ async function buildSocContext() {
 }
 
 const BUILDERS = {
-  storeMonitor: (detail) => buildStoreMonitorContext(10, detail),
-  storeProblems: (_, opts) => buildStoreProblemsContext(opts?.userMessage || ''),
-  soc: buildSocContext,
+  storeMonitor: (detail, opts) => buildStoreMonitorContext(10, detail, opts),
+  storeProblems: (_, opts) => buildStoreProblemsContext(opts?.userMessage || '', opts),
+  soc: (_, opts) => buildSocContext(opts),
   zabbixInfra: (_, opts) => buildZabbixInfraContext(opts?.userMessage || '', opts),
   storeZabbix: (_, opts) => buildStoreZabbixContext(opts?.userMessage || '', opts),
-  orian: (_, opts) => buildSolarWindsContext(opts?.userMessage || ''),
+  orian: (_, opts) => buildSolarWindsContext(opts?.userMessage || '', opts),
 }
 
 /**
@@ -591,7 +638,7 @@ export async function tryDirectCrashAnswer(question, allowedPages, ctx = null, o
 
   const appFilter = ctx?.appName || null
   const hostnameFilter = extractStoreHostname(q) || ctx?.hostname || null
-  const crashWindow = resolveCrashQueryWindow(q, ctx, opts)
+  const crashWindow = resolveQueryWindow(q, ctx, opts)
   const range = crashWindow.range
   const fetchedAt = new Date().toISOString()
   const rangeLabel = crashWindow.label || formatRangeLabelFromInflux(range)
@@ -948,10 +995,14 @@ export async function tryDirectStoreIssuesAnswer(question, allowedPages, ctx = n
 
   const limit = extractTopLimit(question)
   const groupFilter = extractStoreGroupFilter(question)
-  const metricRange = parseQuestionTimeRange(question)
-  const rangeLabel = formatRangeLabelFromInflux(metricRange)
-  const since = metricRangeToSince(metricRange)
-  const windowedQuery = hasExplicitTimeRange(question)
+  const queryWindow = resolveQueryWindow(question, ctx)
+  const influx = queryWindowForInflux(queryWindow)
+  const metricRange = influx.range
+  const rangeLabel = queryWindow.label || formatRangeLabelFromInflux(metricRange)
+  const since = influx.fromSec
+    ? new Date(influx.fromSec * 1000)
+    : metricRangeToSince(metricRange)
+  const windowedQuery = hasExplicitTimeRange(question) || hasQueryHistoryWindow(queryWindow)
   const fetchedAt = new Date().toISOString()
 
   if (!isInfluxStoreConfigured()) {
@@ -965,7 +1016,7 @@ export async function tryDirectStoreIssuesAnswer(question, allowedPages, ctx = n
 
   const [trackerRanked, storesInitial] = await Promise.all([
     rankProblemsFromTracker(since, groupFilter, limit),
-    fetchStoreSnapshot(10, metricRange),
+    fetchStoreSnapshot(10, metricRange, influx.fromSec, influx.toSec),
   ])
 
   let stores = storesInitial
@@ -977,12 +1028,6 @@ export async function tryDirectStoreIssuesAnswer(question, allowedPages, ctx = n
   if (!stores.length) {
     stores = await fetchStoreIssuesLite(10, metricRange)
     if (stores.length) snapshotNote = 'Using lightweight Store Monitor fetch (full snapshot unavailable).'
-  }
-  if (!stores.length && metricRange !== '-24h') {
-    stores = getAnyCachedStoreSnapshot() || await fetchStoreIssuesLite(10, '-24h')
-    if (stores.length && !snapshotNote) {
-      snapshotNote = 'Using 24h fallback window (12h fetch unavailable).'
-    }
   }
 
   let scoped = groupFilter
@@ -1255,20 +1300,19 @@ export async function tryDirectStoreConnectivityAnswer(question, allowedPages, c
 
   const threadText = [ctx?.priorUser, question, ctx?.priorAssistant].filter(Boolean).join(' ')
   const groupFilter = extractStoreGroupFilter(question, threadText) || 'RP Group'
-  const range = ctx?.range || parseQuestionTimeRange(question) || parseQuestionTimeRange(ctx?.priorUser) || '-24h'
-  const rangeLabel = formatRangeLabelFromInflux(range)
+  const queryWindow = resolveQueryWindow(question, ctx)
+  const influx = queryWindowForInflux(queryWindow)
+  const range = influx.range
+  const rangeLabel = queryWindow.label || formatRangeLabelFromInflux(range)
   const wantsWifi = /\b(wifi|wi-?fi|wireless)\b/i.test(threadText)
   if (!wantsWifi) return null
 
   const fetchedAt = new Date().toISOString()
-  const wifiHistory = await fetchWifiConnectivityHistory(range)
+  const wifiHistory = await fetchWifiConnectivityHistory(range, influx.fromSec, influx.toSec)
 
-  let stores = await fetchStoreSnapshot(10, range)
+  let stores = await fetchStoreSnapshot(10, range, influx.fromSec, influx.toSec)
   if (!stores.length) stores = getAnyCachedStoreSnapshot() || []
   if (!stores.length) stores = await fetchStoreIssuesLite(10, range)
-  if (!stores.length && range !== '-24h') {
-    stores = getAnyCachedStoreSnapshot() || await fetchStoreIssuesLite(10, '-24h')
-  }
 
   const groupStores = stores.filter(s =>
     deriveStoreGroups(s.hostname, s.gatewayVendor, s.isFortinet).includes(groupFilter),
@@ -1491,6 +1535,8 @@ export async function buildPortalContext(user, moduleIds = [], opts = {}) {
   const detail = inferContextDetail(opts.userMessage || '')
   const { allowedPages } = await computeUserPageAccess(user)
   const unique = [...new Set(moduleIds)].filter(id => canUseModule(id, allowedPages))
+  const queryWindow = resolveQueryWindow(opts.userMessage || '', opts.queryContext, opts)
+  const builderOpts = { ...opts, queryWindow }
 
   const modules = {}
   const meta = []
@@ -1501,11 +1547,7 @@ export async function buildPortalContext(user, moduleIds = [], opts = {}) {
       const builder = BUILDERS[id]
       if (!builder) return
       try {
-        const data = id === 'storeMonitor'
-          ? await builder(detail)
-          : (id === 'zabbixInfra' || id === 'storeZabbix' || id === 'storeProblems' || id === 'orian')
-            ? await builder(detail, opts)
-            : await builder()
+        const data = await builder(detail, builderOpts)
         modules[id] = data
         meta.push({
           id,
@@ -1535,6 +1577,7 @@ export async function buildPortalContext(user, moduleIds = [], opts = {}) {
 
   return {
     portal: 'netpulse',
+    queryWindow: formatQueryWindowMeta(queryWindow),
     user: { email: user.email, role: user.role },
     modules,
     meta,
