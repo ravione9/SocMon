@@ -981,10 +981,11 @@ TOOL CALLS (5 in parallel — replace <STORE>, <CODE>, <DATE>, <FROM>, <TO>):
   1) netpulse_storeZabbix
      question: "<STORE> RP<CODE> CPU memory history net.if.in net.if.out
      interface bandwidth upload download bps Mbps icmpping packet loss
-     agent.ping availability uptime history disconnect <DATE> <FROM>-<TO> IST"
+     uptime system.uptime sysUpTime agent.ping availability history disconnect <DATE> <FROM>-<TO> IST"
      historyFrom: <unix>   historyTo: <unix>
      (Force Zabbix to return: cpuMemoryHistory, interfaceHistory,
-      hosts[].ping (icmpping loss/ms), agent.ping history for uptime,
+      hosts[].ping (icmpping loss/ms), uptimeHistory (device uptime counter),
+      pingHistory (agent.ping availability),
       disconnectEvents.)
 
   2) netpulse_storeMonitor
@@ -1039,12 +1040,13 @@ VALUE EXTRACTION — STRICT SOURCE RULES (no cross-source fallbacks):
                           Fallback: pingHistory.byHost[hid].totalSamples
                           minus upSamples (count of agent.ping=0 samples).
 
-  Uptime (%)            → STORE ZABBIX (agent.ping / icmpping history)
-                          PRIMARY:   hosts[].pingAtSession.uptimePct
-                          SECONDARY: pingHistory.byHost[<hostid>].uptimePct
-                          (MCP pre-computes this in-window:
-                           100 × upSamples ÷ totalSamples, 2 decimals.)
-                          DO NOT derive from disconnect minutes.
+  Uptime                → STORE ZABBIX uptime counter (NOT availability %)
+                          PRIMARY:   hosts[].uptimeAtSession.label
+                          SECONDARY: uptimeHistory.hosts[].uptime.sessionSnapshot.label
+                          Raw seconds also available as .seconds.
+                          This matches Zabbix graph item "Uptime (uptime)" /
+                          system.uptime / sysUpTime / hrSystemUptime.
+                          DO NOT use pingAtSession.uptimePct for this row.
                           Empty → "0".
 
   Ping delay (ms)       → STORE ZABBIX (icmppingsec / custom.ping.ms history)
@@ -1104,7 +1106,7 @@ OUTPUT FORMAT (reply with this only — no extra commentary):
   | Internet (WiFi or Ethernet)         |        |
   | Download speed (Mbps)               |        |
   | Upload speed (Mbps)                 |        |
-  | Uptime (%)                          |        |
+  | Uptime                              |        |
   | Internet drops (count in window)    |        |
   | Ping delay (ms)                     |        |
   | Packet loss (%)                     |        |
@@ -1135,7 +1137,8 @@ OUTPUT VALUE RULES (strict):
                             cpuPointsTotal, memoryPointsTotal }
         Bandwidth       → interfaceHistory.hosts[].ports[] (null in/out)
                           + hosts[].ports stale poll
-        Uptime/Ping/    → pingHistory.diagnostics
+        Uptime          → uptimeHistory.diagnostics
+        Ping/Loss       → pingHistory.diagnostics
         Loss              { itemCounts: { agent, icmp, icmpSec, icmpLoss },
                             sourcesUsed: { uptime, ms, loss } }
         Drops           → disconnectEventsCount, disconnectFilterMode
@@ -1145,7 +1148,8 @@ OUTPUT VALUE RULES (strict):
 
       Example WHY ZERO bullets (terse — one line each):
         "CPU/RAM: 0 hosts matched CPU items (RP371 has no system.cpu.util / fgSysCpuUsage)"
-        "Uptime/Ping: itemCounts {agent:0, icmp:0} — host lacks ICMP/agent template"
+        "Uptime: uptimePointsTotal=0, keys=[uptime] — no points in window"
+        "Ping/Loss: itemCounts {agent:0, icmp:0} — host lacks ICMP template"
         "Bandwidth: net.if items found but lastclock is 7d old"
 
   • Zabbix CPU/RAM/interface/ping history WILL be present for valid
@@ -1160,9 +1164,12 @@ OUTPUT VALUE RULES (strict):
        Bandwidth:
          interfaceHistory.hosts[].ports[].in.points[] / .out.points[]
          hosts[].ports[].in.rate / .out.rate / .inBps / .outBps
-       Ping / Uptime / Loss:
-         hosts[].pingAtSession.{uptimePct, avgMs, avgLossPct}
-         pingHistory.byHost[<hostid>].{uptimePct, avgMs, avgLossPct}
+       Uptime counter:
+         hosts[].uptimeAtSession.{label, seconds}
+         uptimeHistory.hosts[].uptime.sessionSnapshot.{label, seconds}
+       Ping / Loss:
+         hosts[].pingAtSession.{avgMs, avgLossPct}
+         pingHistory.byHost[<hostid>].{avgMs, avgLossPct}
     If ANY of these is populated, USE IT — do not write "0".
   • If a value is genuinely not available from the locked source: write
     0 (counts / % / Mbps / ms) or "Not found" for text-only fields.

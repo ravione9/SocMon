@@ -969,6 +969,20 @@ function trendQueryBounds(from, to) {
   }
 }
 
+function formatDurationSeconds(seconds) {
+  const n = Number(seconds)
+  if (!Number.isFinite(n) || n < 0) return null
+  const total = Math.round(n)
+  const days = Math.floor(total / 86400)
+  const hours = Math.floor((total % 86400) / 3600)
+  const mins = Math.floor((total % 3600) / 60)
+  const secs = total % 60
+  if (days > 0) return `${days}d ${hours}h ${mins}m`
+  if (hours > 0) return `${hours}h ${mins}m`
+  if (mins > 0) return `${mins}m ${secs}s`
+  return `${secs}s`
+}
+
 async function fetchItemHistorySeries(zabbixRpc, metric, from, to, maxPoints = 120, opts = {}) {
   const valueMode = opts.valueMode === 'traffic' ? 'traffic' : 'percent'
   const itemid = String(metric?.itemid || '').trim()
@@ -1550,6 +1564,39 @@ function buildHostMetricMap(items, hostids) {
   return { valueByHost, clockByHost }
 }
 
+function baseItemKey(key) {
+  return String(key || '').split('[')[0].trim()
+}
+
+function isUptimeItem(it) {
+  const key = baseItemKey(it?.key_).toLowerCase()
+  const name = String(it?.name || '').toLowerCase()
+  if (key === 'agent.ping' || key === 'icmpping') return false
+  return [
+    'uptime',
+    'system.uptime',
+    'sysuptime',
+    'hrsystemuptime',
+    'device.uptime',
+  ].includes(key)
+    || /\b(system|device|host|fortigate|firewall)?\s*uptime\b/i.test(name)
+}
+
+async function fetchUptimeItems(zabbixRpc, hostids) {
+  const batches = await Promise.all([
+    fetchItemsChunked(zabbixRpc, hostids, 'uptime'),
+    fetchItemsChunked(zabbixRpc, hostids, 'system.uptime'),
+    fetchItemsChunked(zabbixRpc, hostids, 'sysUpTime'),
+    fetchItemsChunked(zabbixRpc, hostids, 'hrSystemUptime'),
+    fetchItemsChunked(zabbixRpc, hostids, 'device.uptime'),
+  ])
+  const byId = new Map()
+  for (const it of batches.flat()) {
+    if (it?.itemid && isUptimeItem(it)) byId.set(String(it.itemid), it)
+  }
+  return [...byId.values()]
+}
+
 function classifyFreshMetrics(valueByHost, clockByHost, hostids, nowSec = Math.floor(Date.now() / 1000)) {
   const fresh = {}
   const staleFlags = {}
@@ -1903,6 +1950,151 @@ function applySessionPingToHosts(hosts, pingHistory) {
       msSamples: row.msSamples,
       lossSamples: row.lossSamples,
     }
+  }
+}
+
+async function fetchUptimeHistorySnapshot(zabbixRpc, matchedHosts, window, maxPoints = 120) {
+  if (!window || !matchedHosts?.length) return null
+  const hostids = matchedHosts.map((h) => String(h.hostid)).filter(Boolean)
+  const uptimeItems = await fetchUptimeItems(zabbixRpc, hostids)
+  const itemsByHost = {}
+  for (const it of uptimeItems) {
+    const hid = String(it.hostid)
+    if (!itemsByHost[hid]) itemsByHost[hid] = []
+    itemsByHost[hid].push(it)
+  }
+
+  async function readSeries(it) {
+    const valueType = Number(it.value_type)
+    const hk = zabbixHistoryKind(valueType)
+    if (!hk) return null
+
+    const fetchHistory = async () => {
+      const rows = await zabbixRpc('history.get', {
+        history: hk.history,
+        itemids: [String(it.itemid)],
+        time_from: window.from,
+        time_till: window.to,
+        output: ['clock', 'value'],
+        sortfield: 'clock',
+        sortorder: 'ASC',
+        limit: 5000,
+      }).catch(() => [])
+      return (rows || [])
+        .map((r) => ({ clock: Number(r.clock), value: hk.parse(r.value) }))
+        .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+    }
+
+    const fetchTrends = async () => {
+      if (!hk.trends) return []
+      const trendWindow = trendQueryBounds(window.from, window.to)
+      const rows = await zabbixRpc('trend.get', {
+        itemids: [String(it.itemid)],
+        time_from: trendWindow.from,
+        time_till: trendWindow.to,
+        output: ['clock', 'value_avg'],
+        sortfield: 'clock',
+        sortorder: 'ASC',
+        limit: 5000,
+      }).catch(() => [])
+      return (rows || [])
+        .map((r) => ({ clock: Number(r.clock), value: Number(r.value_avg) }))
+        .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+    }
+
+    let source = 'history'
+    let points = await fetchHistory()
+    if (!points.length) {
+      points = await fetchTrends()
+      source = points.length ? 'trend' : null
+    }
+    if (!points.length) return null
+
+    points = downsampleHistoryPoints(points, maxPoints)
+    const targetSec = window.requestedAtSec ?? Math.floor((window.from + window.to) / 2)
+    const nearest = nearestHistoryPoint(
+      points.map((p) => ({
+        clock: p.clock,
+        at: formatPortalTimestamp(p.clock * 1000),
+        percent: p.value,
+      })),
+      targetSec,
+    )
+    const seconds = nearest?.percent ?? null
+    return {
+      itemid: String(it.itemid),
+      key: it.key_ || '',
+      itemName: it.name || it.key_ || String(it.itemid),
+      units: it.units || '',
+      source,
+      pointCount: points.length,
+      sessionSnapshot: seconds == null
+        ? null
+        : {
+          clock: nearest.clock,
+          at: nearest.at,
+          seconds,
+          label: formatDurationSeconds(seconds),
+          deltaSec: nearest.deltaSec,
+        },
+      points: points.map((p) => ({
+        clock: p.clock,
+        at: formatPortalTimestamp(p.clock * 1000),
+        seconds: Math.round(Number(p.value)),
+        label: formatDurationSeconds(p.value),
+      })),
+    }
+  }
+
+  const hosts = []
+  const diagnostics = {
+    hostsChecked: hostids.length,
+    hostsWithUptimeItem: 0,
+    uptimeItemKeys: [],
+    uptimePointsTotal: 0,
+  }
+
+  for (const h of matchedHosts) {
+    const hid = String(h.hostid)
+    const candidates = itemsByHost[hid] || []
+    if (candidates.length) diagnostics.hostsWithUptimeItem += 1
+    for (const it of candidates) {
+      if (it.key_ && diagnostics.uptimeItemKeys.length < 8) diagnostics.uptimeItemKeys.push(it.key_)
+      const series = await readSeries(it)
+      if (!series) continue
+      diagnostics.uptimePointsTotal += series.pointCount || 0
+      hosts.push({
+        hostid: hid,
+        name: h.name || h.host || hid,
+        host: h.host || null,
+        uptime: series,
+      })
+      break
+    }
+  }
+
+  return {
+    windowSec: window.rangeSec,
+    windowLabel: window.windowLabel,
+    parseNote: window.parseNote,
+    from: window.from,
+    to: window.to,
+    fromAt: formatPortalTimestamp(window.from * 1000),
+    toAt: formatPortalTimestamp(window.to * 1000),
+    hosts,
+    diagnostics,
+    note: 'Fetched from Zabbix uptime counter items (uptime / system.uptime / sysUpTime / hrSystemUptime) via history.get with trend.get hour-bucket fallback. This is device uptime duration, not availability percentage.',
+  }
+}
+
+function applySessionUptimeToHosts(hosts, uptimeHistory) {
+  if (!Array.isArray(hosts) || !uptimeHistory?.hosts?.length) return
+  const byHost = Object.fromEntries(
+    uptimeHistory.hosts.map((h) => [String(h.hostid), h.uptime?.sessionSnapshot]),
+  )
+  for (const host of hosts) {
+    const row = byHost[String(host.hostid)]
+    if (row) host.uptimeAtSession = row
   }
 }
 
@@ -3180,6 +3372,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   let cpuMemoryHistory = null
   let interfaceHistory = null
   let pingHistory = null
+  let uptimeHistory = null
   const historyWindow = historyWindowForFetch
   const historyMaxPoints = historyWindow
     ? historyMaxPointsForRange(historyWindow.rangeSec)
@@ -3240,6 +3433,27 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
         to: historyWindow.to,
         byHost: {},
         error: err?.message || 'Failed to fetch Zabbix ping history',
+      }
+    }
+  }
+
+  if (historyWindow && matched.length) {
+    try {
+      uptimeHistory = await fetchUptimeHistorySnapshot(
+        client.zabbixRpc,
+        matched,
+        historyWindow,
+        historyMaxPoints,
+      )
+      if (uptimeHistory) applySessionUptimeToHosts(hosts, uptimeHistory)
+    } catch (err) {
+      uptimeHistory = {
+        windowSec: historyWindow.rangeSec,
+        windowLabel: historyWindow.windowLabel,
+        from: historyWindow.from,
+        to: historyWindow.to,
+        hosts: [],
+        diagnostics: { error: err?.message || 'Failed to fetch Zabbix uptime history' },
       }
     }
   }
@@ -3308,6 +3522,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     cpuMemoryHistory,
     interfaceHistory,
     pingHistory,
+    uptimeHistory,
     pingSummary: includePing && data.pingMetrics ? data.pingMetrics.summary : undefined,
   }
 }
