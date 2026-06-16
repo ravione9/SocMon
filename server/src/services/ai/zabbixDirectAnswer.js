@@ -1690,10 +1690,12 @@ async function fetchPingHistorySnapshot(zabbixRpc, items, hostids, window) {
   const secBy = itemsByHost(items.icmpSec || [], 'icmppingsec')
   const lossBy = itemsByHost(items.icmpLoss || [], 'icmppingloss')
 
+  // history.get → trend.get fallback (raw history retention may be shorter
+  // than the queried age; trends keep hourly aggregates for ~1 year).
   async function getPoints(itemid, valueType) {
     const hk = zabbixHistoryKind(valueType)
-    if (!hk) return []
-    const rows = await zabbixRpc('history.get', {
+    if (!hk) return { points: [], source: null }
+    const histRows = await zabbixRpc('history.get', {
       history: hk.history,
       itemids: [itemid],
       time_from: window.from,
@@ -1703,35 +1705,86 @@ async function fetchPingHistorySnapshot(zabbixRpc, items, hostids, window) {
       sortorder: 'ASC',
       limit: 5000,
     }).catch(() => [])
-    return (rows || [])
+    let points = (histRows || [])
       .map((r) => ({ clock: Number(r.clock), value: hk.parse(r.value) }))
       .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+    if (points.length) return { points, source: 'history' }
+    if (!hk.trends) return { points: [], source: null }
+    const trendRows = await zabbixRpc('trend.get', {
+      itemids: [itemid],
+      time_from: window.from,
+      time_till: window.to,
+      output: ['clock', 'value_avg', 'num'],
+      sortfield: 'clock',
+      sortorder: 'ASC',
+      limit: 5000,
+    }).catch(() => [])
+    points = (trendRows || [])
+      .map((r) => ({
+        clock: Number(r.clock),
+        value: Number(r.value_avg),
+        weight: Number(r.num) || 1,
+      }))
+      .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+    return { points, source: points.length ? 'trend' : null }
   }
 
   const byHost = {}
+  const diagnostics = {
+    hostidsChecked: hostids.length,
+    itemCounts: {
+      agent: 0,
+      icmp: 0,
+      icmpSec: 0,
+      icmpLoss: 0,
+    },
+    sourcesUsed: { uptime: null, ms: null, loss: null },
+  }
+
   for (const hid of hostids.map(String)) {
     const agentItems = agentBy[hid] || []
     const icmpItems = icmpBy[hid] || []
     const secItems = secBy[hid] || []
     const lossItems = lossBy[hid] || []
+    diagnostics.itemCounts.agent += agentItems.length
+    diagnostics.itemCounts.icmp += icmpItems.length
+    diagnostics.itemCounts.icmpSec += secItems.length
+    diagnostics.itemCounts.icmpLoss += lossItems.length
 
     const reachItems = agentItems.length ? agentItems : icmpItems
     const reachKey = agentItems.length ? 'agent.ping' : 'icmpping'
 
     let totalSamples = 0
     let upSamples = 0
+    let uptimeSource = null
     for (const it of reachItems) {
-      const points = await getPoints(it.itemid, it.valueType)
+      const { points, source } = await getPoints(it.itemid, it.valueType)
+      if (source && !uptimeSource) uptimeSource = source
       for (const p of points) {
-        totalSamples += 1
-        if (Number(p.value) >= 1) upSamples += 1
+        const weight = p.weight || 1
+        totalSamples += weight
+        if (Number(p.value) >= 0.5) upSamples += weight
       }
     }
 
     const msPoints = []
-    for (const it of secItems) msPoints.push(...await getPoints(it.itemid, it.valueType))
+    let msSource = null
+    for (const it of secItems) {
+      const { points, source } = await getPoints(it.itemid, it.valueType)
+      if (source && !msSource) msSource = source
+      msPoints.push(...points)
+    }
     const lossPoints = []
-    for (const it of lossItems) lossPoints.push(...await getPoints(it.itemid, it.valueType))
+    let lossSource = null
+    for (const it of lossItems) {
+      const { points, source } = await getPoints(it.itemid, it.valueType)
+      if (source && !lossSource) lossSource = source
+      lossPoints.push(...points)
+    }
+
+    if (uptimeSource && !diagnostics.sourcesUsed.uptime) diagnostics.sourcesUsed.uptime = uptimeSource
+    if (msSource && !diagnostics.sourcesUsed.ms) diagnostics.sourcesUsed.ms = msSource
+    if (lossSource && !diagnostics.sourcesUsed.loss) diagnostics.sourcesUsed.loss = lossSource
 
     const avgMs = msPoints.length
       ? Math.round((msPoints.reduce((s, p) => s + p.value * 1000, 0) / msPoints.length) * 10) / 10
@@ -1752,11 +1805,14 @@ async function fetchPingHistorySnapshot(zabbixRpc, items, hostids, window) {
         upSamples,
         totalSamples,
         reachSource: reachKey,
+        uptimeDataSource: uptimeSource,
         avgMs,
         maxMs,
         msSamples: msPoints.length,
+        msDataSource: msSource,
         avgLossPct,
         lossSamples: lossPoints.length,
+        lossDataSource: lossSource,
       }
     }
   }
@@ -1770,7 +1826,8 @@ async function fetchPingHistorySnapshot(zabbixRpc, items, hostids, window) {
     fromAt: formatPortalTimestamp(window.from * 1000),
     toAt: formatPortalTimestamp(window.to * 1000),
     byHost,
-    note: 'Computed from Zabbix history.get on agent.ping / icmpping / icmppingsec / icmppingloss in the requested window. uptimePct = up samples ÷ total samples × 100.',
+    diagnostics,
+    note: 'Computed from Zabbix history.get on agent.ping / icmpping / icmppingsec / icmppingloss in the window, with trend.get fallback when raw history is past retention. uptimePct = up samples ÷ total samples × 100. Empty diagnostics.itemCounts means the host has no ping items in this Zabbix template (check Zabbix host config, not just data retention).',
   }
 }
 
