@@ -688,19 +688,33 @@ function wantsStoreZabbix(question) {
   return /\b(store zabbix|store hosts?|store server|pos server|retail server)\b/i.test(String(question || ''))
 }
 
+function filterHostsMatchingSearch(rows, search) {
+  return (rows || []).filter(h => hostMatchesSearch(h, search))
+}
+
 function hostMatchesSearch(h, search) {
   const s = String(search || '').trim()
   if (!s) return true
   const low = s.toLowerCase()
-  if (String(h.name || '').toLowerCase().includes(low) || String(h.host || '').toLowerCase().includes(low)) {
-    return true
-  }
-  // Alias matching: LKST973 / LK973 should match RP973-* hosts in Zabbix.
-  // Keep RP full-host searches strict by applying alias only for LK/LKST input.
-  const queryCode = shouldUseStoreCodeAlias(s) ? extractStoreCode(s) : null
+
+  // Store code queries (LKST/LK/RP + digits): match by canonical numeric code so
+  // LKST1746 does not match LKST17460 and RP1746 does not match RP17460.
+  const queryCode = extractStoreCode(s)
   if (queryCode) {
     const hostCode = extractStoreCode(h.name || '') || extractStoreCode(h.host || '')
     if (hostCode && hostCode === queryCode) return true
+    const searchHost = extractStoreHostname(s)
+    if (searchHost) {
+      const hn = String(h.name || '').toUpperCase()
+      const ht = String(h.host || '').toUpperCase()
+      if (hn === searchHost || ht === searchHost) return true
+      if (hn.startsWith(`${searchHost}-`) || ht.startsWith(`${searchHost}-`)) return true
+    }
+    return false
+  }
+
+  if (String(h.name || '').toLowerCase().includes(low) || String(h.host || '').toLowerCase().includes(low)) {
+    return true
   }
   if (IPV4_RE.test(s)) {
     return (h.interfaces || []).some(i => String(i.ip || '') === s)
@@ -2470,21 +2484,21 @@ async function fetchZabbixSnapshot(client, { hostFilter = '', deviceTypeFilter =
           return zabbixRpc('host.get', { ...baseParams, hostids: ipHostIds, limit: 50 })
         }
 
-        const primary = await hostSearch(search, 200)
-        if (primary?.length) return primary
+        const primary = filterHostsMatchingSearch(await hostSearch(search, 200), search)
+        if (primary.length) return primary
 
         // Alias rescue path:
-        // Query can be LKST973 while Zabbix host is RP973-xxxx. Primary host.get
-        // search by LKST term returns zero rows, so hostMatchesSearch never gets a
-        // chance to apply code-level alias matching. On LKST inputs, retry with
-        // RP/LK/code probes, then let hostMatchesSearch finalize.
-        const code = shouldUseStoreCodeAlias(search) ? extractStoreCode(search) : null
+        // Query can be LKST973 while Zabbix host is RP973-xxxx. Wildcard host.get
+        // can also return sibling stores (LKST17460 for LKST1746) — those are
+        // filtered out above, so retry with RP/LK/code probes before giving up.
+        const code = extractStoreCode(search)
         if (!code) return primary
 
-        const probeTerms = [`RP${code}`, `LK${code}`, code]
+        const pad3 = String(code).padStart(3, '0')
+        const probeTerms = [`RP${code}`, `RP${pad3}`, `LK${code}`, `LK${pad3}`, `LKST${code}`, code]
         for (const term of probeTerms) {
-          const alt = await hostSearch(term, 300)
-          if (alt?.length) return alt
+          const alt = filterHostsMatchingSearch(await hostSearch(term, 300), search)
+          if (alt.length) return alt
         }
 
         // Last-resort alias resolver for LKST inputs:
