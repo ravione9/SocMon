@@ -24,6 +24,7 @@ import { isXdrQuestion } from './xdrDirectAnswer.js'
 import { isStoreMonitorConnectivityQuery, isStoreMonitorIssuesQuery, isStoreDowntimeQuery, extractTopLimit } from './geoConnectionQuery.js'
 import { isNetworkInfraQuery, isZabbixQuestion, extractIpv4, isInfraMonitorQuery, isIpInfraQuery, prefersLlmSynthesis, buildZabbixInfraContext, buildStoreZabbixContext, wantsDiskUsage, extractHostGroupFilter } from './zabbixDirectAnswer.js'
 import { buildSolarWindsContext, isOrionQuestion } from './orionDirectAnswer.js'
+import { buildSentinelXdrContext } from './hostnameDirectAnswer.js'
 import {
   appNameMatches,
   crashRecordMatches,
@@ -74,7 +75,7 @@ export const AI_CONTEXT_MODULES = [
     label: 'SentinelOne XDR',
     pageKey: 'sentinel',
     freshness: 'live',
-    description: 'Singularity Data Lake PowerQuery at send time',
+    description: 'Elasticsearch sentinel-* USB/phoropter/BT Device Control logs; XDR PowerQuery for threats/logins only',
   },
   {
     id: 'zabbixInfra',
@@ -604,6 +605,7 @@ const BUILDERS = {
   soc: (_, opts) => buildSocContext(opts),
   zabbixInfra: (_, opts) => buildZabbixInfraContext(opts?.userMessage || '', opts),
   storeZabbix: (_, opts) => buildStoreZabbixContext(opts?.userMessage || '', opts),
+  sentinelXdr: (_, opts) => buildSentinelXdrContext(opts?.userMessage || '', opts),
   orian: (_, opts) => buildSolarWindsContext(opts?.userMessage || '', opts),
 }
 
@@ -1550,7 +1552,7 @@ export async function buildPortalContext(user, moduleIds = [], opts = {}) {
   const { allowedPages } = await computeUserPageAccess(user)
   const unique = [...new Set(moduleIds)].filter(id => canUseModule(id, allowedPages))
   const queryWindow = resolveQueryWindow(opts.userMessage || '', opts.queryContext, opts)
-  const builderOpts = { ...opts, queryWindow }
+  const builderOpts = { ...opts, queryWindow, allowedPages }
 
   const modules = {}
   const meta = []
@@ -1711,6 +1713,21 @@ export function buildContextPreview(context) {
       hasNodeDetail: Boolean(orion.nodeDetail),
     }
   }
+  const sx = context?.modules?.sentinelXdr
+  if (sx && (sx.peripheralQuery || sx.peripheralCounts || sx.usbConnected != null || sx.hostname)) {
+    preview.sentinelXdr = {
+      dataSource: sx.dataSource,
+      hostname: sx.hostname,
+      agentHostnameUsed: sx.agentHostnameUsed,
+      searchWindow: sx.userSearchWindow || sx.searchWindow,
+      searchWindowAbsolute: sx.searchWindowAbsolute,
+      peripheralCounts: sx.peripheralCounts,
+      usbConnected: sx.usbConnected,
+      usbDisconnected: sx.usbDisconnected,
+      configured: sx.configured,
+      error: sx.error,
+    }
+  }
   return preview
 }
 
@@ -1735,6 +1752,7 @@ export function formatContextForPrompt(context) {
     '- For storeProblems disconnect events: same BH fields as storeZabbix disconnect block. Do NOT use Zabbix availability.unavailable as disconnect events.',
     '- For CPU/memory trend graphs, use cpuMemoryHistory (Zabbix history.get / trend.get). For interface bandwidth history, use interfaceHistory.hosts[].ports[].in/out.points (net.if.in/out). Live ports also expose inItemId/outItemId. REST equivalent: GET /api/store-zabbix/items/{itemId}/history?from=&to=',
     '- For orian (SolarWinds Orion): summary.nodes/alerts are fleet counts by status/severity; nodes[] has cpu, memory, responseTime, packetLoss; nodeDetail has interfaces (inBps/outBps) when a single node matched nodeFilter.',
+    '- For sentinelXdr USB/phoropter/BT: use modules.sentinelXdr.peripheralCounts and usbConnected/usbDisconnected from Elasticsearch sentinel-* (dataSource elasticsearch_sentinel). Empty XDR PowerQuery is normal for USB — do NOT treat as zero events if peripheralCounts is populated.',
     '',
     JSON.stringify(context),
     '=== END PORTAL CONTEXT ===',

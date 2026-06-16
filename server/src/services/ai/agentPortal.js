@@ -15,7 +15,8 @@ import { tryDirectZabbixAnswer } from './zabbixDirectAnswer.js'
 import { tryDirectSOCAnswer } from './socDirectAnswer.js'
 import { tryDirectHostnameAnswer } from './hostnameDirectAnswer.js'
 import { tryDirectXdrAnswer } from './xdrDirectAnswer.js'
-import { resolveQueryContext } from './queryContext.js'
+import { isSentinelPeripheralQuery, resolveQueryContext } from './queryContext.js'
+import { isHostnameDetailQuery } from './hostnameDirectAnswer.js'
 
 const AGENT_PAYLOAD_VERSION = '1'
 
@@ -30,11 +31,14 @@ export async function tryDirectAgentAnswer(user, question, ctx, allowedPages, op
   const q = String(question || '').trim()
   if (!q) return null
 
+  const peripheralOrHostname = isSentinelPeripheralQuery(q) || isHostnameDetailQuery(q, ctx)
+  const hostnameAttempt = () => tryDirectHostnameAnswer(q, allowedPages, ctx, opts)
   const attempts = [
+    ...(peripheralOrHostname ? [hostnameAttempt] : []),
     () => tryDirectXdrAnswer(q, allowedPages, ctx),
     () => tryDirectZabbixAnswer(q, allowedPages, ctx),
     () => tryDirectSOCAnswer(q, allowedPages, ctx),
-    () => tryDirectHostnameAnswer(q, allowedPages, ctx, opts),
+    ...(!peripheralOrHostname ? [hostnameAttempt] : []),
     () => tryDirectCrashAnswer(q, allowedPages, ctx, opts),
   ]
 

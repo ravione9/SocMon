@@ -6,7 +6,7 @@ import {
   runSentinelOnePowerQuery,
 } from '../../utils/sentinelOneApi.js'
 import { buildPowerQueryText, DEFAULT_TABLE_COLUMNS } from '../../utils/xdrPowerQuery.js'
-import { parseQuestionTimeRange } from './queryContext.js'
+import { isSentinelPeripheralQuery, parseQuestionTimeRange } from './queryContext.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 import {
   buildGeoConnectionPowerQuery,
@@ -123,6 +123,8 @@ export function buildXdrQueryFromQuestion(question) {
 export function isXdrQuestion(question) {
   const q = String(question || '')
   if (isStoreMonitorConnectivityQuery(q)) return false
+  // USB/phoropter/peripheral logs live in Elasticsearch sentinel-*, not the XDR data lake.
+  if (isSentinelPeripheralQuery(q)) return false
   if (XDR_KEYWORDS.test(q)) return true
   if (LOGIN_FAIL_KEYWORDS.test(q)) return true
   if (isGeoConnectionQuery(q)) return true
@@ -388,11 +390,15 @@ export async function tryDirectXdrAnswer(question, allowedPages, ctx = null) {
     if (countryFilter && (isGeoConnectionQuery(effectiveQuestion) || isXdrQuestion(effectiveQuestion))) {
       rawQuery = buildGeoConnectionPowerQuery(countryFilter.name)
     } else if (isXdrQuestion(effectiveQuestion)) {
+      if (isSentinelPeripheralQuery(effectiveQuestion)) return null
       return {
         content: [
           'Could not map this question to a SentinelOne XDR PowerQuery template.',
           '',
-          'Try: "Sentinel XDR connections to China last 12 hours" or "how many devices connecting to China in XDR".',
+          'USB/phoropter/peripheral connect-disconnect events are NOT in the XDR data lake.',
+          'Use netpulse_query with "hostname report USB phoropter …" (Elasticsearch sentinel-* Device Control).',
+          '',
+          'XDR examples: "Sentinel XDR connections to China last 12 hours" or "failed login last 1 hour".',
         ].join('\n'),
         contextMeta: [{
           id: 'sentinelXdr',

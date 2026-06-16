@@ -1003,6 +1003,9 @@ TOOL CALLS (5 in parallel — replace <STORE>, <CODE>, <DATE>, <FROM>, <TO>):
      question: "<STORE> hostname report USB phoropter bluetooth wired mic
      speaker <DATE> <FROM>-<TO> IST"
      historyFrom: <unix>   historyTo: <unix>
+     (Same ES data is also returned on netpulse_sentinelXdr when the
+     question includes hostname + USB/phoropter — but prefer netpulse_query
+     for dossier tool #4. XDR PowerQuery has NO USB rows.)
 
   5) netpulse_orian
      question: "<STORE> RP<CODE> dual link link_status custom properties

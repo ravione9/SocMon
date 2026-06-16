@@ -64,6 +64,11 @@ export function isStoreHostnamePortalQuery(q) {
   return false
 }
 
+/** USB / phoropter / peripheral Device Control queries (Elasticsearch sentinel-*, not XDR PowerQuery). */
+export function isSentinelPeripheralQuery(q) {
+  return /\b(usb|phoropter|peripheral|bluetooth|\bbt\b|device control|microphone|\bmic\b|speaker|wired|cable|hostname report)\b/i.test(String(q || ''))
+}
+
 /** Question asks for a hostname-scoped data dump (instant path, no LLM). */
 export function isHostnameDataRequest(q) {
   const text = String(q || '')

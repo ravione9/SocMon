@@ -20,6 +20,8 @@ import {
   resolveQueryWindow,
   shouldUseStoreCodeAlias,
   hasQueryHistoryWindow,
+  formatQueryWindowMeta,
+  isSentinelPeripheralQuery,
 } from './queryContext.js'
 import { isNetworkInfraQuery, isZabbixQuestion, buildStoreZabbixContext } from './zabbixDirectAnswer.js'
 
@@ -465,5 +467,87 @@ function buildHostnameResponse(lines, hostname, range, fetchedAt, env, ctx, stat
       range,
       isFollowUp: ctx?.isFollowUp,
     },
+  }
+}
+
+/**
+ * MCP module context for netpulse_sentinelXdr — USB/phoropter/BT from Elasticsearch.
+ * XDR PowerQuery does not contain peripheral Device Control events.
+ */
+export async function buildSentinelXdrContext(userMessage = '', opts = {}) {
+  const fetchedAt = new Date().toISOString()
+  const allowedPages = Array.isArray(opts.allowedPages) ? opts.allowedPages : ['sentinel']
+  const hostname = extractStoreHostname(userMessage)
+  const queryWindow = opts.queryWindow || resolveQueryWindow(userMessage, opts.queryContext, opts)
+  const range = queryWindow.range || parseQuestionTimeRange(userMessage)
+  const rangeLabel = queryWindow.label || formatRangeLabelFromInflux(range)
+  const absoluteWindow = hasQueryHistoryWindow(queryWindow)
+  const aliases = buildStoreHostAliases(userMessage)
+  const peripheralQuery = isSentinelPeripheralQuery(userMessage) || Boolean(hostname)
+
+  if (!allowedPages.includes('sentinel')) {
+    return {
+      module: 'sentinelXdr',
+      freshness: 'live',
+      fetchedAt,
+      configured: false,
+      error: 'Sentinel page access not enabled for this account',
+      dataSource: 'elasticsearch_sentinel',
+    }
+  }
+
+  if (!peripheralQuery) {
+    return {
+      module: 'sentinelXdr',
+      freshness: 'live',
+      fetchedAt,
+      configured: true,
+      dataSource: 'elasticsearch_sentinel',
+      peripheralQuery: false,
+      note: 'Include store hostname (LKST/RP) + USB/phoropter keywords. XDR PowerQuery here is for threats/logins only — USB uses Elasticsearch sentinel-*.',
+    }
+  }
+
+  let agentHostname = hostname || ''
+  let storeTag = ''
+  if (hostname && isInfluxStoreConfigured()) {
+    try {
+      const stores = await fetchStoreSnapshot(10, '-1h')
+      const store = stores.find(s => hostnameMatchesStore(s, hostname))
+      if (store) {
+        agentHostname = store.hostname || hostname
+        storeTag = store.storeTag || ''
+      }
+    } catch {
+      // Non-fatal — ES alias search still runs on LKST/RP variants.
+    }
+  }
+
+  const env = await fetchHostnameEnvironments(agentHostname || hostname, range, allowedPages, {
+    storeTag,
+    agentHostname: agentHostname || hostname,
+    aliasHostnames: aliases,
+    extendSentinelWindow: !absoluteWindow,
+    fromSec: queryWindow.fromSec,
+    toSec: queryWindow.toSec,
+    windowLabel: rangeLabel,
+    usbSampleSize: absoluteWindow ? 100 : 20,
+    btSampleSize: absoluteWindow ? 100 : 20,
+  })
+
+  const sentinel = env.sentinel || { configured: false, error: 'Sentinel ES block missing' }
+  return {
+    module: 'sentinelXdr',
+    freshness: 'live',
+    fetchedAt,
+    configured: sentinel.configured !== false,
+    dataSource: 'elasticsearch_sentinel',
+    hostname: hostname || null,
+    peripheralQuery: true,
+    queryWindow: formatQueryWindowMeta(queryWindow),
+    ...sentinel,
+    note: sentinel.configured !== false
+      ? `USB/phoropter from Elasticsearch sentinel-* (NOT XDR PowerQuery). Window: ${sentinel.userSearchWindow || sentinel.searchWindow || rangeLabel}`
+      : (sentinel.error || 'Elasticsearch not configured — set ES_HOST, ES_USER, ES_PASSWORD'),
   }
 }
