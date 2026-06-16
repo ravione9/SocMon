@@ -226,6 +226,9 @@ IMPORTANT — disconnect events table (storeProblems ONLY — not storeZabbix):
   Source: Mongo StoreProblemHistory (same as Store Zabbix ROP tab), BH 09:00–18:00 IST.
   Columns: disconnectedAt, backUpAt, bhDurationMin, totalDurationMin, stillOffline.
   activeDisconnectEvents[] = currently offline sessions that overlap BH.
+  When historyFrom/historyTo or a calendar range is in the question, disconnectFilterMode
+  = query_window_overlap — events in that IST window are included even after 18:00
+  (bhDurationMin may be 0; use windowOverlapMin for session drop count).
   Events with bhDurationMin=0 are EXCLUDED (same rule as ROP REST).
   Do NOT infer disconnects from storeZabbix availability.unavailable — that is Zabbix gear status.
   Global query returns newest 120 BH-filtered events (14-day window). If
@@ -272,7 +275,9 @@ List them with disconnectedAt and bhDurationMin.
 ================================================================================
 
 IMPORTANT — disconnect events on storeZabbix (works even if Zabbix API is down):
-  disconnectEvents[] / activeDisconnectEvents[] — Mongo BH filter (09:00–18:00 IST).
+  disconnectEvents[] / activeDisconnectEvents[] — Mongo BH filter (09:00–18:00 IST) by default.
+  With historyFrom/historyTo or calendar date+time in question: query_window_overlap mode
+  (includes after-hours session drops; bhDurationMin may be 0, see windowOverlapMin).
   Same source as Store Zabbix → ROP tab → click store → Disconnect Events table.
   zabbixConfigured=false only means host metrics unavailable; disconnect block still works.
   Fields: disconnectedAt, backUpAt, bhDurationMin, totalDurationMin, stillOffline.

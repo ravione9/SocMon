@@ -4,7 +4,7 @@ import { buildStoreDisconnectMcpContext } from '../../services/storeDisconnectEv
 import { buildStoreCrashMcpContext } from '../../services/storeCrashEvents.js'
 import { formatPortalTimestamp } from '../../utils/portalTimestamp.js'
 import { isInfluxStoreConfigured, fetchStoreSnapshot, buildOverviewSummary } from '../influxStore.js'
-import { extractStoreCode, extractStoreHostname, formatQueryWindowMeta, isStoreHostnamePortalQuery, resolveQueryWindow, shouldUseStoreCodeAlias } from './queryContext.js'
+import { extractStoreCode, extractStoreHostname, formatQueryWindowMeta, hasQueryHistoryWindow, isStoreHostnamePortalQuery, resolveQueryWindow, shouldUseStoreCodeAlias } from './queryContext.js'
 import { isSocReportQuery } from './socDirectAnswer.js'
 import { isXdrQuestion } from './xdrDirectAnswer.js'
 import { isGeoConnectionQuery } from './geoConnectionQuery.js'
@@ -260,6 +260,83 @@ export function wantsCpuMemoryHistory(question) {
   return hasTrendKw || hasRangeKw || hasDateKw
 }
 
+/** Auto-fetch CPU/RAM history when MCP/queryContext supplies an absolute window. */
+function shouldIncludeCpuMemoryHistory(question, opts = {}) {
+  if (wantsCpuMemoryHistory(question)) return true
+  const w = opts.queryWindow || resolveQueryWindow(question, opts.queryContext, opts)
+  if (!hasQueryHistoryWindow(w)) return false
+  const q = String(question || '')
+  if (/\b(cpu|memory|mem|ram|utilization|utilisation)\b/i.test(q)) return true
+  if (parseHistoryItemIds(q).length > 0) return true
+  const hostScoped = Boolean(extractStoreHostname(q) || extractIpv4(q))
+  return hostScoped && w.toSec < Math.floor(Date.now() / 1000) - 3600
+}
+
+/** Auto-fetch interface history when an absolute window is set and traffic is in scope. */
+function shouldIncludeInterfaceHistory(question, opts = {}) {
+  if (wantsInterfaceHistory(question)) return true
+  const w = opts.queryWindow || resolveQueryWindow(question, opts.queryContext, opts)
+  if (!hasQueryHistoryWindow(w)) return false
+  const q = String(question || '')
+  return /\b(interface|interfaces|bandwidth|throughput|traffic|net\.if|ports?)\b/i.test(q)
+    || wantsBandwidthUtil(q)
+}
+
+function isPastHistoricalWindow(window) {
+  return Boolean(window?.to && window.to < Math.floor(Date.now() / 1000) - 3600)
+}
+
+function enrichCpuMemoryHistoryWithSessionSnapshot(history, window) {
+  if (!history || !window) return history
+  const targetSec = window.requestedAtSec ?? Math.floor((window.from + window.to) / 2)
+  for (const h of history.hosts || []) {
+    h.sessionSnapshot = {
+      targetSec,
+      targetAt: formatPortalTimestamp(targetSec * 1000),
+      cpu: h.cpu?.points?.length ? nearestHistoryPoint(h.cpu.points, targetSec) : null,
+      memory: h.memory?.points?.length ? nearestHistoryPoint(h.memory.points, targetSec) : null,
+    }
+  }
+  const anyPoints = (history.hosts || []).some(
+    (h) => h.cpu?.points?.length || h.memory?.points?.length,
+  )
+  if (!anyPoints && !history.error) {
+    history.emptyReason = 'No Zabbix history/trend points in window — check retention or item polling interval.'
+  }
+  history.note = [
+    history.note,
+    'sessionSnapshot = nearest CPU/RAM point to window center; prefer cpuAtSession/memoryAtSession or sessionSnapshot over hosts[].cpu for past sessions.',
+  ].filter(Boolean).join(' ')
+  return history
+}
+
+function applySessionCpuMemoryToHosts(hosts, cpuMemoryHistory) {
+  if (!Array.isArray(hosts) || !cpuMemoryHistory?.hosts?.length) return
+  const snapByHost = Object.fromEntries(
+    cpuMemoryHistory.hosts.map((h) => [String(h.hostid), h.sessionSnapshot]),
+  )
+  for (const host of hosts) {
+    const snap = snapByHost[String(host.hostid)]
+    if (!snap) continue
+    if (snap.cpu?.percent != null) {
+      host.cpuAtSession = {
+        percent: snap.cpu.percent,
+        at: snap.cpu.at,
+        deltaSec: snap.cpu.deltaSec,
+        source: 'zabbix_history',
+      }
+    }
+    if (snap.memory?.percent != null) {
+      host.memoryAtSession = {
+        percent: snap.memory.percent,
+        at: snap.memory.at,
+        deltaSec: snap.memory.deltaSec,
+        source: 'zabbix_history',
+      }
+    }
+  }
+}
+
 /** Zabbix net.if.in/out time-series (same window rules as cpuMemoryHistory). */
 export function wantsInterfaceHistory(question) {
   const q = String(question || '')
@@ -439,7 +516,7 @@ function parseZabbixHistoryRangeSec(message) {
 
 /** Absolute or relative Zabbix history window for CPU/RAM / interface series. */
 function parseZabbixHistoryWindow(message, opts = {}) {
-  const w = resolveQueryWindow(message, opts.queryContext, opts)
+  const w = opts.queryWindow || resolveQueryWindow(message, opts.queryContext, opts)
   if (w.fromSec && w.toSec) {
     const built = buildHistoryWindowResult(w.fromSec, w.toSec, w.parseNote)
     if (built) return built
@@ -2735,8 +2812,9 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   // is the critical selector. Without this, we'd fetch broad host sets and the
   // resulting item.get fan-out could exceed Claude Desktop's tool timeout.
   const hostFilter = ip || hostname || ''
-  const includeInterfaceHistory = wantsInterfaceHistory(userMessage)
-  const includeCpuMemoryHistory = wantsCpuMemoryHistory(userMessage)
+  const resolvedQueryWindow = opts.queryWindow || resolveQueryWindow(userMessage, opts.queryContext, opts)
+  const includeInterfaceHistory = shouldIncludeInterfaceHistory(userMessage, opts)
+  const includeCpuMemoryHistory = shouldIncludeCpuMemoryHistory(userMessage, opts)
   const includePing = wantsPingStatus(userMessage)
   const includeBandwidth = wantsBandwidthUtil(userMessage)
     || /\b(bandwidth|utilization|utilisation|interface|port|traffic|throughput)\b/i.test(String(userMessage || ''))
@@ -2802,9 +2880,26 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     }
   }
 
+  const historyWindowForFetch = (includeCpuMemoryHistory || includeInterfaceHistory)
+    ? parseZabbixHistoryWindow(userMessage, { ...opts, queryWindow: resolvedQueryWindow })
+    : null
+  const pastHistoricalQuery = isPastHistoricalWindow(historyWindowForFetch)
+
   const hosts = matched.map(h => {
     const hid = String(h.hostid)
     const zabbixCm = cmByHost[hid]
+    const cpuMetric = includeCpuMemory ? formatCpuMemoryMetric(zabbixCm?.cpu) : undefined
+    const memoryMetric = includeCpuMemory ? formatCpuMemoryMetric(zabbixCm?.memory) : undefined
+    if (pastHistoricalQuery) {
+      if (cpuMetric) {
+        cpuMetric.source = 'live_lastvalue'
+        cpuMetric.note = 'Current Zabbix poll — use cpuAtSession or cpuMemoryHistory.sessionSnapshot for the requested window.'
+      }
+      if (memoryMetric) {
+        memoryMetric.source = 'live_lastvalue'
+        memoryMetric.note = 'Current Zabbix poll — use memoryAtSession or cpuMemoryHistory.sessionSnapshot for the requested window.'
+      }
+    }
     return {
       hostid: h.hostid,
       name: h.name,
@@ -2822,8 +2917,8 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
         }
         : undefined,
       ports: includeBandwidth ? hostPortsFromSnapshot(data, h) : undefined,
-      cpu: includeCpuMemory ? formatCpuMemoryMetric(zabbixCm?.cpu) : undefined,
-      memory: includeCpuMemory ? formatCpuMemoryMetric(zabbixCm?.memory) : undefined,
+      cpu: cpuMetric,
+      memory: memoryMetric,
     }
   })
   const interfaceMetricsState = buildInterfaceMetricsState(data, matched, includeBandwidth)
@@ -2831,9 +2926,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
 
   let cpuMemoryHistory = null
   let interfaceHistory = null
-  const historyWindow = (includeCpuMemoryHistory || includeInterfaceHistory)
-    ? parseZabbixHistoryWindow(userMessage, opts)
-    : null
+  const historyWindow = historyWindowForFetch
   const historyMaxPoints = historyWindow
     ? historyMaxPointsForRange(historyWindow.rangeSec)
     : 120
@@ -2856,6 +2949,10 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
           historyWindow,
           historyMaxPoints,
         )
+      }
+      if (cpuMemoryHistory) {
+        enrichCpuMemoryHistoryWithSessionSnapshot(cpuMemoryHistory, historyWindow)
+        applySessionCpuMemoryToHosts(hosts, cpuMemoryHistory)
       }
     } catch (err) {
       cpuMemoryHistory = {
@@ -2911,11 +3008,11 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
       : 'live',
     fetchedAt,
     configured: true,
-    queryWindow: formatQueryWindowMeta(opts.queryWindow || resolveQueryWindow(userMessage, opts.queryContext, opts)),
+    queryWindow: formatQueryWindowMeta(resolvedQueryWindow),
     source: `${sourceLabel} API (host.get + item.get net.if.*)`,
     note: moduleId === 'storeZabbix'
-      ? 'CPU/RAM from both sources when available: hosts[].cpu/memory (Zabbix items) and storeAgentMetrics (Influx store PC agent). hosts[].ports = live net.if traffic; interfaceHistory = historical net.if.in/out series. Report both live and history when present.'
-      : 'Live SNMP/interface metrics at send time. inBps/outBps are raw bytes/sec from Zabbix net.if.in/out items. interfaceHistory provides historical net.if series when trend/history keywords are used.',
+      ? 'CPU/RAM: for past sessions use hosts[].cpuAtSession/memoryAtSession or cpuMemoryHistory.sessionSnapshot (Zabbix history/trend). hosts[].cpu/memory = live lastvalue (labeled live_lastvalue when query window is historical). storeAgentMetrics = Influx agent snapshot. interfaceHistory = historical net.if series when window/history keywords apply.'
+      : 'Live SNMP/interface metrics at send time. For past windows use cpuMemoryHistory.sessionSnapshot / cpuAtSession. interfaceHistory provides historical net.if series when an absolute window or trend/history keywords are used.',
     version: data.version,
     hostFilter: data.hostFilter,
     deviceTypeFilter: data.deviceTypeFilter,

@@ -15,6 +15,12 @@ import {
 
 export const OFFLINE_CODE = 'offline'
 
+/** Global MCP disconnect list lookback when no hostname / absolute window is set. */
+export const DISCONNECT_LOOKBACK_DAYS = 14
+
+/** Per-store scoped lookback when hostname is in the question. */
+export const DISCONNECT_SCOPED_LOOKBACK_DAYS = 30
+
 /** Default BH for MCP + Store Zabbix ROP toolbar (09:00–18:00 IST, all days). */
 export const MCP_DEFAULT_BUSINESS_HOURS = {
   startHour: 9,
@@ -84,7 +90,14 @@ export function isBhFilterActive(bh) {
  * Map one StoreProblemHistory offline record to a disconnect event (BH-aware).
  * Returns null when BH filter is active and the outage does not overlap BH.
  */
-export function mapStoreDisconnectEvent(r, { fromMsN, toMsN, isBh, bhActive, nowMs }) {
+export function mapStoreDisconnectEvent(r, {
+  fromMsN,
+  toMsN,
+  isBh,
+  bhActive,
+  nowMs,
+  includeQueryWindowOverlap = false,
+}) {
   const disconnectAtMs = new Date(r.firstSeenAt).getTime()
   const backUpAtMs = r.resolvedAt ? new Date(r.resolvedAt).getTime() : null
   const endMs = backUpAtMs != null
@@ -98,8 +111,15 @@ export function mapStoreDisconnectEvent(r, { fromMsN, toMsN, isBh, bhActive, now
     ? bhMinutesInInterval(segStart, segEnd, isBh)
     : 0
   const totalDurationMin = durationMs != null ? Math.round(durationMs / 60_000) : null
+  const windowOverlapMin = segEnd > segStart
+    ? Math.round((segEnd - segStart) / 60_000)
+    : 0
 
-  if (bhActive && bhDurationMin <= 0) return null
+  if (includeQueryWindowOverlap) {
+    if (windowOverlapMin <= 0) return null
+  } else if (bhActive && bhDurationMin <= 0) {
+    return null
+  }
 
   return {
     storeTag: r.storeTag || '',
@@ -112,6 +132,7 @@ export function mapStoreDisconnectEvent(r, { fromMsN, toMsN, isBh, bhActive, now
     durationMin: totalDurationMin,
     totalDurationMin,
     bhDurationMin: bhActive ? bhDurationMin : totalDurationMin,
+    windowOverlapMin: includeQueryWindowOverlap ? windowOverlapMin : undefined,
     status: r.status,
     stillOffline: r.status === 'active',
   }
@@ -128,17 +149,26 @@ export function buildStoreDisconnectEvents(records, opts = {}) {
   const bh = normaliseBusinessHours(opts.businessHours)
   const isBh = makeBhChecker(bh)
   const bhActive = isBhFilterActive(bh)
+  const includeQueryWindowOverlap = Boolean(opts.includeQueryWindowOverlap)
 
   const events = []
   for (const r of records || []) {
-    const ev = mapStoreDisconnectEvent(r, { fromMsN, toMsN, isBh, bhActive, nowMs })
+    const ev = mapStoreDisconnectEvent(r, {
+      fromMsN,
+      toMsN,
+      isBh,
+      bhActive,
+      nowMs,
+      includeQueryWindowOverlap,
+    })
     if (ev) events.push(ev)
   }
 
   return {
     events,
     businessHours: bh,
-    bhApplied: bhActive,
+    bhApplied: includeQueryWindowOverlap ? false : bhActive,
+    disconnectFilterMode: includeQueryWindowOverlap ? 'query_window_overlap' : 'bh_default',
   }
 }
 
@@ -192,16 +222,18 @@ export async function buildStoreDisconnectMcpContext(userMessage = '', opts = {}
   const nowMs = Date.now()
   const hostScope = buildDisconnectHostScope(userMessage)
   const queryWindow = opts.queryWindow || resolveQueryWindow(userMessage, opts.queryContext, opts)
+  const includeQueryWindowOverlap = hasQueryHistoryWindow(queryWindow)
   const DISCONNECT_FETCH_LIMIT = hostScope ? 300 : 400
   const DISCONNECT_EVENT_LIMIT = hostScope ? 100 : 120
 
   let fromMs
   let toMs
-  if (hasQueryHistoryWindow(queryWindow)) {
+  let lookbackDays = hostScope ? DISCONNECT_SCOPED_LOOKBACK_DAYS : DISCONNECT_LOOKBACK_DAYS
+  if (includeQueryWindowOverlap) {
     fromMs = queryWindow.fromSec * 1000
     toMs = queryWindow.toSec * 1000
+    lookbackDays = Math.max(1, Math.ceil((toMs - fromMs) / (24 * 60 * 60 * 1000)))
   } else {
-    const lookbackDays = hostScope ? 30 : 14
     fromMs = nowMs - lookbackDays * 24 * 60 * 60 * 1000
     toMs = nowMs
   }
@@ -210,9 +242,11 @@ export async function buildStoreDisconnectMcpContext(userMessage = '', opts = {}
   const disconnectQuery = {
     code: OFFLINE_CODE,
     firstSeenAt: { $lt: new Date(toMs) },
-    $or: [{ resolvedAt: null }, { resolvedAt: { $gt: new Date(fromMs) } }],
+    $and: [
+      { $or: [{ resolvedAt: null }, { resolvedAt: { $gt: new Date(fromMs) } }] },
+    ],
   }
-  if (scopeFilter) Object.assign(disconnectQuery, scopeFilter)
+  if (scopeFilter) disconnectQuery.$and.push(scopeFilter)
 
   const activeOfflineQuery = { status: 'active', code: OFFLINE_CODE }
   if (scopeFilter) Object.assign(activeOfflineQuery, scopeFilter)
@@ -257,8 +291,14 @@ export async function buildStoreDisconnectMcpContext(userMessage = '', opts = {}
     toMs,
     businessHours: MCP_DEFAULT_BUSINESS_HOURS,
     nowMs,
+    includeQueryWindowOverlap,
   }
-  const { events: disconnectEvents, businessHours: bh, bhApplied } = buildStoreDisconnectEvents(disconnectRaw, bhOpts)
+  const {
+    events: disconnectEvents,
+    businessHours: bh,
+    bhApplied,
+    disconnectFilterMode,
+  } = buildStoreDisconnectEvents(disconnectRaw, bhOpts)
   const { events: activeDisconnectEvents } = buildStoreDisconnectEvents(activeOfflineRaw, bhOpts)
 
   const disconnectEventsTruncated = !hostScope && (
@@ -273,20 +313,23 @@ export async function buildStoreDisconnectMcpContext(userMessage = '', opts = {}
     activeDisconnectCount: activeDisconnectEvents.length,
     activeDisconnectEvents,
     queryWindow: formatQueryWindowMeta(queryWindow),
-    disconnectEventsWindowDays: Math.max(1, Math.ceil((toMs - fromMs) / (24 * 60 * 60 * 1000))),
+    disconnectEventsWindowDays: lookbackDays,
     disconnectEventsLimit: DISCONNECT_EVENT_LIMIT,
     disconnectEventsFilter: hostScope
       ? { hostname: hostScope.hostname, storeCode: hostScope.code, scoped: true }
       : { scoped: false },
+    disconnectFilterMode,
     disconnectEventsTruncated,
     businessHours: bh,
     bhApplied,
     disconnectEventsCount: limitedDisconnectEvents.length,
     disconnectEvents: limitedDisconnectEvents,
-    disconnectNote: hostScope
-      ? `BH disconnect history scoped to ${hostScope.hostname} (30-day window, 09:00–18:00 IST).`
-      : disconnectEventsTruncated
-        ? `BH-filtered disconnect events (newest ${DISCONNECT_EVENT_LIMIT}, ${DISCONNECT_LOOKBACK_DAYS}d). Events with zero BH overlap excluded.`
-        : 'Active disconnect + BH history from Store Zabbix ROP rules (Mongo, not Zabbix host status).',
+    disconnectNote: includeQueryWindowOverlap
+      ? `Disconnect events overlapping query window ${queryWindow.label || ''} (BH filter bypassed; bhDurationMin may be 0 for after-hours outages).`
+      : hostScope
+        ? `BH disconnect history scoped to ${hostScope.hostname} (${DISCONNECT_SCOPED_LOOKBACK_DAYS}-day window, 09:00–18:00 IST).`
+        : disconnectEventsTruncated
+          ? `BH-filtered disconnect events (newest ${DISCONNECT_EVENT_LIMIT}, ${DISCONNECT_LOOKBACK_DAYS}d). Events with zero BH overlap excluded.`
+          : 'Active disconnect + BH history from Store Zabbix ROP rules (Mongo, not Zabbix host status).',
   }
 }
