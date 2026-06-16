@@ -761,16 +761,17 @@ Run ALL of these in parallel (replace <CODE>, <DATE>, <FROM>, <TO>):
      If hosts[] empty: re-query with "RP<CODE>" only.
 
   2. netpulse_storeMonitor
-     question: "LKST<CODE> online connState active interface gateway vendor
-     speedtest ping packet loss <DATE>"
+     question: "LKST<CODE> wifi ethernet active interface connState
+     speedtest ping packet loss <DATE> <FROM>-<TO> IST"
      Extract:
-       Internet type     → connState, activeInterface, gatewayVendor
+       Internet type     → stores[].internetType (WiFi | Ethernet | Both | Unknown)
+                           fallback: activeInterface or connState (wifi_healthy→WiFi, lan_healthy→Ethernet)
        Ping / loss       → ping targets (1.1.1.1, 8.8.8.8, google.com) if present
 
-  3. netpulse_storeZabbix  (crashes — same module, explicit window)
-     question: "LKST<CODE> app crash event log <DATE>"
-     OR netpulse_storeProblems with same question + historyFrom/historyTo
-     Extract: crashEvents[] total count + app breakdown (NOT last 24h default)
+  3. netpulse_storeZabbix  (app crashes — InfluxDB, NOT Zabbix; same /app-crashes bucket)
+     question: "LKST<CODE> app crash event log <DATE> <FROM>-<TO> IST"
+     Extract: crashEventsTotal or sum of crashEvents[].count (session window, not whole day)
+     Source field: crashSource = "InfluxDB /app-crashes (not Zabbix)"
 
   4. netpulse_query  (USB / phoropter — uses agent hostname LK64-* not just LKST tag)
      question: "LKST<CODE> hostname report USB mic speaker phoropter bluetooth
@@ -793,7 +794,7 @@ Render ONE markdown report with this metric table (quote tool values only):
   | Metric | Source module | Value |
   | CPU Usage (%) | storeZabbix cpuMemoryHistory or hosts[].cpu | … |
   | RAM Usage (%) | storeZabbix | … |
-  | Internet type | storeMonitor | … |
+  | Internet type (WiFi/Ethernet) | storeMonitor internetType | … |
   | # Internet Drops | storeZabbix disconnectEvents | … |
   | Avg latency (ms) | storeMonitor ping | … |
   | Packet loss (%) | storeMonitor ping | … |
@@ -801,7 +802,7 @@ Render ONE markdown report with this metric table (quote tool values only):
   | Phoropter Wired disconnects | netpulse_query hostname | … |
   | USB Mic events | netpulse_query hostname | … |
   | USB Speaker events | netpulse_query hostname | … |
-  | App crash count | storeZabbix crashEvents | … |
+  | App crash count | storeZabbix crashEvents (Influx) | … |
   | Dual SD-WAN link | orian orionNodeResolve + DUAL_LINKS | 1 or 0 |
   | Call duration | user event list | … |
 
@@ -809,21 +810,51 @@ Never invent numbers. Cite orionNodeResolve.matchedBy when Orion matches.
 ----------------------------------------------------------------------
 
 ----------------------------------------------------------------------
-[LKST EYE-TEST / VIDEO CALL DOSSIER]  (macro: "lkst eye <CODE> <DATE>")
-Same as [LKST FULL STORE DOSSIER]. Example for LKST64, 11 June 2026 20:08–20:10 IST:
+[LKST EYE-TEST / VIDEO CALL DOSSIER]  (macro: "lkst eye <CODE> <DATE> <FROM>-<TO>")
+Output ONLY this table — two columns, no notes or caveats in the table:
+
+  | Metric | Value |
+  | CPU Usage (%) | |
+  | RAM Usage (%) | |
+  | Internet type (WiFi/Ethernet) | |
+  | # Internet Drops | |
+  | Avg latency (ms) | |
+  | Packet loss (%) | |
+  | Phoropter BT disconnects | |
+  | Phoropter Wired disconnects | |
+  | USB Mic events | |
+  | USB Speaker events | |
+  | App crash count | |
+  | Dual SD-WAN link | |
+  | Call duration | |
+
+DATA RULES (where each row comes from):
+  • CPU/RAM session → storeZabbix cpuAtSession / memoryAtSession (NOT hosts[].cpu live poll)
+  • Internet type → storeMonitor stores[].internetType — value MUST be WiFi, Ethernet, Both, or Unknown (not gateway vendor)
+  • Internet Drops → storeZabbix disconnectEventsCount in session window
+  • Latency / loss → storeMonitor ping stats (prefer over Zabbix ping for store agent)
+  • USB / phoropter → netpulse_query hostname report in session window only
+  • App crash count → storeZabbix crashEventsTotal (InfluxDB — NOT stored in Zabbix)
+  • Dual SD-WAN → netpulse_orian nodeDetail DUAL_LINKS or LINK_STATUS (1=dual, 0=single)
+  • Call duration → user-supplied event timestamps (last − first, IST)
+
+ALIAS: LKST<CODE> → RP<CODE> for Zabbix/Orion. Influx agent hostname is LK<CODE>-* (e.g. LK64-PG040CD6).
+
+Run these 5 tool calls in parallel (example LKST64, 11 June 2026, 20:00–20:15 IST):
 
   netpulse_storeZabbix
-    question: "LKST64 RP64 CPU memory history ping packet loss disconnect 11 June 2026 20:00-20:15 IST"
+    question: "LKST64 RP64 CPU memory history ping disconnect 11 June 2026 20:00-20:15 IST"
   netpulse_storeMonitor
-    question: "LKST64 connState gateway speedtest ping 11 June 2026 20:00-20:15 IST"
+    question: "LKST64 wifi ethernet active interface connState speedtest ping packet loss 11 June 2026 20:00-20:15 IST"
   netpulse_storeZabbix
-    question: "LKST64 app crash event log 11 June 2026 whole day IST"
+    question: "LKST64 app crash event log 11 June 2026 20:00-20:15 IST"
   netpulse_query
     question: "LKST64 hostname report USB phoropter bluetooth wired mic speaker 11 June 2026 20:00-20:15 IST"
   netpulse_orian
     question: "LKST64 RP64 dual link link_status custom properties snapshot"
 
-Append user call events + duration (first→last IST).
+Value column = single number or short phrase only (e.g. "8.8%", "0", "WiFi", "Ethernet", "1 min 20 s").
+If no data in session window, write "0" or "N/A" — do not paste live/today values.
 ----------------------------------------------------------------------
 
 ----------------------------------------------------------------------

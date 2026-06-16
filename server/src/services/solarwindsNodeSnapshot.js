@@ -151,14 +151,25 @@ async function queryAlertDetailRow(alertId, objectHint = '') {
   return null
 }
 
+function pickNodeByStoreCode(rows, code) {
+  const want = code != null ? String(Number.parseInt(code, 10)) : null
+  if (!want || !Number.isFinite(Number(want))) return rows?.[0] || null
+  for (const row of rows || []) {
+    const c = extractStoreCode(row.Caption || '')
+    if (c === want) return row
+  }
+  return null
+}
+
 export async function findNodeIdByCaption(caption) {
   const cap = swqlEscape(String(caption || '').trim())
   if (!cap) return null
+  const code = extractStoreCode(caption)
   let data = await orionSwisQuery(`SELECT TOP 1 NodeID, Caption FROM Orion.Nodes WHERE Caption='${cap}'`)
   let row = data?.results?.[0]
   if (row?.NodeID != null) return Number(row.NodeID)
-  data = await orionSwisQuery(`SELECT TOP 1 NodeID, Caption FROM Orion.Nodes WHERE Caption LIKE '%${cap}%'`)
-  row = data?.results?.[0]
+  data = await orionSwisQuery(`SELECT TOP 15 NodeID, Caption FROM Orion.Nodes WHERE Caption LIKE '%${cap}%'`)
+  row = pickNodeByStoreCode(data?.results, code) || data?.results?.[0]
   return row?.NodeID != null ? Number(row.NodeID) : null
 }
 
@@ -180,20 +191,39 @@ export async function resolveOrionNodeIdForStore(question) {
     }
   }
 
+  const code = extractStoreCode(question)
   const captionPatterns = buildStoreHostAliases(question)
+  if (code) {
+    const pad3 = String(code).padStart(3, '0')
+    const prefixPatterns = [
+      `RP${pad3}-`, `RP${code}-`, `LKST${code}-`, `LK${code}-`, `LK${pad3}-`,
+      ...captionPatterns.map((p) => `${p}-`),
+    ]
+    for (const prefix of [...new Set(prefixPatterns)]) {
+      const v = swqlEscape(prefix)
+      const data = await withOrionTimeout(
+        orionSwisQuery(`SELECT TOP 10 NodeID, Caption FROM Orion.Nodes WHERE Caption LIKE '${v}%'`),
+        'node lookup',
+      )
+      const row = pickNodeByStoreCode(data?.results, code)
+      if (row?.NodeID != null) {
+        return { nodeId: Number(row.NodeID), caption: row.Caption, matchedBy: `Caption prefix ${prefix}` }
+      }
+    }
+  }
+
   for (const pat of captionPatterns) {
     const v = swqlEscape(pat)
     const data = await withOrionTimeout(
-      orionSwisQuery(`SELECT TOP 5 NodeID, Caption FROM Orion.Nodes WHERE Caption LIKE '%${v}%'`),
+      orionSwisQuery(`SELECT TOP 15 NodeID, Caption FROM Orion.Nodes WHERE Caption LIKE '%${v}%'`),
       'node lookup',
     )
-    const row = data?.results?.[0]
+    const row = pickNodeByStoreCode(data?.results, code) || (code ? null : data?.results?.[0])
     if (row?.NodeID != null) {
       return { nodeId: Number(row.NodeID), caption: row.Caption, matchedBy: `Caption LIKE %${pat}%` }
     }
   }
 
-  const code = extractStoreCode(question)
   if (code) {
     const nodeFields = await discoverNodeCPFields()
     const buField = nodeFields.find((f) => /^LKST_BU$/i.test(f))
@@ -201,11 +231,11 @@ export async function resolveOrionNodeIdForStore(question) {
       const buValues = [code, `LKST${code}`, `RP${code}`, `LK${code}`]
       for (const buVal of buValues) {
         const v = swqlEscape(buVal)
-        const swql = `SELECT TOP 5 n.NodeID, n.Caption FROM Orion.Nodes n
+        const swql = `SELECT TOP 10 n.NodeID, n.Caption FROM Orion.Nodes n
           INNER JOIN Orion.NodesCustomProperties ncp ON n.NodeID = ncp.NodeID
           WHERE ncp.${buField} LIKE '%${v}%'`
         const data = await withOrionTimeout(orionSwisQuery(swql), 'node lookup')
-        const row = data?.results?.[0]
+        const row = pickNodeByStoreCode(data?.results, code)
         if (row?.NodeID != null) {
           return { nodeId: Number(row.NodeID), caption: row.Caption, matchedBy: `${buField} LIKE %${buVal}%` }
         }

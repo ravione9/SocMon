@@ -208,6 +208,9 @@ function summarizeStore(s) {
     serial: s.serial || '',
     online: !!s.online,
     connState: s.connState || 'unknown',
+    activeInterface: s.activeInterface || '',
+    activeSsid: s.activeSsid && s.activeSsid !== 'n/a' ? s.activeSsid : '',
+    internetType: resolveInternetType(s),
     gatewayVendor: s.gatewayVendor || '',
     gatewayIp: s.gatewayIp || '',
     lastSeen: s.lastSeen || null,
@@ -264,6 +267,17 @@ function isStoreOnEthernet(store) {
   const iface = String(store.activeInterface || '').toLowerCase()
   if (iface === 'ethernet' || iface === 'lan') return true
   return store.connState === 'lan_healthy'
+}
+
+/** WiFi / Ethernet for dossier Internet type row (Store Monitor connectivity). */
+function resolveInternetType(store) {
+  const wifi = isStoreOnWifi(store)
+  const eth = isStoreOnEthernet(store)
+  if (wifi && eth) return 'Both'
+  if (wifi) return 'WiFi'
+  if (eth) return 'Ethernet'
+  if (store?.connState === 'hotspot' || store?.isHotspot) return 'WiFi'
+  return 'Unknown'
 }
 
 function buildGroupConnectivityStats(stores) {
