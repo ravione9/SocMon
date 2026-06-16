@@ -1538,6 +1538,24 @@ async function fetchItemsChunked(zabbixRpc, hostids, searchKey) {
   return out
 }
 
+async function fetchItemsByNameChunked(zabbixRpc, hostids, searchText) {
+  const out = []
+  for (let i = 0; i < hostids.length; i += 400) {
+    const chunk = hostids.slice(i, i + 400)
+    const batch = await zabbixRpc('item.get', {
+      hostids: chunk,
+      output: ['itemid', 'hostid', 'key_', 'lastvalue', 'lastclock', 'name', 'units', 'value_type'],
+      search: { name: `*${searchText}*`, key_: `*${searchText}*` },
+      searchByAny: true,
+      searchWildcardsEnabled: true,
+      filter: { status: 0 },
+      limit: 500,
+    }).catch(() => [])
+    out.push(...(batch || []))
+  }
+  return out
+}
+
 function buildHostMetricMap(items, hostids) {
   const picked = {}
   for (const it of items || []) {
@@ -1655,6 +1673,7 @@ async function fetchPingMetrics(zabbixRpc, hostids) {
     icmpLossItems,
     icmpSecItems,
     merakiStatusItems,
+    latencyNameItems,
   ] = await Promise.all([
     fetchItemsChunked(zabbixRpc, hostids, 'agent.ping'),
     fetchItemsChunked(zabbixRpc, hostids, 'custom.ping.loss'),
@@ -1663,7 +1682,26 @@ async function fetchPingMetrics(zabbixRpc, hostids) {
     fetchItemsChunked(zabbixRpc, hostids, 'icmppingloss'),
     fetchItemsChunked(zabbixRpc, hostids, 'icmppingsec'),
     fetchItemsChunked(zabbixRpc, hostids, 'meraki.device.status'),
+    Promise.all([
+      fetchItemsByNameChunked(zabbixRpc, hostids, 'latency'),
+      fetchItemsByNameChunked(zabbixRpc, hostids, 'response time'),
+      fetchItemsByNameChunked(zabbixRpc, hostids, 'ping time'),
+    ]).then((rows) => rows.flat()),
   ])
+  const latencyById = new Map()
+  for (const it of [...(latencyNameItems || [])]) {
+    const key = String(it.key_ || '').toLowerCase()
+    const name = String(it.name || '').toLowerCase()
+    const unit = String(it.units || '').toLowerCase()
+    if (/loss|packet loss|cpu|memory|uptime|availability/.test(`${key} ${name}`)) continue
+    if (/(latency|response time|ping time|icmppingsec|custom\.ping\.ms)/.test(`${key} ${name}`) || unit === 'ms' || unit === 's') {
+      if (it.itemid) latencyById.set(String(it.itemid), it)
+    }
+  }
+  for (const it of [...(pingMsItems || []), ...(icmpSecItems || [])]) {
+    if (it.itemid) latencyById.set(String(it.itemid), it)
+  }
+  const latencyItems = [...latencyById.values()]
   const nowSec = Math.floor(Date.now() / 1000)
   const agentMap = buildHostMetricMap(agentPingItems, hostids)
   const lossMap = buildHostMetricMap(pingLossItems, hostids)
@@ -1671,6 +1709,7 @@ async function fetchPingMetrics(zabbixRpc, hostids) {
   const icmpMap = buildHostMetricMap(filterExactItemKey(icmpPingItems, 'icmpping'), hostids)
   const icmpLossMap = buildHostMetricMap(filterExactItemKey(icmpLossItems, 'icmppingloss'), hostids)
   const icmpSecMap = buildHostMetricMap(filterExactItemKey(icmpSecItems, 'icmppingsec'), hostids)
+  const latencyMap = buildHostMetricMap(latencyItems, hostids)
   const merakiMap = buildHostMetricMap(filterExactItemKey(merakiStatusItems, 'meraki.device.status'), hostids)
 
   const agentCls = classifyFreshMetrics(agentMap.valueByHost, agentMap.clockByHost, hostids, nowSec)
@@ -1723,6 +1762,7 @@ async function fetchPingMetrics(zabbixRpc, hostids) {
 
     const customMs = pickFreshMetric(msCls, hid)
     const icmpSec = pickFreshMetric(icmpSecCls, hid)
+    const genericLatency = pickFreshMetric(classifyFreshMetrics(latencyMap.valueByHost, latencyMap.clockByHost, hostids, nowSec), hid)
     const customLoss = pickFreshMetric(lossCls, hid)
     const icmpLoss = pickFreshMetric(icmpLossCls, hid)
 
@@ -1732,6 +1772,8 @@ async function fetchPingMetrics(zabbixRpc, hostids) {
       ms = customMs.value
     } else if (!icmpSec.stale && icmpSec.value != null && icmpSec.value >= 0) {
       ms = Math.round(icmpSec.value * 1000 * 10) / 10
+    } else if (!genericLatency.stale && genericLatency.value != null && genericLatency.value >= 0) {
+      ms = genericLatency.value
     }
     if (!customLoss.stale && customLoss.value != null) loss = customLoss.value
     else if (!icmpLoss.stale && icmpLoss.value != null) loss = icmpLoss.value
@@ -1763,6 +1805,7 @@ async function fetchPingMetrics(zabbixRpc, hostids) {
       icmp: filterExactItemKey(icmpPingItems, 'icmpping'),
       icmpSec: filterExactItemKey(icmpSecItems, 'icmppingsec'),
       icmpLoss: filterExactItemKey(icmpLossItems, 'icmppingloss'),
+      latency: latencyItems,
     },
   }
 }
@@ -1784,13 +1827,21 @@ async function fetchPingHistorySnapshot(zabbixRpc, items, hostids, window) {
     for (const it of list || []) {
       const hid = String(it.hostid)
       if (!map[hid]) map[hid] = []
-      map[hid].push({ itemid: String(it.itemid), valueType: Number(it.value_type), key })
+      map[hid].push({
+        itemid: String(it.itemid),
+        valueType: Number(it.value_type),
+        key,
+        itemKey: it.key_ || '',
+        itemName: it.name || '',
+        units: it.units || '',
+      })
     }
     return map
   }
   const agentBy = itemsByHost(items.agent || [], 'agent.ping')
   const icmpBy = itemsByHost(items.icmp || [], 'icmpping')
   const secBy = itemsByHost(items.icmpSec || [], 'icmppingsec')
+  const latencyBy = itemsByHost(items.latency || [], 'latency')
   const lossBy = itemsByHost(items.icmpLoss || [], 'icmppingloss')
 
   // history.get → trend.get fallback (raw history retention may be shorter
@@ -1848,7 +1899,7 @@ async function fetchPingHistorySnapshot(zabbixRpc, items, hostids, window) {
   for (const hid of hostids.map(String)) {
     const agentItems = agentBy[hid] || []
     const icmpItems = icmpBy[hid] || []
-    const secItems = secBy[hid] || []
+    const secItems = [...(secBy[hid] || []), ...(latencyBy[hid] || [])]
     const lossItems = lossBy[hid] || []
     diagnostics.itemCounts.agent += agentItems.length
     diagnostics.itemCounts.icmp += icmpItems.length
@@ -1876,7 +1927,10 @@ async function fetchPingHistorySnapshot(zabbixRpc, items, hostids, window) {
     for (const it of secItems) {
       const { points, source } = await getPoints(it.itemid, it.valueType)
       if (source && !msSource) msSource = source
-      msPoints.push(...points)
+      const units = String(it.units || '').toLowerCase()
+      const keyOrName = `${String(it.itemKey || '')} ${String(it.itemName || '')}`.toLowerCase()
+      const multiplier = units === 'ms' || /custom\.ping\.ms|milliseconds?/.test(keyOrName) ? 1 : 1000
+      msPoints.push(...points.map((p) => ({ ...p, value: Number(p.value) * multiplier })))
     }
     const lossPoints = []
     let lossSource = null
@@ -1891,10 +1945,13 @@ async function fetchPingHistorySnapshot(zabbixRpc, items, hostids, window) {
     if (lossSource && !diagnostics.sourcesUsed.loss) diagnostics.sourcesUsed.loss = lossSource
 
     const avgMs = msPoints.length
-      ? Math.round((msPoints.reduce((s, p) => s + p.value * 1000, 0) / msPoints.length) * 10) / 10
+      ? Math.round((msPoints.reduce((s, p) => s + p.value, 0) / msPoints.length) * 10) / 10
+      : null
+    const minMs = msPoints.length
+      ? Math.round(Math.min(...msPoints.map((p) => p.value)) * 10) / 10
       : null
     const maxMs = msPoints.length
-      ? Math.round(Math.max(...msPoints.map((p) => p.value * 1000)) * 10) / 10
+      ? Math.round(Math.max(...msPoints.map((p) => p.value)) * 10) / 10
       : null
     const avgLossPct = lossPoints.length
       ? Math.round((lossPoints.reduce((s, p) => s + p.value, 0) / lossPoints.length) * 10) / 10
@@ -1911,6 +1968,7 @@ async function fetchPingHistorySnapshot(zabbixRpc, items, hostids, window) {
         reachSource: reachKey,
         uptimeDataSource: uptimeSource,
         avgMs,
+        minMs,
         maxMs,
         msSamples: msPoints.length,
         msDataSource: msSource,
@@ -1943,6 +2001,7 @@ function applySessionPingToHosts(hosts, pingHistory) {
     host.pingAtSession = {
       uptimePct: row.uptimePct,
       avgMs: row.avgMs,
+      minMs: row.minMs,
       maxMs: row.maxMs,
       avgLossPct: row.avgLossPct,
       reachSource: row.reachSource,

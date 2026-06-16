@@ -1049,9 +1049,13 @@ VALUE EXTRACTION — STRICT SOURCE RULES (no cross-source fallbacks):
                           DO NOT use pingAtSession.uptimePct for this row.
                           Empty → "0".
 
-  Ping delay (ms)       → STORE ZABBIX (icmppingsec / custom.ping.ms history)
+  Ping delay (ms)       → STORE ZABBIX (icmppingsec / custom.ping.ms /
+                          latency / response time / ping time history)
                           PRIMARY:   hosts[].pingAtSession.avgMs
                           SECONDARY: pingHistory.byHost[<hostid>].avgMs
+                          Also include min/max when available:
+                            hosts[].pingAtSession.minMs / maxMs
+                            pingHistory.byHost[<hostid>].minMs / maxMs
                           Last resort (only if window is within last hour):
                             hosts[].ping.ms (live lastvalue).
                           DO NOT use storeMonitor ping. Empty → "0".
@@ -1108,7 +1112,7 @@ OUTPUT FORMAT (reply with this only — no extra commentary):
   | Upload speed (Mbps)                 |        |
   | Uptime                              |        |
   | Internet drops (count in window)    |        |
-  | Ping delay (ms)                     |        |
+  | Ping delay avg/min/max (ms)         |        |
   | Packet loss (%)                     |        |
   | Phoropter Bluetooth issues          |        |
   | Phoropter cable issues              |        |
@@ -1168,8 +1172,8 @@ OUTPUT VALUE RULES (strict):
          hosts[].uptimeAtSession.{label, seconds}
          uptimeHistory.hosts[].uptime.sessionSnapshot.{label, seconds}
        Ping / Loss:
-         hosts[].pingAtSession.{avgMs, avgLossPct}
-         pingHistory.byHost[<hostid>].{avgMs, avgLossPct}
+         hosts[].pingAtSession.{avgMs, minMs, maxMs, avgLossPct}
+         pingHistory.byHost[<hostid>].{avgMs, minMs, maxMs, avgLossPct}
     If ANY of these is populated, USE IT — do not write "0".
   • If a value is genuinely not available from the locked source: write
     0 (counts / % / Mbps / ms) or "Not found" for text-only fields.
