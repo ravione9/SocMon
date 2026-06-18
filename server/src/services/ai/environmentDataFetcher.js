@@ -375,8 +375,14 @@ export async function fetchHostnameEnvironments(hostname, range, allowedPages = 
 
       const usbMapped = usbSamples.map(mapUsbSample)
       const btMapped = btSamples.map(mapUsbSample)
-      const peripheralCounts = usbInUserWindow?.peripheralCounts
-        || categorizePeripheralEvents(usbMapped, btMapped)
+      const categorized = usbInUserWindow?.peripheralCounts
+        ? { ...usbInUserWindow.peripheralCounts }
+        : categorizePeripheralEvents(usbMapped, btMapped)
+      const peripheralCounts = {
+        ...categorized,
+        usbConnectedTotal: usbInUserWindow?.usbConnected ?? usbConnected.count,
+        usbDisconnectedTotal: usbInUserWindow?.usbDisconnected ?? usbDisconnected.count,
+      }
 
       out.sentinel = {
         configured: true,

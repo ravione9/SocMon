@@ -1215,6 +1215,79 @@ OUTPUT VALUE RULES (strict):
 
 ============================== END ===================================
 
+======================================================================
+[STORE HEALTH CHECK — 4 FIELDS ONLY]
+Copy the box below. Change ONLY the 4 header lines, then send everything.
+This version calls ALL required tools so one metric does not break another.
+======================================================================
+
+###############################################################
+#  STORE HEALTH CHECK  —  FILL IN ONLY THE 4 LINES BELOW       #
+###############################################################
+STORE CODE   :  LKST371
+DATE         :  16-06-2026
+TIME FROM    :  09:00
+TIME TO      :  17:30
+###############################################################
+#  ↓↓↓  DO NOT CHANGE ANYTHING BELOW THIS LINE  ↓↓↓           #
+###############################################################
+
+You are connected to the "netpulse" MCP server. Using ONLY the STORE CODE,
+DATE, and TIME above, investigate the store. Run ALL 5 tool calls in
+PARALLEL. Do not ask questions — produce the report only.
+
+STEPS (silent):
+1. Window = DATE + TIME FROM–TO in IST (+05:30). Convert to unix seconds.
+   Pass historyFrom + historyTo on EVERY tool. If TIME blank, use 09:00–18:30.
+2. Alias: LKST<N> = RP<N>. Zabbix/Orion must match exact code (371 ≠ 3710).
+
+REQUIRED TOOL CALLS (all 5 — missing one causes "Not found" / 0 rows):
+
+  A) netpulse_storeZabbix
+     question: "<STORE> RP<CODE> CPU memory history interface bandwidth
+     upload download net.if.in net.if.out icmpping packet loss uptime
+     system.uptime disconnect <DATE> <FROM>-<TO> IST"
+     historyFrom / historyTo: session unix bounds
+
+  B) netpulse_storeMonitor
+     question: "<STORE> wifi ethernet internetType connState speedtest ping
+     <DATE> <FROM>-<TO> IST"
+     historyFrom / historyTo: same
+
+  C) netpulse_storeZabbix
+     question: "<STORE> app crash crashEventsTotal appName <DATE> <FROM>-<TO> IST"
+     historyFrom / historyTo: same
+
+  D) netpulse_query
+     question: "<STORE> hostname report USB phoropter bluetooth wired mic
+     speaker Device Control <DATE> <FROM>-<TO> IST"
+     historyFrom / historyTo: same
+
+  E) netpulse_orian
+     question: "<STORE> RP<CODE> dual link link_status reboot snapshot
+     <DATE> <FROM>-<TO> IST"
+
+METRIC SOURCES (locked — do not cross-use):
+  CPU/RAM/bandwidth/ping/uptime/drops → storeZabbix (Zabbix history, NOT live poll)
+  WiFi/Ethernet → storeMonitor stores[].internetType
+  USB totals → query sentinal.peripheralCounts.usbConnectedTotal /
+               usbDisconnectedTotal OR sentinal.usbConnected/usbDisconnected
+  Phoropter/mic/speaker counts → sentinal.peripheralCounts (keyword buckets)
+  App crashes → storeZabbix crashEventsTotal (Influx)
+  Router/dual-link/link down → orian
+
+IMPORTANT:
+  • Do NOT use netpulse_sentinelXdr alone for dossier USB — use netpulse_query (D).
+  • Empty XDR PowerQuery ≠ zero USB events.
+  • Uptime: use zabbixUptimeAtSession + disconnectEvents, not ping availability %.
+  • If CPU/bandwidth are 0, check cpuMemoryHistory/interfaceHistory in storeZabbix
+    before writing 0 (history auto-fetches when historyFrom/historyTo + host are set).
+
+Reply with STORE DETAILS table + PLAIN-ENGLISH SUMMARY only (same format as your
+health-check template).
+
+======================================================================
+
 Tip: for the next Excel row in the same chat, just paste a new EXCEL ROW
 section. The rules stay in chat memory.
 [STORE CPU/RAM 24H TREND]

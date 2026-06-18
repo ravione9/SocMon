@@ -133,6 +133,7 @@ app.use(
     validate: { xForwardedForHeader: false },
     skip: (req) => {
       const url = (req.originalUrl || req.url || '')
+      const path = req.path || ''
       return (
         req.path.startsWith('/web-mgmt/p/') ||
         req.path.startsWith('/solarwinds/p/') ||
@@ -141,7 +142,11 @@ app.use(
         // Internal monitoring dashboards make many parallel requests (per-group
         // disconnect widgets, snapshot polls, etc). 500 req / 15 min was choking
         // the Net Health tab.
-        url.startsWith('/api/store-monitor')
+        url.startsWith('/api/store-monitor') ||
+        // MCP / agent runners verify JWT via meta on every connect and poll
+        // modules on refresh — must not count against the bulk API cap (429 → 401).
+        path.startsWith('/agent/') ||
+        url.includes('/api/agent/')
       )
     },
   }),

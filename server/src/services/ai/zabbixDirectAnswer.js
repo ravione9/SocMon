@@ -260,9 +260,17 @@ export function wantsCpuMemoryHistory(question) {
   return hasTrendKw || hasRangeKw || hasDateKw
 }
 
+/** True when MCP/historyFrom+historyTo targets a specific store host session window. */
+function isStoreSessionHistoryQuery(question, opts = {}) {
+  const w = opts.queryWindow || resolveQueryWindow(question, opts.queryContext, opts)
+  if (!hasQueryHistoryWindow(w)) return false
+  return Boolean(extractStoreHostname(question) || extractIpv4(question))
+}
+
 /** Auto-fetch CPU/RAM history when MCP/queryContext supplies an absolute window. */
 function shouldIncludeCpuMemoryHistory(question, opts = {}) {
   if (wantsCpuMemoryHistory(question)) return true
+  if (isStoreSessionHistoryQuery(question, opts)) return true
   const w = opts.queryWindow || resolveQueryWindow(question, opts.queryContext, opts)
   if (!hasQueryHistoryWindow(w)) return false
   const q = String(question || '')
@@ -275,10 +283,11 @@ function shouldIncludeCpuMemoryHistory(question, opts = {}) {
 /** Auto-fetch interface history when an absolute window is set and traffic is in scope. */
 function shouldIncludeInterfaceHistory(question, opts = {}) {
   if (wantsInterfaceHistory(question)) return true
+  if (isStoreSessionHistoryQuery(question, opts)) return true
   const w = opts.queryWindow || resolveQueryWindow(question, opts.queryContext, opts)
   if (!hasQueryHistoryWindow(w)) return false
   const q = String(question || '')
-  return /\b(interface|interfaces|bandwidth|throughput|traffic|net\.if|ports?)\b/i.test(q)
+  return /\b(interface|interfaces|bandwidth|throughput|traffic|net\.if|ports?|download|upload|mbps)\b/i.test(q)
     || wantsBandwidthUtil(q)
 }
 
