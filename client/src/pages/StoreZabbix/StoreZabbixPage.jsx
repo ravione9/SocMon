@@ -4170,6 +4170,14 @@ export default function StoreZabbixPage({
   const [reportThresholdMs, setReportThresholdMs] = useState(150)
   const [reportGapMin, setReportGapMin] = useState(2)
   const [reportTopN, setReportTopN] = useState(20)
+  /* Per-card range / BH overrides (default: inherit from ROP toolbar). */
+  const [reportRangeMode, setReportRangeMode] = useState('inherit') /* 'inherit' | '24h' | '7d' | '14d' | '30d' | 'custom' */
+  const [reportCustomFrom, setReportCustomFrom] = useState('')
+  const [reportCustomTo, setReportCustomTo] = useState('')
+  const [reportBhMode, setReportBhMode] = useState('inherit') /* 'inherit' | 'custom' */
+  const [reportBhStart, setReportBhStart] = useState(9)
+  const [reportBhEnd, setReportBhEnd] = useState(18)
+  const [reportBhDays, setReportBhDays] = useState(() => new Set([0, 1, 2, 3, 4, 5, 6]))
 
   /* ── Custom Dashboard tab state ── */
   const [customDashHosts, setCustomDashHosts] = useState(null)            // full host list for picker
@@ -4577,42 +4585,65 @@ export default function StoreZabbixPage({
    * powering the Custom Dashboard endpoint.
    */
   const buildReportRequestForRop = useCallback(() => {
-    const hostnames = []
+    /* Send hostnames AND host (technical) names so the backend can resolve
+       either form via filter. Some Zabbix deployments display 'name' that
+       differs from the technical 'host' — sending both maximises matches. */
+    const hostnamesSet = new Set()
     for (const ps of ropUptime?.perStore || []) {
-      const h = String(ps?.hostname || ps?.storeTag || '').trim()
-      if (h) hostnames.push(h)
+      const h = String(ps?.hostname || '').trim()
+      const t = String(ps?.storeTag || '').trim()
+      if (h) hostnamesSet.add(h)
+      if (t) hostnamesSet.add(t)
     }
+    const hostnames = [...hostnamesSet]
     if (!hostnames.length) {
       throw Object.assign(new Error('No hosts in current ROP group/sub-group. Adjust the filter and try again.'), { code: 'NO_HOSTS' })
     }
+    /* Range — per-card override or inherit from the ROP toolbar. */
     let fromSec, toSec
-    if (ropRange === 'custom' && ropCustomEpoch?.from && ropCustomEpoch?.to) {
-      fromSec = Math.floor(new Date(ropCustomEpoch.from).getTime() / 1000)
-      toSec = Math.floor(new Date(ropCustomEpoch.to).getTime() / 1000)
+    const effRange = reportRangeMode === 'inherit' ? ropRange : reportRangeMode
+    if (effRange === 'custom') {
+      const fromInput = reportRangeMode === 'inherit' ? ropCustomEpoch?.from : reportCustomFrom
+      const toInput = reportRangeMode === 'inherit' ? ropCustomEpoch?.to : reportCustomTo
+      if (!fromInput || !toInput) {
+        throw Object.assign(new Error('Pick a Custom date range — both From and To required.'), { code: 'BAD_RANGE' })
+      }
+      fromSec = Math.floor(new Date(fromInput).getTime() / 1000)
+      toSec = Math.floor(new Date(toInput).getTime() / 1000)
     } else {
-      const days = ({ '24h': 1, '7d': 7, '14d': 14, '30d': 30 })[ropRange] || 7
+      const days = ({ '24h': 1, '7d': 7, '14d': 14, '30d': 30 })[effRange] || 7
       toSec = Math.floor(Date.now() / 1000)
       fromSec = toSec - days * 86400
     }
     if (!Number.isFinite(fromSec) || !Number.isFinite(toSec) || toSec <= fromSec) {
-      throw Object.assign(new Error('Invalid range — pick a valid Custom date range or change the chip.'), { code: 'BAD_RANGE' })
+      throw Object.assign(new Error('Invalid range — pick a valid date window.'), { code: 'BAD_RANGE' })
+    }
+    /* BH — per-card override or inherit from the ROP toolbar. */
+    const useToolbarBh = reportBhMode === 'inherit'
+    const bh = {
+      enabled: true,
+      start: useToolbarBh ? (Number(ropBhStart) || 9) : (Number(reportBhStart) || 9),
+      end: useToolbarBh ? (Number(ropBhEnd) || 18) : (Number(reportBhEnd) || 18),
+      days: useToolbarBh
+        ? [...(ropBhDays || new Set([0, 1, 2, 3, 4, 5, 6]))].sort((a, b) => a - b)
+        : [...(reportBhDays || new Set([0, 1, 2, 3, 4, 5, 6]))].sort((a, b) => a - b),
     }
     return {
       hostnames,
       from: fromSec,
       to: toSec,
-      bh: {
-        enabled: true,
-        start: Number(ropBhStart) || 9,
-        end: Number(ropBhEnd) || 18,
-        days: [...(ropBhDays || new Set([0, 1, 2, 3, 4, 5, 6]))].sort((a, b) => a - b),
-      },
+      bh,
       latencyThresholdMs: Number(reportThresholdMs) || 150,
       gapToleranceSec: Math.max(0, Math.round(Number(reportGapMin) * 60)),
       latencyTopN: Number(reportTopN) || 20,
       peakTopN: Number(reportTopN) || 20,
     }
-  }, [ropUptime, ropRange, ropCustomEpoch, ropBhStart, ropBhEnd, ropBhDays, reportThresholdMs, reportGapMin, reportTopN])
+  }, [
+    ropUptime, ropRange, ropCustomEpoch, ropBhStart, ropBhEnd, ropBhDays,
+    reportRangeMode, reportCustomFrom, reportCustomTo,
+    reportBhMode, reportBhStart, reportBhEnd, reportBhDays,
+    reportThresholdMs, reportGapMin, reportTopN,
+  ])
 
   const downloadFleetHealthReport = useCallback(async () => {
     setReportFleetBusy(true); setReportFleetError(null)
@@ -7520,6 +7551,109 @@ export default function StoreZabbixPage({
                   </button>
                 </div>
 
+                {/* Shared per-card Range + BH override block (used in both cards). */}
+                {(() => {
+                  const effRangeId = reportRangeMode === 'inherit' ? ropRange : reportRangeMode
+                  const effRangeLabel = reportRangeMode === 'inherit'
+                    ? `Inherit · ${ropDisconnectRangeLabel}`
+                    : (effRangeId === 'custom' && reportCustomFrom && reportCustomTo
+                        ? `${reportCustomFrom} – ${reportCustomTo}`
+                        : ({ '24h': 'Last 24h', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days', custom: 'Custom (set dates)' })[effRangeId])
+                  const effBhLabel = reportBhMode === 'inherit'
+                    ? `Inherit · ${bhSummary}`
+                    : (() => {
+                        const days = [...reportBhDays].sort()
+                        const allDays = days.length === 7
+                        const weekdays = days.length === 5 && [1, 2, 3, 4, 5].every((d) => reportBhDays.has(d))
+                        const dayLabel = allDays ? 'Every day' : weekdays ? 'Mon–Fri' : days.map((d) => ROP_DAY_LABELS[d]).join(', ')
+                        return `${String(reportBhStart).padStart(2, '0')}:00 – ${String(reportBhEnd).padStart(2, '0')}:00 · ${dayLabel}`
+                      })()
+                  const toggleReportBhDay = (d) => {
+                    const next = new Set(reportBhDays)
+                    if (next.has(d)) next.delete(d); else next.add(d)
+                    if (next.size === 0) return
+                    setReportBhDays(next)
+                  }
+                  return (
+                    <div style={{ background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 8, padding: 10, gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, letterSpacing: .5, textTransform: 'uppercase' }}>
+                        Report range &amp; business hours
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Range:</span>
+                        {[
+                          { id: 'inherit', label: 'Inherit toolbar' },
+                          { id: '24h', label: '24h' },
+                          { id: '7d', label: '7d' },
+                          { id: '14d', label: '14d' },
+                          { id: '30d', label: '30d' },
+                          { id: 'custom', label: 'Custom' },
+                        ].map((c) => (
+                          <button key={c.id} type="button"
+                            className={`rop-segment-btn${reportRangeMode === c.id ? ' active' : ''}`}
+                            onClick={() => setReportRangeMode(c.id)}>
+                            {c.label}
+                          </button>
+                        ))}
+                        {reportRangeMode === 'custom' && (
+                          <>
+                            <input type="datetime-local" value={reportCustomFrom}
+                              onChange={(e) => setReportCustomFrom(e.target.value)}
+                              className="rop-control rop-control--datetime" />
+                            <span style={{ fontSize: 10, color: 'var(--text3)' }}>–</span>
+                            <input type="datetime-local" value={reportCustomTo}
+                              onChange={(e) => setReportCustomTo(e.target.value)}
+                              className="rop-control rop-control--datetime" />
+                          </>
+                        )}
+                        <span style={{ marginLeft: 'auto', fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>{effRangeLabel}</span>
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>BH:</span>
+                        <button type="button"
+                          className={`rop-segment-btn${reportBhMode === 'inherit' ? ' active' : ''}`}
+                          onClick={() => setReportBhMode('inherit')}>
+                          Inherit toolbar
+                        </button>
+                        <button type="button"
+                          className={`rop-segment-btn${reportBhMode === 'custom' ? ' active' : ''}`}
+                          onClick={() => setReportBhMode('custom')}>
+                          Custom
+                        </button>
+                        {reportBhMode === 'custom' && (
+                          <>
+                            <select value={reportBhStart} onChange={(e) => setReportBhStart(Number(e.target.value))}
+                              className="rop-control rop-control--time">
+                              {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+                            </select>
+                            <span style={{ fontSize: 10, color: 'var(--text3)' }}>–</span>
+                            <select value={reportBhEnd} onChange={(e) => setReportBhEnd(Number(e.target.value))}
+                              className="rop-control rop-control--time">
+                              {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+                            </select>
+                            <div className="rop-day-row" style={{ marginLeft: 4 }}>
+                              {ROP_DAY_LABELS.map((lbl, idx) => {
+                                const on = reportBhDays.has(idx)
+                                return (
+                                  <button key={idx} type="button"
+                                    onClick={() => toggleReportBhDay(idx)}
+                                    className={`rop-day-btn${on ? ' active' : ''}`}
+                                    title={['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][idx]}>
+                                    {lbl}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                            <button type="button" onClick={() => setReportBhDays(new Set([1, 2, 3, 4, 5]))} className="rop-action-btn rop-action-btn--ghost">Mon–Fri</button>
+                            <button type="button" onClick={() => setReportBhDays(new Set([0, 1, 2, 3, 4, 5, 6]))} className="rop-action-btn rop-action-btn--ghost">All</button>
+                          </>
+                        )}
+                        <span style={{ marginLeft: 'auto', fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>{effBhLabel}</span>
+                      </div>
+                    </div>
+                  )
+                })()}
+
                 {/* Fleet Health (Day-Wise EXACT) — markdown report */}
                 <div className="rop-report-card">
                   <div className="rop-report-card-hd">
@@ -7534,13 +7668,11 @@ export default function StoreZabbixPage({
                   </p>
                   <div className="rop-report-stats">
                     {[
-                      ['Range', ropDisconnectRangeLabel, 'var(--text)'],
                       ['Group', ROP_GROUP_LABELS[ropGroupKey] || ropGroupKey, 'var(--accent)'],
-                      ['Business hours', bhSummary, '#f59e0b'],
                       ['Hosts in scope', String(ropUptime?.perStore?.length ?? 0), 'var(--text)'],
                     ].map(([lbl, val, color]) => (
                       <div key={lbl} className="rop-report-stat">
-                        <div className="rop-report-stat-val" style={{ color, fontSize: lbl === 'Business hours' ? 11 : 14 }} title={String(val)}>
+                        <div className="rop-report-stat-val" style={{ color, fontSize: 14 }} title={String(val)}>
                           {val}
                         </div>
                         <div className="rop-report-stat-lbl">{lbl}</div>
@@ -7565,7 +7697,7 @@ export default function StoreZabbixPage({
                     <div style={{ fontSize: 11, color: '#ef4444', fontFamily: 'var(--mono)', marginTop: 4 }}>{reportFleetError}</div>
                   )}
                   <button type="button" onClick={downloadFleetHealthReport}
-                    disabled={reportFleetBusy || (ropRange === 'custom' && !ropCustomEpoch) || !(ropUptime?.perStore?.length)}
+                    disabled={reportFleetBusy || !(ropUptime?.perStore?.length)}
                     className="rop-action-btn"
                     style={{ alignSelf: 'flex-start' }}
                     title="Download per-day fleet-health markdown for all stores in the current group">
@@ -7587,13 +7719,11 @@ export default function StoreZabbixPage({
                   </p>
                   <div className="rop-report-stats">
                     {[
-                      ['Range', ropDisconnectRangeLabel, 'var(--text)'],
                       ['Group', ROP_GROUP_LABELS[ropGroupKey] || ropGroupKey, 'var(--accent)'],
-                      ['Business hours', bhSummary, '#f59e0b'],
                       ['Threshold', `${reportThresholdMs} ms`, '#ef4444'],
                     ].map(([lbl, val, color]) => (
                       <div key={lbl} className="rop-report-stat">
-                        <div className="rop-report-stat-val" style={{ color, fontSize: lbl === 'Business hours' ? 11 : 14 }} title={String(val)}>
+                        <div className="rop-report-stat-val" style={{ color, fontSize: 14 }} title={String(val)}>
                           {val}
                         </div>
                         <div className="rop-report-stat-lbl">{lbl}</div>
@@ -7607,7 +7737,7 @@ export default function StoreZabbixPage({
                     <div style={{ fontSize: 11, color: '#ef4444', fontFamily: 'var(--mono)', marginTop: 4 }}>{reportLatencyError}</div>
                   )}
                   <button type="button" onClick={downloadLatencyEpisodesReport}
-                    disabled={reportLatencyBusy || (ropRange === 'custom' && !ropCustomEpoch) || !(ropUptime?.perStore?.length)}
+                    disabled={reportLatencyBusy || !(ropUptime?.perStore?.length)}
                     className="rop-action-btn"
                     style={{ alignSelf: 'flex-start' }}
                     title="Download per-day latency-episode markdown for all stores in the current group">

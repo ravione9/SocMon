@@ -1231,27 +1231,46 @@ router.post('/custom-dashboard/reports', async (req, res) => {
     } else if (Array.isArray(body.hostids) && body.hostids.length) {
       hosts = body.hostids.map((hid) => ({ hostid: String(hid) }))
     } else if (Array.isArray(body.hostnames) && body.hostnames.length) {
-      /* Resolve hostnames → hostids via Zabbix host.get. Reports tab uses this
-         path so callers can pass the ROP per-store list directly. */
+      /* Resolve hostnames → hostids via Zabbix host.get. The display name and
+         technical host can differ, so try `host` filter first, then fall back
+         to `name` for whatever didn't resolve. Reports tab uses this path. */
       const wanted = [...new Set(body.hostnames.map((s) => String(s || '').trim()).filter(Boolean))]
       const CHUNK = 200
-      const resolved = []
-      for (let i = 0; i < wanted.length; i += CHUNK) {
-        const chunk = wanted.slice(i, i + CHUNK)
-        const rows = await zabbixRpc('host.get', {
-          output: ['hostid', 'host', 'name'],
-          filter: { host: chunk },
-          monitored_hosts: true,
-        }).catch(() => [])
-        for (const r of rows || []) resolved.push(r)
+      const resolvedById = new Map()
+      const matched = new Set()
+      const tryFilter = async (field, list) => {
+        if (!list.length) return
+        for (let i = 0; i < list.length; i += CHUNK) {
+          const chunk = list.slice(i, i + CHUNK)
+          const rows = await zabbixRpc('host.get', {
+            output: ['hostid', 'host', 'name'],
+            filter: { [field]: chunk },
+            monitored_hosts: true,
+          }).catch(() => [])
+          for (const r of rows || []) {
+            resolvedById.set(String(r.hostid), r)
+            const h = String(r.host || '').trim()
+            const n = String(r.name || '').trim()
+            if (h) matched.add(h)
+            if (n) matched.add(n)
+          }
+        }
       }
-      hosts = resolved.map((r) => ({
+      await tryFilter('host', wanted)
+      const stillUnmatched = wanted.filter((w) => !matched.has(w))
+      if (stillUnmatched.length) await tryFilter('name', stillUnmatched)
+      hosts = [...resolvedById.values()].map((r) => ({
         hostid: String(r.hostid),
         name: r.name || r.host || String(r.hostid),
         host: r.host || null,
       }))
     }
-    if (!hosts.length) return res.status(400).json({ error: 'hosts, hostids, or hostnames required' })
+    if (!hosts.length) {
+      return res.status(400).json({
+        error: 'No matching Zabbix hosts found. Check the host names/ids and that the hosts are monitored.',
+        code: 'NO_HOSTS_RESOLVED',
+      })
+    }
 
     const bh = {
       enabled: !!body?.bh?.enabled,
