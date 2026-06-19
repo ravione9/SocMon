@@ -24,10 +24,12 @@
  */
 import { ZABBIX_HOST_FETCH_MAX } from './zabbixHostFetch.js'
 
-const HOST_LIMIT = 200
+const HOST_LIMIT = 1000
 const ITEM_CHUNK = 200
-const HISTORY_CHUNK = 30
-const HISTORY_CONCURRENCY = 6
+const HISTORY_CHUNK = 60
+const HISTORY_CONCURRENCY = 10
+const TREND_CHUNK = 200
+const TREND_CONCURRENCY = 8
 const REBOOT_DROP_SEC = 300
 const REPORT_CACHE_MS = 30_000
 const _cache = new Map()
@@ -208,8 +210,45 @@ async function fetchHistoryByItems(zabbixRpc, items, fromSec, toSec) {
         if (!byItem[iid]) byItem[iid] = []
         byItem[iid].push({ clock: Number(r.clock), value: Number(r.value) })
       }
-    })
+    }, HISTORY_CONCURRENCY)
   }
+  return byItem
+}
+
+/**
+ * Fetch trend.get for items — returns hourly { value_avg, value_min, value_max }
+ * bins. Use this as a fast screen so we only fetch per-minute history.get for
+ * hosts that actually breach the threshold or reboot in the window.
+ */
+async function fetchTrendsByItems(zabbixRpc, items, fromSec, toSec) {
+  const byItem = {}
+  const trendItems = items.filter((e) => historyKind(e.value_type)?.trends)
+  const chunks = []
+  for (let i = 0; i < trendItems.length; i += TREND_CHUNK) {
+    chunks.push(trendItems.slice(i, i + TREND_CHUNK))
+  }
+  await mapConcurrent(chunks, async (chunk) => {
+    const itemids = chunk.map((e) => String(e.itemid))
+    const rows = await zabbixRpc('trend.get', {
+      itemids,
+      time_from: fromSec,
+      time_till: toSec,
+      output: ['itemid', 'clock', 'value_avg', 'value_min', 'value_max'],
+      sortfield: 'clock',
+      sortorder: 'ASC',
+      limit: 50000,
+    }).catch(() => [])
+    for (const r of rows || []) {
+      const iid = String(r.itemid)
+      if (!byItem[iid]) byItem[iid] = []
+      byItem[iid].push({
+        clock: Number(r.clock),
+        avg: Number(r.value_avg),
+        min: Number(r.value_min),
+        max: Number(r.value_max),
+      })
+    }
+  }, TREND_CONCURRENCY)
   return byItem
 }
 
@@ -300,6 +339,69 @@ function detectBootEvents(points) {
     events.push({ at: bootEst, prevClock: prev.clock, sampleClock: cur.clock })
   }
   return events
+}
+
+/**
+ * Approximate per-day reboot detection from trend bins (hourly).
+ *
+ * A reboot makes uptime collapse to ~0 within an hour. Detect that by spotting
+ * trend bins where value_min is small AND lower than the previous bin's
+ * value_max by > REBOOT_DROP_SEC. Returns true/false flag — used to flag hosts
+ * that need a precise history pass.
+ */
+function trendsSuggestReboot(uptimeTrend, fromSec, toSec) {
+  const bins = (uptimeTrend || [])
+    .filter((b) => b.clock >= fromSec && b.clock < toSec)
+    .sort((a, b) => a.clock - b.clock)
+  if (bins.length < 2) return false
+  for (let i = 1; i < bins.length; i++) {
+    const prev = bins[i - 1]
+    const cur = bins[i]
+    if (!Number.isFinite(prev.max) || !Number.isFinite(cur.min)) continue
+    if (cur.min < prev.max - REBOOT_DROP_SEC) return true
+    if (cur.min < REBOOT_DROP_SEC * 2 && prev.avg > REBOOT_DROP_SEC * 4) return true
+  }
+  return false
+}
+
+/**
+ * Per-day latency stats from trend bins (avg/max only — no episodes).
+ * Used for non-flagged hosts where we skip the expensive history pass.
+ */
+function trendDayLatency(latencyTrend, day, item, bh) {
+  const bins = (latencyTrend || [])
+    .filter((b) => b.clock >= day.start && b.clock < day.end)
+    .filter((b) => inBhDay(b.clock, day.start, bh))
+  if (!bins.length) return { avgMs: null, maxMs: null, peakAt: null, breaches: 0, episodes: [] }
+  let avgSum = 0
+  let avgWeight = 0
+  let max = -Infinity
+  let peakAt = null
+  for (const b of bins) {
+    const av = normalizeLatencyValue(b.avg, item)
+    const mx = normalizeLatencyValue(b.max, item)
+    if (Number.isFinite(av)) { avgSum += av; avgWeight += 1 }
+    if (Number.isFinite(mx) && mx > max) { max = mx; peakAt = b.clock }
+  }
+  return {
+    avgMs: avgWeight ? Math.round((avgSum / avgWeight) * 10) / 10 : null,
+    maxMs: max === -Infinity ? null : Math.round(max),
+    peakAt,
+    breaches: 0,
+    episodes: [],
+    fromTrend: true,
+  }
+}
+
+/** True if trend bins indicate the host crossed the threshold any time in window. */
+function trendsSuggestLatencyBreach(latencyTrend, fromSec, toSec, item, threshold) {
+  const bins = (latencyTrend || [])
+    .filter((b) => b.clock >= fromSec && b.clock < toSec)
+  for (const b of bins) {
+    const mx = normalizeLatencyValue(b.max, item)
+    if (Number.isFinite(mx) && mx > threshold) return true
+  }
+  return false
 }
 
 /* ────────────────────────────────────────────────────────────────────
@@ -427,15 +529,43 @@ export async function buildCustomDashReport(opts) {
 
   const uptimeEntries = Object.values(uptimeByHost)
   const latencyEntries = Object.values(latencyByHost)
+  const uptimeIidByHost = Object.fromEntries(uptimeEntries.map((e) => [String(e.hostid), String(e.itemid)]))
+  const latencyIidByHost = Object.fromEntries(latencyEntries.map((e) => [String(e.hostid), String(e.itemid)]))
 
-  const [uptimeHist, latencyHist] = await Promise.all([
-    fetchHistoryByItems(opts.zabbixRpc, uptimeEntries, fromSec, toSec),
-    fetchHistoryByItems(opts.zabbixRpc, latencyEntries, fromSec, toSec),
+  /**
+   * PASS 1 — fast trend screen (hourly bins). Cheap even for 1000s of hosts.
+   * Use to compute non-precise per-day stats AND flag hosts that need the
+   * expensive per-minute history pass for episode/reboot detail.
+   */
+  const [uptimeTrend, latencyTrend] = await Promise.all([
+    fetchTrendsByItems(opts.zabbixRpc, uptimeEntries, fromSec, toSec),
+    fetchTrendsByItems(opts.zabbixRpc, latencyEntries, fromSec, toSec),
   ])
 
-  /* Pre-compute reboot events + per-host latency points for all hosts. */
+  const flaggedForHistory = new Set()
+  for (const hid of hostids) {
+    const upTrend = uptimeTrend[uptimeIidByHost[hid]] || []
+    const latTrend = latencyTrend[latencyIidByHost[hid]] || []
+    const item = latencyByHost[hid]
+    if (trendsSuggestReboot(upTrend, fromSec, toSec)) flaggedForHistory.add(hid)
+    if (trendsSuggestLatencyBreach(latTrend, fromSec, toSec, item, latencyThresholdMs)) flaggedForHistory.add(hid)
+  }
+
+  /**
+   * PASS 2 — per-minute history ONLY for flagged hosts. This is the slow
+   * call (history.get is expensive on the Zabbix DB). Restricting to
+   * breaching hosts keeps fleet-wide reports under the 10-min frontend limit.
+   */
+  const flaggedUptime = uptimeEntries.filter((e) => flaggedForHistory.has(String(e.hostid)))
+  const flaggedLatency = latencyEntries.filter((e) => flaggedForHistory.has(String(e.hostid)))
+  const [uptimeHist, latencyHist] = await Promise.all([
+    fetchHistoryByItems(opts.zabbixRpc, flaggedUptime, fromSec, toSec),
+    fetchHistoryByItems(opts.zabbixRpc, flaggedLatency, fromSec, toSec),
+  ])
+
+  /* Boot events from history for flagged hosts; 0 otherwise. */
   const hostBootEvents = {}
-  for (const e of uptimeEntries) {
+  for (const e of flaggedUptime) {
     const iid = String(e.itemid)
     const series = uptimeHist[iid] || []
     hostBootEvents[String(e.hostid)] = detectBootEvents(series)
@@ -443,9 +573,10 @@ export async function buildCustomDashReport(opts) {
   const hostLatencyPoints = {}
   const hostLatencyItem = {}
   for (const e of latencyEntries) {
-    const iid = String(e.itemid)
-    hostLatencyPoints[String(e.hostid)] = latencyHist[iid] || []
     hostLatencyItem[String(e.hostid)] = e
+    if (flaggedForHistory.has(String(e.hostid))) {
+      hostLatencyPoints[String(e.hostid)] = latencyHist[String(e.itemid)] || []
+    }
   }
 
   const days = enumerateDays(fromSec, toSec)
@@ -465,10 +596,17 @@ export async function buildCustomDashReport(opts) {
       const rebootCount = dayBoots.length
       if (rebootCount > 0) { rebootedHosts += 1; totalReboots += rebootCount }
 
-      /* Latency stats for this day (BH-aware) */
+      /* Latency stats for this day (BH-aware). Flagged hosts get precise
+         per-minute history; everyone else uses fast hourly trend stats. */
       const latencyItem = hostLatencyItem[hid]
-      const points = hostLatencyPoints[hid] || []
-      const lat = buildDayLatency(points, day, latencyItem, bh, latencyThresholdMs, gapToleranceSec)
+      const isFlagged = flaggedForHistory.has(hid)
+      let lat
+      if (isFlagged) {
+        const points = hostLatencyPoints[hid] || []
+        lat = buildDayLatency(points, day, latencyItem, bh, latencyThresholdMs, gapToleranceSec)
+      } else {
+        lat = trendDayLatency(latencyTrend[latencyIidByHost[hid]], day, latencyItem, bh)
+      }
 
       const sdwan = !!host?.sdwan
       const link = host?.link || (sdwan ? 'Dual' : 'Single')
@@ -558,6 +696,8 @@ export async function buildCustomDashReport(opts) {
       uptimeItems: uptimeEntries.length,
       latencyItems: latencyEntries.length,
       latencyKeys: [...new Set(latencyEntries.map((e) => e.key_).filter(Boolean))].slice(0, 6),
+      flaggedHosts: flaggedForHistory.size,
+      mode: 'two-pass (trend screen + history for breaching hosts only)',
     },
   }
 
