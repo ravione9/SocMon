@@ -1230,8 +1230,28 @@ router.post('/custom-dashboard/reports', async (req, res) => {
         .filter((h) => h.hostid)
     } else if (Array.isArray(body.hostids) && body.hostids.length) {
       hosts = body.hostids.map((hid) => ({ hostid: String(hid) }))
+    } else if (Array.isArray(body.hostnames) && body.hostnames.length) {
+      /* Resolve hostnames → hostids via Zabbix host.get. Reports tab uses this
+         path so callers can pass the ROP per-store list directly. */
+      const wanted = [...new Set(body.hostnames.map((s) => String(s || '').trim()).filter(Boolean))]
+      const CHUNK = 200
+      const resolved = []
+      for (let i = 0; i < wanted.length; i += CHUNK) {
+        const chunk = wanted.slice(i, i + CHUNK)
+        const rows = await zabbixRpc('host.get', {
+          output: ['hostid', 'host', 'name'],
+          filter: { host: chunk },
+          monitored_hosts: true,
+        }).catch(() => [])
+        for (const r of rows || []) resolved.push(r)
+      }
+      hosts = resolved.map((r) => ({
+        hostid: String(r.hostid),
+        name: r.name || r.host || String(r.hostid),
+        host: r.host || null,
+      }))
     }
-    if (!hosts.length) return res.status(400).json({ error: 'hosts or hostids required' })
+    if (!hosts.length) return res.status(400).json({ error: 'hosts, hostids, or hostnames required' })
 
     const bh = {
       enabled: !!body?.bh?.enabled,

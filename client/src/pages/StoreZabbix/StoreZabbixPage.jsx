@@ -3369,16 +3369,6 @@ function CustomDashboardPanel({
             onOpenRebootModal={onOpenRebootModal}
             onOpenCrashModal={onOpenCrashModal}
           />
-
-          {/* Day-wise Reports (Fleet Health + Latency Episodes) */}
-          <CustomDashReportsPanel
-            apiBase={apiBase}
-            selectedHosts={selectedHosts}
-            timeWindow={timeWindow}
-            rangeLabel={rangeLabel}
-            bh={{ enabled: bhEnabled, start: bhStart, end: bhEnd, days: [...(bhDays || new Set([1, 2, 3, 4, 5]))].sort((a, b) => a - b) }}
-            bhLabel={bhLabel}
-          />
         </>
       )}
     </div>
@@ -4172,6 +4162,14 @@ export default function StoreZabbixPage({
   const [ropDisconnectError, setRopDisconnectError] = useState(null)
   const [ropExportBusy, setRopExportBusy] = useState(false)
   const [ropStoreExportBusy, setRopStoreExportBusy] = useState(false)
+  /* Reports tab — Fleet Health + Latency Episodes downloads (markdown). */
+  const [reportFleetBusy, setReportFleetBusy] = useState(false)
+  const [reportFleetError, setReportFleetError] = useState(null)
+  const [reportLatencyBusy, setReportLatencyBusy] = useState(false)
+  const [reportLatencyError, setReportLatencyError] = useState(null)
+  const [reportThresholdMs, setReportThresholdMs] = useState(150)
+  const [reportGapMin, setReportGapMin] = useState(2)
+  const [reportTopN, setReportTopN] = useState(20)
 
   /* ── Custom Dashboard tab state ── */
   const [customDashHosts, setCustomDashHosts] = useState(null)            // full host list for picker
@@ -4569,6 +4567,84 @@ export default function StoreZabbixPage({
       setRopStoreExportBusy(false)
     }
   }, [apiBase, ropDisconnectStore, ropRange, ropCustomEpoch, buildRopFilterQs, downloadRopExcel, parseExportErr])
+
+  /**
+   * Compute and download a per-day Custom-Dashboard report for the hosts
+   * currently in scope on the Reports tab (group + sub-group from ropUptime).
+   *
+   * Re-uses POST /custom-dashboard/reports — server resolves hostnames →
+   * Zabbix hostids and runs the same fleet-health / latency-episode pipeline
+   * powering the Custom Dashboard endpoint.
+   */
+  const buildReportRequestForRop = useCallback(() => {
+    const hostnames = []
+    for (const ps of ropUptime?.perStore || []) {
+      const h = String(ps?.hostname || ps?.storeTag || '').trim()
+      if (h) hostnames.push(h)
+    }
+    if (!hostnames.length) {
+      throw Object.assign(new Error('No hosts in current ROP group/sub-group. Adjust the filter and try again.'), { code: 'NO_HOSTS' })
+    }
+    let fromSec, toSec
+    if (ropRange === 'custom' && ropCustomEpoch?.from && ropCustomEpoch?.to) {
+      fromSec = Math.floor(new Date(ropCustomEpoch.from).getTime() / 1000)
+      toSec = Math.floor(new Date(ropCustomEpoch.to).getTime() / 1000)
+    } else {
+      const days = ({ '24h': 1, '7d': 7, '14d': 14, '30d': 30 })[ropRange] || 7
+      toSec = Math.floor(Date.now() / 1000)
+      fromSec = toSec - days * 86400
+    }
+    if (!Number.isFinite(fromSec) || !Number.isFinite(toSec) || toSec <= fromSec) {
+      throw Object.assign(new Error('Invalid range — pick a valid Custom date range or change the chip.'), { code: 'BAD_RANGE' })
+    }
+    return {
+      hostnames,
+      from: fromSec,
+      to: toSec,
+      bh: {
+        enabled: true,
+        start: Number(ropBhStart) || 9,
+        end: Number(ropBhEnd) || 18,
+        days: [...(ropBhDays || new Set([0, 1, 2, 3, 4, 5, 6]))].sort((a, b) => a - b),
+      },
+      latencyThresholdMs: Number(reportThresholdMs) || 150,
+      gapToleranceSec: Math.max(0, Math.round(Number(reportGapMin) * 60)),
+      latencyTopN: Number(reportTopN) || 20,
+      peakTopN: Number(reportTopN) || 20,
+    }
+  }, [ropUptime, ropRange, ropCustomEpoch, ropBhStart, ropBhEnd, ropBhDays, reportThresholdMs, reportGapMin, reportTopN])
+
+  const downloadFleetHealthReport = useCallback(async () => {
+    setReportFleetBusy(true); setReportFleetError(null)
+    try {
+      const body = buildReportRequestForRop()
+      const { data } = await api.post(`${apiBase}/custom-dashboard/reports`, body)
+      const md = buildFleetHealthMarkdown(data)
+      const stamp = new Date().toISOString().slice(0, 10)
+      const safeGroup = String(ropGroupKey || 'rp').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40)
+      downloadTextFile(`Fleet_Health_DayWise_${safeGroup}_${stamp}.md`, md)
+    } catch (e) {
+      setReportFleetError(e?.response?.data?.error || e?.message || 'Failed to build fleet-health report')
+    } finally {
+      setReportFleetBusy(false)
+    }
+  }, [apiBase, buildReportRequestForRop, ropGroupKey])
+
+  const downloadLatencyEpisodesReport = useCallback(async () => {
+    setReportLatencyBusy(true); setReportLatencyError(null)
+    try {
+      const body = buildReportRequestForRop()
+      const { data } = await api.post(`${apiBase}/custom-dashboard/reports`, body)
+      const md = buildLatencyEpisodesMarkdown(data)
+      const stamp = new Date().toISOString().slice(0, 10)
+      const safeGroup = String(ropGroupKey || 'rp').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40)
+      downloadTextFile(`Latency_Episodes_${safeGroup}_${stamp}.md`, md)
+    } catch (e) {
+      setReportLatencyError(e?.response?.data?.error || e?.message || 'Failed to build latency-episode report')
+    } finally {
+      setReportLatencyBusy(false)
+    }
+  }, [apiBase, buildReportRequestForRop, ropGroupKey])
 
   const refetchProblems = useCallback(async () => {
     const qs = new URLSearchParams({ limit: '250' })
@@ -7441,6 +7517,101 @@ export default function StoreZabbixPage({
                     style={{ alignSelf: 'flex-start' }}
                     title="Download Excel for all stores in the current group">
                     {ropExportBusy ? 'Exporting…' : '⬇ Download Excel'}
+                  </button>
+                </div>
+
+                {/* Fleet Health (Day-Wise EXACT) — markdown report */}
+                <div className="rop-report-card">
+                  <div className="rop-report-card-hd">
+                    <span className="rop-report-card-title">📋 Fleet Health · Day-Wise EXACT</span>
+                    {reportFleetBusy && <span style={{ fontSize: 10, color: 'var(--accent)', fontFamily: 'var(--mono)' }}>Generating…</span>}
+                  </div>
+                  <p className="rop-report-card-desc">
+                    Per-day report for the selected group + BH window. Each day lists exact reboots
+                    (with boot times in IST), top hosts above the latency threshold, and network
+                    issues without reboot — with full breach episodes (start–end, peak ms@time).
+                    Same shape as the manual <code>RP_Fleet_Health_DayWise_EXACT</code> markdown.
+                  </p>
+                  <div className="rop-report-stats">
+                    {[
+                      ['Range', ropDisconnectRangeLabel, 'var(--text)'],
+                      ['Group', ROP_GROUP_LABELS[ropGroupKey] || ropGroupKey, 'var(--accent)'],
+                      ['Business hours', bhSummary, '#f59e0b'],
+                      ['Hosts in scope', String(ropUptime?.perStore?.length ?? 0), 'var(--text)'],
+                    ].map(([lbl, val, color]) => (
+                      <div key={lbl} className="rop-report-stat">
+                        <div className="rop-report-stat-val" style={{ color, fontSize: lbl === 'Business hours' ? 11 : 14 }} title={String(val)}>
+                          {val}
+                        </div>
+                        <div className="rop-report-stat-lbl">{lbl}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="rop-report-sheets" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <span style={{ color: 'var(--text3)', fontSize: 10, fontFamily: 'var(--mono)' }}>Threshold</span>
+                    <input type="number" min={1} max={5000} value={reportThresholdMs}
+                      onChange={(e) => setReportThresholdMs(Math.max(1, Math.min(5000, Number(e.target.value) || 150)))}
+                      style={{ width: 64, padding: '3px 6px', fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', borderRadius: 5, outline: 'none' }} />
+                    <span style={{ color: 'var(--text3)', fontSize: 10, fontFamily: 'var(--mono)' }}>ms · Gap</span>
+                    <input type="number" min={0} max={30} step={0.5} value={reportGapMin}
+                      onChange={(e) => setReportGapMin(Math.max(0, Math.min(30, Number(e.target.value) || 0)))}
+                      style={{ width: 56, padding: '3px 6px', fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', borderRadius: 5, outline: 'none' }} />
+                    <span style={{ color: 'var(--text3)', fontSize: 10, fontFamily: 'var(--mono)' }}>min · Top</span>
+                    <input type="number" min={1} max={200} value={reportTopN}
+                      onChange={(e) => setReportTopN(Math.max(1, Math.min(200, Number(e.target.value) || 20)))}
+                      style={{ width: 56, padding: '3px 6px', fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', borderRadius: 5, outline: 'none' }} />
+                  </div>
+                  {reportFleetError && (
+                    <div style={{ fontSize: 11, color: '#ef4444', fontFamily: 'var(--mono)', marginTop: 4 }}>{reportFleetError}</div>
+                  )}
+                  <button type="button" onClick={downloadFleetHealthReport}
+                    disabled={reportFleetBusy || (ropRange === 'custom' && !ropCustomEpoch) || !(ropUptime?.perStore?.length)}
+                    className="rop-action-btn"
+                    style={{ alignSelf: 'flex-start' }}
+                    title="Download per-day fleet-health markdown for all stores in the current group">
+                    {reportFleetBusy ? 'Generating…' : '⬇ Download Markdown'}
+                  </button>
+                </div>
+
+                {/* High-Latency Episodes — markdown report */}
+                <div className="rop-report-card">
+                  <div className="rop-report-card-hd">
+                    <span className="rop-report-card-title">📈 High-Latency Episodes</span>
+                    {reportLatencyBusy && <span style={{ fontSize: 10, color: 'var(--accent)', fontFamily: 'var(--mono)' }}>Generating…</span>}
+                  </div>
+                  <p className="rop-report-card-desc">
+                    Every contiguous run where ping &gt; threshold within BH (gap-merge tolerance
+                    configurable). Per-host: window avg, max@IST, breach count, and full episode
+                    list <code>start–end peak@time</code>. Same shape as the manual
+                    <code> RP_HighLatency_Breach_Timestamps</code> markdown.
+                  </p>
+                  <div className="rop-report-stats">
+                    {[
+                      ['Range', ropDisconnectRangeLabel, 'var(--text)'],
+                      ['Group', ROP_GROUP_LABELS[ropGroupKey] || ropGroupKey, 'var(--accent)'],
+                      ['Business hours', bhSummary, '#f59e0b'],
+                      ['Threshold', `${reportThresholdMs} ms`, '#ef4444'],
+                    ].map(([lbl, val, color]) => (
+                      <div key={lbl} className="rop-report-stat">
+                        <div className="rop-report-stat-val" style={{ color, fontSize: lbl === 'Business hours' ? 11 : 14 }} title={String(val)}>
+                          {val}
+                        </div>
+                        <div className="rop-report-stat-lbl">{lbl}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="rop-report-sheets">
+                    Per host: Win avg · Win max@time · #breaches · Episodes start–end peak@time
+                  </div>
+                  {reportLatencyError && (
+                    <div style={{ fontSize: 11, color: '#ef4444', fontFamily: 'var(--mono)', marginTop: 4 }}>{reportLatencyError}</div>
+                  )}
+                  <button type="button" onClick={downloadLatencyEpisodesReport}
+                    disabled={reportLatencyBusy || (ropRange === 'custom' && !ropCustomEpoch) || !(ropUptime?.perStore?.length)}
+                    className="rop-action-btn"
+                    style={{ alignSelf: 'flex-start' }}
+                    title="Download per-day latency-episode markdown for all stores in the current group">
+                    {reportLatencyBusy ? 'Generating…' : '⬇ Download Markdown'}
                   </button>
                 </div>
               </div>
