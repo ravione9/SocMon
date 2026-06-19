@@ -1295,6 +1295,13 @@ router.post('/custom-dashboard/reports', async (req, res) => {
     if (e?.code === 'INVALID_WINDOW' || e?.code === 'NO_HOSTS') {
       return res.status(400).json({ error: e.message, code: e.code })
     }
+    if (e?.code === 'ZABBIX_TIMEOUT') {
+      return res.status(504).json({
+        error: 'Zabbix took too long to return history for this report.',
+        code: 'ZABBIX_TIMEOUT',
+        hint: 'Shorten the range (try 24h or 7d), narrow the group/sub-group to fewer hosts, or run during off-peak hours. Each Zabbix history.get call is capped at 4 minutes; for very large fleets the DB cannot serve all chunks within that window.',
+      })
+    }
     return sendZabbixError(res, e)
   }
 })

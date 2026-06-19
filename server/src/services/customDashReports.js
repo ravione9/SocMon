@@ -26,10 +26,17 @@ import { ZABBIX_HOST_FETCH_MAX } from './zabbixHostFetch.js'
 
 const HOST_LIMIT = 1000
 const ITEM_CHUNK = 200
-const HISTORY_CHUNK = 60
-const HISTORY_CONCURRENCY = 10
-const TREND_CHUNK = 200
-const TREND_CONCURRENCY = 8
+/* Smaller chunks per Zabbix call so each call stays inside its timeout window
+   even on heavy DBs. We rely on concurrency to keep total wall-time low. */
+const HISTORY_CHUNK = 20
+const HISTORY_CONCURRENCY = 8
+const TREND_CHUNK = 80
+const TREND_CONCURRENCY = 6
+/* Per-RPC timeout for history/trend calls. Default zabbixRpc is 45s which is
+   too short for fleet-wide pulls on a busy Zabbix DB. */
+const HISTORY_RPC_TIMEOUT_MS = 4 * 60 * 1000
+const TREND_RPC_TIMEOUT_MS = 3 * 60 * 1000
+const ITEM_RPC_TIMEOUT_MS = 2 * 60 * 1000
 const REBOOT_DROP_SEC = 300
 const REPORT_CACHE_MS = 30_000
 const _cache = new Map()
@@ -121,7 +128,7 @@ async function fetchUptimeItems(zabbixRpc, hostids) {
       search: { key_: 'system.uptime' },
       searchWildcardsEnabled: true,
       limit: ZABBIX_HOST_FETCH_MAX,
-    }).catch(() => [])
+    }, { timeoutMs: ITEM_RPC_TIMEOUT_MS }).catch(() => [])
     out.push(...(rows || []))
   }
   return out
@@ -138,7 +145,7 @@ async function fetchLatencyItems(zabbixRpc, hostids) {
         search: { key_: pat },
         searchWildcardsEnabled: true,
         limit: ZABBIX_HOST_FETCH_MAX,
-      }).catch(() => [])
+      }, { timeoutMs: ITEM_RPC_TIMEOUT_MS }).catch(() => [])
       out.push(...(rows || []))
     }
   }
@@ -204,7 +211,7 @@ async function fetchHistoryByItems(zabbixRpc, items, fromSec, toSec) {
         sortfield: 'clock',
         sortorder: 'ASC',
         limit: 50000,
-      }).catch(() => [])
+      }, { timeoutMs: HISTORY_RPC_TIMEOUT_MS }).catch(() => [])
       for (const r of rows || []) {
         const iid = String(r.itemid)
         if (!byItem[iid]) byItem[iid] = []
@@ -237,7 +244,7 @@ async function fetchTrendsByItems(zabbixRpc, items, fromSec, toSec) {
       sortfield: 'clock',
       sortorder: 'ASC',
       limit: 50000,
-    }).catch(() => [])
+    }, { timeoutMs: TREND_RPC_TIMEOUT_MS }).catch(() => [])
     for (const r of rows || []) {
       const iid = String(r.itemid)
       if (!byItem[iid]) byItem[iid] = []

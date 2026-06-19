@@ -4645,6 +4645,18 @@ export default function StoreZabbixPage({
     reportThresholdMs, reportGapMin, reportTopN,
   ])
 
+  const formatReportApiError = (e) => {
+    const data = e?.response?.data || {}
+    const baseMsg = data.error || e?.message || 'Failed to build report'
+    const hint = data.hint
+    /* axios timeout (no server response) */
+    if (!e?.response && (e?.code === 'ECONNABORTED' || /timeout/i.test(String(e?.message || '')))) {
+      return 'Report timed out (10 min). Shorten the range or narrow the group/sub-group, then try again.'
+    }
+    if (hint) return `${baseMsg} — ${hint}`
+    return baseMsg
+  }
+
   const downloadFleetHealthReport = useCallback(async () => {
     setReportFleetBusy(true); setReportFleetError(null)
     try {
@@ -4655,7 +4667,7 @@ export default function StoreZabbixPage({
       const safeGroup = String(ropGroupKey || 'rp').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40)
       downloadTextFile(`Fleet_Health_DayWise_${safeGroup}_${stamp}.md`, md)
     } catch (e) {
-      setReportFleetError(e?.response?.data?.error || e?.message || 'Failed to build fleet-health report')
+      setReportFleetError(formatReportApiError(e))
     } finally {
       setReportFleetBusy(false)
     }
@@ -4671,7 +4683,7 @@ export default function StoreZabbixPage({
       const safeGroup = String(ropGroupKey || 'rp').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40)
       downloadTextFile(`Latency_Episodes_${safeGroup}_${stamp}.md`, md)
     } catch (e) {
-      setReportLatencyError(e?.response?.data?.error || e?.message || 'Failed to build latency-episode report')
+      setReportLatencyError(formatReportApiError(e))
     } finally {
       setReportLatencyBusy(false)
     }
