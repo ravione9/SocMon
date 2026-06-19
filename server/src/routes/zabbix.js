@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { createZabbixClient } from '../services/zabbix.js'
 import { fetchAllMonitoredHosts, ZABBIX_HOST_FETCH_MAX } from '../services/zabbixHostFetch.js'
 import { fetchRopUptimeReport, fetchRopStoreDisconnectEvents, fetchRopGroupDisconnectEvents } from '../services/ropUptimeReport.js'
+import { fetchRpFleetHealthReport } from '../services/rpFleetHealthReport.js'
 import { buildRopDisconnectEventsReport, buildRopSingleStoreDisconnectReport } from '../services/storeReports.js'
 import {
   isInfluxStoreConfigured,
@@ -2292,6 +2293,53 @@ router.get('/rop-dashboard', async (req, res) => {
       staleAfterSec,
     })
   } catch (e) {
+    return sendZabbixError(res, e)
+  }
+})
+
+/* ═══════════ RP FLEET HEALTH (session history — all RP hosts) ═══════════
+ * Batched Store Zabbix history for custom.ping.ms[8.8.8.8] + system.uptime
+ * across every host in the Zabbix RP group. Pair with /rop-uptime for restarts.
+ */
+router.get('/rp-fleet-health', async (req, res) => {
+  try {
+    if (!isZabbixConfigured()) return res.status(503).json({ error: 'Zabbix not configured' })
+
+    const range = String(req.query.range || 'custom').toLowerCase()
+    const customFromSec = parseInt(String(req.query.from || ''), 10)
+    const customToSec = parseInt(String(req.query.to || ''), 10)
+    const nowSec = Math.floor(Date.now() / 1000)
+
+    let fromSec, toSec
+    if (Number.isFinite(customFromSec) && Number.isFinite(customToSec) && customToSec > customFromSec) {
+      fromSec = customFromSec
+      toSec = customToSec
+    } else {
+      const span = ({
+        '24h': 86_400,
+        '1d': 86_400,
+        'today': 86_400,
+        '7d': 7 * 86_400,
+      })[range] || 86_400
+      toSec = nowSec
+      fromSec = nowSec - span
+    }
+
+    const groupName = String(req.query.group || req.query.groupKey || 'RP').trim() || 'RP'
+    const latencyThresholdMs = parseFloat(String(req.query.latencyThreshold ?? req.query.latencyMs ?? '50')) || 50
+
+    const data = await fetchRpFleetHealthReport({
+      zabbixRpc,
+      fromSec,
+      toSec,
+      groupName: groupName.toUpperCase() === 'RP' ? 'RP' : groupName,
+      latencyThresholdMs,
+    })
+    res.json(data)
+  } catch (e) {
+    if (e.code === 'INVALID_WINDOW') {
+      return res.status(400).json({ error: e.message, code: e.code })
+    }
     return sendZabbixError(res, e)
   }
 })

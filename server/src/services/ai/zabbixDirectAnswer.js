@@ -1006,6 +1006,26 @@ function formatDurationSeconds(seconds) {
   return `${secs}s`
 }
 
+async function mapConcurrent(items, fn, concurrency = 20) {
+  const results = new Array(items.length)
+  let idx = 0
+  async function worker() {
+    while (idx < items.length) {
+      const i = idx++
+      results[i] = await fn(items[i], i)
+    }
+  }
+  const workers = Math.min(Math.max(1, concurrency), Math.max(1, items.length))
+  await Promise.all(Array.from({ length: workers }, () => worker()))
+  return results
+}
+
+function fleetHistoryConcurrency(hostCount) {
+  if (hostCount <= 50) return 8
+  const n = parseInt(process.env.ZABBIX_FLEET_HISTORY_CONCURRENCY || '20', 10)
+  return Math.min(Math.max(Number.isFinite(n) ? n : 20, 4), 40)
+}
+
 async function fetchItemHistorySeries(zabbixRpc, metric, from, to, maxPoints = 120, opts = {}) {
   const valueMode = opts.valueMode === 'traffic' ? 'traffic' : 'percent'
   const itemid = String(metric?.itemid || '').trim()
@@ -2097,31 +2117,39 @@ async function fetchLatencyHistorySnapshot(zabbixRpc, matchedHosts, window) {
     pointsTotal: 0,
   }
 
-  for (const h of matchedHosts) {
+  const concurrency = fleetHistoryConcurrency(matchedHosts.length)
+  const rows = await mapConcurrent(matchedHosts, async (h) => {
     const hid = String(h.hostid)
     const it = chosenByHost[hid]
-    if (!it) continue
+    if (!it) return null
     if (it.key_ && diagnostics.chosenItemKeys.length < 10) diagnostics.chosenItemKeys.push(it.key_)
     const { points, source } = await getPoints(it)
     diagnostics.pointsTotal += points.length
-    if (!points.length) continue
+    if (!points.length) return null
     const vals = points.map((p) => Number(p.value)).filter(Number.isFinite)
-    if (!vals.length) continue
-    byHost[hid] = {
-      itemid: String(it.itemid),
-      key: it.key_ || '',
-      itemName: it.name || it.key_ || '',
-      source,
-      pointCount: vals.length,
-      avgMs: Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10,
-      minMs: Math.round(Math.min(...vals) * 10) / 10,
-      maxMs: Math.round(Math.max(...vals) * 10) / 10,
-      points: points.map((p) => ({
-        clock: p.clock,
-        at: formatPortalTimestamp(p.clock * 1000),
-        ms: Math.round(Number(p.value) * 10) / 10,
-      })),
+    if (!vals.length) return null
+    return {
+      hid,
+      row: {
+        itemid: String(it.itemid),
+        key: it.key_ || '',
+        itemName: it.name || it.key_ || '',
+        source,
+        pointCount: vals.length,
+        avgMs: Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10,
+        minMs: Math.round(Math.min(...vals) * 10) / 10,
+        maxMs: Math.round(Math.max(...vals) * 10) / 10,
+        points: points.map((p) => ({
+          clock: p.clock,
+          at: formatPortalTimestamp(p.clock * 1000),
+          ms: Math.round(Number(p.value) * 10) / 10,
+        })),
+      },
     }
+  }, concurrency)
+
+  for (const entry of rows) {
+    if (entry?.hid && entry.row) byHost[entry.hid] = entry.row
   }
 
   return {
@@ -2255,7 +2283,8 @@ async function fetchUptimeHistorySnapshot(zabbixRpc, matchedHosts, window, maxPo
     uptimePointsTotal: 0,
   }
 
-  for (const h of matchedHosts) {
+  const concurrency = fleetHistoryConcurrency(matchedHosts.length)
+  const hostRows = await mapConcurrent(matchedHosts, async (h) => {
     const hid = String(h.hostid)
     const candidates = itemsByHost[hid] || []
     if (candidates.length) diagnostics.hostsWithUptimeItem += 1
@@ -2264,15 +2293,16 @@ async function fetchUptimeHistorySnapshot(zabbixRpc, matchedHosts, window, maxPo
       const series = await readSeries(it)
       if (!series) continue
       diagnostics.uptimePointsTotal += series.pointCount || 0
-      hosts.push({
+      return {
         hostid: hid,
         name: h.name || h.host || hid,
         host: h.host || null,
         uptime: series,
-      })
-      break
+      }
     }
-  }
+    return null
+  }, concurrency)
+  hosts.push(...hostRows.filter(Boolean))
 
   return {
     windowSec: window.rangeSec,
@@ -3459,6 +3489,10 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   const ip = extractIpv4(userMessage)
   const hostname = extractStoreHostname(userMessage)
   const deviceTypeFilter = detectDeviceTypeFilter(userMessage)
+  let hostGroupFilter = extractHostGroupFilter(userMessage, opts?.queryContext) || ''
+  if (!hostGroupFilter && /\bRP\s*group\b/i.test(String(userMessage || ''))) {
+    hostGroupFilter = 'RP'
+  }
   // For store-centric questions like "RP973 ping/interfaces", hostname filter
   // is the critical selector. Without this, we'd fetch broad host sets and the
   // resulting item.get fan-out could exceed Claude Desktop's tool timeout.
@@ -3486,6 +3520,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
 
   const data = await fetchZabbixSnapshot(client, {
     hostFilter,
+    hostGroupFilter,
     deviceTypeFilter,
     includePing,
     includeBandwidth,
@@ -3533,7 +3568,12 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     }
   }
 
-  const historyWindowForFetch = (includeCpuMemoryHistory || includeInterfaceHistory)
+  const historyWindowForFetch = (
+    includeCpuMemoryHistory
+    || includeInterfaceHistory
+    || (includePing && hasQueryHistoryWindow(resolvedQueryWindow)
+      && (hostFilter || (moduleId === 'storeZabbix' && /\b(fleet|RP\s*group|all\s*stores)\b/i.test(String(userMessage || '')))))
+  )
     ? parseZabbixHistoryWindow(userMessage, { ...opts, queryWindow: resolvedQueryWindow })
     : null
   const pastHistoricalQuery = isPastHistoricalWindow(historyWindowForFetch)

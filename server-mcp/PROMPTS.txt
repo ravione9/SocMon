@@ -1287,6 +1287,316 @@ Reply with STORE DETAILS table + PLAIN-ENGLISH SUMMARY only (same format as your
 health-check template).
 
 ======================================================================
+[FLEET RP HEALTH — ALL RP SYSTEMS — 3 REPORTS — 3 FIELDS ONLY]
+Copy the box below. Change ONLY the 3 header lines, then send everything.
+Fleet-wide ALL RP stores. THREE reports — REST for full fleet coverage:
+  REPORT 1 — Restarts + restart downtime (REST rop-uptime — all ~718 stores)
+  REPORT 2 — Latency > 50 ms (REST rp-fleet-health — all RP hosts, one call)
+  REPORT 3 — Network outage WITHOUT restart (REST rp-fleet-health + system.uptime)
+Fallback: per-host storeZabbix waves (50 at a time) if REST unavailable.
+Do NOT use Influx storeMonitor for Report 2 or 3. No packet-loss column.
+======================================================================
+
+###############################################################
+#  FLEET RP HEALTH  —  FILL IN ONLY THE 3 LINES BELOW          #
+###############################################################
+DATE         :  16-06-2026
+TIME FROM    :  11:00
+TIME TO      :  21:30
+###############################################################
+#  ↓↓↓  DO NOT CHANGE ANYTHING BELOW THIS LINE  ↓↓↓           #
+###############################################################
+
+You are connected to the "netpulse" MCP server. Using ONLY DATE, TIME FROM,
+and TIME TO above, investigate ALL RP Group stores (hostname RP*). Run MCP
+tools in PARALLEL + REST rop-uptime. Produce THREE REPORTS only.
+
+STEPS (silent):
+1. IST window: DATE + TIME FROM–TO (+05:30) → historyFrom / historyTo unix.
+   Put DATE + times in EVERY MCP question. REQUIRED on every call.
+2. bizStart = hour FROM (11), bizEnd = hour after TO (22) for REST.
+3. Scope = RP Group (hostname RP*). Do NOT use Influx/storeMonitor for
+   latency or network-outage reports — Store Zabbix only.
+
+REQUIRED MCP TOOL CALLS (1 optional — Report 1 timestamps only):
+
+  A) netpulse_storeProblems  (optional — disconnect timestamps only)
+     question: "RP Group disconnect restart events <DATE> <FROM>-<TO> IST"
+     historyFrom / historyTo: session unix bounds
+
+REQUIRED REST (all 718 RP stores — no per-host MCP loop):
+
+  REPORT 1 — Restarts:
+  GET /api/store-zabbix/rop-uptime?groupKey=rp&range=custom
+    &from=<historyFrom>&to=<historyTo>
+    &bizStart=<hour FROM>&bizEnd=<hour after TO>
+    &bizDays=0,1,2,3,4,5,6&tzOffset=330
+
+  REPORT 2 + REPORT 3 — Latency + uptime (ALL RP hosts, one call):
+  GET /api/store-zabbix/rp-fleet-health?group=RP&range=custom
+    &from=<historyFrom>&to=<historyTo>
+    &latencyThreshold=50
+
+  REST field map (rp-fleet-health):
+    Report 2 table  → report2HighLatency[] { hostname, avgMs, maxMs, itemKey }
+    Report 3 table  → report3NetworkNoRestart[] { hostname, networkIssue,
+                        uptimeStatus, estDurationMin }
+    Fleet counts    → summary.latencyHighCount, summary.networkIssueNoRestartCount
+    Window label    → window.fromAt – window.toAt (IST)
+    Per-host detail → perStore[] (all hosts; filter avgMs/maxMs > 50 for Report 2)
+
+  MCP storeZabbix is NOT required for fleet Reports 2+3 when rp-fleet-health
+  is available. Do NOT loop 718 per-host storeZabbix calls unless REST fails.
+
+ZABBIX UI ITEMS (match Store Zabbix dashboard — REST uses these keys):
+
+  LATENCY (Report 2):
+    Item name : Ping Google DNS (8.8.8.8)
+    Item key  : custom.ping.ms[8.8.8.8]
+    MCP fields:
+      hosts[].latencyAtSession.{avgMs, minMs, maxMs, key, pointCount}
+      latencyHistory.byHost[<hostid>].{avgMs, minMs, maxMs, key, points[]}
+    latencyHistory.byHost[].key MUST contain "custom.ping.ms" and prefer "[8.8.8.8]".
+    Window label = latencyHistory.windowLabel / fromAt / toAt
+      (same as UI "Range: <date> <FROM> - <TO>").
+
+  UPTIME (Report 3 — restart vs no-restart):
+    Item name : Uptime
+    Item key  : system.uptime
+    MCP fields:
+      uptimeHistory.hosts[].uptime.{points[], sessionSnapshot}
+      hosts[].zabbixUptimeAtSession / hosts[].uptimeAtSession.{seconds, label}
+    uptimeHistory.hosts[].uptime.points[] = per-host uptime counter in window
+      (same as UI "UPTIME — PER-HOST DETAIL" graph).
+
+METRIC SOURCES (locked — REST for fleet; Store Zabbix only; NO Influx):
+
+  REPORT 1 — Restarts (REST rop-uptime ONLY):
+    summary.totalDisconnects, summary.totalDowntimeMin, perStore[].
+    NEVER use storeProblems disconnectEvents[] count as fleet total.
+
+  REPORT 2 — Latency > 50 ms (REST rp-fleet-health PRIMARY):
+    report2HighLatency[] — pre-filtered avgMs>50 OR maxMs>50.
+    Fallback if REST unavailable: per-host storeZabbix latencyHistory.byHost.
+    Item key: custom.ping.ms[8.8.8.8] (Ping Google DNS).
+    Omit hosts ≤50 ms (e.g. RP1039 at 13.0 ms = healthy — do NOT list).
+    NEVER use storeMonitor, Influx, or live hosts[].ping.ms for Report 2.
+
+  REPORT 3 — Network issue WITHOUT restart (REST rp-fleet-health PRIMARY):
+    report3NetworkNoRestart[] — ping/loss/latency problem + uptimeMonotonic.
+    Rule: networkProblem AND uptimeResets=0 (system.uptime did NOT reset).
+    Cross-check Report 1: hosts with REST perStore disconnects>0 → Report 1 only.
+    Fallback if REST unavailable: storeZabbix uptimeHistory + latencyHistory.
+    NEVER use storeMonitor offline − restart math.
+
+OUTPUT FORMAT — THREE REPORTS:
+
+══════════════════════════════════════════════════════════════════
+REPORT 1 — RESTARTS (ALL RP) — REST rop-uptime
+Window: <DATE> <FROM>–<TO> IST
+
+| Metric | Value | Source |
+| Total RP restart events | <count> | REST |
+| Unique RP stores restarted | <count> | REST perStore[] |
+| Total restart downtime (fleet) | <H h M min> | REST |
+
+| Hostname | Restarts | Restart downtime | Notes |
+(top 50 from REST perStore[] by bizDownMin)
+
+══════════════════════════════════════════════════════════════════
+REPORT 2 — LATENCY > 50 ms ONLY — custom.ping.ms[8.8.8.8]
+Window: <window.fromAt> – <window.toAt> IST  (from rp-fleet-health)
+
+| Metric | Value | Source |
+| RP stores with latency > 50 ms | <summary.latencyHighCount> | rp-fleet-health |
+| Highest avg/max ping | <ms> @ <hostname> | report2HighLatency[0] |
+
+| Hostname | Avg ping (ms) | Max ping (ms) | Item key | Notes |
+(from report2HighLatency[] — ALL RP hosts covered)
+Healthy hosts like RP1039 at 13 ms are excluded by design.
+
+══════════════════════════════════════════════════════════════════
+REPORT 3 — NETWORK ISSUE WITHOUT RESTART — system.uptime
+Window: <window.fromAt> – <window.toAt> IST  (from rp-fleet-health)
+Rule: custom.ping.ms problem + uptimeResets=0.
+
+| Metric | Value | Source |
+| RP stores with network issue (no restart) | <summary.networkIssueNoRestartCount> | rp-fleet-health |
+| Total estimated issue duration | <sum estDurationMin> | report3NetworkNoRestart |
+
+| Hostname | Network issue | system.uptime status | Est. duration | Notes |
+(from report3NetworkNoRestart[])
+RESTART hosts (REST perStore disconnects>0 or uptimeResets>0) → Report 1 only.
+
+── PLAIN-ENGLISH SUMMARY (3 bullets) ──
+
+IMPORTANT:
+  • Report 1: REST rop-uptime (all ~718 RP stores).
+  • Reports 2+3: REST rp-fleet-health (one call, all RP hosts).
+  • Latency item: custom.ping.ms[8.8.8.8] ONLY (Ping Google DNS).
+  • Uptime item: system.uptime ONLY (UPTIME — PER-HOST DETAIL).
+  • If rp-fleet-health fails → use BATCH FALLBACK prompt below (50 stores/wave).
+  • Do NOT use Influx storeMonitor for Reports 2 or 3.
+
+======================================================================
+[FLEET RP HEALTH — BATCH FALLBACK (if rp-fleet-health REST unavailable)]
+Use when GET /api/store-zabbix/rp-fleet-health returns error or empty perStore.
+Split fleet into waves of 50 hostnames. One storeZabbix call per hostname.
+
+WAVE TEMPLATE (repeat until all RP hosts covered):
+  Run up to 50 netpulse_storeZabbix calls IN PARALLEL per wave:
+    question: "<HOSTNAME> Ping Google DNS custom.ping.ms[8.8.8.8] latency
+    system.uptime history <DATE> <FROM>-<TO> IST"
+    historyFrom / historyTo: session unix bounds
+
+  Merge each wave into Reports 2+3:
+    Report 2: latencyHistory.byHost — include avgMs>50 OR maxMs>50
+    Report 3: network problem + uptime counter monotonic (no reset)
+
+  Report 1 still from REST rop-uptime only (never sum storeProblems events).
+
+  After all waves: state "Covered N / total RP hosts" in summary.
+  Get hostname list from REST rop-uptime perStore[] or rop-dashboard rows[].
+
+======================================================================
+[FLEET RP HEALTH — 10 STORE TEST]
+Scoped to 10 stores. Produces THREE separate reports (not one combined table):
+  REPORT 1 — Restarts + restart downtime (storeProblems)
+  REPORT 2 — Latency / avg ping (storeZabbix)
+  REPORT 3 — Network downtime OTHER than restart (storeMonitor − restart)
+No packet-loss column. No "network issue?" flag column.
+======================================================================
+
+###############################################################
+#  10-STORE RP TEST  —  FILL IN THE 13 LINES BELOW ONLY       #
+###############################################################
+DATE         :  16-06-2026
+TIME FROM    :  11:00
+TIME TO      :  21:30
+STORE 1      :  LKST371
+STORE 2      :  LKST793
+STORE 3      :  LKST1746
+STORE 4      :  LKST64
+STORE 5      :  LKST1012
+STORE 6      :  LKST911
+STORE 7      :  LKST500
+STORE 8      :  LKST220
+STORE 9      :  LKST1500
+STORE 10     :  LKST2500
+###############################################################
+#  ↓↓↓  DO NOT CHANGE ANYTHING BELOW THIS LINE  ↓↓↓           #
+###############################################################
+
+You are connected to the "netpulse" MCP server. Test the 10 STORES listed
+above only (not full fleet). Run ALL 30 tool calls in PARALLEL. No questions
+— produce THREE REPORTS only (see OUTPUT FORMAT).
+
+STEPS (silent):
+1. Window = DATE + TIME FROM–TO in IST (+05:30) → historyFrom / historyTo.
+2. Alias: LKST<N> = RP<N>. Use exact code in every tool question.
+3. "Restart" = disconnect event (offline → back up) or BSOD/Kernel-Power.
+4. MCP resolves ONE hostname per tool call — never batch 10 stores in one call.
+
+REQUIRED TOOL CALLS (30 total — one hostname per call):
+
+  A1–A10) netpulse_storeProblems  (Report 1)
+     question: "<STORE> disconnect restart reboot events <DATE> <FROM>-<TO> IST"
+     historyFrom / historyTo: session unix bounds
+
+  D1–D10) netpulse_storeZabbix  (Report 2)
+     question: "<STORE> RP<CODE> ping latency custom.ping.ms icmpping
+     agent.ping history <DATE> <FROM>-<TO> IST"
+     historyFrom / historyTo: same
+
+  E1–E10) netpulse_storeMonitor  (Report 3)
+     question: "<STORE> downtime offline duration hours minutes network
+     <DATE> <FROM>-<TO> IST"
+     historyFrom / historyTo: same
+
+METRIC SOURCES (locked — only the 10 stores):
+
+  REPORT 1 — Restarts (A1–A10):
+    Restarts       → Count disconnectEvents[] rows per store.
+                     Add bsod_kernel_power from D# only if not already a disconnect.
+    Restart downtime → SUM disconnectEvents[].windowOverlapMin in session window
+                     (query_window_overlap when historyFrom/historyTo set).
+                     If stillOffline, add minutes from disconnectedAt to window end.
+                     Fallback: SUM totalDurationMin clipped to window.
+                     restarts=0 → "0 min".
+
+  REPORT 2 — Latency (D1–D10):
+    Avg ping (ms)  → 1) hosts[].latencyAtSession.avgMs
+                     2) latencyHistory.byHost[<hostid>].avgMs
+                     3) hosts[].pingAtSession.avgMs
+                     4) pingHistory.byHost[<hostid>].avgMs
+                     5) hosts[].ping.ms (live only if all above null)
+                     NEVER "n/a" if any step returns a number.
+    >50 ms flag    → Yes if avg ping > 50; No otherwise.
+
+  REPORT 3 — Network downtime OTHER than restart (E1–E10 minus Report 1):
+    Monitor offline total → offlineMinutes from E# (Influx heartbeat in window).
+    Network downtime      → max(0, Monitor offline total − Restart downtime minutes)
+                     This is downtime NOT caused by restart/disconnect events.
+                     NEVER copy restart downtime into this column.
+                     NEVER use the same value as Report 1 unless the math yields it.
+                     restarts=0 and Monitor offline=0 → "0 min".
+                     If E# unavailable → "n/a" (do NOT substitute restart downtime).
+
+OUTPUT FORMAT — THREE REPORTS (in this order):
+
+══════════════════════════════════════════════════════════════════
+REPORT 1 — RESTARTS
+Window: <DATE> <FROM>–<TO> IST
+
+| Metric | Value | Source |
+|--------|-------|--------|
+| Total restart events | <count> | storeProblems ×10 |
+| Stores with ≥1 restart | <count>/10 | storeProblems ×10 |
+| Total restart downtime | <H h M min> | storeProblems ×10 |
+
+| Store | Restarts | Restart downtime | Notes |
+(all 10 rows — disconnect times, Kernel-Power, still offline, etc.)
+
+══════════════════════════════════════════════════════════════════
+REPORT 2 — LATENCY
+Window: <DATE> <FROM>–<TO> IST
+
+| Metric | Value | Source |
+|--------|-------|--------|
+| Stores with avg ping > 50 ms | <count>/10 | storeZabbix ×10 |
+| Fleet avg ping (10 stores) | <ms> | storeZabbix ×10 |
+
+| Store | Avg ping (ms) | >50 ms? | Source | Notes |
+(all 10 rows — latencyAtSession / latencyHistory; "not found" if 0 hosts)
+
+══════════════════════════════════════════════════════════════════
+REPORT 3 — NETWORK DOWNTIME (non-restart)
+Window: <DATE> <FROM>–<TO> IST
+Definition: Influx heartbeat offline time MINUS restart downtime (Report 1).
+            Shows ISP/link/slow-network gaps NOT counted as restarts.
+
+| Metric | Value | Source |
+|--------|-------|--------|
+| Stores with network downtime >0 | <count>/10 | storeMonitor ×10 |
+| Total network downtime (non-restart) | <H h M min> | storeMonitor − restarts |
+
+| Store | Network downtime | Monitor offline (total) | Notes |
+(all 10 rows — Network downtime = max(0, Monitor total − Restart downtime))
+(NO packet loss column. NO "network issue?" column.)
+
+── PLAIN-ENGLISH SUMMARY (3 bullets max) ──
+One bullet per report. IST times. Quote numbers verbatim.
+
+IMPORTANT:
+  • THREE reports only — do not merge into one table.
+  • Report 3 network downtime MUST differ in definition from Report 1 restart
+    downtime — subtract restart minutes from Monitor offline; never duplicate.
+  • Per-store storeZabbix (D1–D10) mandatory for latency — one store per call.
+  • Per-store storeMonitor (E1–E10) mandatory for Monitor offline total.
+  • Use query_window_overlap (historyFrom/historyTo), not default BH 9–18.
+  • Downtime format: "X min" if <60 min; "H h M min" if ≥60 min.
+
+======================================================================
 
 Tip: for the next Excel row in the same chat, just paste a new EXCEL ROW
 section. The rules stay in chat memory.
