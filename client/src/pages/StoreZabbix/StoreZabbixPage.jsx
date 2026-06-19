@@ -2385,6 +2385,507 @@ function CustomDashSavedFiltersDropdown({
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   CUSTOM DASHBOARD REPORTS — per-day fleet health + latency episodes
+   ═══════════════════════════════════════════════════════════════ */
+
+/** Compose the Markdown summary that mirrors the user's sample reports. */
+function buildFleetHealthMarkdown(report) {
+  if (!report) return ''
+  const days = report.perDay || []
+  const lines = []
+  const hostsCount = (report.hosts || []).length
+  const bh = report.bh || {}
+  const bhLabel = bh.enabled
+    ? `${String(bh.start).padStart(2, '0')}:00–${String(bh.end).padStart(2, '0')}:00 IST`
+    : '24/7'
+  lines.push(`# CUSTOM DASHBOARD — DAY-WISE FLEET HEALTH (${hostsCount} hosts)`)
+  lines.push(`Each day = ${bhLabel} · threshold ${report.latencyThresholdMs} ms · gap tolerance ${Math.round((report.gapToleranceSec || 0) / 60)} min.`)
+  lines.push(`Reboot time = device back-online (boot) on that day in BH window.`)
+  lines.push('')
+  lines.push(`## SUMMARY MATRIX`)
+  lines.push('')
+  lines.push(`| Day | Rebooted | Total reboots | Lat>${report.latencyThresholdMs} | Net-issue no-reboot | Highest avg | Largest spike |`)
+  lines.push(`|---|---|---|---|---|---|---|`)
+  for (const d of days) {
+    const s = d.summary || {}
+    const ha = s.highestAvg ? `${s.highestAvg.avgMs} (${s.highestAvg.hostname})` : '—'
+    const ls = s.largestSpike ? `${s.largestSpike.maxMs} (${s.largestSpike.hostname})` : '—'
+    lines.push(`| ${d.dayLabel} | ${s.rebootedHosts || 0} | ${s.totalReboots || 0} | ${s.latencyHighCount || 0} | ${s.networkIssueNoReboot || 0} | ${ha} | ${ls} |`)
+  }
+  for (const d of days) {
+    lines.push('')
+    lines.push('══════════════════════════════════════════════════════════════════')
+    lines.push(`# ${d.dayLabel} · ${bhLabel}`)
+    lines.push('')
+    lines.push(`### Report 1 — Reboots (${(d.reboots || []).length} hosts, ${d.summary.totalReboots} resets)`)
+    if (d.reboots?.length) {
+      lines.push(`| Hostname | Resets | Exact boot time(s) IST | SD-WAN | Link |`)
+      lines.push(`|---|---|---|---|---|`)
+      for (const r of d.reboots) {
+        const times = r.bootTimesIst?.length ? r.bootTimesIst.join(', ') : (r.rebootOutsideBh ? 'only outside BH window' : 'no event logged')
+        lines.push(`| ${r.hostname} | ${r.rebootCount} | ${times} | ${r.sdwan ? 'Yes' : 'No'} | ${r.link} |`)
+      }
+    } else {
+      lines.push('_No reboots in BH window._')
+    }
+    lines.push('')
+    lines.push(`### Report 2 — Latency >${report.latencyThresholdMs} ms (${d.summary.latencyHighCount} hosts) — top ${report.latencyTopN} by avg`)
+    if (d.latencyHighTop?.length) {
+      lines.push(`| Hostname | Avg ms | Max ms | Episodes (start→end peakMs@time) | SD-WAN | Link |`)
+      lines.push(`|---|---|---|---|---|---|`)
+      for (const r of d.latencyHighTop) {
+        const eps = (r.episodes || []).length
+          ? r.episodes.map((e) => `${e.start}→${e.end} ${e.peakMs}ms@${e.peakAt}`).join(' · ')
+          : 'no breach (sustained high ping)'
+        lines.push(`| ${r.hostname} | ${r.avgMs ?? '—'} | ${r.maxMs ?? '—'} | ${eps} | ${r.sdwan ? 'Yes' : 'No'} | ${r.link} |`)
+      }
+    } else {
+      lines.push('_No latency breaches in BH window._')
+    }
+    lines.push('')
+    lines.push(`### Report 3 — Network issue, no reboot (${d.summary.networkIssueNoReboot} hosts) — top ${report.peakTopN} by peak`)
+    if (d.networkNoRebootTop?.length) {
+      lines.push(`| Hostname | Avg ms | Max ms | Episodes (start→end peakMs@time) | SD-WAN | Link |`)
+      lines.push(`|---|---|---|---|---|---|`)
+      for (const r of d.networkNoRebootTop) {
+        const eps = (r.episodes || []).length
+          ? r.episodes.map((e) => `${e.start}→${e.end} ${e.peakMs}ms@${e.peakAt}`).join(' · ')
+          : 'no breach (sustained high ping)'
+        lines.push(`| ${r.hostname} | ${r.avgMs ?? '—'} | ${r.maxMs ?? '—'} | ${eps} | ${r.sdwan ? 'Yes' : 'No'} | ${r.link} |`)
+      }
+    } else {
+      lines.push('_No qualifying hosts._')
+    }
+  }
+  return lines.join('\n')
+}
+
+function buildLatencyEpisodesMarkdown(report) {
+  if (!report) return ''
+  const days = report.perDay || []
+  const bh = report.bh || {}
+  const bhLabel = bh.enabled
+    ? `${String(bh.start).padStart(2, '0')}:00–${String(bh.end).padStart(2, '0')}:00 IST`
+    : '24/7'
+  const lines = []
+  lines.push(`# CUSTOM DASHBOARD — HIGH-LATENCY >${report.latencyThresholdMs} ms BREACH TIMESTAMPS (in-window ${bhLabel})`)
+  lines.push(`Every contiguous run where ping >${report.latencyThresholdMs} ms (gap tolerance ${Math.round((report.gapToleranceSec || 0) / 60)} min). Format per episode: start–end peakMs@peakTime.`)
+  lines.push('')
+  for (const d of days) {
+    lines.push('')
+    lines.push(`## ${d.dayLabel}`)
+    lines.push('')
+    const list = (d.hosts || []).filter((r) => (r.episodes || []).length).sort((a, b) => (b.maxMs ?? 0) - (a.maxMs ?? 0))
+    if (!list.length) {
+      lines.push('_No latency breaches today._')
+      continue
+    }
+    lines.push(`| Hostname | Win avg | Win max@IST | #breaches | Episodes: start–end peak@time |`)
+    lines.push(`|---|---|---|---|---|`)
+    for (const r of list) {
+      const winMax = r.maxMs != null && r.peakAt != null ? `${r.maxMs}@${r.episodes?.[0]?.peakAt || '—'}` : (r.maxMs ?? '—')
+      const eps = r.episodes.map((e) => `${e.start}–${e.end} ${e.peakMs}@${e.peakAt}`).join(' · ')
+      lines.push(`| ${r.hostname} | ${r.avgMs ?? '—'} | ${winMax} | ${r.breaches} | ${eps} |`)
+    }
+  }
+  return lines.join('\n')
+}
+
+function downloadTextFile(filename, text) {
+  const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  setTimeout(() => URL.revokeObjectURL(url), 1500)
+}
+
+function CustomDashReportsPanel({ apiBase, selectedHosts, timeWindow, rangeLabel, bh, bhLabel }) {
+  const [reportType, setReportType] = useState('fleetHealth') /* fleetHealth | latencyEpisodes */
+  const [thresholdMs, setThresholdMs] = useState(150)
+  const [gapMin, setGapMin] = useState(2)
+  const [topN, setTopN] = useState(20)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const [report, setReport] = useState(null)
+  const [openDays, setOpenDays] = useState(() => new Set())
+
+  const generate = useCallback(async () => {
+    setError(null); setReport(null); setBusy(true)
+    try {
+      const body = {
+        hosts: (selectedHosts || []).map((h) => ({
+          hostid: String(h.hostid),
+          name: h.name || h.host || String(h.hostid),
+          host: h.host || null,
+        })),
+        from: timeWindow.from,
+        to: timeWindow.to,
+        bh: {
+          enabled: !!bh?.enabled,
+          start: Number(bh?.start) || 9,
+          end: Number(bh?.end) || 18,
+          days: bh?.days || [0, 1, 2, 3, 4, 5, 6],
+        },
+        latencyThresholdMs: Number(thresholdMs) || 150,
+        gapToleranceSec: Math.max(0, Math.round(Number(gapMin) * 60)),
+        latencyTopN: Number(topN) || 20,
+        peakTopN: Number(topN) || 20,
+      }
+      const { data } = await api.post(`${apiBase}/custom-dashboard/reports`, body)
+      setReport(data)
+      const next = new Set()
+      if (Array.isArray(data?.perDay) && data.perDay.length) next.add(data.perDay[0].dayKey)
+      setOpenDays(next)
+    } catch (e) {
+      setError(e?.response?.data?.error || e?.message || 'Failed to build report')
+    } finally {
+      setBusy(false)
+    }
+  }, [apiBase, selectedHosts, timeWindow, bh, thresholdMs, gapMin, topN])
+
+  const toggleDay = (key) => {
+    setOpenDays((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key); else next.add(key)
+      return next
+    })
+  }
+
+  const exportMd = () => {
+    if (!report) return
+    const md = reportType === 'fleetHealth' ? buildFleetHealthMarkdown(report) : buildLatencyEpisodesMarkdown(report)
+    const stamp = new Date().toISOString().slice(0, 10)
+    const name = reportType === 'fleetHealth'
+      ? `CustomDash_FleetHealth_${stamp}.md`
+      : `CustomDash_LatencyEpisodes_${stamp}.md`
+    downloadTextFile(name, md)
+  }
+
+  const days = report?.perDay || []
+
+  return (
+    <Widget
+      title="Reports"
+      badge={days.length ? `${days.length} day${days.length > 1 ? 's' : ''}` : undefined}
+      badgeColor="blue"
+      noPad
+    >
+      <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10 }}>
+        <span className="opm-toolbar-label">Type</span>
+        {[
+          { id: 'fleetHealth', label: 'Fleet Health (per day)' },
+          { id: 'latencyEpisodes', label: 'High-Latency Episodes' },
+        ].map((opt) => (
+          <button key={opt.id} type="button" onClick={() => setReportType(opt.id)}
+            style={{
+              padding: '4px 12px', borderRadius: 6, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600,
+              border: reportType === opt.id ? '1px solid var(--accent)' : '1px solid var(--border)',
+              background: reportType === opt.id ? 'rgba(59,130,246,.12)' : 'transparent',
+              color: reportType === opt.id ? 'var(--accent)' : 'var(--text3)', cursor: 'pointer',
+            }}>
+            {opt.label}
+          </button>
+        ))}
+        <span style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 4px' }} />
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>
+          Threshold
+          <input type="number" min={1} max={5000} value={thresholdMs}
+            onChange={(e) => setThresholdMs(Math.max(1, Math.min(5000, Number(e.target.value) || 150)))}
+            style={{ width: 64, padding: '3px 6px', fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', borderRadius: 5, outline: 'none' }} /> ms
+        </label>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>
+          Gap tol
+          <input type="number" min={0} max={30} step={0.5} value={gapMin}
+            onChange={(e) => setGapMin(Math.max(0, Math.min(30, Number(e.target.value) || 0)))}
+            style={{ width: 56, padding: '3px 6px', fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', borderRadius: 5, outline: 'none' }} /> min
+        </label>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>
+          Top
+          <input type="number" min={1} max={200} value={topN}
+            onChange={(e) => setTopN(Math.max(1, Math.min(200, Number(e.target.value) || 20)))}
+            style={{ width: 56, padding: '3px 6px', fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', borderRadius: 5, outline: 'none' }} />
+        </label>
+        <button type="button" onClick={generate} disabled={busy || !selectedHosts?.length}
+          style={{
+            marginLeft: 'auto', padding: '6px 14px', borderRadius: 7, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 700,
+            border: 'none', background: busy ? 'var(--bg3)' : 'var(--accent)', color: '#fff', cursor: busy || !selectedHosts?.length ? 'wait' : 'pointer',
+            opacity: !selectedHosts?.length ? 0.5 : 1,
+          }}>
+          {busy ? 'Generating…' : 'Generate report'}
+        </button>
+        <button type="button" onClick={exportMd} disabled={!report}
+          style={{
+            padding: '6px 12px', borderRadius: 7, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600,
+            border: '1px solid var(--border)', background: 'var(--bg3)', color: report ? 'var(--accent)' : 'var(--text3)',
+            cursor: report ? 'pointer' : 'default',
+          }}>
+          ⬇ Markdown
+        </button>
+      </div>
+
+      <div style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>
+        <span>Hosts: <strong style={{ color: 'var(--text2)' }}>{selectedHosts?.length || 0}</strong></span>
+        <span>Range: <strong style={{ color: 'var(--text2)' }}>{rangeLabel}</strong></span>
+        <span>BH: <strong style={{ color: 'var(--text2)' }}>{bhLabel}</strong></span>
+        {report && <span>Days computed: <strong style={{ color: 'var(--text2)' }}>{report.perDay?.length || 0}</strong></span>}
+      </div>
+
+      {error && (
+        <div style={{ padding: '12px 14px', color: '#ef4444', fontFamily: 'var(--mono)', fontSize: 12 }}>{error}</div>
+      )}
+
+      {!report && !error && !busy && (
+        <div style={{ padding: 28, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12, textAlign: 'center' }}>
+          Configure threshold and click <strong>Generate report</strong>. Reports cover the dashboard range and BH window across the selected hosts.
+        </div>
+      )}
+
+      {busy && (
+        <div style={{ padding: 28, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12, textAlign: 'center' }}>
+          Computing per-day reboots and latency episodes from Zabbix history…
+        </div>
+      )}
+
+      {report && reportType === 'fleetHealth' && (
+        <FleetHealthReportRender report={report} openDays={openDays} onToggleDay={toggleDay} />
+      )}
+      {report && reportType === 'latencyEpisodes' && (
+        <LatencyEpisodesReportRender report={report} openDays={openDays} onToggleDay={toggleDay} />
+      )}
+    </Widget>
+  )
+}
+
+function ReportSummaryMatrix({ report }) {
+  const days = report?.perDay || []
+  if (!days.length) return null
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, fontFamily: 'var(--mono)' }}>
+        <thead>
+          <tr style={{ background: 'var(--bg3)', borderBottom: '1px solid var(--border)' }}>
+            <th style={{ padding: '8px 10px', textAlign: 'left', color: 'var(--text3)' }}>Day</th>
+            <th style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text3)' }}>Rebooted hosts</th>
+            <th style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text3)' }}>Total reboots</th>
+            <th style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text3)' }}>Lat &gt; {report.latencyThresholdMs}</th>
+            <th style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text3)' }}>Net-issue no-reboot</th>
+            <th style={{ padding: '8px 10px', textAlign: 'left', color: 'var(--text3)' }}>Highest avg</th>
+            <th style={{ padding: '8px 10px', textAlign: 'left', color: 'var(--text3)' }}>Largest spike</th>
+          </tr>
+        </thead>
+        <tbody>
+          {days.map((d) => {
+            const s = d.summary || {}
+            return (
+              <tr key={d.dayKey} style={{ borderBottom: '1px solid var(--border)' }}>
+                <td style={{ padding: '6px 10px', color: 'var(--text)' }}>{d.dayLabel}</td>
+                <td style={{ padding: '6px 10px', textAlign: 'right' }}>{s.rebootedHosts || 0}</td>
+                <td style={{ padding: '6px 10px', textAlign: 'right' }}>{s.totalReboots || 0}</td>
+                <td style={{ padding: '6px 10px', textAlign: 'right' }}>{s.latencyHighCount || 0}</td>
+                <td style={{ padding: '6px 10px', textAlign: 'right' }}>{s.networkIssueNoReboot || 0}</td>
+                <td style={{ padding: '6px 10px' }}>
+                  {s.highestAvg ? <span><strong style={{ color: 'var(--accent)' }}>{s.highestAvg.avgMs}</strong> <span style={{ color: 'var(--text3)' }}>({s.highestAvg.hostname})</span></span> : '—'}
+                </td>
+                <td style={{ padding: '6px 10px' }}>
+                  {s.largestSpike ? <span><strong style={{ color: '#ef4444' }}>{s.largestSpike.maxMs}</strong> <span style={{ color: 'var(--text3)' }}>({s.largestSpike.hostname})</span></span> : '—'}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function ReportTable({ rows, columns }) {
+  if (!rows?.length) {
+    return (
+      <div style={{ padding: 16, fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>No rows.</div>
+    )
+  }
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, fontFamily: 'var(--mono)' }}>
+        <thead>
+          <tr style={{ background: 'var(--bg3)' }}>
+            {columns.map((c) => (
+              <th key={c.key} style={{ padding: '6px 10px', textAlign: c.align || 'left', color: 'var(--text3)', borderBottom: '1px solid var(--border)' }}>{c.label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, i) => (
+            <tr key={row.hostid || i} style={{ borderBottom: '1px solid var(--border)' }}>
+              {columns.map((c) => (
+                <td key={c.key} style={{ padding: '5px 10px', textAlign: c.align || 'left', color: c.color?.(row) || 'var(--text2)' }}>
+                  {c.render ? c.render(row) : (row[c.key] ?? '—')}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function FleetHealthReportRender({ report, openDays, onToggleDay }) {
+  const days = report?.perDay || []
+  return (
+    <div>
+      <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)' }}>
+        <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, letterSpacing: .5, textTransform: 'uppercase', marginBottom: 6 }}>Summary matrix</div>
+        <ReportSummaryMatrix report={report} />
+      </div>
+      {days.map((d) => {
+        const open = openDays.has(d.dayKey)
+        return (
+          <div key={d.dayKey} style={{ borderBottom: '1px solid var(--border)' }}>
+            <button type="button" onClick={() => onToggleDay(d.dayKey)}
+              style={{
+                width: '100%', textAlign: 'left', padding: '10px 14px',
+                background: open ? 'rgba(59,130,246,.06)' : 'transparent',
+                border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
+                fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text)',
+              }}>
+              <span style={{ fontSize: 10, color: 'var(--text3)' }}>{open ? '▾' : '▸'}</span>
+              <strong>{d.dayLabel}</strong>
+              <span style={{ color: 'var(--text3)' }}>·</span>
+              <span style={{ color: 'var(--text3)' }}>
+                Reboots: <strong style={{ color: 'var(--text2)' }}>{d.summary?.rebootedHosts || 0}</strong> hosts ({d.summary?.totalReboots || 0} resets)
+              </span>
+              <span style={{ color: 'var(--text3)' }}>·</span>
+              <span style={{ color: 'var(--text3)' }}>
+                Lat &gt; {report.latencyThresholdMs}: <strong style={{ color: 'var(--text2)' }}>{d.summary?.latencyHighCount || 0}</strong>
+              </span>
+              <span style={{ color: 'var(--text3)' }}>·</span>
+              <span style={{ color: 'var(--text3)' }}>
+                Net-issue no-reboot: <strong style={{ color: 'var(--text2)' }}>{d.summary?.networkIssueNoReboot || 0}</strong>
+              </span>
+            </button>
+            {open && (
+              <div style={{ borderTop: '1px solid var(--border)' }}>
+                <DaySection title={`Report 1 — Reboots (${(d.reboots || []).length} hosts, ${d.summary.totalReboots} resets)`}>
+                  <ReportTable
+                    rows={d.reboots || []}
+                    columns={[
+                      { key: 'hostname', label: 'Hostname', render: (r) => <span style={{ color: 'var(--accent)' }}>{r.hostname}</span> },
+                      { key: 'rebootCount', label: 'Resets', align: 'right' },
+                      { key: 'bootTimes', label: 'Exact boot time(s) IST',
+                        render: (r) => r.bootTimesIst?.length ? r.bootTimesIst.join(', ') : (r.rebootOutsideBh ? <span style={{ color: 'var(--text3)' }}>only outside BH window</span> : <span style={{ color: 'var(--text3)' }}>no event logged</span>) },
+                      { key: 'sdwan', label: 'SD-WAN', render: (r) => r.sdwan ? 'Yes' : 'No' },
+                      { key: 'link', label: 'Link' },
+                    ]}
+                  />
+                </DaySection>
+                <DaySection title={`Report 2 — Latency >${report.latencyThresholdMs} ms (${d.summary.latencyHighCount} hosts) — top ${report.latencyTopN} by avg`}>
+                  <LatencyHostTable rows={d.latencyHighTop || []} />
+                </DaySection>
+                <DaySection title={`Report 3 — Network issue, no reboot (${d.summary.networkIssueNoReboot} hosts) — top ${report.peakTopN} by peak`}>
+                  <LatencyHostTable rows={d.networkNoRebootTop || []} />
+                </DaySection>
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function DaySection({ title, children }) {
+  return (
+    <div style={{ borderBottom: '1px solid var(--border)' }}>
+      <div style={{ padding: '8px 14px', fontSize: 11, fontWeight: 700, color: 'var(--text2)', fontFamily: 'var(--mono)', background: 'var(--bg3)' }}>{title}</div>
+      {children}
+    </div>
+  )
+}
+
+function EpisodeBadgeList({ episodes }) {
+  if (!episodes?.length) return <span style={{ color: 'var(--text3)' }}>no breach (sustained high ping)</span>
+  return (
+    <span style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 4 }}>
+      {episodes.map((e, i) => (
+        <span key={i} style={{
+          padding: '2px 6px', borderRadius: 4, background: 'rgba(239,68,68,.12)', color: '#ef4444',
+          fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600,
+        }}
+          title={`Peak ${e.peakMs} ms at ${e.peakAt}`}
+        >
+          {e.start}→{e.end} <span style={{ opacity: .8 }}>{e.peakMs}ms@{e.peakAt}</span>
+        </span>
+      ))}
+    </span>
+  )
+}
+
+function LatencyHostTable({ rows }) {
+  return (
+    <ReportTable
+      rows={rows}
+      columns={[
+        { key: 'hostname', label: 'Hostname', render: (r) => <span style={{ color: 'var(--accent)' }}>{r.hostname}</span> },
+        { key: 'avgMs', label: 'Avg ms', align: 'right', render: (r) => r.avgMs ?? '—' },
+        { key: 'maxMs', label: 'Max ms', align: 'right', render: (r) => r.maxMs ?? '—' },
+        { key: 'episodes', label: 'Episodes', render: (r) => <EpisodeBadgeList episodes={r.episodes} /> },
+        { key: 'sdwan', label: 'SD-WAN', render: (r) => r.sdwan ? 'Yes' : 'No' },
+        { key: 'link', label: 'Link' },
+      ]}
+    />
+  )
+}
+
+function LatencyEpisodesReportRender({ report, openDays, onToggleDay }) {
+  const days = report?.perDay || []
+  return (
+    <div>
+      {days.map((d) => {
+        const open = openDays.has(d.dayKey)
+        const list = (d.hosts || []).filter((r) => (r.episodes || []).length).sort((a, b) => (b.maxMs ?? 0) - (a.maxMs ?? 0))
+        return (
+          <div key={d.dayKey} style={{ borderBottom: '1px solid var(--border)' }}>
+            <button type="button" onClick={() => onToggleDay(d.dayKey)}
+              style={{
+                width: '100%', textAlign: 'left', padding: '10px 14px',
+                background: open ? 'rgba(59,130,246,.06)' : 'transparent',
+                border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
+                fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text)',
+              }}>
+              <span style={{ fontSize: 10, color: 'var(--text3)' }}>{open ? '▾' : '▸'}</span>
+              <strong>{d.dayLabel}</strong>
+              <span style={{ color: 'var(--text3)' }}>·</span>
+              <span style={{ color: 'var(--text3)' }}>
+                {list.length} host{list.length === 1 ? '' : 's'} with episodes
+              </span>
+            </button>
+            {open && (
+              <div style={{ borderTop: '1px solid var(--border)' }}>
+                <ReportTable
+                  rows={list}
+                  columns={[
+                    { key: 'hostname', label: 'Hostname', render: (r) => <span style={{ color: 'var(--accent)' }}>{r.hostname}</span> },
+                    { key: 'avgMs', label: 'Win avg', align: 'right', render: (r) => r.avgMs ?? '—' },
+                    { key: 'maxMs', label: 'Win max@IST', render: (r) => r.maxMs != null ? <span><strong>{r.maxMs}</strong>@{r.episodes?.[0]?.peakAt || '—'}</span> : '—' },
+                    { key: 'breaches', label: '#', align: 'right' },
+                    { key: 'episodes', label: 'Episodes start–end peak@time', render: (r) => <EpisodeBadgeList episodes={r.episodes} /> },
+                  ]}
+                />
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════
    CUSTOM DASHBOARD COMPONENT
    ═══════════════════════════════════════════════════════════════ */
 function CustomDashboardPanel({
@@ -2867,6 +3368,16 @@ function CustomDashboardPanel({
             uptimeStatsBusy={uptimeStatsBusy}
             onOpenRebootModal={onOpenRebootModal}
             onOpenCrashModal={onOpenCrashModal}
+          />
+
+          {/* Day-wise Reports (Fleet Health + Latency Episodes) */}
+          <CustomDashReportsPanel
+            apiBase={apiBase}
+            selectedHosts={selectedHosts}
+            timeWindow={timeWindow}
+            rangeLabel={rangeLabel}
+            bh={{ enabled: bhEnabled, start: bhStart, end: bhEnd, days: [...(bhDays || new Set([1, 2, 3, 4, 5]))].sort((a, b) => a - b) }}
+            bhLabel={bhLabel}
           />
         </>
       )}

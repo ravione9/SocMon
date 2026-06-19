@@ -3,6 +3,7 @@ import { createZabbixClient } from '../services/zabbix.js'
 import { fetchAllMonitoredHosts, ZABBIX_HOST_FETCH_MAX } from '../services/zabbixHostFetch.js'
 import { fetchRopUptimeReport, fetchRopStoreDisconnectEvents, fetchRopGroupDisconnectEvents } from '../services/ropUptimeReport.js'
 import { fetchRpFleetHealthReport } from '../services/rpFleetHealthReport.js'
+import { buildCustomDashReport } from '../services/customDashReports.js'
 import { buildRopDisconnectEventsReport, buildRopSingleStoreDisconnectReport } from '../services/storeReports.js'
 import {
   isInfluxStoreConfigured,
@@ -1188,6 +1189,74 @@ router.get('/app-crashes', async (req, res) => {
     })
   } catch (e) {
     return res.status(502).json({ error: e?.message || 'Failed to fetch crash events from InfluxDB' })
+  }
+})
+
+/**
+ * POST /custom-dashboard/reports
+ * Compute per-day fleet-health + high-latency-episode report for a list of
+ * selected hosts (Custom Dashboard). Mirrors the manual MD reports the user
+ * generated with full episodes per breach.
+ *
+ * Body:
+ *   - hosts | hostids: array of selected hosts (or just ids). Optional
+ *     per-host: { hostid, name, host, sdwan, link }
+ *   - from, to: epoch seconds (window covers N days)
+ *   - bh: { enabled, start, end, days[] } (days = 0..6, Sun-first)
+ *   - latencyThresholdMs: default 150
+ *   - gapToleranceSec: episode merge tolerance; default 120
+ *   - latencyTopN, peakTopN: per-day cap; default 20
+ */
+router.post('/custom-dashboard/reports', async (req, res) => {
+  try {
+    if (!isZabbixConfigured()) return res.status(503).json({ error: 'Zabbix not configured' })
+    const body = req.body || {}
+    const fromSec = parseInt(String(body.from ?? body.fromSec ?? ''), 10)
+    const toSec = parseInt(String(body.to ?? body.toSec ?? ''), 10)
+    if (!Number.isFinite(fromSec) || !Number.isFinite(toSec) || toSec <= fromSec) {
+      return res.status(400).json({ error: 'Invalid from/to range' })
+    }
+
+    let hosts = []
+    if (Array.isArray(body.hosts) && body.hosts.length) {
+      hosts = body.hosts
+        .map((h) => ({
+          hostid: String(h?.hostid || h?.id || h),
+          name: h?.name || h?.host || null,
+          host: h?.host || null,
+          sdwan: !!h?.sdwan,
+          link: h?.link || null,
+        }))
+        .filter((h) => h.hostid)
+    } else if (Array.isArray(body.hostids) && body.hostids.length) {
+      hosts = body.hostids.map((hid) => ({ hostid: String(hid) }))
+    }
+    if (!hosts.length) return res.status(400).json({ error: 'hosts or hostids required' })
+
+    const bh = {
+      enabled: !!body?.bh?.enabled,
+      start: Number(body?.bh?.start ?? 9),
+      end: Number(body?.bh?.end ?? 18),
+      days: Array.isArray(body?.bh?.days) ? body.bh.days.map((d) => Number(d)).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6) : [0, 1, 2, 3, 4, 5, 6],
+    }
+
+    const data = await buildCustomDashReport({
+      zabbixRpc,
+      hosts,
+      fromSec,
+      toSec,
+      bh,
+      latencyThresholdMs: Number(body.latencyThresholdMs ?? 150),
+      gapToleranceSec: Number(body.gapToleranceSec ?? 120),
+      latencyTopN: Number(body.latencyTopN ?? 20),
+      peakTopN: Number(body.peakTopN ?? 20),
+    })
+    res.json(data)
+  } catch (e) {
+    if (e?.code === 'INVALID_WINDOW' || e?.code === 'NO_HOSTS') {
+      return res.status(400).json({ error: e.message, code: e.code })
+    }
+    return sendZabbixError(res, e)
   }
 })
 
