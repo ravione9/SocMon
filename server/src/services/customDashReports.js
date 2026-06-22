@@ -40,6 +40,13 @@ const ITEM_RPC_TIMEOUT_MS = 2 * 60 * 1000
 const REBOOT_DROP_SEC = 300
 const REPORT_CACHE_MS = 30_000
 const _cache = new Map()
+const PRECISE_LATENCY_HOSTS_BY_DAYS = [
+  { maxDays: 2, budget: 260 },
+  { maxDays: 7, budget: 180 },
+  { maxDays: 14, budget: 120 },
+  { maxDays: 30, budget: 80 },
+  { maxDays: Infinity, budget: 50 },
+]
 
 const LATENCY_KEY_PATTERNS = [
   'custom.ping.ms',
@@ -219,6 +226,48 @@ async function fetchHistoryByItems(zabbixRpc, items, fromSec, toSec) {
       }
     }, HISTORY_CONCURRENCY)
   }
+  return byItem
+}
+
+/**
+ * Fetch history for a small set of items — one item per Zabbix call, fully
+ * concurrent, with day-by-day chunking so each call is small and fast.
+ * Used when only a few hosts are selected (custom scope ≤ 20 hosts).
+ */
+async function fetchHistoryByItemsFast(zabbixRpc, items, fromSec, toSec) {
+  const daySpan = Math.ceil((toSec - fromSec) / 86400)
+  /* For short windows use a single request; for longer windows split by day
+     so each Zabbix call covers at most FAST_DAY_CHUNK days. */
+  const FAST_DAY_CHUNK = Math.min(daySpan, 2)
+  const FAST_TIMEOUT_MS = 90_000
+
+  const byItem = {}
+  const allTasks = []
+  for (const item of items) {
+    const hk = historyKind(item.value_type)
+    if (!hk) continue
+    for (let dayStart = fromSec; dayStart < toSec; dayStart += FAST_DAY_CHUNK * 86400) {
+      const dayEnd = Math.min(dayStart + FAST_DAY_CHUNK * 86400, toSec)
+      allTasks.push({ item, hk, dayStart, dayEnd })
+    }
+  }
+  await mapConcurrent(allTasks, async ({ item, hk, dayStart, dayEnd }) => {
+    const rows = await zabbixRpc('history.get', {
+      history: hk.history,
+      itemids: [String(item.itemid)],
+      time_from: dayStart,
+      time_till: dayEnd,
+      output: ['itemid', 'clock', 'value'],
+      sortfield: 'clock',
+      sortorder: 'ASC',
+      limit: 10000,
+    }, { timeoutMs: FAST_TIMEOUT_MS }).catch(() => [])
+    for (const r of rows || []) {
+      const iid = String(r.itemid)
+      if (!byItem[iid]) byItem[iid] = []
+      byItem[iid].push({ clock: Number(r.clock), value: Number(r.value) })
+    }
+  }, 8)
   return byItem
 }
 
@@ -411,6 +460,24 @@ function trendsSuggestLatencyBreach(latencyTrend, fromSec, toSec, item, threshol
   return false
 }
 
+function trendPeakLatency(latencyTrend, fromSec, toSec, item) {
+  const bins = (latencyTrend || [])
+    .filter((b) => b.clock >= fromSec && b.clock < toSec)
+  let peak = -Infinity
+  for (const b of bins) {
+    const mx = normalizeLatencyValue(b.max, item)
+    if (Number.isFinite(mx) && mx > peak) peak = mx
+  }
+  return peak === -Infinity ? null : peak
+}
+
+function preciseLatencyBudgetByRange(rangeDays) {
+  for (const row of PRECISE_LATENCY_HOSTS_BY_DAYS) {
+    if (rangeDays <= row.maxDays) return row.budget
+  }
+  return 50
+}
+
 /* ────────────────────────────────────────────────────────────────────
    latency stats + episodes
    ──────────────────────────────────────────────────────────────────── */
@@ -507,6 +574,11 @@ export async function buildCustomDashReport(opts) {
   }
   const hostids = hostList.map((h) => String(h.hostid))
   const hostMap = Object.fromEntries(hostList.map((h) => [String(h.hostid), h]))
+  const rangeDays = Math.max(1, Math.ceil((toSec - fromSec) / 86400))
+  /* For small custom selections, use the fast day-chunked per-item fetcher
+     instead of the large-batch fetcher so individual Zabbix calls stay small. */
+  const isSmallScope = hostids.length <= 20
+  const historyFetcher = isSmallScope ? fetchHistoryByItemsFast : fetchHistoryByItems
 
   const bh = {
     enabled: !!opts.bh?.enabled,
@@ -549,25 +621,55 @@ export async function buildCustomDashReport(opts) {
     fetchTrendsByItems(opts.zabbixRpc, latencyEntries, fromSec, toSec),
   ])
 
-  const flaggedForHistory = new Set()
-  for (const hid of hostids) {
-    const upTrend = uptimeTrend[uptimeIidByHost[hid]] || []
-    const latTrend = latencyTrend[latencyIidByHost[hid]] || []
-    const item = latencyByHost[hid]
-    if (trendsSuggestReboot(upTrend, fromSec, toSec)) flaggedForHistory.add(hid)
-    if (trendsSuggestLatencyBreach(latTrend, fromSec, toSec, item, latencyThresholdMs)) flaggedForHistory.add(hid)
+  const rebootCandidates = new Set()
+  const latencyCandidates = []
+
+  /* For small scopes, flag ALL hosts for the precise history pass — the day-chunked
+     fetcher is fast enough that the trend pre-screen overhead isn't worth it. */
+  if (isSmallScope) {
+    for (const hid of hostids) {
+      rebootCandidates.add(hid)
+      const item = latencyByHost[hid]
+      latencyCandidates.push({ hostid: hid, peak: latencyThresholdMs })
+    }
+  } else {
+    for (const hid of hostids) {
+      const upTrend = uptimeTrend[uptimeIidByHost[hid]] || []
+      const latTrend = latencyTrend[latencyIidByHost[hid]] || []
+      const item = latencyByHost[hid]
+      if (trendsSuggestReboot(upTrend, fromSec, toSec)) rebootCandidates.add(hid)
+      if (trendsSuggestLatencyBreach(latTrend, fromSec, toSec, item, latencyThresholdMs)) {
+        const peak = trendPeakLatency(latTrend, fromSec, toSec, item)
+        latencyCandidates.push({
+          hostid: hid,
+          peak: Number.isFinite(peak) ? peak : latencyThresholdMs,
+        })
+      }
+    }
   }
+
+  const preciseForHistory = new Set(rebootCandidates)
+  const latencyPrecisionBudget = isSmallScope ? hostids.length : preciseLatencyBudgetByRange(rangeDays)
+  const remainingLatencySlots = Math.max(0, latencyPrecisionBudget - rebootCandidates.size)
+  latencyCandidates
+    .sort((a, b) => (b.peak - a.peak) || a.hostid.localeCompare(b.hostid))
+    .slice(0, remainingLatencySlots)
+    .forEach((row) => preciseForHistory.add(row.hostid))
+  const flaggedCandidateHosts = new Set([
+    ...rebootCandidates,
+    ...latencyCandidates.map((r) => r.hostid),
+  ])
 
   /**
    * PASS 2 — per-minute history ONLY for flagged hosts. This is the slow
-   * call (history.get is expensive on the Zabbix DB). Restricting to
-   * breaching hosts keeps fleet-wide reports under the 10-min frontend limit.
+   * call (history.get is expensive on the Zabbix DB). For small scopes
+   * we use the fast day-chunked fetcher; for large fleets the batched one.
    */
-  const flaggedUptime = uptimeEntries.filter((e) => flaggedForHistory.has(String(e.hostid)))
-  const flaggedLatency = latencyEntries.filter((e) => flaggedForHistory.has(String(e.hostid)))
+  const flaggedUptime = uptimeEntries.filter((e) => preciseForHistory.has(String(e.hostid)))
+  const flaggedLatency = latencyEntries.filter((e) => preciseForHistory.has(String(e.hostid)))
   const [uptimeHist, latencyHist] = await Promise.all([
-    fetchHistoryByItems(opts.zabbixRpc, flaggedUptime, fromSec, toSec),
-    fetchHistoryByItems(opts.zabbixRpc, flaggedLatency, fromSec, toSec),
+    historyFetcher(opts.zabbixRpc, flaggedUptime, fromSec, toSec),
+    historyFetcher(opts.zabbixRpc, flaggedLatency, fromSec, toSec),
   ])
 
   /* Boot events from history for flagged hosts; 0 otherwise. */
@@ -581,7 +683,7 @@ export async function buildCustomDashReport(opts) {
   const hostLatencyItem = {}
   for (const e of latencyEntries) {
     hostLatencyItem[String(e.hostid)] = e
-    if (flaggedForHistory.has(String(e.hostid))) {
+    if (preciseForHistory.has(String(e.hostid))) {
       hostLatencyPoints[String(e.hostid)] = latencyHist[String(e.itemid)] || []
     }
   }
@@ -606,7 +708,7 @@ export async function buildCustomDashReport(opts) {
       /* Latency stats for this day (BH-aware). Flagged hosts get precise
          per-minute history; everyone else uses fast hourly trend stats. */
       const latencyItem = hostLatencyItem[hid]
-      const isFlagged = flaggedForHistory.has(hid)
+      const isFlagged = preciseForHistory.has(hid)
       let lat
       if (isFlagged) {
         const points = hostLatencyPoints[hid] || []
@@ -703,8 +805,12 @@ export async function buildCustomDashReport(opts) {
       uptimeItems: uptimeEntries.length,
       latencyItems: latencyEntries.length,
       latencyKeys: [...new Set(latencyEntries.map((e) => e.key_).filter(Boolean))].slice(0, 6),
-      flaggedHosts: flaggedForHistory.size,
-      mode: 'two-pass (trend screen + history for breaching hosts only)',
+      flaggedHosts: flaggedCandidateHosts.size,
+      preciseHosts: preciseForHistory.size,
+      downgradedToTrendHosts: Math.max(0, flaggedCandidateHosts.size - preciseForHistory.size),
+      latencyPrecisionBudget,
+      rangeDays,
+      mode: 'two-pass adaptive (trend screen + exact history for reboot and top-latency hosts)',
     },
   }
 

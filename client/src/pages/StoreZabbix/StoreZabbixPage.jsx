@@ -1369,7 +1369,7 @@ const INLINE_CSS = `
 .rop-meta{display:inline-flex;align-items:center;gap:4px;height:26px;padding:0 8px;border-radius:6px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.18);color:var(--accent);font-size:10px;font-family:var(--mono);font-weight:600;white-space:nowrap;margin-left:auto}
 .rop-meta--muted{background:transparent;border-color:var(--border);color:var(--text3);font-weight:500}
 .rop-toolbar-spacer{flex:1;min-width:8px}
-.rop-subtabs{display:flex;align-items:center;gap:0;padding:0;background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.rop-subtabs{display:flex;align-items:center;gap:0;padding:0;background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:visible;position:relative;z-index:4}
 .rop-subtab{display:inline-flex;align-items:center;gap:8px;padding:11px 18px;border:none;background:transparent;color:var(--text3);font-size:12px;font-weight:600;cursor:pointer;border-right:1px solid var(--border);transition:all .15s;font-family:var(--sans,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif);position:relative}
 .rop-subtab:last-child{border-right:none}
 .rop-subtab:hover:not(.active){color:var(--text2);background:var(--bg3)}
@@ -4167,6 +4167,12 @@ export default function StoreZabbixPage({
   const [reportFleetError, setReportFleetError] = useState(null)
   const [reportLatencyBusy, setReportLatencyBusy] = useState(false)
   const [reportLatencyError, setReportLatencyError] = useState(null)
+  const [reportJobsBusy, setReportJobsBusy] = useState(false)
+  const [reportJobsError, setReportJobsError] = useState(null)
+  const [reportJobs, setReportJobs] = useState([])
+  const [reportJobDownloadBusyId, setReportJobDownloadBusyId] = useState(null)
+  const [reportNotifOpen, setReportNotifOpen] = useState(false)
+  const reportNotifRef = useRef(null)
   const [reportThresholdMs, setReportThresholdMs] = useState(150)
   const [reportGapMin, setReportGapMin] = useState(2)
   const [reportTopN, setReportTopN] = useState(20)
@@ -4178,6 +4184,9 @@ export default function StoreZabbixPage({
   const [reportBhStart, setReportBhStart] = useState(9)
   const [reportBhEnd, setReportBhEnd] = useState(18)
   const [reportBhDays, setReportBhDays] = useState(() => new Set([0, 1, 2, 3, 4, 5, 6]))
+  const [reportHostScopeMode, setReportHostScopeMode] = useState('group') /* 'group' | 'custom' */
+  const [reportSelectedStoreTags, setReportSelectedStoreTags] = useState([])
+  const [reportHostSearch, setReportHostSearch] = useState('')
 
   /* ── Custom Dashboard tab state ── */
   const [customDashHosts, setCustomDashHosts] = useState(null)            // full host list for picker
@@ -4584,20 +4593,25 @@ export default function StoreZabbixPage({
    * Zabbix hostids and runs the same fleet-health / latency-episode pipeline
    * powering the Custom Dashboard endpoint.
    */
-  const buildReportRequestForRop = useCallback(() => {
-    /* Send hostnames AND host (technical) names so the backend can resolve
-       either form via filter. Some Zabbix deployments display 'name' that
-       differs from the technical 'host' — sending both maximises matches. */
-    const hostnamesSet = new Set()
-    for (const ps of ropUptime?.perStore || []) {
-      const h = String(ps?.hostname || '').trim()
-      const t = String(ps?.storeTag || '').trim()
-      if (h) hostnamesSet.add(h)
-      if (t) hostnamesSet.add(t)
+  const buildReportRequestForRop = useCallback((opts = {}) => {
+    const customTags = Array.isArray(opts?.storeTags)
+      ? opts.storeTags.map((t) => String(t || '').trim()).filter(Boolean)
+      : reportSelectedStoreTags
+    const allPerStore = ropUptime?.perStore || []
+    const perStore = reportHostScopeMode === 'custom'
+      ? allPerStore.filter((ps) => customTags.includes(String(ps?.storeTag || '').trim()))
+      : allPerStore
+    if (!perStore.length) {
+      throw Object.assign(new Error(reportHostScopeMode === 'custom'
+        ? 'Select one or more hosts in Custom scope.'
+        : 'No hosts in current ROP group/sub-group. Adjust the filter and try again.'), { code: 'NO_HOSTS' })
     }
-    const hostnames = [...hostnamesSet]
-    if (!hostnames.length) {
-      throw Object.assign(new Error('No hosts in current ROP group/sub-group. Adjust the filter and try again.'), { code: 'NO_HOSTS' })
+    const storeRefs = perStore.map((ps) => ({
+      storeTag: String(ps?.storeTag || '').trim(),
+      hostname: String(ps?.hostname || '').trim(),
+    })).filter((r) => r.storeTag || r.hostname)
+    if (!storeRefs.length) {
+      throw Object.assign(new Error('No store tags in current group. Refresh the ROP data and try again.'), { code: 'NO_HOSTS' })
     }
     /* Range — per-card override or inherit from the ROP toolbar. */
     let fromSec, toSec
@@ -4628,8 +4642,28 @@ export default function StoreZabbixPage({
         ? [...(ropBhDays || new Set([0, 1, 2, 3, 4, 5, 6]))].sort((a, b) => a - b)
         : [...(reportBhDays || new Set([0, 1, 2, 3, 4, 5, 6]))].sort((a, b) => a - b),
     }
+    if (reportHostScopeMode === 'custom') {
+      /* Custom picks: send only selected store refs + group for robust fuzzy
+         mapping (storeTag/hostname/code), with hostname fallback. */
+      const hostnames = [...new Set(storeRefs.flatMap((r) => [r.hostname, r.storeTag].filter(Boolean)))]
+      return {
+        groupKey: ropGroupKey || 'rp',
+        storeRefs,
+        hostnames,
+        from: fromSec,
+        to: toSec,
+        bh,
+        latencyThresholdMs: Number(reportThresholdMs) || 150,
+        gapToleranceSec: Math.max(0, Math.round(Number(reportGapMin) * 60)),
+        latencyTopN: Number(reportTopN) || 20,
+        peakTopN: Number(reportTopN) || 20,
+      }
+    }
     return {
-      hostnames,
+      groupKey: ropGroupKey || 'rp',
+      storeRefs,
+      /* Fallback for legacy/exact name resolution if group fuzzy-match misses. */
+      hostnames: storeRefs.flatMap((r) => [r.hostname, r.storeTag].filter(Boolean)),
       from: fromSec,
       to: toSec,
       bh,
@@ -4639,55 +4673,131 @@ export default function StoreZabbixPage({
       peakTopN: Number(reportTopN) || 20,
     }
   }, [
-    ropUptime, ropRange, ropCustomEpoch, ropBhStart, ropBhEnd, ropBhDays,
+    ropUptime, reportHostScopeMode, reportSelectedStoreTags, ropGroupKey, ropRange, ropCustomEpoch, ropBhStart, ropBhEnd, ropBhDays,
     reportRangeMode, reportCustomFrom, reportCustomTo,
     reportBhMode, reportBhStart, reportBhEnd, reportBhDays,
     reportThresholdMs, reportGapMin, reportTopN,
   ])
 
   const formatReportApiError = (e) => {
+    if (e?.code === 'NO_HOSTS' || e?.code === 'BAD_RANGE') return e.message
     const data = e?.response?.data || {}
     const baseMsg = data.error || e?.message || 'Failed to build report'
     const hint = data.hint
+    const status = e?.response?.status
+    if (status === 504 || status === 502) {
+      return `${baseMsg} — The server or proxy timed out. Shorten the range (try 24h or 7d) or narrow the group, then retry.`
+    }
     /* axios timeout (no server response) */
     if (!e?.response && (e?.code === 'ECONNABORTED' || /timeout/i.test(String(e?.message || '')))) {
-      return 'Report timed out (10 min). Shorten the range or narrow the group/sub-group, then try again.'
+      return 'Report timed out (15 min). Shorten the range or narrow the group/sub-group, then try again.'
     }
     if (hint) return `${baseMsg} — ${hint}`
     return baseMsg
   }
 
-  const downloadFleetHealthReport = useCallback(async () => {
-    setReportFleetBusy(true); setReportFleetError(null)
-    try {
-      const body = buildReportRequestForRop()
-      const { data } = await api.post(`${apiBase}/custom-dashboard/reports`, body)
-      const md = buildFleetHealthMarkdown(data)
-      const stamp = new Date().toISOString().slice(0, 10)
-      const safeGroup = String(ropGroupKey || 'rp').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40)
-      downloadTextFile(`Fleet_Health_DayWise_${safeGroup}_${stamp}.md`, md)
-    } catch (e) {
-      setReportFleetError(formatReportApiError(e))
-    } finally {
-      setReportFleetBusy(false)
+  const downloadReportMarkdown = (data, buildMd, filename) => {
+    if (!data?.perDay?.length) {
+      throw new Error('Report returned no days — check the date range and that Zabbix has history for these hosts.')
     }
-  }, [apiBase, buildReportRequestForRop, ropGroupKey])
+    const md = buildMd(data)
+    if (!md?.trim()) {
+      throw new Error('Report was empty — no data in the selected range/BH window.')
+    }
+    downloadTextFile(filename, md)
+  }
 
-  const downloadLatencyEpisodesReport = useCallback(async () => {
-    setReportLatencyBusy(true); setReportLatencyError(null)
+  const fetchReportJobs = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) setReportJobsBusy(true)
     try {
-      const body = buildReportRequestForRop()
-      const { data } = await api.post(`${apiBase}/custom-dashboard/reports`, body)
-      const md = buildLatencyEpisodesMarkdown(data)
-      const stamp = new Date().toISOString().slice(0, 10)
-      const safeGroup = String(ropGroupKey || 'rp').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40)
-      downloadTextFile(`Latency_Episodes_${safeGroup}_${stamp}.md`, md)
+      const { data } = await api.get(`${apiBase}/custom-dashboard/reports/jobs?limit=25`, { timeout: 30000 })
+      setReportJobs(data?.jobs || [])
+      if (!silent) setReportJobsError(null)
+      return data?.jobs || []
     } catch (e) {
-      setReportLatencyError(formatReportApiError(e))
+      if (!silent) setReportJobsError(formatReportApiError(e))
+      return []
     } finally {
-      setReportLatencyBusy(false)
+      if (!silent) setReportJobsBusy(false)
     }
-  }, [apiBase, buildReportRequestForRop, ropGroupKey])
+  }, [apiBase])
+
+  const queueReportJob = useCallback(async (reportKind) => {
+    const isFleet = reportKind === 'fleetHealth'
+    if (isFleet) { setReportFleetBusy(true); setReportFleetError(null) }
+    else { setReportLatencyBusy(true); setReportLatencyError(null) }
+    try {
+      const body = { ...buildReportRequestForRop(), reportKind }
+      const { data } = await api.post(`${apiBase}/custom-dashboard/reports/jobs`, body, { timeout: 30000 })
+      const created = data?.job
+      if (created?.id) {
+        setReportJobs((prev) => [created, ...prev.filter((j) => j.id !== created.id)].slice(0, 25))
+      } else {
+        await fetchReportJobs({ silent: true })
+      }
+      setReportJobsError(null)
+    } catch (e) {
+      const msg = formatReportApiError(e)
+      if (isFleet) setReportFleetError(msg)
+      else setReportLatencyError(msg)
+    } finally {
+      if (isFleet) setReportFleetBusy(false)
+      else setReportLatencyBusy(false)
+    }
+  }, [apiBase, buildReportRequestForRop, fetchReportJobs])
+
+  const queueFleetHealthReport = useCallback(async () => {
+    await queueReportJob('fleetHealth')
+  }, [queueReportJob])
+
+  const queueLatencyEpisodesReport = useCallback(async () => {
+    await queueReportJob('latencyEpisodes')
+  }, [queueReportJob])
+
+  const cancelReportJob = useCallback(async (job) => {
+    if (!job?.id) return
+    try {
+      await api.delete(`${apiBase}/custom-dashboard/reports/jobs/${encodeURIComponent(job.id)}`, { timeout: 10000 })
+      await fetchReportJobs({ silent: true })
+    } catch {
+      await fetchReportJobs({ silent: true })
+    }
+  }, [apiBase, fetchReportJobs])
+
+  const clearAllReportJobs = useCallback(async () => {
+    try {
+      await api.delete(`${apiBase}/custom-dashboard/reports/jobs`, { timeout: 10000 })
+      setReportJobs([])
+    } catch {
+      await fetchReportJobs({ silent: true })
+    }
+  }, [apiBase, fetchReportJobs])
+
+  const downloadCompletedReportJob = useCallback(async (job) => {
+    if (!job?.id) return
+    setReportJobsError(null)
+    setReportJobDownloadBusyId(job.id)
+    try {
+      const { data } = await api.get(`${apiBase}/custom-dashboard/reports/jobs/${encodeURIComponent(job.id)}/result`, { timeout: 120000 })
+      if (!data?.data) {
+        throw new Error('Report is not ready yet.')
+      }
+      const reportKind = String(data?.job?.reportKind || job?.reportKind || 'fleetHealth')
+      const report = data.data
+      const stamp = new Date(data?.job?.finishedAt || Date.now()).toISOString().slice(0, 10)
+      const safeGroup = String(data?.job?.groupKey || job?.groupKey || 'rp').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40)
+      if (reportKind === 'latencyEpisodes') {
+        downloadReportMarkdown(report, buildLatencyEpisodesMarkdown, `Latency_Episodes_${safeGroup}_${stamp}.md`)
+      } else {
+        downloadReportMarkdown(report, buildFleetHealthMarkdown, `Fleet_Health_DayWise_${safeGroup}_${stamp}.md`)
+      }
+      await fetchReportJobs({ silent: true })
+    } catch (e) {
+      setReportJobsError(formatReportApiError(e))
+    } finally {
+      setReportJobDownloadBusyId(null)
+    }
+  }, [apiBase, fetchReportJobs])
 
   const refetchProblems = useCallback(async () => {
     const qs = new URLSearchParams({ limit: '250' })
@@ -5154,6 +5264,29 @@ export default function StoreZabbixPage({
   )
 
   useEffect(() => {
+    if (tab !== 'reports' || !config?.configured || config?.reachable === false) return
+    fetchReportJobs()
+  }, [tab, config?.configured, config?.reachable, fetchReportJobs])
+
+  useSmartPolling(
+    () => fetchReportJobs({ silent: true }),
+    15_000,
+    [fetchReportJobs],
+    { enabled: tab === 'reports' && !!config?.configured && config?.reachable !== false, skipImmediate: true },
+  )
+
+  useEffect(() => {
+    if (!reportNotifOpen) return
+    const onDocClick = (ev) => {
+      const root = reportNotifRef.current
+      if (!root) return
+      if (!root.contains(ev.target)) setReportNotifOpen(false)
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [reportNotifOpen])
+
+  useEffect(() => {
     if (!selectedGraphId || tab !== 'hostGraphs') return; let c = false; setGraphSeriesBusy(true); setError(null); setErrorHint(null)
     fetchGraphSeries(selectedGraphId, graphRange, graphDataMode, graphCustomRange)
       .then((data) => { if (!c) setGraphSeries(data) })
@@ -5217,6 +5350,38 @@ export default function StoreZabbixPage({
     return Array.from(set).sort((a, b) => a.localeCompare(b))
   }, [hostsExplorer])
   const ovProblemsFiltered = useMemo(() => { const l = overview?.problems || []; return severityFilter == null ? l : l.filter((p) => Number(p.severity) === Number(severityFilter)) }, [overview?.problems, severityFilter])
+  const reportJobsReady = useMemo(() => (reportJobs || []).filter((j) => j.status === 'completed'), [reportJobs])
+  const reportJobsActive = useMemo(() => (reportJobs || []).filter((j) => j.status === 'queued' || j.status === 'running'), [reportJobs])
+  const reportJobsFailed = useMemo(() => (reportJobs || []).filter((j) => j.status === 'failed'), [reportJobs])
+  const reportHostOptions = useMemo(() => {
+    const rows = ropUptime?.perStore || []
+    return rows
+      .map((ps) => ({
+        storeTag: String(ps?.storeTag || '').trim(),
+        hostname: String(ps?.hostname || '').trim(),
+      }))
+      .filter((r) => r.storeTag)
+      .sort((a, b) => {
+        const an = (a.hostname || a.storeTag).toLowerCase()
+        const bn = (b.hostname || b.storeTag).toLowerCase()
+        return an.localeCompare(bn)
+      })
+  }, [ropUptime])
+  const reportFilteredHostOptions = useMemo(() => {
+    const q = String(reportHostSearch || '').trim().toLowerCase()
+    if (!q) return reportHostOptions
+    return reportHostOptions.filter((h) =>
+      String(h.storeTag || '').toLowerCase().includes(q)
+      || String(h.hostname || '').toLowerCase().includes(q),
+    )
+  }, [reportHostOptions, reportHostSearch])
+
+  useEffect(() => {
+    if (!reportSelectedStoreTags.length) return
+    const valid = new Set(reportHostOptions.map((h) => h.storeTag))
+    const next = reportSelectedStoreTags.filter((t) => valid.has(t))
+    if (next.length !== reportSelectedStoreTags.length) setReportSelectedStoreTags(next)
+  }, [reportSelectedStoreTags, reportHostOptions])
 
   const theme = useThemeStore((s) => s.theme)
   const tc = useMemo(() => getThemeCssColors(), [theme])
@@ -7415,6 +7580,13 @@ export default function StoreZabbixPage({
           && Number.isFinite(new Date(ropCustomFrom).getTime())
           && Number.isFinite(new Date(ropCustomTo).getTime())
           && new Date(ropCustomFrom) < new Date(ropCustomTo)
+        const reportScopeHosts = reportHostScopeMode === 'custom'
+          ? (ru?.perStore || []).filter((s) => reportSelectedStoreTags.includes(String(s?.storeTag || '')))
+          : (ru?.perStore || [])
+        const reportScopeHostCount = reportScopeHosts.length
+        const reportGroupLabel = reportHostScopeMode === 'custom'
+          ? 'Custom'
+          : (ROP_GROUP_LABELS[ropGroupKey] || ropGroupKey)
 
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -7512,11 +7684,119 @@ export default function StoreZabbixPage({
                   </button>
                 )
               })}
-              {!isRpGroupKey(ropGroupKey) && (
-                <span style={{ marginLeft: 'auto', marginRight: 14, fontSize: 11, color: 'var(--accent)', fontWeight: 600 }}>
-                  Viewing: {ROP_GROUP_LABELS[ropGroupKey]}
-                </span>
-              )}
+              <div ref={reportNotifRef} style={{ marginLeft: 'auto', marginRight: 8, display: 'flex', alignItems: 'center', gap: 8, position: 'relative' }}>
+                {!isRpGroupKey(ropGroupKey) && (
+                  <span style={{ fontSize: 11, color: 'var(--accent)', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                    Viewing: {ROP_GROUP_LABELS[ropGroupKey]}
+                  </span>
+                )}
+                <button type="button"
+                  onClick={() => setReportNotifOpen((v) => !v)}
+                  className="rop-action-btn rop-action-btn--ghost"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 8, position: 'relative' }}
+                  title="Report notifications">
+                  <span>🔔 Notifications</span>
+                  <span style={{ fontSize: 10, color: '#22c55e', fontFamily: 'var(--mono)' }}>{reportJobsReady.length}</span>
+                  <span style={{ fontSize: 10, color: '#f59e0b', fontFamily: 'var(--mono)' }}>{reportJobsActive.length}</span>
+                  <span style={{ fontSize: 10, color: '#ef4444', fontFamily: 'var(--mono)' }}>{reportJobsFailed.length}</span>
+                </button>
+                {reportNotifOpen && (
+                  <div style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 8px)',
+                    right: 0,
+                    width: 420,
+                    maxWidth: 'min(90vw, 420px)',
+                    background: 'var(--bg2)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 10,
+                    boxShadow: '0 12px 32px rgba(0,0,0,.25)',
+                    padding: 10,
+                    zIndex: 50,
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)' }}>Report Notifications</div>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button type="button"
+                          className="rop-action-btn rop-action-btn--ghost"
+                          style={{ padding: '4px 8px', fontSize: 10 }}
+                          onClick={() => fetchReportJobs()}
+                          disabled={reportJobsBusy}>
+                          {reportJobsBusy ? '…' : 'Refresh'}
+                        </button>
+                        {reportJobs.length > 0 && (
+                          <button type="button"
+                            className="rop-action-btn rop-action-btn--ghost"
+                            style={{ padding: '4px 8px', fontSize: 10, color: '#ef4444', borderColor: '#ef4444' }}
+                            onClick={() => clearAllReportJobs()}
+                            title="Cancel all stuck/queued jobs and clear list">
+                            Clear all
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {reportJobsError && (
+                      <div style={{ fontSize: 10, color: '#ef4444', fontFamily: 'var(--mono)', marginBottom: 8 }}>{reportJobsError}</div>
+                    )}
+                    {!reportJobs.length ? (
+                      <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                        No background jobs yet.
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 280, overflowY: 'auto' }}>
+                        {reportJobs.map((job) => {
+                          const status = String(job.status || 'queued')
+                          const statusColor = status === 'completed'
+                            ? '#22c55e'
+                            : status === 'failed'
+                              ? '#ef4444'
+                              : '#f59e0b'
+                          const title = status === 'completed'
+                            ? 'Completed'
+                            : status === 'running'
+                              ? 'Running'
+                              : status === 'failed'
+                                ? 'Failed'
+                                : 'Queued'
+                          return (
+                            <div key={job.id} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '7px 8px', background: 'var(--bg3)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <span style={{ fontSize: 10, fontFamily: 'var(--mono)', color: statusColor, fontWeight: 700, minWidth: 56 }}>{title}</span>
+                              <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {(job.reportKind === 'latencyEpisodes' ? 'Latency' : 'Fleet')} · {ROP_GROUP_LABELS[job.groupKey] || job.groupKey || 'rp'}
+                              </span>
+                              {status === 'completed' ? (
+                                <button type="button"
+                                  className="rop-action-btn"
+                                  style={{ marginLeft: 'auto', padding: '4px 8px', fontSize: 10 }}
+                                  onClick={() => downloadCompletedReportJob(job)}
+                                  disabled={reportJobDownloadBusyId === job.id}>
+                                  {reportJobDownloadBusyId === job.id ? 'Downloading…' : 'Download'}
+                                </button>
+                              ) : status === 'failed' ? (
+                                <span style={{ marginLeft: 'auto', fontSize: 10, color: '#ef4444', fontFamily: 'var(--mono)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                  title={job?.error?.message || 'Failed'}>
+                                  {job?.error?.code === 'CANCELLED' ? 'Cancelled' : (job?.error?.message || 'Failed')}
+                                </span>
+                              ) : (
+                                <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+                                  <span style={{ fontSize: 10, color: '#f59e0b', fontFamily: 'var(--mono)' }}>Processing…</span>
+                                  <button type="button"
+                                    className="rop-action-btn rop-action-btn--ghost"
+                                    style={{ padding: '3px 7px', fontSize: 9, color: '#ef4444', borderColor: '#ef4444' }}
+                                    onClick={() => cancelReportJob(job)}
+                                    title="Cancel this job">
+                                    ✕ Cancel
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             {ropUptimeBusy && !ru && (
@@ -7571,6 +7851,14 @@ export default function StoreZabbixPage({
                     : (effRangeId === 'custom' && reportCustomFrom && reportCustomTo
                         ? `${reportCustomFrom} – ${reportCustomTo}`
                         : ({ '24h': 'Last 24h', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days', custom: 'Custom (set dates)' })[effRangeId])
+                  const effGroupScopeLabel = reportHostScopeMode === 'custom'
+                    ? `Custom hosts (${reportSelectedStoreTags.length} selected)`
+                    : `Current group (${reportHostOptions.length})`
+                  const effHostLabel = reportHostScopeMode === 'custom'
+                    ? (reportSelectedStoreTags.length
+                      ? `${reportSelectedStoreTags.length} host(s) selected`
+                      : 'No hosts selected')
+                    : `All hosts (${reportHostOptions.length})`
                   const effBhLabel = reportBhMode === 'inherit'
                     ? `Inherit · ${bhSummary}`
                     : (() => {
@@ -7619,6 +7907,73 @@ export default function StoreZabbixPage({
                           </>
                         )}
                         <span style={{ marginLeft: 'auto', fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>{effRangeLabel}</span>
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Group:</span>
+                        <button type="button"
+                          className={`rop-segment-btn${reportHostScopeMode === 'group' ? ' active' : ''}`}
+                          onClick={() => setReportHostScopeMode('group')}>
+                          Current group
+                        </button>
+                        <button type="button"
+                          className={`rop-segment-btn${reportHostScopeMode === 'custom' ? ' active' : ''}`}
+                          onClick={() => setReportHostScopeMode('custom')}>
+                          Custom
+                        </button>
+                        <span style={{ marginLeft: 'auto', fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>{effGroupScopeLabel}</span>
+                      </div>
+                      {reportHostScopeMode === 'custom' && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
+                            <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Hosts:</span>
+                            <input
+                              value={reportHostSearch}
+                              onChange={(e) => setReportHostSearch(e.target.value)}
+                              placeholder="Search host/store tag..."
+                              className="rop-control"
+                              style={{ width: 220 }} />
+                            <button
+                              type="button"
+                              className="rop-action-btn rop-action-btn--ghost"
+                              onClick={() => setReportSelectedStoreTags(reportFilteredHostOptions.map((h) => h.storeTag))}>
+                              Select visible
+                            </button>
+                            <button
+                              type="button"
+                              className="rop-action-btn rop-action-btn--ghost"
+                              onClick={() => setReportSelectedStoreTags([])}>
+                              Clear
+                            </button>
+                          </div>
+                          <select
+                            multiple
+                            value={reportSelectedStoreTags}
+                            onChange={(e) => setReportSelectedStoreTags([...e.target.selectedOptions].map((o) => String(o.value)))}
+                            style={{
+                              minHeight: 120,
+                              height: 140,
+                              maxWidth: 520,
+                              minWidth: 320,
+                              border: '1px solid var(--border)',
+                              borderRadius: 6,
+                              background: 'var(--bg)',
+                              color: 'var(--text)',
+                              fontSize: 11,
+                              fontFamily: 'var(--mono)',
+                              padding: 6,
+                              outline: 'none',
+                            }}>
+                            {reportFilteredHostOptions.map((h) => (
+                              <option key={h.storeTag} value={h.storeTag}>
+                                {h.hostname ? `${h.hostname} (${h.storeTag})` : h.storeTag}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Host scope:</span>
+                        <span style={{ marginLeft: 'auto', fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>{effHostLabel}</span>
                       </div>
                       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
                         <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>BH:</span>
@@ -7680,8 +8035,8 @@ export default function StoreZabbixPage({
                   </p>
                   <div className="rop-report-stats">
                     {[
-                      ['Group', ROP_GROUP_LABELS[ropGroupKey] || ropGroupKey, 'var(--accent)'],
-                      ['Hosts in scope', String(ropUptime?.perStore?.length ?? 0), 'var(--text)'],
+                      ['Group', reportGroupLabel, 'var(--accent)'],
+                      ['Hosts in scope', String(reportScopeHostCount), 'var(--text)'],
                     ].map(([lbl, val, color]) => (
                       <div key={lbl} className="rop-report-stat">
                         <div className="rop-report-stat-val" style={{ color, fontSize: 14 }} title={String(val)}>
@@ -7708,12 +8063,12 @@ export default function StoreZabbixPage({
                   {reportFleetError && (
                     <div style={{ fontSize: 11, color: '#ef4444', fontFamily: 'var(--mono)', marginTop: 4 }}>{reportFleetError}</div>
                   )}
-                  <button type="button" onClick={downloadFleetHealthReport}
-                    disabled={reportFleetBusy || !(ropUptime?.perStore?.length)}
+                  <button type="button" onClick={queueFleetHealthReport}
+                    disabled={reportFleetBusy || reportScopeHostCount <= 0}
                     className="rop-action-btn"
                     style={{ alignSelf: 'flex-start' }}
-                    title="Download per-day fleet-health markdown for all stores in the current group">
-                    {reportFleetBusy ? 'Generating…' : '⬇ Download Markdown'}
+                    title="Queue report and notify when markdown is ready">
+                    {reportFleetBusy ? 'Queueing…' : '🔔 Notify + Download when ready'}
                   </button>
                 </div>
 
@@ -7731,7 +8086,8 @@ export default function StoreZabbixPage({
                   </p>
                   <div className="rop-report-stats">
                     {[
-                      ['Group', ROP_GROUP_LABELS[ropGroupKey] || ropGroupKey, 'var(--accent)'],
+                      ['Group', reportGroupLabel, 'var(--accent)'],
+                      ['Hosts in scope', String(reportScopeHostCount), 'var(--text)'],
                       ['Threshold', `${reportThresholdMs} ms`, '#ef4444'],
                     ].map(([lbl, val, color]) => (
                       <div key={lbl} className="rop-report-stat">
@@ -7748,12 +8104,12 @@ export default function StoreZabbixPage({
                   {reportLatencyError && (
                     <div style={{ fontSize: 11, color: '#ef4444', fontFamily: 'var(--mono)', marginTop: 4 }}>{reportLatencyError}</div>
                   )}
-                  <button type="button" onClick={downloadLatencyEpisodesReport}
-                    disabled={reportLatencyBusy || !(ropUptime?.perStore?.length)}
+                  <button type="button" onClick={queueLatencyEpisodesReport}
+                    disabled={reportLatencyBusy || reportScopeHostCount <= 0}
                     className="rop-action-btn"
                     style={{ alignSelf: 'flex-start' }}
-                    title="Download per-day latency-episode markdown for all stores in the current group">
-                    {reportLatencyBusy ? 'Generating…' : '⬇ Download Markdown'}
+                    title="Queue report and notify when markdown is ready">
+                    {reportLatencyBusy ? 'Queueing…' : '🔔 Notify + Download when ready'}
                   </button>
                 </div>
               </div>

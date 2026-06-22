@@ -1,9 +1,14 @@
 import { Router } from 'express'
+import { createHash, randomUUID } from 'crypto'
 import { createZabbixClient } from '../services/zabbix.js'
 import { fetchAllMonitoredHosts, ZABBIX_HOST_FETCH_MAX } from '../services/zabbixHostFetch.js'
 import { fetchRopUptimeReport, fetchRopStoreDisconnectEvents, fetchRopGroupDisconnectEvents } from '../services/ropUptimeReport.js'
 import { fetchRpFleetHealthReport } from '../services/rpFleetHealthReport.js'
 import { buildCustomDashReport } from '../services/customDashReports.js'
+import {
+  resolveReportHostsByGroup,
+  resolveReportHostsByNames,
+} from '../utils/zabbixReportHosts.js'
 import { buildRopDisconnectEventsReport, buildRopSingleStoreDisconnectReport } from '../services/storeReports.js'
 import {
   isInfluxStoreConfigured,
@@ -38,6 +43,15 @@ const SEVERITY_LABEL = {
   4: 'High',
   5: 'Disaster',
 }
+
+const REPORT_JOB_TTL_MS = 6 * 60 * 60 * 1000
+const REPORT_JOB_MAX = 300
+const REPORT_JOB_QUEUE_MAX = 400
+const REPORT_JOB_CONCURRENCY = 2
+const REPORT_JOB_RUNTIME_MAX_MS = 20 * 60 * 1000
+const reportJobs = new Map()
+const reportJobQueue = []
+let reportJobsRunning = 0
 
 function mapProblems(problems) {
   return (problems || []).map((p) => ({
@@ -173,6 +187,86 @@ function sendZabbixError(res, e) {
     hint: e.hint,
     zabbixCode: e.zabbixCode,
   })
+}
+
+function reportJobOwnerKey(req) {
+  const auth = String(req.headers?.authorization || '').trim()
+  if (/^bearer\s+/i.test(auth)) {
+    const token = auth.replace(/^bearer\s+/i, '').trim()
+    const digest = createHash('sha1').update(token).digest('hex').slice(0, 16)
+    return `bearer:${digest}`
+  }
+  const ip = String(req.ip || req.headers['x-forwarded-for'] || 'anon')
+  return `ip:${ip}`
+}
+
+function reportJobSummary(job) {
+  const queuePos = job.status === 'queued'
+    ? (reportJobQueue.findIndex((id) => id === job.id) + 1 || null)
+    : null
+  return {
+    id: job.id,
+    status: job.status,
+    reportKind: job.reportKind,
+    groupKey: job.groupKey,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt || null,
+    finishedAt: job.finishedAt || null,
+    queuePosition: queuePos,
+    error: job.error || null,
+    diagnostics: job.result?.diagnostics || null,
+  }
+}
+
+function normalizeReportJobError(e) {
+  if (e?.code === 'INVALID_WINDOW' || e?.code === 'NO_HOSTS' || e?.code === 'NO_HOSTS_RESOLVED') {
+    return { message: e.message, code: e.code, hint: e.hint || null }
+  }
+  if (e?.code === 'REPORT_JOB_TIMEOUT') {
+    return {
+      message: 'Report job timed out while waiting for Zabbix data.',
+      code: 'REPORT_JOB_TIMEOUT',
+      hint: 'Try fewer hosts, a smaller date range, or run in off-peak hours.',
+    }
+  }
+  if (e?.code === 'ZABBIX_TIMEOUT') {
+    return {
+      message: 'Zabbix took too long to return history for this report.',
+      code: 'ZABBIX_TIMEOUT',
+      hint: 'Shorten the range (try 24h or 7d), narrow the group/sub-group to fewer hosts, or run during off-peak hours.',
+    }
+  }
+  return {
+    message: e?.message || 'Failed to build report.',
+    code: e?.code || 'REPORT_JOB_ERROR',
+    hint: e?.hint || null,
+  }
+}
+
+function pruneReportJobs() {
+  const now = Date.now()
+  for (const [id, job] of reportJobs.entries()) {
+    const doneAt = job.finishedAt || job.createdAt
+    const isDone = job.status === 'completed' || job.status === 'failed'
+    if (isDone && (now - doneAt) > REPORT_JOB_TTL_MS) {
+      reportJobs.delete(id)
+    }
+  }
+  if (reportJobs.size <= REPORT_JOB_MAX) return
+  const removable = [...reportJobs.values()]
+    .filter((j) => j.status === 'completed' || j.status === 'failed')
+    .sort((a, b) => (a.finishedAt || a.createdAt) - (b.finishedAt || b.createdAt))
+  for (const job of removable) {
+    if (reportJobs.size <= REPORT_JOB_MAX) break
+    reportJobs.delete(job.id)
+  }
+}
+
+function getOwnedReportJob(req, jobId) {
+  const ownerKey = reportJobOwnerKey(req)
+  const job = reportJobs.get(String(jobId))
+  if (!job || job.ownerKey !== ownerKey) return null
+  return job
 }
 
 router.get('/config', async (req, res) => {
@@ -1192,108 +1286,277 @@ router.get('/app-crashes', async (req, res) => {
   }
 })
 
+async function resolveCustomDashboardReportPayload(rawBody = {}) {
+  const body = rawBody && typeof rawBody === 'object' ? rawBody : {}
+  const fromSec = parseInt(String(body.from ?? body.fromSec ?? ''), 10)
+  const toSec = parseInt(String(body.to ?? body.toSec ?? ''), 10)
+  if (!Number.isFinite(fromSec) || !Number.isFinite(toSec) || toSec <= fromSec) {
+    const err = new Error('Invalid from/to range')
+    err.code = 'INVALID_WINDOW'
+    throw err
+  }
+
+  let hosts = []
+  if (Array.isArray(body.hosts) && body.hosts.length) {
+    hosts = body.hosts
+      .map((h) => ({
+        hostid: String(h?.hostid || h?.id || h),
+        name: h?.name || h?.host || null,
+        host: h?.host || null,
+        sdwan: !!h?.sdwan,
+        link: h?.link || null,
+      }))
+      .filter((h) => h.hostid)
+  } else if (Array.isArray(body.hostids) && body.hostids.length) {
+    hosts = body.hostids.map((hid) => ({ hostid: String(hid) }))
+  } else if (body.groupKey && Array.isArray(body.storeRefs) && body.storeRefs.length) {
+    /* Reports tab — custom or full-group scope.
+       For small selections (≤30 hosts) go directly to per-name search to avoid
+       the expensive full-group Zabbix scan. Fall back to group scan if needed. */
+    const refs = body.storeRefs
+    const hostnames = Array.isArray(body.hostnames) ? body.hostnames : []
+    if (refs.length <= 30) {
+      /* Fast path: direct hostname + storeTag search, no group fetch needed. */
+      const terms = [...new Set([
+        ...hostnames,
+        ...refs.flatMap((r) => [r?.hostname, r?.storeTag].filter(Boolean)),
+      ])].filter(Boolean)
+      hosts = await resolveReportHostsByNames(zabbixRpc, terms)
+    }
+    if (!hosts.length) {
+      /* Fallback: group-wide scan + fuzzy match (slower but handles synthetic tags). */
+      hosts = await resolveReportHostsByGroup(zabbixRpc, body.groupKey, refs)
+    }
+    if (!hosts.length && hostnames.length) {
+      hosts = await resolveReportHostsByNames(zabbixRpc, hostnames)
+    }
+  } else if (Array.isArray(body.hostnames) && body.hostnames.length) {
+    hosts = await resolveReportHostsByNames(zabbixRpc, body.hostnames)
+  }
+  if (!hosts.length) {
+    const err = new Error('No matching Zabbix hosts found. Check the host names/ids and that the hosts are monitored.')
+    err.code = 'NO_HOSTS_RESOLVED'
+    err.hint = body.groupKey
+      ? 'Store tags from the ROP table may not match any host in the Zabbix group. Try a smaller sub-group or verify hosts exist in Zabbix.'
+      : 'Send hostids from Custom Dashboard, or storeRefs + groupKey from the Reports tab.'
+    throw err
+  }
+
+  const bh = {
+    enabled: !!body?.bh?.enabled,
+    start: Number(body?.bh?.start ?? 9),
+    end: Number(body?.bh?.end ?? 18),
+    days: Array.isArray(body?.bh?.days) ? body.bh.days.map((d) => Number(d)).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6) : [0, 1, 2, 3, 4, 5, 6],
+  }
+
+  return {
+    fromSec,
+    toSec,
+    hosts,
+    bh,
+    latencyThresholdMs: Number(body.latencyThresholdMs ?? 150),
+    gapToleranceSec: Number(body.gapToleranceSec ?? 120),
+    latencyTopN: Number(body.latencyTopN ?? 20),
+    peakTopN: Number(body.peakTopN ?? 20),
+  }
+}
+
+async function runCustomDashboardReport(rawBody = {}) {
+  const payload = await resolveCustomDashboardReportPayload(rawBody)
+  return buildCustomDashReport({
+    zabbixRpc,
+    hosts: payload.hosts,
+    fromSec: payload.fromSec,
+    toSec: payload.toSec,
+    bh: payload.bh,
+    latencyThresholdMs: payload.latencyThresholdMs,
+    gapToleranceSec: payload.gapToleranceSec,
+    latencyTopN: payload.latencyTopN,
+    peakTopN: payload.peakTopN,
+  })
+}
+
+function drainReportJobQueue() {
+  while (reportJobsRunning < REPORT_JOB_CONCURRENCY && reportJobQueue.length) {
+    const jobId = reportJobQueue.shift()
+    const job = reportJobs.get(jobId)
+    if (!job || job.status !== 'queued') continue
+    reportJobsRunning += 1
+    job.status = 'running'
+    job.startedAt = Date.now()
+    job.updatedAt = Date.now()
+    ;(async () => {
+      let timeoutId = null
+      try {
+        const runPromise = runCustomDashboardReport(job.requestBody)
+        const timeoutPromise = new Promise((_, reject) => {
+          timeoutId = setTimeout(() => {
+            const err = new Error(`Report exceeded ${Math.round(REPORT_JOB_RUNTIME_MAX_MS / 60000)} minutes.`)
+            err.code = 'REPORT_JOB_TIMEOUT'
+            reject(err)
+          }, REPORT_JOB_RUNTIME_MAX_MS)
+        })
+        job.result = await Promise.race([runPromise, timeoutPromise])
+        job.status = 'completed'
+      } catch (e) {
+        job.error = normalizeReportJobError(e)
+        job.status = 'failed'
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId)
+        job.finishedAt = Date.now()
+        job.updatedAt = Date.now()
+        reportJobsRunning = Math.max(0, reportJobsRunning - 1)
+        pruneReportJobs()
+        drainReportJobQueue()
+      }
+    })()
+  }
+}
+
+/**
+ * POST /custom-dashboard/reports/jobs
+ * Queue a long-running report in background and return a job id.
+ */
+router.post('/custom-dashboard/reports/jobs', async (req, res) => {
+  if (!isZabbixConfigured()) return res.status(503).json({ error: 'Zabbix not configured' })
+  pruneReportJobs()
+  if (reportJobQueue.length >= REPORT_JOB_QUEUE_MAX) {
+    return res.status(429).json({
+      error: 'Too many reports are queued right now. Please retry in a minute.',
+      code: 'REPORT_QUEUE_BUSY',
+    })
+  }
+  const body = req.body || {}
+  const ownerKey = reportJobOwnerKey(req)
+  const job = {
+    id: randomUUID(),
+    ownerKey,
+    reportKind: String(body.reportKind || 'fleetHealth'),
+    groupKey: String(body.groupKey || 'rp'),
+    requestBody: body,
+    status: 'queued',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    startedAt: null,
+    finishedAt: null,
+    result: null,
+    error: null,
+  }
+  reportJobs.set(job.id, job)
+  reportJobQueue.push(job.id)
+  drainReportJobQueue()
+  return res.status(202).json({ job: reportJobSummary(job) })
+})
+
+/**
+ * GET /custom-dashboard/reports/jobs
+ * List current user's recent report jobs (newest first).
+ */
+router.get('/custom-dashboard/reports/jobs', (req, res) => {
+  pruneReportJobs()
+  const ownerKey = reportJobOwnerKey(req)
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit || '20'), 10) || 20, 1), 100)
+  const jobs = [...reportJobs.values()]
+    .filter((job) => job.ownerKey === ownerKey)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, limit)
+    .map(reportJobSummary)
+  return res.json({ jobs })
+})
+
+/**
+ * GET /custom-dashboard/reports/jobs/:jobId
+ * Poll one job's state.
+ */
+router.get('/custom-dashboard/reports/jobs/:jobId', (req, res) => {
+  const job = getOwnedReportJob(req, req.params.jobId)
+  if (!job) return res.status(404).json({ error: 'Report job not found' })
+  return res.json({ job: reportJobSummary(job) })
+})
+
+/**
+ * GET /custom-dashboard/reports/jobs/:jobId/result
+ * Fetch finished report payload (for markdown download).
+ */
+router.get('/custom-dashboard/reports/jobs/:jobId/result', (req, res) => {
+  const job = getOwnedReportJob(req, req.params.jobId)
+  if (!job) return res.status(404).json({ error: 'Report job not found' })
+  if (job.status === 'failed') {
+    return res.status(409).json({
+      error: job.error?.message || 'Report failed',
+      code: job.error?.code || 'REPORT_JOB_FAILED',
+      hint: job.error?.hint || null,
+      job: reportJobSummary(job),
+    })
+  }
+  if (job.status !== 'completed' || !job.result) {
+    return res.status(202).json({ job: reportJobSummary(job) })
+  }
+  return res.json({ job: reportJobSummary(job), data: job.result })
+})
+
+/**
+ * DELETE /custom-dashboard/reports/jobs/:jobId
+ * Dismiss / forcibly fail a running or queued job so the user can retry.
+ */
+router.delete('/custom-dashboard/reports/jobs/:jobId', (req, res) => {
+  const job = getOwnedReportJob(req, req.params.jobId)
+  if (!job) return res.status(404).json({ error: 'Report job not found' })
+  if (job.status === 'queued') {
+    const qi = reportJobQueue.indexOf(job.id)
+    if (qi !== -1) reportJobQueue.splice(qi, 1)
+  }
+  /* Mark as failed regardless of current status so it disappears cleanly. */
+  if (job.status !== 'completed') {
+    job.status = 'failed'
+    job.error = { message: 'Cancelled by user.', code: 'CANCELLED' }
+    job.finishedAt = job.finishedAt || Date.now()
+    job.updatedAt = Date.now()
+    if (job.status === 'running') reportJobsRunning = Math.max(0, reportJobsRunning - 1)
+  }
+  return res.json({ job: reportJobSummary(job) })
+})
+
+/**
+ * DELETE /custom-dashboard/reports/jobs
+ * Dismiss all queued/running jobs for this user (clear stuck jobs).
+ */
+router.delete('/custom-dashboard/reports/jobs', (req, res) => {
+  const ownerKey = reportJobOwnerKey(req)
+  let cleared = 0
+  for (const job of reportJobs.values()) {
+    if (job.ownerKey !== ownerKey) continue
+    if (job.status === 'completed' || job.status === 'failed') {
+      reportJobs.delete(job.id)
+      cleared++
+    } else {
+      const qi = reportJobQueue.indexOf(job.id)
+      if (qi !== -1) reportJobQueue.splice(qi, 1)
+      if (job.status === 'running') reportJobsRunning = Math.max(0, reportJobsRunning - 1)
+      job.status = 'failed'
+      job.error = { message: 'Cancelled by user.', code: 'CANCELLED' }
+      job.finishedAt = Date.now()
+      job.updatedAt = Date.now()
+      cleared++
+    }
+  }
+  return res.json({ cleared })
+})
+
 /**
  * POST /custom-dashboard/reports
  * Compute per-day fleet-health + high-latency-episode report for a list of
  * selected hosts (Custom Dashboard). Mirrors the manual MD reports the user
  * generated with full episodes per breach.
- *
- * Body:
- *   - hosts | hostids: array of selected hosts (or just ids). Optional
- *     per-host: { hostid, name, host, sdwan, link }
- *   - from, to: epoch seconds (window covers N days)
- *   - bh: { enabled, start, end, days[] } (days = 0..6, Sun-first)
- *   - latencyThresholdMs: default 150
- *   - gapToleranceSec: episode merge tolerance; default 120
- *   - latencyTopN, peakTopN: per-day cap; default 20
  */
 router.post('/custom-dashboard/reports', async (req, res) => {
   try {
     if (!isZabbixConfigured()) return res.status(503).json({ error: 'Zabbix not configured' })
-    const body = req.body || {}
-    const fromSec = parseInt(String(body.from ?? body.fromSec ?? ''), 10)
-    const toSec = parseInt(String(body.to ?? body.toSec ?? ''), 10)
-    if (!Number.isFinite(fromSec) || !Number.isFinite(toSec) || toSec <= fromSec) {
-      return res.status(400).json({ error: 'Invalid from/to range' })
-    }
-
-    let hosts = []
-    if (Array.isArray(body.hosts) && body.hosts.length) {
-      hosts = body.hosts
-        .map((h) => ({
-          hostid: String(h?.hostid || h?.id || h),
-          name: h?.name || h?.host || null,
-          host: h?.host || null,
-          sdwan: !!h?.sdwan,
-          link: h?.link || null,
-        }))
-        .filter((h) => h.hostid)
-    } else if (Array.isArray(body.hostids) && body.hostids.length) {
-      hosts = body.hostids.map((hid) => ({ hostid: String(hid) }))
-    } else if (Array.isArray(body.hostnames) && body.hostnames.length) {
-      /* Resolve hostnames → hostids via Zabbix host.get. The display name and
-         technical host can differ, so try `host` filter first, then fall back
-         to `name` for whatever didn't resolve. Reports tab uses this path. */
-      const wanted = [...new Set(body.hostnames.map((s) => String(s || '').trim()).filter(Boolean))]
-      const CHUNK = 200
-      const resolvedById = new Map()
-      const matched = new Set()
-      const tryFilter = async (field, list) => {
-        if (!list.length) return
-        for (let i = 0; i < list.length; i += CHUNK) {
-          const chunk = list.slice(i, i + CHUNK)
-          const rows = await zabbixRpc('host.get', {
-            output: ['hostid', 'host', 'name'],
-            filter: { [field]: chunk },
-            monitored_hosts: true,
-          }).catch(() => [])
-          for (const r of rows || []) {
-            resolvedById.set(String(r.hostid), r)
-            const h = String(r.host || '').trim()
-            const n = String(r.name || '').trim()
-            if (h) matched.add(h)
-            if (n) matched.add(n)
-          }
-        }
-      }
-      await tryFilter('host', wanted)
-      const stillUnmatched = wanted.filter((w) => !matched.has(w))
-      if (stillUnmatched.length) await tryFilter('name', stillUnmatched)
-      hosts = [...resolvedById.values()].map((r) => ({
-        hostid: String(r.hostid),
-        name: r.name || r.host || String(r.hostid),
-        host: r.host || null,
-      }))
-    }
-    if (!hosts.length) {
-      return res.status(400).json({
-        error: 'No matching Zabbix hosts found. Check the host names/ids and that the hosts are monitored.',
-        code: 'NO_HOSTS_RESOLVED',
-      })
-    }
-
-    const bh = {
-      enabled: !!body?.bh?.enabled,
-      start: Number(body?.bh?.start ?? 9),
-      end: Number(body?.bh?.end ?? 18),
-      days: Array.isArray(body?.bh?.days) ? body.bh.days.map((d) => Number(d)).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6) : [0, 1, 2, 3, 4, 5, 6],
-    }
-
-    const data = await buildCustomDashReport({
-      zabbixRpc,
-      hosts,
-      fromSec,
-      toSec,
-      bh,
-      latencyThresholdMs: Number(body.latencyThresholdMs ?? 150),
-      gapToleranceSec: Number(body.gapToleranceSec ?? 120),
-      latencyTopN: Number(body.latencyTopN ?? 20),
-      peakTopN: Number(body.peakTopN ?? 20),
-    })
-    res.json(data)
+    const data = await runCustomDashboardReport(req.body || {})
+    return res.json(data)
   } catch (e) {
-    if (e?.code === 'INVALID_WINDOW' || e?.code === 'NO_HOSTS') {
-      return res.status(400).json({ error: e.message, code: e.code })
+    if (e?.code === 'INVALID_WINDOW' || e?.code === 'NO_HOSTS' || e?.code === 'NO_HOSTS_RESOLVED') {
+      return res.status(400).json({ error: e.message, code: e.code, hint: e.hint || null })
     }
     if (e?.code === 'ZABBIX_TIMEOUT') {
       return res.status(504).json({

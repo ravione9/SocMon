@@ -11,7 +11,7 @@ api.interceptors.request.use(config => {
   if (reqUrl.includes('/custom-dashboard/reports')) {
     /* Multi-day fleet report can take several minutes for large fleets even
        with the trend-screen + history-only-on-breach optimization. */
-    config.timeout = 600000
+    config.timeout = 900000
   } else if (reqUrl.includes('/zabbix') || reqUrl.includes('/store-zabbix')) {
     config.timeout = 120000
   } else if (reqUrl.includes('/store-monitor')) {
