@@ -16,6 +16,12 @@ import {
   getStaleAfterSec,
   fetchStorePingItemsChunked,
 } from '../utils/zabbixStorePingSensors.js'
+import {
+  shouldNotifyForBhPolicy,
+  describeBusinessHoursStatus,
+} from '../utils/zabbixAlertBusinessHours.js'
+
+const SUSTAINED_POLLS = Math.max(1, parseInt(process.env.ZABBIX_ALERT_SUSTAINED_POLLS || '2', 10))
 
 const storeClient = createZabbixClient('STORE_ZABBIX')
 const { zabbixRpc, isZabbixConfigured } = storeClient
@@ -27,6 +33,9 @@ const hostNotifyAt = new Map()
 /** Seen Zabbix problem event ids (webhook / problem poll dedupe). */
 const seenProblemIds = new Set()
 let maxProblemEventId = 0
+
+/** Per rule+host: consecutive breach poll count (anti-flap). */
+const breachStreak = new Map()
 
 let lastInstantAt = null
 let lastInstantStats = null
@@ -44,24 +53,44 @@ function stateKey(ruleId, hostid) {
   return `${ruleId}:${hostid}`
 }
 
-function isWithinBusinessHours(bh, now = new Date()) {
-  if (!bh?.enabled) return true
-  const days = bh.weekdays || [1, 2, 3, 4, 5]
-  if (!days.includes(now.getDay())) return false
-  const hour = now.getHours()
-  const from = bh.fromHour ?? 9
-  const to = bh.toHour ?? 18
-  if (from <= to) return hour >= from && hour < to
-  return hour >= from || hour < to
+function syncBreachState(ruleId, hostid, breaching) {
+  breachState.set(stateKey(ruleId, hostid), !!breaching)
+  if (!breaching) breachStreak.delete(stateKey(ruleId, hostid))
 }
 
-function shouldNotifyForBhPolicy(rule) {
-  const bh = rule.businessHours || {}
-  if (!bh.enabled || bh.policy === 'always') return true
-  const inBh = isWithinBusinessHours(bh)
-  if (bh.policy === 'bh_only' || bh.policy === 'suppress_after_hours') return inBh
-  if (bh.policy === 'outside_bh') return !inBh
-  return true
+function trackBreachStreak(ruleId, hostid, breaching) {
+  const key = stateKey(ruleId, hostid)
+  if (!breaching) {
+    breachStreak.delete(key)
+    return 0
+  }
+  const n = (breachStreak.get(key) || 0) + 1
+  breachStreak.set(key, n)
+  return n
+}
+
+function syncRuleBreachStateWhileSuppressed(rule, scopedHosts, groupMap, itemBatches, pingTarget, nowSec, staleAfterSec) {
+  const ruleId = String(rule._id)
+  for (const h of scopedHosts) {
+    if (!hostMatchesScope(h, rule.scope, groupMap)) continue
+    const metrics = buildHostMetrics(h.hostid, itemBatches, pingTarget, nowSec, staleAfterSec)
+    const breaching = evaluateCondition(rule.condition, metrics, h)
+    syncBreachState(ruleId, String(h.hostid), breaching)
+    if (breaching) trackBreachStreak(ruleId, String(h.hostid), true)
+  }
+}
+
+function isNewSlaBreach(ruleId, hostid, breaching, { seedOnly = false } = {}) {
+  const key = stateKey(ruleId, hostid)
+  if (seedOnly) {
+    /** Baseline as healthy so hosts already breaching get notified on the first real poll. */
+    breachState.set(key, false)
+    breachStreak.delete(key)
+    return false
+  }
+  const wasBreaching = breachState.get(key) === true
+  breachState.set(key, breaching)
+  return breaching && !wasBreaching
 }
 
 function pickScalarItem(hostItems) {
@@ -148,18 +177,6 @@ function hostCooldownMs(rule) {
   const envMin = parseInt(process.env.ZABBIX_ALERT_HOST_COOLDOWN_MIN || '15', 10)
   const min = Number.isFinite(ruleMin) && ruleMin > 0 ? ruleMin : envMin
   return min * 60 * 1000
-}
-
-function isNewSlaBreach(ruleId, hostid, breaching, { seedOnly = false } = {}) {
-  const key = stateKey(ruleId, hostid)
-  if (seedOnly) {
-    /** Baseline as healthy so hosts already breaching get notified on the first real poll. */
-    breachState.set(key, false)
-    return false
-  }
-  const wasBreaching = breachState.get(key) === true
-  breachState.set(key, breaching)
-  return breaching && !wasBreaching
 }
 
 function hostCooldownOk(rule, hostid) {
@@ -275,12 +292,19 @@ export async function runInstantSlaCheck({ seedState = false, includeAllHosts = 
   let noMetricData = 0
 
   for (const rule of rules) {
+    const pingTarget = String(rule.condition?.target || DEFAULT_PING_TARGET).trim() || DEFAULT_PING_TARGET
     if (!shouldNotifyForBhPolicy(rule)) {
+      syncRuleBreachStateWhileSuppressed(rule, scopedHosts, groupMap, itemBatches, pingTarget, nowSec, staleAfterSec)
       skipped++
-      results.push({ ruleId: rule._id, ruleName: rule.name, skipped: true, reason: 'business_hours' })
+      results.push({
+        ruleId: rule._id,
+        ruleName: rule.name,
+        skipped: true,
+        reason: 'business_hours',
+        bh: describeBusinessHoursStatus(rule),
+      })
       continue
     }
-    const pingTarget = String(rule.condition?.target || DEFAULT_PING_TARGET).trim() || DEFAULT_PING_TARGET
     const affected = []
     const ruleDiag = { breaching: 0, edgeBlocked: 0, cooldownBlocked: 0, noData: 0 }
 
@@ -297,11 +321,19 @@ export async function runInstantSlaCheck({ seedState = false, includeAllHosts = 
         }
       }
       if (!breaching) {
-        if (!seedState) isNewSlaBreach(String(rule._id), String(h.hostid), false)
+        if (!seedState) {
+          syncBreachState(String(rule._id), String(h.hostid), false)
+        }
         continue
       }
       breachingHosts++
       ruleDiag.breaching++
+      const streak = trackBreachStreak(String(rule._id), String(h.hostid), true)
+      if (!forceNotify && streak < SUSTAINED_POLLS) {
+        edgeBlocked++
+        ruleDiag.edgeBlocked++
+        continue
+      }
       const isNew = forceNotify || isNewSlaBreach(String(rule._id), String(h.hostid), breaching, { seedOnly: seedState })
       if (!isNew) {
         edgeBlocked++

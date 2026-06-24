@@ -254,6 +254,9 @@ function RuleModal({ open, initial, groups, onClose, onSave, saving }) {
               {BH_POLICIES.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
             </select>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                Timezone: {form.businessHours.timezone || 'Asia/Kolkata'}
+              </span>
               <select value={form.businessHours.fromHour} onChange={(e) => setBh({ fromHour: Number(e.target.value) })} style={{ ...inp, width: 90 }} disabled={!form.businessHours.enabled}>
                 {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
               </select>
