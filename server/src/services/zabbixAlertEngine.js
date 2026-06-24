@@ -273,10 +273,20 @@ export async function runZabbixAlertEval({ forceNotify = false } = {}) {
 export function startZabbixAlertEngine(io) {
   _io = io || null
   setZabbixAlertIo(io)
+
+  const url = process.env.STORE_ZABBIX_URL || ''
+  const hasToken = Boolean(process.env.STORE_ZABBIX_API_TOKEN?.trim() || process.env.STORE_ZABBIX_TOKEN?.trim())
+  console.log(`[zabbixAlertEngine] init url=${url ? 'set' : 'missing'} token=${hasToken ? 'set' : 'missing'} configured=${isZabbixConfigured()}`)
+
   if (!isZabbixConfigured()) {
     console.log('[zabbixAlertEngine] Store Zabbix not configured — auto-evaluation disabled')
     return
   }
+
+  void zabbixRpc('apiinfo.version', {})
+    .then((ver) => console.log(`[zabbixAlertEngine] Store Zabbix API OK (version ${ver})`))
+    .catch((e) => console.error(`[zabbixAlertEngine] Store Zabbix API unreachable: ${e.message}`))
+
   if (_io) {
     _io.on('connection', (socket) => {
       socket.on('subscribe:zabbix-alerts', () => {

@@ -113,13 +113,42 @@ export function resolveStorePingMetrics(indexes, hostid, target, nowSec, staleAf
   }
 }
 
-/** Fuzzy host-group match (RPSystem, RP Group, RP, etc.). */
+/**
+ * Alert evaluation — uses last reading even if slightly stale (agent poll gaps).
+ * Set ZABBIX_ALERT_FRESH_ONLY=1 to require fresh data only.
+ */
+export function resolveStorePingMetricsForAlerts(indexes, hostid, target, nowSec, staleAfterSec) {
+  const base = resolveStorePingMetrics(indexes, hostid, target, nowSec, staleAfterSec)
+  if (process.env.ZABBIX_ALERT_FRESH_ONLY === '1') return base
+  const pick = (val, raw) => (val != null ? val : (raw?.value != null ? raw.value : null))
+  return {
+    ...base,
+    latency: pick(base.latency, base.raw?.latency),
+    jitter: pick(base.jitter, base.raw?.jitter),
+    packetLoss: pick(base.packetLoss, base.raw?.packetLoss),
+  }
+}
+
+/** Normalize group name for fuzzy match (ignore spaces/case). */
+function normGroupName(name) {
+  return String(name || '').toLowerCase().replace(/\s+/g, '')
+}
+
+/** Extract group names from Zabbix host.get row. */
+export function hostGroupNames(host) {
+  return (host?.hostgroups || host?.groups || [])
+    .map((g) => (typeof g === 'string' ? g : g?.name))
+    .filter(Boolean)
+}
+
+/** Fuzzy host-group match (RPSystem, RP System, RP Group, etc.). */
 export function hostInGroup(hostGroups, wantedGroup) {
   const gn = String(wantedGroup || '').trim()
   if (!gn) return false
-  const want = gn.toLowerCase()
+  const want = normGroupName(gn)
   return (hostGroups || []).some((g) => {
-    const name = String(g || '').toLowerCase()
+    const name = normGroupName(typeof g === 'string' ? g : g?.name || g)
+    if (!name) return false
     return name === want || name.includes(want) || want.includes(name)
   })
 }

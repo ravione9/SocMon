@@ -10,8 +10,9 @@ import {
   STORE_PING_KEY_RES,
   DEFAULT_PING_TARGET,
   indexCustomPingItems,
-  resolveStorePingMetrics,
+  resolveStorePingMetricsForAlerts,
   hostInGroup,
+  hostGroupNames,
   getStaleAfterSec,
 } from '../utils/zabbixStorePingSensors.js'
 
@@ -94,7 +95,7 @@ function pickScalarItem(hostItems) {
 
 function buildHostMetrics(hostid, itemBatches, target, nowSec, staleAfterSec) {
   const hid = String(hostid)
-  const ping = resolveStorePingMetrics(itemBatches.pingIndexes, hid, target, nowSec, staleAfterSec)
+  const ping = resolveStorePingMetricsForAlerts(itemBatches.pingIndexes, hid, target, nowSec, staleAfterSec)
   return {
     ...ping,
     cpu: pickScalarItem((itemBatches.cpu || []).filter((it) => String(it.hostid) === hid)),
@@ -274,7 +275,7 @@ export async function runInstantSlaCheck({ seedState = false, includeAllHosts = 
 
   const groupMap = {}
   for (const h of hostRows) {
-    groupMap[String(h.hostid)] = (h.hostgroups || h.groups || []).map((g) => g.name)
+    groupMap[String(h.hostid)] = hostGroupNames(h)
   }
 
   const scopedHosts = includeAllHosts ? hostRows : collectScopedHosts(rules, hostRows, groupMap)
@@ -377,7 +378,117 @@ export async function runInstantSlaCheck({ seedState = false, includeAllHosts = 
   }
   lastInstantAt = stats.evaluatedAt
   lastInstantStats = stats
+  if (fired > 0 || breachingHosts > 0 || scopedHosts.length === 0) {
+    console.log(
+      `[zabbixAlertInstant] scoped=${scopedHosts.length}/${hostRows.length} breaching=${breachingHosts} ` +
+      `fired=${fired} noData=${noMetricData} edgeBlocked=${edgeBlocked} cooldownBlocked=${cooldownBlocked}`,
+    )
+  }
   return { ...stats, results }
+}
+
+/** Dry-run diagnostic — why rules are / aren't firing. */
+export async function previewZabbixAlertEvaluation() {
+  if (!isZabbixConfigured()) {
+    return { ok: false, reason: 'zabbix_not_configured' }
+  }
+
+  const rules = await ZabbixAlertRule.find({ enabled: true }).lean()
+  const nowSec = Math.floor(Date.now() / 1000)
+  const staleAfterSec = getStaleAfterSec()
+
+  const { rows: hostRows, total: hostTotal } = await fetchAllMonitoredHosts(zabbixRpc, {
+    output: ['hostid', 'host', 'name', 'available', 'active_available'],
+    selectHostGroups: ['groupid', 'name'],
+  })
+
+  const groupMap = {}
+  for (const h of hostRows) {
+    groupMap[String(h.hostid)] = hostGroupNames(h)
+  }
+
+  const scopedHosts = collectScopedHosts(rules, hostRows, groupMap)
+  const hostids = scopedHosts.map((h) => String(h.hostid))
+  const itemBatches = hostids.length ? await buildItemBatchesForHosts(hostids) : null
+
+  const msItemCount = itemBatches
+    ? Object.values(itemBatches.pingIndexes.latency).reduce((n, arr) => n + arr.length, 0)
+    : 0
+
+  const rulePreviews = []
+  for (const rule of rules) {
+    const pingTarget = String(rule.condition?.target || DEFAULT_PING_TARGET).trim() || DEFAULT_PING_TARGET
+    let inScope = 0
+    let withFresh = 0
+    let withAny = 0
+    let breaching = 0
+    const samples = []
+
+    for (const h of scopedHosts) {
+      if (!hostMatchesScope(h, rule.scope, groupMap)) continue
+      inScope++
+      const metrics = itemBatches
+        ? buildHostMetrics(h.hostid, itemBatches, pingTarget, nowSec, staleAfterSec)
+        : {}
+      const hasFresh = rule.condition?.metric === 'latency' ? metrics.fresh?.latency
+        : rule.condition?.metric === 'jitter' ? metrics.fresh?.jitter
+          : metrics.fresh?.packetLoss
+      const hasAny = rule.condition?.metric === 'latency' ? metrics.latency != null
+        : rule.condition?.metric === 'jitter' ? metrics.jitter != null
+          : metrics.packetLoss != null
+      if (hasFresh) withFresh++
+      if (hasAny) withAny++
+      const isBreaching = evaluateCondition(rule.condition, metrics, h)
+      if (isBreaching) {
+        breaching++
+        if (samples.length < 8) {
+          samples.push({
+            host: h.host,
+            name: h.name,
+            groups: groupMap[String(h.hostid)],
+            latency: metrics.latency,
+            jitter: metrics.jitter,
+            packetLoss: metrics.packetLoss,
+            fresh: metrics.fresh,
+            sensorKeys: metrics.itemKeys,
+          })
+        }
+      }
+    }
+
+    rulePreviews.push({
+      ruleId: rule._id,
+      name: rule.name,
+      scope: rule.scope,
+      condition: rule.condition,
+      channelCount: (rule.channels || []).filter((c) => c.webhookUrl || c.emails?.length).length,
+      inScope,
+      withFreshMetric: withFresh,
+      withAnyMetric: withAny,
+      breaching,
+      samples,
+    })
+  }
+
+  const groupSample = [...new Set(hostRows.flatMap((h) => hostGroupNames(h)))].sort().slice(0, 30)
+
+  return {
+    ok: true,
+    hostTotal,
+    monitoredFetched: hostRows.length,
+    scopedHosts: scopedHosts.length,
+    staleAfterSec,
+    pingItemsFound: msItemCount,
+    zabbixGroupsSample: groupSample,
+    rules: rulePreviews,
+    hint: scopedHosts.length === 0
+      ? 'No hosts match rule scope — verify groupName matches Zabbix (see zabbixGroupsSample)'
+      : msItemCount === 0
+        ? 'No custom.ping.ms items on scoped hosts — check Zabbix agent items'
+        : rulePreviews.every((r) => r.breaching === 0)
+          ? 'Hosts in scope but none breaching threshold right now'
+          : 'Hosts breaching — use Run Evaluate (force) to send Slack',
+  }
 }
 
 function isPingRelatedProblem(name) {
@@ -429,7 +540,7 @@ export async function pollZabbixNewProblems() {
     const fullHosts = hostRows || hosts
     const groupMap = {}
     for (const h of fullHosts) {
-      groupMap[String(h.hostid)] = (h.hostgroups || h.groups || []).map((g) => g.name)
+      groupMap[String(h.hostid)] = hostGroupNames(h)
     }
 
     const itemBatches = await buildItemBatchesForHosts(hostids)
@@ -492,7 +603,7 @@ export async function handleZabbixAlertWebhook(body, { eventId } = {}) {
   }
 
   const rules = await ZabbixAlertRule.find({ enabled: true }).lean()
-  const groupMap = { [String(host.hostid)]: (host.hostgroups || []).map((g) => g.name) }
+  const groupMap = { [String(host.hostid)]: hostGroupNames(host) }
   const nowSec = Math.floor(Date.now() / 1000)
   const itemBatches = await buildItemBatchesForHosts([String(host.hostid)])
 

@@ -9,7 +9,7 @@ import {
   getZabbixAlertEvalStatus,
   fetchZabbixAlertDashboard,
 } from '../services/zabbixAlertEngine.js'
-import { runInstantSlaCheck } from '../services/zabbixAlertInstant.js'
+import { runInstantSlaCheck, previewZabbixAlertEvaluation } from '../services/zabbixAlertInstant.js'
 import { createZabbixClient } from '../services/zabbix.js'
 
 const storeClient = createZabbixClient('STORE_ZABBIX')
@@ -81,6 +81,13 @@ router.post('/evaluate/instant', async (req, res, next) => {
   try {
     const force = req.query.force === '1' || req.body?.force === true
     const result = await runInstantSlaCheck({ forceNotify: force })
+    res.json(result)
+  } catch (e) { next(e) }
+})
+
+router.get('/preview', async (_req, res, next) => {
+  try {
+    const result = await previewZabbixAlertEvaluation()
     res.json(result)
   } catch (e) { next(e) }
 })
