@@ -24,6 +24,28 @@ export function getStaleAfterSec() {
   return Number.isFinite(raw) ? Math.min(Math.max(raw, 60), 3600) : 300
 }
 
+/**
+ * Fetch Zabbix items by key prefix — same pattern as Store Zabbix dashboard / network health.
+ * (Explicit key_* wildcard; no monitored filter — matches custom.ping.ms[8.8.8.8] on RP hosts.)
+ */
+export async function fetchStorePingItemsChunked(zabbixRpc, hostids, searchKey, { hostChunk = 400, pageLimit = 5000 } = {}) {
+  if (!hostids?.length || !zabbixRpc) return []
+  const prefix = String(searchKey || '').replace(/\*+$/, '')
+  const out = []
+  for (let i = 0; i < hostids.length; i += hostChunk) {
+    const chunkHids = hostids.slice(i, i + hostChunk)
+    const batch = await zabbixRpc('item.get', {
+      hostids: chunkHids,
+      output: ['itemid', 'hostid', 'name', 'key_', 'lastvalue', 'units', 'lastclock'],
+      search: { key_: `${prefix}*` },
+      searchWildcardsEnabled: true,
+      limit: pageLimit,
+    })
+    out.push(...(batch || []))
+  }
+  return out
+}
+
 /** Index Zabbix items by hostid (filtered by key regex). */
 export function indexCustomPingItems(items, keyRe) {
   const map = {}

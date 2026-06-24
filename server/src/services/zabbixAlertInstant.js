@@ -14,6 +14,7 @@ import {
   hostInGroup,
   hostGroupNames,
   getStaleAfterSec,
+  fetchStorePingItemsChunked,
 } from '../utils/zabbixStorePingSensors.js'
 
 const storeClient = createZabbixClient('STORE_ZABBIX')
@@ -61,24 +62,6 @@ function shouldNotifyForBhPolicy(rule) {
   if (bh.policy === 'bh_only' || bh.policy === 'suppress_after_hours') return inBh
   if (bh.policy === 'outside_bh') return !inBh
   return true
-}
-
-async function fetchItemsChunked(hostids, searchKey) {
-  if (!hostids.length) return []
-  const out = []
-  for (let i = 0; i < hostids.length; i += 400) {
-    const slice = hostids.slice(i, i + 400)
-    const rows = await zabbixRpc('item.get', {
-      hostids: slice,
-      monitored: true,
-      search: { key_: searchKey },
-      searchWildcardsEnabled: true,
-      output: ['itemid', 'hostid', 'key_', 'lastvalue', 'lastclock', 'units'],
-      limit: 5000,
-    })
-    out.push(...(rows || []))
-  }
-  return out
 }
 
 function pickScalarItem(hostItems) {
@@ -235,12 +218,12 @@ function collectScopedHosts(rules, hostRows, groupMap) {
 
 async function buildItemBatchesForHosts(hostids) {
   const [msItems, jitterItems, lossItems, cpuItems, memItems, agentItems] = await Promise.all([
-    fetchItemsChunked(hostids, 'custom.ping.ms'),
-    fetchItemsChunked(hostids, 'custom.ping.jitter'),
-    fetchItemsChunked(hostids, 'custom.ping.loss'),
-    fetchItemsChunked(hostids, 'system.cpu.util'),
-    fetchItemsChunked(hostids, 'vm.memory.util'),
-    fetchItemsChunked(hostids, 'agent.ping'),
+    fetchStorePingItemsChunked(zabbixRpc, hostids, 'custom.ping.ms'),
+    fetchStorePingItemsChunked(zabbixRpc, hostids, 'custom.ping.jitter'),
+    fetchStorePingItemsChunked(zabbixRpc, hostids, 'custom.ping.loss'),
+    fetchStorePingItemsChunked(zabbixRpc, hostids, 'system.cpu.util'),
+    fetchStorePingItemsChunked(zabbixRpc, hostids, 'vm.memory.util'),
+    fetchStorePingItemsChunked(zabbixRpc, hostids, 'agent.ping'),
   ])
   return {
     pingIndexes: {
