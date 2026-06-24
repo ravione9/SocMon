@@ -460,7 +460,14 @@ export default function ZabbixAlertsPanel({ apiBase = '/api/store-zabbix' }) {
         </div>
         {evalStatus?.lastEvalAt && (
           <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', paddingTop: 4 }}>
-            Last auto-eval: {new Date(evalStatus.lastEvalAt).toLocaleString()} · every {Math.round((evalStatus.intervalMs || 120000) / 1000)}s
+            Instant SLA check every {Math.round((evalStatus.instantIntervalMs || 10000) / 1000)}s
+            {evalStatus.instant?.lastInstantAt && (
+              <> · last instant run {new Date(evalStatus.instant.lastInstantAt).toLocaleTimeString()}</>
+            )}
+            {evalStatus.instant?.lastInstantStats?.fired > 0 && (
+              <> · <span style={{ color: '#22c55e' }}>{evalStatus.instant.lastInstantStats.fired} fired</span></>
+            )}
+            {' '}· backup eval every {Math.round((evalStatus.intervalMs || 120000) / 1000)}s
           </div>
         )}
       </div>
@@ -480,7 +487,7 @@ export default function ZabbixAlertsPanel({ apiBase = '/api/store-zabbix' }) {
           {dashboard?.sensors && (
             <p style={{ margin: 0, fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
               Ping sensors: {dashboard.sensors.latency} · {dashboard.sensors.jitter} · {dashboard.sensors.packetLoss}
-              (RP / store Windows workstations)
+              · Instant SLA: fires when threshold is newly crossed (~10s) + Zabbix problem hook
             </p>
           )}
 

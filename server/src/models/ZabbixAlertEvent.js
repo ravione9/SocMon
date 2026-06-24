@@ -27,6 +27,8 @@ const zabbixAlertEventSchema = new mongoose.Schema({
   hasMore: { type: Boolean, default: false },
   dispatch: [{ channel: String, ok: Boolean, error: String, status: Number }],
   eventStatus: { type: String, enum: ['problem', 'resolved'], default: 'problem' },
+  /** instant_sla | zabbix_problem | zabbix_webhook | scheduled */
+  source: { type: String, default: 'scheduled' },
   firedAt: { type: Date, default: Date.now, index: true },
 }, { timestamps: false })
 

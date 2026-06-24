@@ -18,6 +18,14 @@ import {
   hostInGroup,
   getStaleAfterSec,
 } from '../utils/zabbixStorePingSensors.js'
+import {
+  getInstantAlertStatus,
+  startInstantSlaWatcher,
+  setZabbixAlertIo,
+  runInstantSlaCheck,
+} from './zabbixAlertInstant.js'
+
+export { handleZabbixAlertWebhook } from './zabbixAlertInstant.js'
 
 const storeClient = createZabbixClient('STORE_ZABBIX')
 const { zabbixRpc, isZabbixConfigured } = storeClient
@@ -29,7 +37,15 @@ let lastEvalStats = null
 let _io = null
 
 export function getZabbixAlertEvalStatus() {
-  return { lastEvalAt, lastEvalStats, intervalMs: EVAL_INTERVAL_MS }
+  const instantMs = parseInt(process.env.ZABBIX_ALERT_INSTANT_MS || '10000', 10)
+  return {
+    lastEvalAt,
+    lastEvalStats,
+    intervalMs: EVAL_INTERVAL_MS,
+    instantIntervalMs: instantMs,
+    instant: getInstantAlertStatus(),
+    mode: 'instant_sla_edge + scheduled_backup',
+  }
 }
 
 function isWithinBusinessHours(bh, now = new Date()) {
@@ -250,142 +266,13 @@ export async function fetchZabbixAlertDashboard() {
 }
 
 export async function runZabbixAlertEval() {
-  if (!isZabbixConfigured()) {
-    return { fired: 0, skipped: 0, results: [], reason: 'zabbix_not_configured' }
-  }
-
-  const rules = await ZabbixAlertRule.find({ enabled: true }).lean()
-  if (!rules.length) return { fired: 0, skipped: 0, results: [] }
-
-  const nowSec = Math.floor(Date.now() / 1000)
-  const staleAfterSec = getStaleAfterSec()
-
-  const { rows: hostRows } = await fetchAllMonitoredHosts(zabbixRpc, {
-    output: ['hostid', 'host', 'name', 'available', 'active_available'],
-    selectHostGroups: ['groupid', 'name'],
-  })
-
-  const hostids = hostRows.map((h) => String(h.hostid))
-  const groupMap = {}
-  for (const h of hostRows) {
-    groupMap[String(h.hostid)] = (h.hostgroups || h.groups || []).map((g) => g.name)
-  }
-
-  const [msItems, jitterItems, lossItems, cpuItems, memItems, agentItems] = await Promise.all([
-    fetchItemsChunked(hostids, 'custom.ping.ms'),
-    fetchItemsChunked(hostids, 'custom.ping.jitter'),
-    fetchItemsChunked(hostids, 'custom.ping.loss'),
-    fetchItemsChunked(hostids, 'system.cpu.util'),
-    fetchItemsChunked(hostids, 'vm.memory.util'),
-    fetchItemsChunked(hostids, 'agent.ping'),
-  ])
-
-  const itemBatches = {
-    pingIndexes: {
-      latency: indexCustomPingItems(msItems, STORE_PING_KEY_RES.latency),
-      jitter: indexCustomPingItems(jitterItems, STORE_PING_KEY_RES.jitter),
-      packetLoss: indexCustomPingItems(lossItems, STORE_PING_KEY_RES.packetLoss),
-    },
-    cpu: cpuItems,
-    mem: memItems,
-    agent: agentItems,
-  }
-
-  const results = []
-  let fired = 0
-  let skipped = 0
-
-  for (const rule of rules) {
-    try {
-      if (!shouldNotifyForBhPolicy(rule)) {
-        skipped++
-        results.push({ ruleId: rule._id, ruleName: rule.name, skipped: true, reason: 'business_hours' })
-        continue
-      }
-
-      const cooldownMs = (rule.cooldownMinutes ?? 30) * 60 * 1000
-      if (rule.lastFiredAt && Date.now() - new Date(rule.lastFiredAt).getTime() < cooldownMs) {
-        skipped++
-        results.push({ ruleId: rule._id, ruleName: rule.name, skipped: true, reason: 'cooldown' })
-        continue
-      }
-
-      const pingTarget = String(rule.condition?.target || DEFAULT_PING_TARGET).trim() || DEFAULT_PING_TARGET
-      const affected = []
-
-      for (const h of hostRows) {
-        if (!hostMatchesScope(h, rule.scope, groupMap)) continue
-        const metrics = buildHostMetrics(h.hostid, itemBatches, pingTarget, nowSec, staleAfterSec)
-        if (evaluateCondition(rule.condition, metrics, h)) {
-          affected.push({
-            hostid: String(h.hostid),
-            hostname: h.host,
-            name: h.name,
-            triggeredValue: triggeredValueForMetric(rule.condition, metrics),
-            latency: metrics.latency,
-            jitter: metrics.jitter,
-            packetLoss: metrics.packetLoss,
-            cpu: metrics.cpu,
-            memory: metrics.memory,
-            sensorKeys: metrics.itemKeys,
-            pingTarget,
-          })
-        }
-      }
-
-      if (!affected.length) {
-        results.push({ ruleId: rule._id, ruleName: rule.name, fired: false, affected: 0, pingTarget })
-        continue
-      }
-
-      const dispatch = await dispatchZabbixAlertNotifications(rule, affected)
-      const event = await ZabbixAlertEvent.create({
-        ruleId: rule._id,
-        ruleName: rule.name,
-        severity: rule.severity,
-        condition: rule.condition,
-        affectedCount: affected.length,
-        hosts: affected.slice(0, 50),
-        hasMore: affected.length > 50,
-        dispatch,
-        eventStatus: 'problem',
-      })
-
-      await ZabbixAlertRule.findByIdAndUpdate(rule._id, { lastFiredAt: new Date() })
-      fired++
-
-      if (_io) {
-        _io.to('zabbix-alerts').emit('zabbix:alert', {
-          id: event._id,
-          ruleName: rule.name,
-          severity: rule.severity,
-          affectedCount: affected.length,
-          firedAt: event.firedAt,
-        })
-      }
-
-      results.push({ ruleId: rule._id, ruleName: rule.name, fired: true, affected: affected.length, pingTarget, dispatch })
-    } catch (e) {
-      results.push({ ruleId: rule._id, ruleName: rule.name, error: e.message })
-    }
-  }
-
-  const stats = {
-    fired,
-    skipped,
-    total: rules.length,
-    hostsChecked: hostRows.length,
-    evaluatedAt: new Date().toISOString(),
-    sensors: ['custom.ping.ms', 'custom.ping.jitter', 'custom.ping.loss'],
-    staleAfterSec,
-  }
-  lastEvalAt = stats.evaluatedAt
-  lastEvalStats = stats
-  return { ...stats, results }
+  /** Scheduled backup uses the same edge-trigger + per-host cooldown as instant SLA. */
+  return runInstantSlaCheck({ includeAllHosts: true })
 }
 
 export function startZabbixAlertEngine(io) {
   _io = io || null
+  setZabbixAlertIo(io)
   if (!isZabbixConfigured()) {
     console.log('[zabbixAlertEngine] Store Zabbix not configured — auto-evaluation disabled')
     return
@@ -399,7 +286,8 @@ export function startZabbixAlertEngine(io) {
       socket.on('unsubscribe:zabbix-alerts', () => socket.leave('zabbix-alerts'))
     })
   }
-  console.log(`[zabbixAlertEngine] Starting — custom.ping.ms/jitter/loss · every ${EVAL_INTERVAL_MS / 1000}s`)
+  startInstantSlaWatcher()
+  console.log(`[zabbixAlertEngine] Scheduled backup eval every ${EVAL_INTERVAL_MS / 1000}s`)
   setTimeout(async () => {
     await runZabbixAlertEval().catch((e) => console.error('[zabbixAlertEngine]', e.message))
     setInterval(async () => {

@@ -39,7 +39,7 @@ import storeMonitorRoutes from './routes/storeMonitor.js'
 import storeAlertsRoutes from './routes/storeAlerts.js'
 import zabbixAlertsRoutes from './routes/zabbixAlerts.js'
 import { startStoreAlertEngine } from './services/storeAlertEngine.js'
-import { startZabbixAlertEngine } from './services/zabbixAlertEngine.js'
+import { startZabbixAlertEngine, handleZabbixAlertWebhook } from './services/zabbixAlertEngine.js'
 import { startProblemSnapshotter } from './services/storeProblemSnapshotter.js'
 import { startKafkaProducer, stopKafkaProducer } from './services/kafkaProducer.js'
 import sshSessionRoutes from './routes/sshSessions.js'
@@ -168,6 +168,23 @@ app.use('/api/stats',   statsRoutes)
 app.use('/api/sentinel', sentinelRoutes)
 app.use('/api/sentinel-one', sentinelOneRoutes)
 app.use('/api/zabbix', zabbixRoutes)
+/** Zabbix media-type webhook — instant SLA Slack (no session; optional token). */
+app.post('/api/store-zabbix/alerts/incoming/zabbix', async (req, res) => {
+  const expected = process.env.ZABBIX_ALERT_WEBHOOK_TOKEN
+  if (expected) {
+    const token = String(req.headers['x-zabbix-alert-token'] || req.query.token || '')
+    if (token !== expected) return res.status(401).json({ error: 'Invalid webhook token' })
+  }
+  try {
+    const result = await handleZabbixAlertWebhook(req.body || {}, {
+      eventId: req.headers['x-zabbix-event-id'] || req.body?.event_id,
+    })
+    if (!result.ok) return res.status(400).json(result)
+    res.json(result)
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Webhook handler failed' })
+  }
+})
 app.use('/api/store-zabbix/alerts', zabbixAlertsRoutes)
 app.use('/api/store-zabbix', storeZabbixRoutes)
 app.use('/api/store-monitor', storeMonitorRoutes)

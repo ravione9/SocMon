@@ -9,6 +9,7 @@ import {
   getZabbixAlertEvalStatus,
   fetchZabbixAlertDashboard,
 } from '../services/zabbixAlertEngine.js'
+import { runInstantSlaCheck } from '../services/zabbixAlertInstant.js'
 import { createZabbixClient } from '../services/zabbix.js'
 
 const storeClient = createZabbixClient('STORE_ZABBIX')
@@ -71,6 +72,13 @@ router.post('/test-channel', async (req, res, next) => {
 router.post('/evaluate', async (_req, res, next) => {
   try {
     const result = await runZabbixAlertEval()
+    res.json(result)
+  } catch (e) { next(e) }
+})
+
+router.post('/evaluate/instant', async (_req, res, next) => {
+  try {
+    const result = await runInstantSlaCheck()
     res.json(result)
   } catch (e) { next(e) }
 })
