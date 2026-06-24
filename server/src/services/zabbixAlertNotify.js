@@ -51,56 +51,135 @@ function formatConditionLine(rule) {
   return line
 }
 
-function formatHostLine(host, rule) {
-  const lines = [
-    `• *${host.name || host.hostname}* (${host.hostname || '—'})`,
-    `  Store: ${storeCodeFromHost(host)}`,
-  ]
-  if (host.pingTarget) lines.push(`  Ping target: ${host.pingTarget}`)
-  if (host.sensorKeys?.latency) lines.push(`  src latency: \`${host.sensorKeys.latency}\``)
-  if (host.sensorKeys?.jitter) lines.push(`  src jitter: \`${host.sensorKeys.jitter}\``)
-  if (host.sensorKeys?.packetLoss) lines.push(`  src loss: \`${host.sensorKeys.packetLoss}\``)
-  if (host.trigger) lines.push(`  Trigger: ${host.trigger}`)
-  const parts = []
-  if (host.latency != null) parts.push(`Latency: ${host.latency} ms`)
-  if (host.jitter != null) parts.push(`Jitter: ${host.jitter} ms`)
-  if (host.packetLoss != null) parts.push(`Packet Loss: ${host.packetLoss}%`)
-  if (host.cpu != null) parts.push(`CPU: ${host.cpu}%`)
-  if (host.memory != null) parts.push(`Memory: ${host.memory}%`)
-  if (host.triggeredValue != null && !parts.length) {
-    parts.push(`Value: ${host.triggeredValue}`)
+function fmtNum(v, decimals = 1) {
+  if (v == null || !Number.isFinite(Number(v))) return '—'
+  const n = Number(v)
+  if (decimals === 0) return String(Math.round(n))
+  return n.toFixed(decimals).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '')
+}
+
+function fmtMs(v) {
+  return v != null && Number.isFinite(Number(v)) ? fmtNum(v, 0) : '—'
+}
+
+function fmtPct(v) {
+  return v != null && Number.isFinite(Number(v)) ? `${fmtNum(v, 1)}%` : '—'
+}
+
+/** Fixed-width column for Slack monospace table. */
+function col(text, width, { align = 'left', mark = false } = {}) {
+  let s = String(text ?? '—')
+  if (mark) s = `${s}▲`
+  if (s.length > width) s = s.slice(0, width - 1) + '…'
+  return align === 'right' ? s.padStart(width) : s.padEnd(width)
+}
+
+function getHostTableColumns(rule) {
+  const metric = rule.condition?.metric
+  const highlight = metric === 'latency' ? 'lat'
+    : metric === 'jitter' ? 'jit'
+      : metric === 'packet_loss' ? 'loss'
+        : metric === 'cpu' ? 'cpu'
+          : metric === 'memory' ? 'mem'
+            : null
+  return {
+    highlight,
+    columns: [
+      { id: 'store', title: 'Store', w: 8, align: 'left', get: (h) => storeCodeFromHost(h) },
+      { id: 'host', title: 'Hostname', w: 22, align: 'left', get: (h) => h.hostname || h.name || '—' },
+      { id: 'lat', title: 'Lat (ms)', w: 8, align: 'right', get: (h) => fmtMs(h.latency) },
+      { id: 'jit', title: 'Jit (ms)', w: 8, align: 'right', get: (h) => fmtMs(h.jitter) },
+      { id: 'loss', title: 'Loss', w: 6, align: 'right', get: (h) => (h.packetLoss != null ? `${fmtNum(h.packetLoss, 0)}%` : '—') },
+      { id: 'cpu', title: 'CPU', w: 7, align: 'right', get: (h) => fmtPct(h.cpu) },
+      { id: 'mem', title: 'Mem', w: 7, align: 'right', get: (h) => fmtPct(h.memory) },
+    ],
   }
-  if (parts.length) lines.push(`  ${parts.join(' · ')}`)
+}
+
+function orderHostsForTable(hosts, highlight) {
+  if (!highlight) return hosts
+  const pick = (h) => {
+    if (highlight === 'lat') return h.latency
+    if (highlight === 'jit') return h.jitter
+    if (highlight === 'loss') return h.packetLoss
+    return h[highlight]
+  }
+  return [...hosts].sort((a, b) => Number(pick(b) ?? -1) - Number(pick(a) ?? -1))
+}
+
+function buildHostsTable(hosts, rule, { maxRows = 20 } = {}) {
+  const { highlight, columns } = getHostTableColumns(rule)
+  const ordered = orderHostsForTable(hosts, highlight)
+  const slice = ordered.slice(0, maxRows)
+  const header = columns.map((c) => col(c.title, c.w, { align: c.align || 'left' })).join('')
+  const divider = columns.map((c) => '─'.repeat(c.w)).join('')
+  const rows = slice.map((h) => columns.map((c) => col(
+    c.get(h),
+    c.w,
+    { align: c.align || 'left', mark: highlight === c.id },
+  )).join(''))
+
+  const lines = [header, divider, ...rows]
+  if (hosts.length > maxRows) {
+    lines.push(`… +${hosts.length - maxRows} more host(s)`)
+  }
   return lines.join('\n')
+}
+
+/** Slack Block Kit native table (Aug 2025+). */
+function buildSlackTableBlock(hosts, rule, { maxRows = 15 } = {}) {
+  const { highlight, columns } = getHostTableColumns(rule)
+  const ordered = orderHostsForTable(hosts, highlight).slice(0, maxRows)
+  const cell = (text) => ({ type: 'raw_text', text: String(text ?? '—').slice(0, 120) })
+  const rows = [
+    columns.map((c) => cell(c.title)),
+    ...ordered.map((h) => columns.map((c) => {
+      let val = c.get(h)
+      if (highlight === c.id && val !== '—') val = `${val} ▲`
+      return cell(val)
+    })),
+  ]
+  if (hosts.length > maxRows) {
+    const pad = columns.length - 1
+    rows.push([
+      cell(`… +${hosts.length - maxRows} more host(s)`),
+      ...Array(Math.max(pad, 0)).fill(cell('')),
+    ])
+  }
+  return {
+    type: 'table',
+    column_settings: columns.map((c) => ({ align: c.align || 'left', is_wrapped: false })),
+    rows,
+  }
 }
 
 export function buildZabbixAlertMessage(rule, hosts) {
   const emoji = SEV_EMOJI[rule.severity] || '⚠️'
   const title = `${emoji} Alert Notification — ${rule.name}`
-  const first = hosts[0] || {}
+  const tableText = buildHostsTable(hosts, rule)
+  const hostsTable = `\`\`\`\n${tableText}\n\`\`\``
+  const slackTableBlock = buildSlackTableBlock(hosts, rule)
   const summary = [
-    `🚨 *${rule.severity.toUpperCase()}* · ${rule.name}`,
-    rule.description || `Condition: ${formatConditionLine(rule)}`,
-    '',
-    `*Store:* ${storeCodeFromHost(first)}`,
-    `*Hostname:* ${first.hostname || first.name || '—'}`,
-    `*Severity:* ${rule.severity}`,
-    `*Trigger:* ${formatConditionLine(rule)}`,
-    `*Latency:* ${first.latency != null ? `${first.latency} ms` : '—'}`,
-    `*Jitter:* ${first.jitter != null ? `${first.jitter} ms` : '—'}`,
-    `*Packet Loss:* ${first.packetLoss != null ? `${first.packetLoss}%` : '—'}`,
-  ].join('\n')
-
-  const hostLines = hosts.slice(0, 15).map((h) => formatHostLine(h, rule))
-  const more = hosts.length > 15 ? `\n_…and ${hosts.length - 15} more host(s)_` : ''
-  const storeSection = ['*Affected Hosts:*', ...hostLines].join('\n\n') + more
+    rule.description ? rule.description : null,
+    `*Affected:* ${hosts.length} host(s) · ping target ${rule.condition?.target || '8.8.8.8'}`,
+  ].filter(Boolean).join('\n')
+  const storeSection = ['*Affected Hosts*', hostsTable].join('\n')
   const footer = `Netpulse Store Zabbix · ${new Date().toISOString()}`
-  const body = [summary, '', storeSection, '', footer].join('\n')
+  const body = [
+    `*${rule.severity.toUpperCase()}* · ${rule.name}`,
+    `*Condition:* ${formatConditionLine(rule)}`,
+    '',
+    tableText,
+    '',
+    footer,
+  ].join('\n')
 
   return {
     title,
     body,
     summary,
+    hostsTable,
+    slackTableBlock,
     storeSection,
     footer,
     fields: [
@@ -124,7 +203,17 @@ async function postWebhook(url, payload, { method = 'POST', headers = {} } = {})
         path: u.pathname + u.search,
         headers: { 'Content-Type': 'application/json', 'Content-Length': body.length, ...headers },
         timeout: 12000,
-      }, (res) => { res.resume(); resolve({ ok: res.statusCode < 400, status: res.statusCode }) })
+      }, (res) => {
+        let text = ''
+        res.on('data', (chunk) => { text += chunk })
+        res.on('end', () => {
+          resolve({
+            ok: res.statusCode < 400,
+            status: res.statusCode,
+            error: res.statusCode >= 400 ? text.slice(0, 300) : undefined,
+          })
+        })
+      })
       req.on('error', (e) => resolve({ ok: false, error: e.message }))
       req.on('timeout', () => { req.destroy(); resolve({ ok: false, error: 'timeout' }) })
       req.write(body)
@@ -135,19 +224,52 @@ async function postWebhook(url, payload, { method = 'POST', headers = {} } = {})
   })
 }
 
-async function sendSlack(webhookUrl, msg) {
+function buildSlackBlocks(msg, { includeTable = true, useNativeTable = true } = {}) {
   const blocks = [
     { type: 'header', text: { type: 'plain_text', text: msg.title, emoji: true } },
-    { type: 'section', text: { type: 'mrkdwn', text: msg.summary || msg.body } },
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*Severity*\n${msg.fields?.[0]?.value || '—'}` },
+        { type: 'mrkdwn', text: `*Affected*\n${msg.fields?.[1]?.value || '—'}` },
+        { type: 'mrkdwn', text: `*Condition*\n${msg.fields?.[2]?.value || '—'}` },
+      ],
+    },
   ]
-  if (msg.storeSection) {
+  if (msg.summary) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: msg.summary } })
+  }
+  if (includeTable) {
     blocks.push({ type: 'divider' })
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: msg.storeSection } })
+    if (useNativeTable && msg.slackTableBlock) {
+      blocks.push(msg.slackTableBlock)
+    } else if (msg.hostsTable) {
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: `*Affected Hosts*\n${msg.hostsTable}` },
+      })
+    }
   }
   if (msg.footer) {
     blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: msg.footer }] })
   }
-  return postWebhook(webhookUrl, { text: msg.title, blocks })
+  return blocks
+}
+
+async function sendSlack(webhookUrl, msg) {
+  const fallbackText = [msg.title, msg.summary, msg.hostsTable?.replace(/```/g, '')].filter(Boolean).join('\n\n')
+  let result = await postWebhook(webhookUrl, {
+    text: fallbackText,
+    blocks: buildSlackBlocks(msg, { useNativeTable: true }),
+  })
+  if (!result.ok && msg.slackTableBlock) {
+    result = await postWebhook(webhookUrl, {
+      text: fallbackText,
+      blocks: buildSlackBlocks(msg, { useNativeTable: false }),
+    })
+    if (result.ok) result.fallback = 'code_block_table'
+  }
+  return result
 }
 
 async function sendTeams(webhookUrl, msg) {
@@ -256,20 +378,36 @@ export async function dispatchZabbixAlertNotifications(rule, affectedHosts) {
 }
 
 export async function testZabbixAlertChannel(channel) {
+  const sampleHosts = [
+    {
+      hostid: '0',
+      hostname: 'RP2453-E547CP8C',
+      name: 'RP2453 Store',
+      latency: 126,
+      jitter: 95,
+      packetLoss: 0,
+      cpu: 6.7,
+      memory: 47.9,
+      triggeredValue: 95,
+    },
+    {
+      hostid: '1',
+      hostname: 'RP1618-E519BNYF',
+      name: 'RP1618 Store',
+      latency: 18,
+      jitter: 31,
+      packetLoss: 0,
+      cpu: 6.3,
+      memory: 41.7,
+      triggeredValue: 31,
+    },
+  ]
   const sampleRule = {
-    name: 'Test Alert Rule',
-    severity: 'warning',
-    condition: { metric: 'latency', operator: 'gt', threshold: 150, target: '8.8.8.8' },
+    name: 'Jitter',
+    severity: 'high',
+    description: 'RP System jitter',
+    condition: { metric: 'jitter', operator: 'gt', threshold: 30, target: '8.8.8.8' },
   }
-  const sampleHosts = [{
-    hostid: '0',
-    hostname: 'RP2806-TEST',
-    name: 'RP2806 Test Store',
-    latency: 180,
-    jitter: 25,
-    packetLoss: 3,
-    triggeredValue: 180,
-  }]
   const msg = buildZabbixAlertMessage(sampleRule, sampleHosts)
   msg.title = '✅ Test notification from Netpulse Store Zabbix Alerts'
   if (channel.type === 'slack') return sendSlack(channel.webhookUrl, msg)
