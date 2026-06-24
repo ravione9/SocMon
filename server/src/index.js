@@ -37,7 +37,9 @@ import zabbixRoutes from './routes/zabbix.js'
 import storeZabbixRoutes from './routes/storeZabbix.js'
 import storeMonitorRoutes from './routes/storeMonitor.js'
 import storeAlertsRoutes from './routes/storeAlerts.js'
+import zabbixAlertsRoutes from './routes/zabbixAlerts.js'
 import { startStoreAlertEngine } from './services/storeAlertEngine.js'
+import { startZabbixAlertEngine } from './services/zabbixAlertEngine.js'
 import { startProblemSnapshotter } from './services/storeProblemSnapshotter.js'
 import { startKafkaProducer, stopKafkaProducer } from './services/kafkaProducer.js'
 import sshSessionRoutes from './routes/sshSessions.js'
@@ -166,6 +168,7 @@ app.use('/api/stats',   statsRoutes)
 app.use('/api/sentinel', sentinelRoutes)
 app.use('/api/sentinel-one', sentinelOneRoutes)
 app.use('/api/zabbix', zabbixRoutes)
+app.use('/api/store-zabbix/alerts', zabbixAlertsRoutes)
 app.use('/api/store-zabbix', storeZabbixRoutes)
 app.use('/api/store-monitor', storeMonitorRoutes)
 app.use('/api/store-alerts', storeAlertsRoutes)
@@ -211,6 +214,7 @@ async function start() {
   initWebSocket(io)
   startAlertEngine(io)
   startStoreAlertEngine(io)
+  startZabbixAlertEngine(io)
   startProblemSnapshotter(io)
   const PORT = process.env.PORT || 5000
   httpServer.listen(PORT, () => {

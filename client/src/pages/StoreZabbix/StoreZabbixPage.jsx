@@ -34,8 +34,9 @@ import { useSmartPolling } from '../../hooks/useSmartPolling.js'
 import { useUrlTab } from '../../hooks/useUrlTab.js'
 import { RP_OUTAGE_LABELS, ROP_SUBTABS, isRpGroupKey } from '../../utils/storeRopGrouping.js'
 import { parseManualStoreCodes } from '../../config/manualRopSdwanStoreCodes.js'
+import ZabbixAlertsPanel from './ZabbixAlertsPanel.jsx'
 
-const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'rop', 'reports', 'custom']
+const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'rop', 'reports', 'custom', 'alerts']
 
 const ROP_GROUP_LABELS = {
   rp: 'All ROP',
@@ -2509,6 +2510,27 @@ function downloadTextFile(filename, text) {
   setTimeout(() => URL.revokeObjectURL(url), 1500)
 }
 
+async function downloadExcelResponse(res, fallbackFilename) {
+  const ct = String(res.headers['content-type'] || '')
+  const disposition = String(res.headers['content-disposition'] || '')
+  if (!/attachment/i.test(disposition) && ct.includes('application/json')) {
+    const text = await res.data.text()
+    let msg = 'Export failed'
+    try { msg = JSON.parse(text)?.error || msg } catch { /* ignore */ }
+    throw new Error(msg)
+  }
+  const match = disposition.match(/filename="?([^"]+)"?/)
+  const filename = match?.[1] || fallbackFilename
+  const url = URL.createObjectURL(new Blob([res.data]))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  setTimeout(() => URL.revokeObjectURL(url), 1500)
+}
+
 function CustomDashReportsPanel({ apiBase, selectedHosts, timeWindow, rangeLabel, bh, bhLabel }) {
   const [reportType, setReportType] = useState('fleetHealth') /* fleetHealth | latencyEpisodes */
   const [thresholdMs, setThresholdMs] = useState(150)
@@ -2561,14 +2583,25 @@ function CustomDashReportsPanel({ apiBase, selectedHosts, timeWindow, rangeLabel
     })
   }
 
-  const exportMd = () => {
+  const exportExcel = async () => {
     if (!report) return
-    const md = reportType === 'fleetHealth' ? buildFleetHealthMarkdown(report) : buildLatencyEpisodesMarkdown(report)
-    const stamp = new Date().toISOString().slice(0, 10)
-    const name = reportType === 'fleetHealth'
-      ? `CustomDash_FleetHealth_${stamp}.md`
-      : `CustomDash_LatencyEpisodes_${stamp}.md`
-    downloadTextFile(name, md)
+    setError(null)
+    setBusy(true)
+    try {
+      const stamp = new Date().toISOString().slice(0, 10)
+      const fallback = reportType === 'fleetHealth'
+        ? `CustomDash_FleetHealth_${stamp}.xlsx`
+        : `CustomDash_LatencyEpisodes_${stamp}.xlsx`
+      const res = await api.post(`${apiBase}/custom-dashboard/reports/export`, {
+        reportKind: reportType,
+        data: report,
+      }, { responseType: 'blob', timeout: 120000 })
+      await downloadExcelResponse(res, fallback)
+    } catch (e) {
+      setError(e?.response?.data?.error || e?.message || 'Failed to export Excel')
+    } finally {
+      setBusy(false)
+    }
   }
 
   const days = report?.perDay || []
@@ -2623,13 +2656,13 @@ function CustomDashReportsPanel({ apiBase, selectedHosts, timeWindow, rangeLabel
           }}>
           {busy ? 'Generating…' : 'Generate report'}
         </button>
-        <button type="button" onClick={exportMd} disabled={!report}
+        <button type="button" onClick={exportExcel} disabled={!report || busy}
           style={{
             padding: '6px 12px', borderRadius: 7, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600,
             border: '1px solid var(--border)', background: 'var(--bg3)', color: report ? 'var(--accent)' : 'var(--text3)',
-            cursor: report ? 'pointer' : 'default',
+            cursor: report && !busy ? 'pointer' : 'default',
           }}>
-          ⬇ Markdown
+          {busy ? 'Exporting…' : '⬇ Excel'}
         </button>
       </div>
 
@@ -4177,7 +4210,7 @@ export default function StoreZabbixPage({
   const [ropDisconnectError, setRopDisconnectError] = useState(null)
   const [ropExportBusy, setRopExportBusy] = useState(false)
   const [ropStoreExportBusy, setRopStoreExportBusy] = useState(false)
-  /* Reports tab — Fleet Health + Latency Episodes downloads (markdown). */
+  /* Reports tab — Fleet Health + Latency Episodes downloads (Excel). */
   const [reportFleetBusy, setReportFleetBusy] = useState(false)
   const [reportFleetError, setReportFleetError] = useState(null)
   const [reportLatencyBusy, setReportLatencyBusy] = useState(false)
@@ -4533,23 +4566,8 @@ export default function StoreZabbixPage({
 
   const downloadRopExcel = useCallback(async (path, fallbackFilename) => {
     const res = await api.get(path, { responseType: 'blob', timeout: 300000 })
-    const ct = String(res.headers['content-type'] || '')
-    const disposition = String(res.headers['content-disposition'] || '')
-    if (!/attachment/i.test(disposition) && ct.includes('application/json')) {
-      const text = await res.data.text()
-      let msg = 'Export failed'
-      try { msg = JSON.parse(text)?.error || msg } catch { /* ignore */ }
-      throw new Error(msg)
-    }
-    const match = disposition.match(/filename="?([^"]+)"?/)
-    const filename = match?.[1] || fallbackFilename
-    const url = URL.createObjectURL(new Blob([res.data]))
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    a.click()
-    URL.revokeObjectURL(url)
-  }, [apiBase])
+    await downloadExcelResponse(res, fallbackFilename)
+  }, [])
 
   const parseExportErr = useCallback(async (e) => {
     let msg = e.message || 'Export failed'
@@ -4711,17 +4729,6 @@ export default function StoreZabbixPage({
     return baseMsg
   }
 
-  const downloadReportMarkdown = (data, buildMd, filename) => {
-    if (!data?.perDay?.length) {
-      throw new Error('Report returned no days — check the date range and that Zabbix has history for these hosts.')
-    }
-    const md = buildMd(data)
-    if (!md?.trim()) {
-      throw new Error('Report was empty — no data in the selected range/BH window.')
-    }
-    downloadTextFile(filename, md)
-  }
-
   const fetchReportJobs = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setReportJobsBusy(true)
     try {
@@ -4793,26 +4800,23 @@ export default function StoreZabbixPage({
     setReportJobsError(null)
     setReportJobDownloadBusyId(job.id)
     try {
-      const { data } = await api.get(`${apiBase}/custom-dashboard/reports/jobs/${encodeURIComponent(job.id)}/result`, { timeout: 120000 })
-      if (!data?.data) {
-        throw new Error('Report is not ready yet.')
-      }
-      const reportKind = String(data?.job?.reportKind || job?.reportKind || 'fleetHealth')
-      const report = data.data
-      const stamp = new Date(data?.job?.finishedAt || Date.now()).toISOString().slice(0, 10)
-      const safeGroup = String(data?.job?.groupKey || job?.groupKey || 'rp').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40)
-      if (reportKind === 'latencyEpisodes') {
-        downloadReportMarkdown(report, buildLatencyEpisodesMarkdown, `Latency_Episodes_${safeGroup}_${stamp}.md`)
-      } else {
-        downloadReportMarkdown(report, buildFleetHealthMarkdown, `Fleet_Health_DayWise_${safeGroup}_${stamp}.md`)
-      }
+      const reportKind = String(job?.reportKind || 'fleetHealth')
+      const stamp = new Date(job?.finishedAt || Date.now()).toISOString().slice(0, 10)
+      const safeGroup = String(job?.groupKey || 'rp').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40)
+      const fallback = reportKind === 'latencyEpisodes'
+        ? `Latency_Episodes_${safeGroup}_${stamp}.xlsx`
+        : `Fleet_Health_DayWise_${safeGroup}_${stamp}.xlsx`
+      await downloadRopExcel(
+        `${apiBase}/custom-dashboard/reports/jobs/${encodeURIComponent(job.id)}/export`,
+        fallback,
+      )
       await fetchReportJobs({ silent: true })
     } catch (e) {
       setReportJobsError(formatReportApiError(e))
     } finally {
       setReportJobDownloadBusyId(null)
     }
-  }, [apiBase, fetchReportJobs])
+  }, [apiBase, downloadRopExcel, fetchReportJobs])
 
   const refetchProblems = useCallback(async () => {
     const qs = new URLSearchParams({ limit: '250' })
@@ -5633,6 +5637,7 @@ export default function StoreZabbixPage({
     { id: 'rop', label: 'ROP Dashboard', icon: '🏪', badge: ropUptime?.summary?.totalStores },
     { id: 'reports', label: 'Reports', icon: '📊' },
     { id: 'custom', label: 'Custom Dashboard', icon: '🧩' },
+    { id: 'alerts', label: 'Alerts Management', icon: '🔔' },
   ]
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 0, minHeight: 0 }}>
@@ -7785,7 +7790,7 @@ export default function StoreZabbixPage({
                                   style={{ marginLeft: 'auto', padding: '4px 8px', fontSize: 10 }}
                                   onClick={() => downloadCompletedReportJob(job)}
                                   disabled={reportJobDownloadBusyId === job.id}>
-                                  {reportJobDownloadBusyId === job.id ? 'Downloading…' : 'Download'}
+                                  {reportJobDownloadBusyId === job.id ? 'Downloading…' : 'Download Excel'}
                                 </button>
                               ) : status === 'failed' ? (
                                 <span style={{ marginLeft: 'auto', fontSize: 10, color: '#ef4444', fontFamily: 'var(--mono)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
@@ -8036,7 +8041,7 @@ export default function StoreZabbixPage({
                   )
                 })()}
 
-                {/* Fleet Health (Day-Wise EXACT) — markdown report */}
+                {/* Fleet Health (Day-Wise EXACT) — Excel report */}
                 <div className="rop-report-card">
                   <div className="rop-report-card-hd">
                     <span className="rop-report-card-title">📋 Fleet Health · Day-Wise EXACT</span>
@@ -8046,7 +8051,7 @@ export default function StoreZabbixPage({
                     Per-day report for the selected group + BH window. Each day lists exact reboots
                     (with boot times in IST), top hosts above the latency threshold, and network
                     issues without reboot — with full breach episodes (start–end, peak ms@time).
-                    Same shape as the manual <code>RP_Fleet_Health_DayWise_EXACT</code> markdown.
+                    Exported as a multi-sheet Excel workbook.
                   </p>
                   <div className="rop-report-stats">
                     {[
@@ -8082,12 +8087,12 @@ export default function StoreZabbixPage({
                     disabled={reportFleetBusy || reportScopeHostCount <= 0}
                     className="rop-action-btn"
                     style={{ alignSelf: 'flex-start' }}
-                    title="Queue report and notify when markdown is ready">
-                    {reportFleetBusy ? 'Queueing…' : '🔔 Notify + Download when ready'}
+                    title="Queue report and notify when Excel is ready">
+                    {reportFleetBusy ? 'Queueing…' : '🔔 Notify + Download Excel when ready'}
                   </button>
                 </div>
 
-                {/* High-Latency Episodes — markdown report */}
+                {/* High-Latency Episodes — Excel report */}
                 <div className="rop-report-card">
                   <div className="rop-report-card-hd">
                     <span className="rop-report-card-title">📈 High-Latency Episodes</span>
@@ -8096,8 +8101,7 @@ export default function StoreZabbixPage({
                   <p className="rop-report-card-desc">
                     Every contiguous run where ping &gt; threshold within BH (gap-merge tolerance
                     configurable). Per-host: window avg, max@IST, breach count, and full episode
-                    list <code>start–end peak@time</code>. Same shape as the manual
-                    <code> RP_HighLatency_Breach_Timestamps</code> markdown.
+                    list <code>start–end peak@time</code>. Exported as Excel with one row per host-day.
                   </p>
                   <div className="rop-report-stats">
                     {[
@@ -8123,8 +8127,8 @@ export default function StoreZabbixPage({
                     disabled={reportLatencyBusy || reportScopeHostCount <= 0}
                     className="rop-action-btn"
                     style={{ alignSelf: 'flex-start' }}
-                    title="Queue report and notify when markdown is ready">
-                    {reportLatencyBusy ? 'Queueing…' : '🔔 Notify + Download when ready'}
+                    title="Queue report and notify when Excel is ready">
+                    {reportLatencyBusy ? 'Queueing…' : '🔔 Notify + Download Excel when ready'}
                   </button>
                 </div>
               </div>
@@ -8218,6 +8222,11 @@ export default function StoreZabbixPage({
           onDeleteSavedFilter={handleDeleteSavedFilter}
           onRenameSavedFilter={handleUpdateSavedFilter}
         />
+      )}
+
+      {/* ═══════════ ALERTS MANAGEMENT TAB ═══════════ */}
+      {configured && reachable && tab === 'alerts' && (
+        <ZabbixAlertsPanel apiBase={apiBase} />
       )}
 
       {/* Click-popups launched from the Uptime per-host detail panel */}

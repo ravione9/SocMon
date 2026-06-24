@@ -5,6 +5,7 @@ import { fetchAllMonitoredHosts, ZABBIX_HOST_FETCH_MAX } from '../services/zabbi
 import { fetchRopUptimeReport, fetchRopStoreDisconnectEvents, fetchRopGroupDisconnectEvents } from '../services/ropUptimeReport.js'
 import { fetchRpFleetHealthReport } from '../services/rpFleetHealthReport.js'
 import { buildCustomDashReport } from '../services/customDashReports.js'
+import { buildCustomDashReportExcel } from '../services/customDashReportExcel.js'
 import {
   resolveReportHostsByGroup,
   resolveReportHostsByNames,
@@ -1476,7 +1477,7 @@ router.get('/custom-dashboard/reports/jobs/:jobId', (req, res) => {
 
 /**
  * GET /custom-dashboard/reports/jobs/:jobId/result
- * Fetch finished report payload (for markdown download).
+ * Fetch finished report payload (JSON preview / export source).
  */
 router.get('/custom-dashboard/reports/jobs/:jobId/result', (req, res) => {
   const job = getOwnedReportJob(req, req.params.jobId)
@@ -1493,6 +1494,43 @@ router.get('/custom-dashboard/reports/jobs/:jobId/result', (req, res) => {
     return res.status(202).json({ job: reportJobSummary(job) })
   }
   return res.json({ job: reportJobSummary(job), data: job.result })
+})
+
+/**
+ * GET /custom-dashboard/reports/jobs/:jobId/export
+ * Download finished report as Excel (.xlsx).
+ */
+router.get('/custom-dashboard/reports/jobs/:jobId/export', async (req, res) => {
+  const job = getOwnedReportJob(req, req.params.jobId)
+  if (!job) return res.status(404).json({ error: 'Report job not found' })
+  if (job.status === 'failed') {
+    return res.status(409).json({
+      error: job.error?.message || 'Report failed',
+      code: job.error?.code || 'REPORT_JOB_FAILED',
+      hint: job.error?.hint || null,
+      job: reportJobSummary(job),
+    })
+  }
+  if (job.status !== 'completed' || !job.result) {
+    return res.status(202).json({ job: reportJobSummary(job) })
+  }
+  if (!job.result?.perDay?.length) {
+    return res.status(400).json({ error: 'Report returned no days — check the date range and Zabbix history.' })
+  }
+  try {
+    const reportKind = String(job.reportKind || 'fleetHealth')
+    const wb = await buildCustomDashReportExcel(job.result, reportKind)
+    const stamp = new Date(job.finishedAt || Date.now()).toISOString().slice(0, 10)
+    const safeGroup = String(job.groupKey || 'rp').replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40)
+    const filename = reportKind === 'latencyEpisodes'
+      ? `Latency_Episodes_${safeGroup}_${stamp}.xlsx`
+      : `Fleet_Health_DayWise_${safeGroup}_${stamp}.xlsx`
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+    await wb.xlsx.write(res)
+  } catch (e) {
+    return res.status(500).json({ error: e.message || 'Failed to export report', code: e.code })
+  }
 })
 
 /**
@@ -1566,6 +1604,31 @@ router.post('/custom-dashboard/reports', async (req, res) => {
       })
     }
     return sendZabbixError(res, e)
+  }
+})
+
+/**
+ * POST /custom-dashboard/reports/export
+ * Convert an already-computed report payload to Excel (.xlsx).
+ */
+router.post('/custom-dashboard/reports/export', async (req, res) => {
+  try {
+    const body = req.body || {}
+    const reportKind = String(body.reportKind || 'fleetHealth')
+    const data = body.data
+    if (!data?.perDay?.length) {
+      return res.status(400).json({ error: 'Report has no data — generate the report first.' })
+    }
+    const wb = await buildCustomDashReportExcel(data, reportKind)
+    const stamp = new Date().toISOString().slice(0, 10)
+    const filename = reportKind === 'latencyEpisodes'
+      ? `CustomDash_LatencyEpisodes_${stamp}.xlsx`
+      : `CustomDash_FleetHealth_${stamp}.xlsx`
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+    await wb.xlsx.write(res)
+  } catch (e) {
+    return res.status(500).json({ error: e.message || 'Failed to export report', code: e.code })
   }
 })
 
