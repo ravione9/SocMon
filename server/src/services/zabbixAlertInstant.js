@@ -168,11 +168,14 @@ function hostCooldownMs(rule) {
 
 function isNewSlaBreach(ruleId, hostid, breaching, { seedOnly = false } = {}) {
   const key = stateKey(ruleId, hostid)
-  const was = breachState.get(key)
+  if (seedOnly) {
+    /** Baseline as healthy so hosts already breaching get notified on the first real poll. */
+    breachState.set(key, false)
+    return false
+  }
+  const wasBreaching = breachState.get(key) === true
   breachState.set(key, breaching)
-  if (seedOnly) return false
-  if (was === undefined) return false
-  return breaching && !was
+  return breaching && !wasBreaching
 }
 
 function hostCooldownOk(rule, hostid) {
@@ -253,7 +256,7 @@ async function buildItemBatchesForHosts(hostids) {
 /**
  * Instant SLA loop — polls scoped hosts every N seconds, fires Slack on NEW breach only.
  */
-export async function runInstantSlaCheck({ seedState = false, includeAllHosts = false } = {}) {
+export async function runInstantSlaCheck({ seedState = false, includeAllHosts = false, forceNotify = false } = {}) {
   if (!isZabbixConfigured()) {
     return { fired: 0, skipped: 0, reason: 'zabbix_not_configured' }
   }
@@ -282,25 +285,53 @@ export async function runInstantSlaCheck({ seedState = false, includeAllHosts = 
   const results = []
   let fired = 0
   let skipped = 0
+  let breachingHosts = 0
+  let edgeBlocked = 0
+  let cooldownBlocked = 0
+  let noMetricData = 0
 
   for (const rule of rules) {
     if (!shouldNotifyForBhPolicy(rule)) {
       skipped++
+      results.push({ ruleId: rule._id, ruleName: rule.name, skipped: true, reason: 'business_hours' })
       continue
     }
     const pingTarget = String(rule.condition?.target || DEFAULT_PING_TARGET).trim() || DEFAULT_PING_TARGET
     const affected = []
+    const ruleDiag = { breaching: 0, edgeBlocked: 0, cooldownBlocked: 0, noData: 0 }
 
     for (const h of scopedHosts) {
       if (!hostMatchesScope(h, rule.scope, groupMap)) continue
       const metrics = buildHostMetrics(h.hostid, itemBatches, pingTarget, nowSec, staleAfterSec)
       const breaching = evaluateCondition(rule.condition, metrics, h)
-      const isNew = isNewSlaBreach(String(rule._id), String(h.hostid), breaching, { seedOnly: seedState })
-      if (!breaching) continue
-      if (!isNew) continue
+      if (['latency', 'jitter', 'packet_loss'].includes(rule.condition?.metric)) {
+        const val = rule.condition.metric === 'latency' ? metrics.latency
+          : rule.condition.metric === 'jitter' ? metrics.jitter : metrics.packetLoss
+        if (val == null) {
+          noMetricData++
+          ruleDiag.noData++
+        }
+      }
+      if (!breaching) {
+        if (!seedState) isNewSlaBreach(String(rule._id), String(h.hostid), false)
+        continue
+      }
+      breachingHosts++
+      ruleDiag.breaching++
+      const isNew = forceNotify || isNewSlaBreach(String(rule._id), String(h.hostid), breaching, { seedOnly: seedState })
+      if (!isNew) {
+        edgeBlocked++
+        ruleDiag.edgeBlocked++
+        continue
+      }
       if (!hostCooldownOk(rule, h.hostid)) {
         skipped++
+        cooldownBlocked++
+        ruleDiag.cooldownBlocked++
         continue
+      }
+      if (forceNotify) {
+        breachState.set(stateKey(String(rule._id), String(h.hostid)), true)
       }
       affected.push({
         hostid: String(h.hostid),
@@ -317,9 +348,14 @@ export async function runInstantSlaCheck({ seedState = false, includeAllHosts = 
       })
     }
 
-    if (!affected.length) continue
+    if (!affected.length) {
+      if (ruleDiag.breaching > 0 || ruleDiag.noData > 0) {
+        results.push({ ruleId: rule._id, ruleName: rule.name, fired: false, diag: ruleDiag })
+      }
+      continue
+    }
     try {
-      const res = await fireRuleForHosts(rule, affected, { source: 'instant_sla' })
+      const res = await fireRuleForHosts(rule, affected, { source: forceNotify ? 'scheduled' : 'instant_sla' })
       fired++
       results.push({ ruleId: rule._id, ruleName: rule.name, fired: true, affected: affected.length, dispatch: res?.dispatch })
     } catch (e) {
@@ -330,8 +366,12 @@ export async function runInstantSlaCheck({ seedState = false, includeAllHosts = 
   const stats = {
     fired,
     skipped,
-    mode: 'instant_sla',
+    mode: forceNotify ? 'force' : 'instant_sla',
     hostsChecked: scopedHosts.length,
+    breachingHosts,
+    edgeBlocked,
+    cooldownBlocked,
+    noMetricData,
     evaluatedAt: new Date().toISOString(),
     staleAfterSec,
   }
@@ -482,6 +522,24 @@ export async function handleZabbixAlertWebhook(body, { eventId } = {}) {
   return { ok: true, fired, hostname }
 }
 
+async function initProblemWatermark() {
+  try {
+    const rows = await zabbixRpc('problem.get', {
+      output: ['eventid'],
+      sortfield: ['eventid'],
+      sortorder: 'DESC',
+      limit: 1,
+    })
+    const eid = Number(rows?.[0]?.eventid)
+    if (Number.isFinite(eid) && eid > 0) {
+      maxProblemEventId = eid
+      console.log(`[zabbixAlertInstant] Problem watermark eventid=${maxProblemEventId}`)
+    }
+  } catch (e) {
+    console.warn('[zabbixAlertInstant] Problem watermark init failed:', e.message)
+  }
+}
+
 export function startInstantSlaWatcher() {
   const instantMs = parseInt(process.env.ZABBIX_ALERT_INSTANT_MS || '10000', 10)
   const problemMs = parseInt(process.env.ZABBIX_ALERT_PROBLEM_MS || '10000', 10)
@@ -489,6 +547,8 @@ export function startInstantSlaWatcher() {
   if (!isZabbixConfigured()) return
 
   console.log(`[zabbixAlertInstant] SLA edge-check every ${instantMs / 1000}s · problem poll every ${problemMs / 1000}s`)
+
+  void initProblemWatermark()
 
   setTimeout(async () => {
     await runInstantSlaCheck({ seedState: true }).catch((e) => console.error('[zabbixAlertInstant] seed', e.message))

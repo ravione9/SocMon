@@ -228,7 +228,14 @@ async function sendGenericWebhook(ch, rule, hosts, msg) {
 export async function dispatchZabbixAlertNotifications(rule, affectedHosts) {
   const msg = buildZabbixAlertMessage(rule, affectedHosts)
   const results = []
-  for (const ch of (rule.channels || [])) {
+  const channels = (rule.channels || []).filter((ch) => {
+    if (ch.type === 'email') return ch.emails?.length
+    if (ch.type === 'slack' || ch.type === 'teams' || ch.type === 'google_chat' || ch.type === 'webhook') {
+      return String(ch.webhookUrl || '').trim().length > 0
+    }
+    return false
+  })
+  for (const ch of channels) {
     if (ch.type === 'slack' && ch.webhookUrl) {
       results.push({ channel: 'slack', ...(await sendSlack(ch.webhookUrl, msg)) })
     } else if (ch.type === 'teams' && ch.webhookUrl) {
@@ -242,6 +249,7 @@ export async function dispatchZabbixAlertNotifications(rule, affectedHosts) {
     }
   }
   if (!results.length) {
+    console.warn(`[zabbixAlertNotify] Rule "${rule.name}" has no valid channels (check Slack webhook URL is saved on the rule)`)
     results.push({ channel: 'none', ok: false, error: 'no valid notification channels on rule' })
   }
   return results

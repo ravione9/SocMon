@@ -265,9 +265,9 @@ export async function fetchZabbixAlertDashboard() {
   }
 }
 
-export async function runZabbixAlertEval() {
+export async function runZabbixAlertEval({ forceNotify = false } = {}) {
   /** Scheduled backup uses the same edge-trigger + per-host cooldown as instant SLA. */
-  return runInstantSlaCheck({ includeAllHosts: true })
+  return runInstantSlaCheck({ includeAllHosts: true, forceNotify })
 }
 
 export function startZabbixAlertEngine(io) {

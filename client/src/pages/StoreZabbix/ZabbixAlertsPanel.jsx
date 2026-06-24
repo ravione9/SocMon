@@ -407,8 +407,11 @@ export default function ZabbixAlertsPanel({ apiBase = '/api/store-zabbix' }) {
   const runEval = async () => {
     setEvalBusy(true)
     try {
-      const { data } = await api.post(`${alertsApi}/evaluate`)
-      window.alert(`Evaluation complete: ${data.fired} fired, ${data.skipped} skipped`)
+      const { data } = await api.post(`${alertsApi}/evaluate`, { force: true })
+      const diag = data.breachingHosts != null
+        ? `\nBreaching: ${data.breachingHosts} · edge-blocked: ${data.edgeBlocked ?? 0} · no sensor data: ${data.noMetricData ?? 0}`
+        : ''
+      window.alert(`Evaluation complete: ${data.fired} fired, ${data.skipped} skipped${diag}`)
       await refresh()
     } catch (e) {
       window.alert(e.response?.data?.error || e.message)

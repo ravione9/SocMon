@@ -69,16 +69,18 @@ router.post('/test-channel', async (req, res, next) => {
   } catch (e) { next(e) }
 })
 
-router.post('/evaluate', async (_req, res, next) => {
+router.post('/evaluate', async (req, res, next) => {
   try {
-    const result = await runZabbixAlertEval()
+    const force = req.query.force === '1' || req.body?.force === true
+    const result = await runZabbixAlertEval({ forceNotify: force })
     res.json(result)
   } catch (e) { next(e) }
 })
 
-router.post('/evaluate/instant', async (_req, res, next) => {
+router.post('/evaluate/instant', async (req, res, next) => {
   try {
-    const result = await runInstantSlaCheck()
+    const force = req.query.force === '1' || req.body?.force === true
+    const result = await runInstantSlaCheck({ forceNotify: force })
     res.json(result)
   } catch (e) { next(e) }
 })
