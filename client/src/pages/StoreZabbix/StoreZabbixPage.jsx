@@ -969,9 +969,19 @@ const CUSTOM_DASH_KEY_RES = {
   jitter: [
     /^custom\.ping\.jitter(\b|\[)/i,
   ],
+  /* Local default-gateway RTT (custom Zabbix sensor). Values treated as milliseconds. */
+  gatewayLatency: [
+    /^custom\.gateway\.ms(\b|\[)/i,
+  ],
 }
 /** Metrics displayed in ms with latency-style tiles and detail panels. */
-const CUSTOM_DASH_MS_METRICS = new Set(['latency', 'jitter'])
+const CUSTOM_DASH_MS_METRICS = new Set(['latency', 'jitter', 'gatewayLatency'])
+/** Range-history tiles that show max ms over [from, to] (BH-aware). */
+const CUSTOM_DASH_RANGE_MS_TILES = new Set(['maxJitter', 'maxGatewayLatency'])
+const CUSTOM_DASH_RANGE_MS_WIDGET = {
+  maxJitter: { itemKey: 'jitter', label: 'Jitter' },
+  maxGatewayLatency: { itemKey: 'gatewayLatency', label: 'Gateway latency' },
+}
 const CUSTOM_DASH_INVERT_RE = /pavailable|pfree/i
 /** Per-mode CPU keys that are NOT the aggregate (we deprioritize these). */
 const CUSTOM_DASH_PER_MODE_RE = /\[\s*[^\]]*?(user|system|iowait|idle|steal|nice|kernel|softirq|hardirq|interrupt)/i
@@ -1246,8 +1256,8 @@ function computeUptimeStats(points, fromTs, toTs, bh) {
   return { rebootCount: reboots.length, reboots, upSec, totalSec, downSec, uptimePct, lastReboot }
 }
 
-/** Max / avg jitter (ms) from a custom.ping.jitter history series over [from, to], BH-filtered when enabled. */
-function computeJitterStats(points, fromTs, toTs, bh) {
+/** Max / avg ms from a Zabbix history series over [from, to], BH-filtered when enabled. */
+function computeRangeMsStats(points, fromTs, toTs, bh) {
   let filtered = (points || [])
     .filter((p) => p.clock >= fromTs && p.clock <= toTs && Number.isFinite(p.value))
   if (bh?.bhEnabled) {
@@ -1260,6 +1270,25 @@ function computeJitterStats(points, fromTs, toTs, bh) {
   const maxMs = Math.max(...values)
   const avgMs = values.reduce((s, v) => s + v, 0) / values.length
   return { maxMs, avgMs, pointCount: filtered.length }
+}
+
+/** Aggregate range max-ms stats across hosts for a dashboard tile. */
+function buildMaxRangeMsAgg(hostMetricItems, itemKey, kind, statsByHost, statsBusy) {
+  const rows = (hostMetricItems || []).map((row) => {
+    const stat = statsByHost?.[String(row.host.hostid)]
+    return { host: row.host, item: row[itemKey], maxMs: stat?.maxMs, avgMs: stat?.avgMs }
+  })
+  const reporting = rows.filter((r) => r.item && r.maxMs != null)
+  if (!reporting.length) {
+    return { reporting: [], total: rows.length, kind, summary: null, busy: statsBusy }
+  }
+  const peak = reporting.reduce((acc, r) => (acc == null || r.maxMs > acc.maxMs ? r : acc), null)
+  const fleetAvg = reporting.reduce((s, r) => s + (r.avgMs ?? r.maxMs), 0) / reporting.length
+  return {
+    reporting, total: rows.length, kind,
+    summary: { value: peak.maxMs, host: peak.host, avg: fleetAvg },
+    busy: statsBusy,
+  }
 }
 
 /** Day-of-week labels (Sun-first, matches getDay()). */
@@ -2958,6 +2987,7 @@ function CustomDashboardPanel({
   crashes, crashesBusy, crashesError,
   uptimeStats, uptimeStatsBusy,
   jitterStats, jitterStatsBusy,
+  gatewayStats, gatewayStatsBusy,
   onOpenRebootModal, onOpenCrashModal,
   onRefresh,
   prefsSavedAt, prefsBusy,
@@ -3013,6 +3043,7 @@ function CustomDashboardPanel({
         uptime: pickCustomDashItem(items, 'uptime'),
         latency: pickCustomDashItem(items, 'latency'),
         jitter: pickCustomDashItem(items, 'jitter'),
+        gatewayLatency: pickCustomDashItem(items, 'gatewayLatency'),
       }
     })
   }, [selectedHosts, latestByHost])
@@ -3051,24 +3082,14 @@ function CustomDashboardPanel({
   }, [hostMetricItems, uptimeStats, uptimeStatsBusy])
   const latAgg = useMemo(() => aggregateMetric(hostMetricItems, 'latency'), [hostMetricItems])
   const jitterAgg = useMemo(() => aggregateMetric(hostMetricItems, 'jitter'), [hostMetricItems])
-  /* Max Jitter tile shows range-aware peak (BH-aware) from history.get. */
-  const maxJitterAgg = useMemo(() => {
-    const rows = (hostMetricItems || []).map((row) => {
-      const stat = jitterStats?.[String(row.host.hostid)]
-      return { host: row.host, item: row.jitter, maxMs: stat?.maxMs, avgMs: stat?.avgMs }
-    })
-    const reporting = rows.filter((r) => r.item && r.maxMs != null)
-    if (!reporting.length) {
-      return { reporting: [], total: rows.length, kind: 'maxJitter', summary: null, busy: jitterStatsBusy }
-    }
-    const peak = reporting.reduce((acc, r) => (acc == null || r.maxMs > acc.maxMs ? r : acc), null)
-    const fleetAvg = reporting.reduce((s, r) => s + (r.avgMs ?? r.maxMs), 0) / reporting.length
-    return {
-      reporting, total: rows.length, kind: 'maxJitter',
-      summary: { value: peak.maxMs, host: peak.host, avg: fleetAvg },
-      busy: jitterStatsBusy,
-    }
-  }, [hostMetricItems, jitterStats, jitterStatsBusy])
+  const maxJitterAgg = useMemo(
+    () => buildMaxRangeMsAgg(hostMetricItems, 'jitter', 'maxJitter', jitterStats, jitterStatsBusy),
+    [hostMetricItems, jitterStats, jitterStatsBusy],
+  )
+  const maxGatewayLatencyAgg = useMemo(
+    () => buildMaxRangeMsAgg(hostMetricItems, 'gatewayLatency', 'maxGatewayLatency', gatewayStats, gatewayStatsBusy),
+    [hostMetricItems, gatewayStats, gatewayStatsBusy],
+  )
 
   /** Index InfluxDB crash events by lowercase host/store key for fast per-host lookup. */
   const crashesByHost = useMemo(() => {
@@ -3411,6 +3432,12 @@ function CustomDashboardPanel({
               busy={jitterStatsBusy} agg={maxJitterAgg}
               contextLine={`${rangeLabel}${bhEnabled ? ` · ${bhLabel}` : ''}`}
             />
+            <CustomDashMetricTile
+              kind="maxGatewayLatency" active={activeWidget === 'maxGatewayLatency'} onClick={() => onSelectWidget('maxGatewayLatency')}
+              title={bhEnabled ? 'Max Local Gateway Latency (BH)' : 'Max Local Gateway Latency (range)'} icon="⌂" color="#0ea5e9"
+              busy={gatewayStatsBusy} agg={maxGatewayLatencyAgg}
+              contextLine={`${rangeLabel}${bhEnabled ? ` · ${bhLabel}` : ''}`}
+            />
             <CustomDashEventTile
               kind="internet" active={activeWidget === 'internet'} onClick={() => onSelectWidget('internet')}
               title="Internet Disconnect" icon="📡" color="#f97316"
@@ -3455,6 +3482,8 @@ function CustomDashboardPanel({
             uptimeStatsBusy={uptimeStatsBusy}
             jitterStats={jitterStats}
             jitterStatsBusy={jitterStatsBusy}
+            gatewayStats={gatewayStats}
+            gatewayStatsBusy={gatewayStatsBusy}
             onOpenRebootModal={onOpenRebootModal}
             onOpenCrashModal={onOpenCrashModal}
           />
@@ -3519,7 +3548,7 @@ function CustomDashMetricTile({ active, onClick, title, icon, color, busy, agg, 
       /* Legacy snapshot uptime (kept for compatibility — not used by the tile). */
       bigText = fmtValue(Number(agg.summary.value), 'uptime')
       subText = agg.summary.host ? `Min · ${agg.summary.host.name || agg.summary.host.host}` : ''
-    } else if (agg.kind === 'maxJitter') {
+    } else if (CUSTOM_DASH_RANGE_MS_TILES.has(agg.kind)) {
       bigText = fmtLatencyMs(agg.summary.value)
       meterPct = Math.min(100, Math.max(0, (agg.summary.value / 200) * 100))
       bigColor = agg.summary.value >= 150 ? '#ef4444' : agg.summary.value >= 50 ? '#eab308' : '#22c55e'
@@ -3700,6 +3729,7 @@ function CustomDashDetailPanel({
   rangeLabel, bhEnabled, bhStart, bhEnd, bhDays, bhLabel, timeWindow,
   uptimeStats, uptimeStatsBusy,
   jitterStats, jitterStatsBusy,
+  gatewayStats, gatewayStatsBusy,
   onOpenRebootModal, onOpenCrashModal,
 }) {
   if (!widget) {
@@ -3711,7 +3741,8 @@ function CustomDashDetailPanel({
       </Widget>
     )
   }
-  if (widget === 'cpu' || widget === 'memory' || widget === 'uptime' || widget === 'latency' || widget === 'jitter' || widget === 'maxJitter') {
+  if (widget === 'cpu' || widget === 'memory' || widget === 'uptime' || widget === 'latency' || widget === 'jitter' || CUSTOM_DASH_RANGE_MS_TILES.has(widget)) {
+    const rangeMsCfg = CUSTOM_DASH_RANGE_MS_WIDGET[widget]
     const titleMap = {
       cpu: 'CPU Usage — per-host detail',
       memory: 'Memory Usage — per-host detail',
@@ -3719,21 +3750,28 @@ function CustomDashDetailPanel({
       latency: 'Avg Latency — per-host detail',
       jitter: 'Avg Jitter — per-host detail',
       maxJitter: 'Max Jitter — per-host detail',
+      maxGatewayLatency: 'Max Local Gateway Latency — per-host detail',
     }
-    const metricKey = widget === 'maxJitter' ? 'jitter' : widget
+    const metricKey = rangeMsCfg?.itemKey || widget
     const rows = (hostMetricItems || []).map((row) => ({ host: row.host, item: row[metricKey] }))
     const reporting = rows.filter((r) => r.item)
     const isUptimeWidget = widget === 'uptime'
-    const isMaxJitterWidget = widget === 'maxJitter'
-    const isMsMetricWidget = CUSTOM_DASH_MS_METRICS.has(widget) || isMaxJitterWidget
-    const msMetricLabel = (widget === 'jitter' || widget === 'maxJitter') ? 'Jitter' : 'Latency'
+    const isRangeMaxMsWidget = CUSTOM_DASH_RANGE_MS_TILES.has(widget)
+    const rangeMsStats = widget === 'maxJitter' ? jitterStats : widget === 'maxGatewayLatency' ? gatewayStats : null
+    const rangeMsStatsBusy = widget === 'maxJitter' ? jitterStatsBusy : widget === 'maxGatewayLatency' ? gatewayStatsBusy : false
+    const isMsMetricWidget = CUSTOM_DASH_MS_METRICS.has(widget) || isRangeMaxMsWidget
+    const msMetricLabel = widget === 'jitter' || widget === 'maxJitter'
+      ? 'Jitter'
+      : widget === 'maxGatewayLatency'
+        ? 'Gateway latency'
+        : 'Latency'
     return (
       <Widget title={titleMap[widget]} badge={`${reporting.length}/${rows.length}`} badgeColor="blue" noPad>
         <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 14, fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text3)', flexWrap: 'wrap' }}>
           <span>Range: <strong style={{ color: 'var(--text2)' }}>{rangeLabel}</strong></span>
           {bhEnabled && <span>BH window: <strong style={{ color: 'var(--text2)' }}>{bhLabel}</strong> <em style={{ color: 'var(--text3)' }}>(stats + charts use BH window only)</em></span>}
           {isUptimeWidget && uptimeStatsBusy && <span style={{ color: 'var(--accent)' }}>Computing range uptime…</span>}
-          {isMaxJitterWidget && jitterStatsBusy && <span style={{ color: 'var(--accent)' }}>Computing range jitter…</span>}
+          {isRangeMaxMsWidget && rangeMsStatsBusy && <span style={{ color: 'var(--accent)' }}>Computing range {msMetricLabel.toLowerCase()}…</span>}
         </div>
         {!rows.length && (
           <div style={{ padding: 24, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12, textAlign: 'center' }}>
@@ -3743,9 +3781,9 @@ function CustomDashDetailPanel({
         <div style={{ display: 'flex', flexDirection: 'column' }}>
           {rows.map(({ host, item }) => {
             const isExp = expandedItem && expandedItem.hostid === host.hostid && expandedItem.metric === widget
-            const jitterStat = isMaxJitterWidget ? jitterStats?.[String(host.hostid)] : null
-            const v = isMaxJitterWidget
-              ? jitterStat?.maxMs
+            const rangeMsStat = isRangeMaxMsWidget ? rangeMsStats?.[String(host.hostid)] : null
+            const v = isRangeMaxMsWidget
+              ? rangeMsStat?.maxMs
               : (item ? Number(item._displayValue ?? item.value) : null)
             const display = item
               ? (widget === 'uptime'
@@ -3798,18 +3836,18 @@ function CustomDashDetailPanel({
                       ) : 'No metric'}
                     </div>
                   </div>
-                  {!isUptimeWidget && !isMaxJitterWidget && (
+                  {!isUptimeWidget && !isRangeMaxMsWidget && (
                     <div style={{ flex: '0 1 220px', minWidth: 120, display: (isPct || isMsMetricWidget) ? 'flex' : 'none', alignItems: 'center', gap: 8 }}>
                       <div style={{ flex: 1, height: 5, borderRadius: 3, background: 'var(--bg4)', overflow: 'hidden' }}>
                         <div style={{ width: `${meterPct}%`, height: '100%', background: valueColor, transition: 'width .3s' }} />
                       </div>
                     </div>
                   )}
-                  {isMaxJitterWidget && (
+                  {isRangeMaxMsWidget && (
                     <>
-                      <div style={{ width: 100, textAlign: 'right' }} title="Average jitter over selected range (BH-aware)">
+                      <div style={{ width: 100, textAlign: 'right' }} title={`Average ${msMetricLabel.toLowerCase()} over selected range (BH-aware)`}>
                         <div style={{ fontSize: 10, color: 'var(--text3)' }}>Avg ({bhEnabled ? 'BH' : 'range'})</div>
-                        <div style={{ fontWeight: 700, color: 'var(--text2)' }}>{jitterStat?.avgMs == null ? '—' : fmtLatencyMs(jitterStat.avgMs)}</div>
+                        <div style={{ fontWeight: 700, color: 'var(--text2)' }}>{rangeMsStat?.avgMs == null ? '—' : fmtLatencyMs(rangeMsStat.avgMs)}</div>
                       </div>
                       <div style={{ flex: '0 1 160px', minWidth: 100, display: 'flex', alignItems: 'center', gap: 8 }}>
                         <div style={{ flex: 1, height: 5, borderRadius: 3, background: 'var(--bg4)', overflow: 'hidden' }}>
@@ -3856,10 +3894,10 @@ function CustomDashDetailPanel({
                     </>
                   )}
                   <div style={{ minWidth: 80, fontWeight: 700, color: valueColor, textAlign: 'right' }}
-                    title={isUptimeWidget ? 'Current uptime (latest value)' : isMaxJitterWidget ? `Max ${msMetricLabel.toLowerCase()} in range (BH-aware)` : isMsMetricWidget ? `Latest ${msMetricLabel.toLowerCase()} reading (ms)` : 'Latest value'}>
+                    title={isUptimeWidget ? 'Current uptime (latest value)' : isRangeMaxMsWidget ? `Max ${msMetricLabel.toLowerCase()} in range (BH-aware)` : isMsMetricWidget ? `Latest ${msMetricLabel.toLowerCase()} reading (ms)` : 'Latest value'}>
                     {display}
                   </div>
-                  {!isUptimeWidget && !isMaxJitterWidget && (
+                  {!isUptimeWidget && !isRangeMaxMsWidget && (
                     <div style={{ width: 130, fontSize: 10, color: 'var(--text3)', textAlign: 'right' }}>
                       {item ? <>{fmtClock(item.lastclock)}<div style={{ fontSize: 9 }}>{relAge(item.lastclock)} ago</div></> : '—'}
                     </div>
@@ -4319,7 +4357,7 @@ export default function StoreZabbixPage({
   const [customDashEvents, setCustomDashEvents] = useState(null)
   const [customDashEventsBusy, setCustomDashEventsBusy] = useState(false)
   const [customDashEventLimit, setCustomDashEventLimit] = useState(2000)
-  /** Active widget for the detail panel: 'cpu' | 'memory' | 'uptime' | 'latency' | 'jitter' | 'maxJitter' | 'internet' | 'usb' | 'appCrash' | null */
+  /** Active widget for the detail panel: 'cpu' | 'memory' | 'uptime' | 'latency' | 'jitter' | 'maxJitter' | 'maxGatewayLatency' | 'internet' | 'usb' | 'appCrash' | null */
   const [customDashWidget, setCustomDashWidget] = useState(null)
   /** Range chip: '24h' | '7d' | '14d' | '30d' | 'custom' */
   const [customDashRange, setCustomDashRange] = useState('24h')
@@ -4343,6 +4381,9 @@ export default function StoreZabbixPage({
   /** Per-host max/avg jitter (ms) over selected range from custom.ping.jitter history. */
   const [customDashJitterStats, setCustomDashJitterStats] = useState({})
   const [customDashJitterStatsBusy, setCustomDashJitterStatsBusy] = useState(false)
+  /** Per-host max/avg local gateway latency (ms) from custom.gateway.ms history. */
+  const [customDashGatewayStats, setCustomDashGatewayStats] = useState({})
+  const [customDashGatewayStatsBusy, setCustomDashGatewayStatsBusy] = useState(false)
   /** Modals shown when user clicks the Reboots / App-crash count cells. */
   const [customDashRebootModalHost, setCustomDashRebootModalHost] = useState(null)
   const [customDashCrashModalHost, setCustomDashCrashModalHost] = useState(null)
@@ -4505,11 +4546,11 @@ export default function StoreZabbixPage({
     }
   }, [apiBase])
 
-  /** Fetch custom.ping.jitter history per host and compute max/avg over [from, to] (BH-aware). */
-  const loadCustomDashJitterStats = useCallback(async (jitterItemPairs, fromTs, toTs, bh) => {
-    const pairs = (jitterItemPairs || []).filter((p) => p?.itemid && p?.hostid)
-    if (!pairs.length) { setCustomDashJitterStats({}); return }
-    setCustomDashJitterStatsBusy(true)
+  /** Fetch Zabbix item history per host and compute max/avg ms over [from, to] (BH-aware). */
+  const loadCustomDashRangeMsStats = useCallback(async (itemPairs, fromTs, toTs, bh, setStats, setBusy) => {
+    const pairs = (itemPairs || []).filter((p) => p?.itemid && p?.hostid)
+    if (!pairs.length) { setStats({}); return }
+    setBusy(true)
     try {
       const results = await Promise.all(pairs.map(async ({ hostid, itemid }) => {
         try {
@@ -4517,17 +4558,26 @@ export default function StoreZabbixPage({
           const { data } = await api.get(`${apiBase}/items/${encodeURIComponent(itemid)}/history?${qs}`)
           const points = (data?.points || []).map((p) => ({ clock: Number(p.clock), value: Number(p.value) }))
             .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
-          const stats = computeJitterStats(points, fromTs, toTs, bh)
+          const stats = computeRangeMsStats(points, fromTs, toTs, bh)
           return [String(hostid), { itemid, ...stats }]
         } catch {
           return [String(hostid), { itemid, error: true, maxMs: null, avgMs: null, pointCount: 0 }]
         }
       }))
-      setCustomDashJitterStats(Object.fromEntries(results))
+      setStats(Object.fromEntries(results))
     } finally {
-      setCustomDashJitterStatsBusy(false)
+      setBusy(false)
     }
   }, [apiBase])
+
+  const loadCustomDashJitterStats = useCallback(
+    (pairs, fromTs, toTs, bh) => loadCustomDashRangeMsStats(pairs, fromTs, toTs, bh, setCustomDashJitterStats, setCustomDashJitterStatsBusy),
+    [loadCustomDashRangeMsStats],
+  )
+  const loadCustomDashGatewayStats = useCallback(
+    (pairs, fromTs, toTs, bh) => loadCustomDashRangeMsStats(pairs, fromTs, toTs, bh, setCustomDashGatewayStats, setCustomDashGatewayStatsBusy),
+    [loadCustomDashRangeMsStats],
+  )
 
   /**
    * Fetch app/service crash events from InfluxDB for the selected hosts over [from, to].
@@ -5231,7 +5281,7 @@ export default function StoreZabbixPage({
     const ids = (customDashSelected || []).map((h) => h.hostid).filter(Boolean)
     const hostnames = (customDashSelected || []).map((h) => h.host || h.name).filter(Boolean)
     if (!ids.length) {
-      setCustomDashLatestByHost({}); setCustomDashEvents([]); setCustomDashCrashes([]); setCustomDashCrashesError(null); setCustomDashUptimeStats({}); setCustomDashJitterStats({})
+      setCustomDashLatestByHost({}); setCustomDashEvents([]); setCustomDashCrashes([]); setCustomDashCrashesError(null); setCustomDashUptimeStats({}); setCustomDashJitterStats({}); setCustomDashGatewayStats({})
       return
     }
     loadCustomDashLatest(ids)
@@ -5281,6 +5331,25 @@ export default function StoreZabbixPage({
     customDashTimeWindow.from, customDashTimeWindow.to,
     customDashBhEnabled, customDashBhStart, customDashBhEnd, customDashBhDays,
     loadCustomDashJitterStats,
+  ])
+
+  /* Custom Dashboard: preload per-host max local gateway latency whenever hosts, range, or BH changes. */
+  useEffect(() => {
+    if (!config?.configured || tab !== 'custom') return
+    const pairs = []
+    for (const h of customDashSelected || []) {
+      const data = customDashLatestByHost?.[String(h.hostid)]
+      const gItem = pickCustomDashItem(data?.latest, 'gatewayLatency')
+      if (gItem?.itemid) pairs.push({ hostid: String(h.hostid), itemid: gItem.itemid })
+    }
+    if (!pairs.length) { setCustomDashGatewayStats({}); return }
+    const bh = { bhEnabled: customDashBhEnabled, bhStart: customDashBhStart, bhEnd: customDashBhEnd, bhDays: customDashBhDays }
+    loadCustomDashGatewayStats(pairs, customDashTimeWindow.from, customDashTimeWindow.to, bh)
+  }, [
+    tab, config?.configured, customDashSelected, customDashLatestByHost,
+    customDashTimeWindow.from, customDashTimeWindow.to,
+    customDashBhEnabled, customDashBhStart, customDashBhEnd, customDashBhDays,
+    loadCustomDashGatewayStats,
   ])
 
   useEffect(() => {
@@ -8318,6 +8387,8 @@ export default function StoreZabbixPage({
           uptimeStatsBusy={customDashUptimeStatsBusy}
           jitterStats={customDashJitterStats}
           jitterStatsBusy={customDashJitterStatsBusy}
+          gatewayStats={customDashGatewayStats}
+          gatewayStatsBusy={customDashGatewayStatsBusy}
           /* Modal callbacks */
           onOpenRebootModal={(h) => setCustomDashRebootModalHost(h)}
           onOpenCrashModal={(h) => setCustomDashCrashModalHost(h)}
