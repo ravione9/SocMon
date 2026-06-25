@@ -20,6 +20,14 @@ import {
   shouldNotifyForBhPolicy,
   describeBusinessHoursStatus,
 } from '../utils/zabbixAlertBusinessHours.js'
+import {
+  evaluateRuleConditions,
+  getRuleConditions,
+  metricValueFromMetrics,
+  primaryPingTarget,
+  ruleMissingPingMetricData,
+  triggeredValuesForRule,
+} from '../utils/zabbixAlertConditions.js'
 
 const SUSTAINED_POLLS = Math.max(1, parseInt(process.env.ZABBIX_ALERT_SUSTAINED_POLLS || '2', 10))
 
@@ -69,12 +77,12 @@ function trackBreachStreak(ruleId, hostid, breaching) {
   return n
 }
 
-function syncRuleBreachStateWhileSuppressed(rule, scopedHosts, groupMap, itemBatches, pingTarget, nowSec, staleAfterSec) {
+function syncRuleBreachStateWhileSuppressed(rule, scopedHosts, groupMap, itemBatches, nowSec, staleAfterSec) {
   const ruleId = String(rule._id)
   for (const h of scopedHosts) {
     if (!hostMatchesScope(h, rule.scope, groupMap)) continue
-    const metrics = buildHostMetrics(h.hostid, itemBatches, pingTarget, nowSec, staleAfterSec)
-    const breaching = evaluateCondition(rule.condition, metrics, h)
+    const buildMetrics = (target) => buildHostMetrics(h.hostid, itemBatches, target, nowSec, staleAfterSec)
+    const breaching = evaluateRuleConditions(rule, h, buildMetrics)
     syncBreachState(ruleId, String(h.hostid), breaching)
     if (breaching) trackBreachStreak(ruleId, String(h.hostid), true)
   }
@@ -133,45 +141,6 @@ function hostMatchesScope(host, scope, groupMap) {
   return true
 }
 
-function evaluateCondition(cond, metrics, host) {
-  const { metric, operator, threshold, thresholdMax } = cond
-  let value = null
-  if (metric === 'host_down') {
-    const avail = Number(host.available ?? host.active_available)
-    if (avail === 2) return true
-    if (metrics.packetLoss != null && metrics.packetLoss >= 100) return true
-    if (metrics.raw?.packetLoss?.fresh && metrics.raw.packetLoss.value >= 100) return true
-    return metrics.agentPing === 0
-  }
-  if (metric === 'agent_down') return metrics.agentPing === 0
-  if (metric === 'cpu') value = metrics.cpu
-  if (metric === 'memory') value = metrics.memory
-  if (metric === 'latency') { value = metrics.latency; if (value == null) return false }
-  if (metric === 'jitter') { value = metrics.jitter; if (value == null) return false }
-  if (metric === 'packet_loss') { value = metrics.packetLoss; if (value == null) return false }
-  if (value == null || !Number.isFinite(Number(value))) return false
-  const v = Number(value)
-  const t = Number(threshold)
-  const tMax = Number(thresholdMax)
-  if (operator === 'between') return v >= t && v <= tMax
-  if (operator === 'gt' || !operator) return v > t
-  if (operator === 'gte') return v >= t
-  if (operator === 'lt') return v < t
-  if (operator === 'lte') return v <= t
-  if (operator === 'eq') return v === t
-  return false
-}
-
-function triggeredValueForMetric(cond, metrics) {
-  const m = cond.metric
-  if (m === 'latency') return metrics.latency
-  if (m === 'jitter') return metrics.jitter
-  if (m === 'packet_loss') return metrics.packetLoss
-  if (m === 'cpu') return metrics.cpu
-  if (m === 'memory') return metrics.memory
-  return null
-}
-
 function hostCooldownMs(rule) {
   const ruleMin = Number(rule.cooldownMinutes)
   const envMin = parseInt(process.env.ZABBIX_ALERT_HOST_COOLDOWN_MIN || '15', 10)
@@ -197,6 +166,8 @@ async function fireRuleForHosts(rule, affected, { source = 'instant' } = {}) {
     ruleName: rule.name,
     severity: rule.severity,
     condition: rule.condition,
+    conditions: getRuleConditions(rule),
+    logic: rule.logic || 'and',
     affectedCount: affected.length,
     hosts: affected.slice(0, 50),
     hasMore: affected.length > 50,
@@ -292,9 +263,8 @@ export async function runInstantSlaCheck({ seedState = false, includeAllHosts = 
   let noMetricData = 0
 
   for (const rule of rules) {
-    const pingTarget = String(rule.condition?.target || DEFAULT_PING_TARGET).trim() || DEFAULT_PING_TARGET
     if (!shouldNotifyForBhPolicy(rule)) {
-      syncRuleBreachStateWhileSuppressed(rule, scopedHosts, groupMap, itemBatches, pingTarget, nowSec, staleAfterSec)
+      syncRuleBreachStateWhileSuppressed(rule, scopedHosts, groupMap, itemBatches, nowSec, staleAfterSec)
       skipped++
       results.push({
         ruleId: rule._id,
@@ -310,15 +280,11 @@ export async function runInstantSlaCheck({ seedState = false, includeAllHosts = 
 
     for (const h of scopedHosts) {
       if (!hostMatchesScope(h, rule.scope, groupMap)) continue
-      const metrics = buildHostMetrics(h.hostid, itemBatches, pingTarget, nowSec, staleAfterSec)
-      const breaching = evaluateCondition(rule.condition, metrics, h)
-      if (['latency', 'jitter', 'packet_loss'].includes(rule.condition?.metric)) {
-        const val = rule.condition.metric === 'latency' ? metrics.latency
-          : rule.condition.metric === 'jitter' ? metrics.jitter : metrics.packetLoss
-        if (val == null) {
-          noMetricData++
-          ruleDiag.noData++
-        }
+      const buildMetrics = (target) => buildHostMetrics(h.hostid, itemBatches, target, nowSec, staleAfterSec)
+      const breaching = evaluateRuleConditions(rule, h, buildMetrics)
+      if (ruleMissingPingMetricData(rule, buildMetrics)) {
+        noMetricData++
+        ruleDiag.noData++
       }
       if (!breaching) {
         if (!seedState) {
@@ -349,17 +315,24 @@ export async function runInstantSlaCheck({ seedState = false, includeAllHosts = 
       if (forceNotify) {
         breachState.set(stateKey(String(rule._id), String(h.hostid)), true)
       }
+      const pingTarget = primaryPingTarget(rule)
+      const metricsCache = new Map()
+      const primaryMetrics = buildMetrics(pingTarget)
+      metricsCache.set(pingTarget, primaryMetrics)
+      const triggeredValues = triggeredValuesForRule(rule, metricsCache, buildMetrics)
+      const primaryCond = getRuleConditions(rule)[0]
       affected.push({
         hostid: String(h.hostid),
         hostname: h.host,
         name: h.name,
-        triggeredValue: triggeredValueForMetric(rule.condition, metrics),
-        latency: metrics.latency,
-        jitter: metrics.jitter,
-        packetLoss: metrics.packetLoss,
-        cpu: metrics.cpu,
-        memory: metrics.memory,
-        sensorKeys: metrics.itemKeys,
+        triggeredValue: metricValueFromMetrics(primaryCond, primaryMetrics),
+        triggeredValues,
+        latency: primaryMetrics.latency,
+        jitter: primaryMetrics.jitter,
+        packetLoss: primaryMetrics.packetLoss,
+        cpu: primaryMetrics.cpu,
+        memory: primaryMetrics.memory,
+        sensorKeys: primaryMetrics.itemKeys,
         pingTarget,
       })
     }
@@ -432,7 +405,7 @@ export async function previewZabbixAlertEvaluation() {
 
   const rulePreviews = []
   for (const rule of rules) {
-    const pingTarget = String(rule.condition?.target || DEFAULT_PING_TARGET).trim() || DEFAULT_PING_TARGET
+    const pingTarget = primaryPingTarget(rule)
     let inScope = 0
     let withFresh = 0
     let withAny = 0
@@ -442,18 +415,20 @@ export async function previewZabbixAlertEvaluation() {
     for (const h of scopedHosts) {
       if (!hostMatchesScope(h, rule.scope, groupMap)) continue
       inScope++
-      const metrics = itemBatches
-        ? buildHostMetrics(h.hostid, itemBatches, pingTarget, nowSec, staleAfterSec)
-        : {}
-      const hasFresh = rule.condition?.metric === 'latency' ? metrics.fresh?.latency
-        : rule.condition?.metric === 'jitter' ? metrics.fresh?.jitter
-          : metrics.fresh?.packetLoss
-      const hasAny = rule.condition?.metric === 'latency' ? metrics.latency != null
-        : rule.condition?.metric === 'jitter' ? metrics.jitter != null
-          : metrics.packetLoss != null
+      const buildMetrics = (target) => (itemBatches
+        ? buildHostMetrics(h.hostid, itemBatches, target, nowSec, staleAfterSec)
+        : {})
+      const metrics = buildMetrics(pingTarget)
+      const hasFresh = getRuleConditions(rule).some((c) => {
+        if (c.metric === 'latency') return metrics.fresh?.latency
+        if (c.metric === 'jitter') return metrics.fresh?.jitter
+        if (c.metric === 'packet_loss') return metrics.fresh?.packetLoss
+        return false
+      })
+      const hasAny = getRuleConditions(rule).some((c) => metricValueFromMetrics(c, buildMetrics(String(c.target || pingTarget).trim() || pingTarget)) != null)
       if (hasFresh) withFresh++
       if (hasAny) withAny++
-      const isBreaching = evaluateCondition(rule.condition, metrics, h)
+      const isBreaching = evaluateRuleConditions(rule, h, buildMetrics)
       if (isBreaching) {
         breaching++
         if (samples.length < 8) {
@@ -476,6 +451,8 @@ export async function previewZabbixAlertEvaluation() {
       name: rule.name,
       scope: rule.scope,
       condition: rule.condition,
+      conditions: getRuleConditions(rule),
+      logic: rule.logic || 'and',
       channelCount: (rule.channels || []).filter((c) => c.webhookUrl || c.emails?.length).length,
       inScope,
       withFreshMetric: withFresh,
@@ -562,23 +539,27 @@ export async function pollZabbixNewProblems() {
 
     for (const rule of rules) {
       if (!shouldNotifyForBhPolicy(rule)) continue
-      const pingTarget = String(rule.condition?.target || DEFAULT_PING_TARGET).trim() || DEFAULT_PING_TARGET
+      const pingTarget = primaryPingTarget(rule)
       const affected = []
       for (const h of fullHosts) {
         if (!hostMatchesScope(h, rule.scope, groupMap)) continue
-        const metrics = buildHostMetrics(h.hostid, itemBatches, pingTarget, nowSec, staleAfterSec)
-        if (!evaluateCondition(rule.condition, metrics, h)) continue
+        const buildMetrics = (target) => buildHostMetrics(h.hostid, itemBatches, target, nowSec, staleAfterSec)
+        if (!evaluateRuleConditions(rule, h, buildMetrics)) continue
         if (!hostCooldownOk(rule, h.hostid)) continue
+        const primaryMetrics = buildMetrics(pingTarget)
+        const metricsCache = new Map([[pingTarget, primaryMetrics]])
+        const primaryCond = getRuleConditions(rule)[0]
         affected.push({
           hostid: String(h.hostid),
           hostname: h.host,
           name: h.name,
           trigger: p.name,
-          triggeredValue: triggeredValueForMetric(rule.condition, metrics),
-          latency: metrics.latency,
-          jitter: metrics.jitter,
-          packetLoss: metrics.packetLoss,
-          sensorKeys: metrics.itemKeys,
+          triggeredValue: metricValueFromMetrics(primaryCond, primaryMetrics),
+          triggeredValues: triggeredValuesForRule(rule, metricsCache, buildMetrics),
+          latency: primaryMetrics.latency,
+          jitter: primaryMetrics.jitter,
+          packetLoss: primaryMetrics.packetLoss,
+          sensorKeys: primaryMetrics.itemKeys,
           pingTarget,
         })
       }
@@ -627,20 +608,24 @@ export async function handleZabbixAlertWebhook(body, { eventId } = {}) {
     if (!shouldNotifyForBhPolicy(rule)) continue
     if (!hostMatchesScope(host, rule.scope, groupMap)) continue
     if (!hostCooldownOk(rule, host.hostid)) continue
-    const pingTarget = String(rule.condition?.target || DEFAULT_PING_TARGET).trim() || DEFAULT_PING_TARGET
-    const metrics = buildHostMetrics(host.hostid, itemBatches, pingTarget, nowSec, getStaleAfterSec())
-    if (!evaluateCondition(rule.condition, metrics, host)) continue
+    const pingTarget = primaryPingTarget(rule)
+    const buildMetrics = (target) => buildHostMetrics(host.hostid, itemBatches, target, nowSec, getStaleAfterSec())
+    if (!evaluateRuleConditions(rule, host, buildMetrics)) continue
 
+    const primaryMetrics = buildMetrics(pingTarget)
+    const metricsCache = new Map([[pingTarget, primaryMetrics]])
+    const primaryCond = getRuleConditions(rule)[0]
     await fireRuleForHosts(rule, [{
       hostid: String(host.hostid),
       hostname: host.host,
       name: host.name,
       trigger: String(body?.trigger_name || body?.TRIGGER?.NAME || body?.alert_message || 'Zabbix webhook'),
-      triggeredValue: triggeredValueForMetric(rule.condition, metrics),
-      latency: metrics.latency,
-      jitter: metrics.jitter,
-      packetLoss: metrics.packetLoss,
-      sensorKeys: metrics.itemKeys,
+      triggeredValue: metricValueFromMetrics(primaryCond, primaryMetrics),
+      triggeredValues: triggeredValuesForRule(rule, metricsCache, buildMetrics),
+      latency: primaryMetrics.latency,
+      jitter: primaryMetrics.jitter,
+      packetLoss: primaryMetrics.packetLoss,
+      sensorKeys: primaryMetrics.itemKeys,
       pingTarget,
     }], { source: 'zabbix_webhook' })
     fired++

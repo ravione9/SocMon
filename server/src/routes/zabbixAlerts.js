@@ -9,6 +9,7 @@ import {
   getZabbixAlertEvalStatus,
   fetchZabbixAlertDashboard,
 } from '../services/zabbixAlertEngine.js'
+import { normalizeRulePayload } from '../utils/zabbixAlertConditions.js'
 import { runInstantSlaCheck, previewZabbixAlertEvaluation } from '../services/zabbixAlertInstant.js'
 import { createZabbixClient } from '../services/zabbix.js'
 
@@ -42,14 +43,18 @@ router.get('/rules', async (_req, res, next) => {
 
 router.post('/rules', async (req, res, next) => {
   try {
-    const rule = await ZabbixAlertRule.create({ ...req.body, createdBy: req.user?._id })
+    const rule = await ZabbixAlertRule.create(normalizeRulePayload({ ...req.body, createdBy: req.user?._id }))
     res.status(201).json(rule)
   } catch (e) { next(e) }
 })
 
 router.put('/rules/:id', async (req, res, next) => {
   try {
-    const rule = await ZabbixAlertRule.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true })
+    const rule = await ZabbixAlertRule.findByIdAndUpdate(
+      req.params.id,
+      normalizeRulePayload(req.body),
+      { new: true, runValidators: true },
+    )
     if (!rule) return res.status(404).json({ error: 'Not found' })
     res.json(rule)
   } catch (e) { next(e) }

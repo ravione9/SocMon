@@ -1490,7 +1490,7 @@ async function fetchHostsInGroup(zabbixRpc, groupName, baseParams) {
 }
 
 export function wantsPingStatus(question) {
-  return /\b(ping|icmp|latency|packet\s*loss|response\s*time|sensor\s*data|reachable|unreachable)\b/i.test(String(question || ''))
+  return /\b(ping|icmp|latency|jitter|packet\s*loss|response\s*time|sensor\s*data|reachable|unreachable)\b/i.test(String(question || ''))
 }
 
 export function wantsBandwidthUtil(question, ctx = null) {
@@ -1704,7 +1704,10 @@ function filterExactItemKey(items, exactKey) {
 async function fetchPingMetrics(zabbixRpc, hostids) {
   if (!hostids.length) {
     return {
-      summary: { reachable: 0, unreachable: 0, degraded: 0, noData: 0, stale: 0, avgMs: null, maxMs: null },
+      summary: {
+        reachable: 0, unreachable: 0, degraded: 0, noData: 0, stale: 0,
+        avgMs: null, maxMs: null, avgJitter: null, maxJitter: null,
+      },
       byHost: {},
     }
   }
@@ -1712,6 +1715,7 @@ async function fetchPingMetrics(zabbixRpc, hostids) {
     agentPingItems,
     pingLossItems,
     pingMsItems,
+    pingJitterItems,
     icmpPingItems,
     icmpLossItems,
     icmpSecItems,
@@ -1721,6 +1725,7 @@ async function fetchPingMetrics(zabbixRpc, hostids) {
     fetchItemsChunked(zabbixRpc, hostids, 'agent.ping'),
     fetchItemsChunked(zabbixRpc, hostids, 'custom.ping.loss'),
     fetchItemsChunked(zabbixRpc, hostids, 'custom.ping.ms'),
+    fetchItemsChunked(zabbixRpc, hostids, 'custom.ping.jitter'),
     fetchItemsChunked(zabbixRpc, hostids, 'icmpping'),
     fetchItemsChunked(zabbixRpc, hostids, 'icmppingloss'),
     fetchItemsChunked(zabbixRpc, hostids, 'icmppingsec'),
@@ -1749,6 +1754,7 @@ async function fetchPingMetrics(zabbixRpc, hostids) {
   const agentMap = buildHostMetricMap(agentPingItems, hostids)
   const lossMap = buildHostMetricMap(pingLossItems, hostids)
   const msMap = buildHostMetricMap(pingMsItems, hostids)
+  const jitterMap = buildHostMetricMap(pingJitterItems, hostids)
   const icmpMap = buildHostMetricMap(filterExactItemKey(icmpPingItems, 'icmpping'), hostids)
   const icmpLossMap = buildHostMetricMap(filterExactItemKey(icmpLossItems, 'icmppingloss'), hostids)
   const icmpSecMap = buildHostMetricMap(filterExactItemKey(icmpSecItems, 'icmppingsec'), hostids)
@@ -1758,14 +1764,19 @@ async function fetchPingMetrics(zabbixRpc, hostids) {
   const agentCls = classifyFreshMetrics(agentMap.valueByHost, agentMap.clockByHost, hostids, nowSec)
   const lossCls = classifyFreshMetrics(lossMap.valueByHost, lossMap.clockByHost, hostids, nowSec)
   const msCls = classifyFreshMetrics(msMap.valueByHost, msMap.clockByHost, hostids, nowSec)
+  const jitterCls = classifyFreshMetrics(jitterMap.valueByHost, jitterMap.clockByHost, hostids, nowSec)
   const icmpCls = classifyFreshMetrics(icmpMap.valueByHost, icmpMap.clockByHost, hostids, nowSec)
   const icmpLossCls = classifyFreshMetrics(icmpLossMap.valueByHost, icmpLossMap.clockByHost, hostids, nowSec)
   const icmpSecCls = classifyFreshMetrics(icmpSecMap.valueByHost, icmpSecMap.clockByHost, hostids, nowSec)
   const merakiCls = classifyFreshMetrics(merakiMap.valueByHost, merakiMap.clockByHost, hostids, nowSec)
 
-  const summary = { reachable: 0, unreachable: 0, degraded: 0, noData: 0, stale: 0, avgMs: null, maxMs: null }
+  const summary = {
+    reachable: 0, unreachable: 0, degraded: 0, noData: 0, stale: 0,
+    avgMs: null, maxMs: null, avgJitter: null, maxJitter: null,
+  }
   const byHost = {}
   const msVals = []
+  const jitterVals = []
 
   for (const hid of hostids) {
     const agent = pickFreshMetric(agentCls, hid)
@@ -1804,12 +1815,14 @@ async function fetchPingMetrics(zabbixRpc, hostids) {
     else if (reach === 'degraded') summary.degraded += 1
 
     const customMs = pickFreshMetric(msCls, hid)
+    const customJitter = pickFreshMetric(jitterCls, hid)
     const icmpSec = pickFreshMetric(icmpSecCls, hid)
     const genericLatency = pickFreshMetric(classifyFreshMetrics(latencyMap.valueByHost, latencyMap.clockByHost, hostids, nowSec), hid)
     const customLoss = pickFreshMetric(lossCls, hid)
     const icmpLoss = pickFreshMetric(icmpLossCls, hid)
 
     let ms = null
+    let jitter = null
     let loss = null
     if (!customMs.stale && customMs.value != null && customMs.value >= 0) {
       ms = customMs.value
@@ -1818,17 +1831,23 @@ async function fetchPingMetrics(zabbixRpc, hostids) {
     } else if (!genericLatency.stale && genericLatency.value != null && genericLatency.value >= 0) {
       ms = genericLatency.value
     }
+    if (!customJitter.stale && customJitter.value != null && customJitter.value >= 0) {
+      jitter = customJitter.value
+    }
     if (!customLoss.stale && customLoss.value != null) loss = customLoss.value
     else if (!icmpLoss.stale && icmpLoss.value != null) loss = icmpLoss.value
 
     if (ms != null && ms >= 0) msVals.push(ms)
+    if (jitter != null && jitter >= 0) jitterVals.push(jitter)
 
     byHost[hid] = {
       reach,
       ms,
+      jitter,
       loss,
       source,
       msPoll: msMap.clockByHost[hid] || icmpSecMap.clockByHost[hid] || null,
+      jitterPoll: jitterMap.clockByHost[hid] || null,
       lossPoll: lossMap.clockByHost[hid] || icmpLossMap.clockByHost[hid] || null,
       agentPoll: pollClock,
     }
@@ -1838,6 +1857,11 @@ async function fetchPingMetrics(zabbixRpc, hostids) {
     msVals.sort((a, b) => a - b)
     summary.avgMs = Math.round(msVals.reduce((a, b) => a + b, 0) / msVals.length * 10) / 10
     summary.maxMs = msVals[msVals.length - 1]
+  }
+  if (jitterVals.length) {
+    jitterVals.sort((a, b) => a - b)
+    summary.avgJitter = Math.round(jitterVals.reduce((a, b) => a + b, 0) / jitterVals.length * 10) / 10
+    summary.maxJitter = jitterVals[jitterVals.length - 1]
   }
 
   return {
@@ -2057,23 +2081,34 @@ function applySessionPingToHosts(hosts, pingHistory) {
   }
 }
 
-async function fetchLatencyHistorySnapshot(zabbixRpc, matchedHosts, window) {
-  if (!window || !matchedHosts?.length) return null
-  const hostids = matchedHosts.map((h) => String(h.hostid)).filter(Boolean)
-  const items = await fetchItemsChunked(zabbixRpc, hostids, 'custom.ping.ms')
+function chooseStoreCustomPingItemByHost(items, preferredTarget = '[8.8.8.8]') {
   const chosenByHost = {}
   for (const it of items || []) {
     const hid = String(it.hostid)
     const key = String(it.key_ || '')
     const prev = chosenByHost[hid]
-    const exact = key.includes('[8.8.8.8]')
-    const prevExact = prev ? String(prev.key_ || '').includes('[8.8.8.8]') : false
+    const exact = key.includes(preferredTarget)
+    const prevExact = prev ? String(prev.key_ || '').includes(preferredTarget) : false
     const clock = Number(it.lastclock) || 0
     const prevClock = Number(prev?.lastclock) || 0
     if (!prev || (exact && !prevExact) || (exact === prevExact && clock >= prevClock)) {
       chosenByHost[hid] = it
     }
   }
+  return chosenByHost
+}
+
+async function fetchStoreCustomPingHistorySnapshot(
+  zabbixRpc,
+  matchedHosts,
+  window,
+  searchKey,
+  { itemsFoundField, note },
+) {
+  if (!window || !matchedHosts?.length) return null
+  const hostids = matchedHosts.map((h) => String(h.hostid)).filter(Boolean)
+  const items = await fetchItemsChunked(zabbixRpc, hostids, searchKey)
+  const chosenByHost = chooseStoreCustomPingItemByHost(items)
 
   async function getPoints(it) {
     const hk = zabbixHistoryKind(Number(it.value_type))
@@ -2112,7 +2147,7 @@ async function fetchLatencyHistorySnapshot(zabbixRpc, matchedHosts, window) {
   const byHost = {}
   const diagnostics = {
     hostsChecked: hostids.length,
-    latencyItemsFound: items.length,
+    [itemsFoundField]: items.length,
     chosenItemKeys: [],
     pointsTotal: 0,
   }
@@ -2162,8 +2197,22 @@ async function fetchLatencyHistorySnapshot(zabbixRpc, matchedHosts, window) {
     toAt: formatPortalTimestamp(window.to * 1000),
     byHost,
     diagnostics,
-    note: 'Fetched from Store Zabbix custom.ping.ms* items, preferring custom.ping.ms[8.8.8.8], using history.get with trend.get hour-bucket fallback.',
+    note,
   }
+}
+
+async function fetchLatencyHistorySnapshot(zabbixRpc, matchedHosts, window) {
+  return fetchStoreCustomPingHistorySnapshot(zabbixRpc, matchedHosts, window, 'custom.ping.ms', {
+    itemsFoundField: 'latencyItemsFound',
+    note: 'Fetched from Store Zabbix custom.ping.ms* items, preferring custom.ping.ms[8.8.8.8], using history.get with trend.get hour-bucket fallback.',
+  })
+}
+
+async function fetchJitterHistorySnapshot(zabbixRpc, matchedHosts, window) {
+  return fetchStoreCustomPingHistorySnapshot(zabbixRpc, matchedHosts, window, 'custom.ping.jitter', {
+    itemsFoundField: 'jitterItemsFound',
+    note: 'Fetched from Store Zabbix custom.ping.jitter* items, preferring custom.ping.jitter[8.8.8.8], using history.get with trend.get hour-bucket fallback.',
+  })
 }
 
 function applySessionLatencyToHosts(hosts, latencyHistory) {
@@ -2172,6 +2221,22 @@ function applySessionLatencyToHosts(hosts, latencyHistory) {
     const row = latencyHistory.byHost[String(host.hostid)]
     if (!row) continue
     host.latencyAtSession = {
+      avgMs: row.avgMs,
+      minMs: row.minMs,
+      maxMs: row.maxMs,
+      source: row.source,
+      key: row.key,
+      pointCount: row.pointCount,
+    }
+  }
+}
+
+function applySessionJitterToHosts(hosts, jitterHistory) {
+  if (!Array.isArray(hosts) || !jitterHistory?.byHost) return
+  for (const host of hosts) {
+    const row = jitterHistory.byHost[String(host.hostid)]
+    if (!row) continue
+    host.jitterAtSession = {
       avgMs: row.avgMs,
       minMs: row.minMs,
       maxMs: row.maxMs,
@@ -2345,6 +2410,7 @@ function formatPingLine(name, ping) {
   else parts.push('ping —')
   if (ping.source) parts.push(`via ${ping.source}`)
   if (ping.ms != null) parts.push(`${ping.ms} ms`)
+  if (ping.jitter != null) parts.push(`jitter ${ping.jitter} ms`)
   if (ping.loss != null) parts.push(`loss ${ping.loss}%`)
   if (ping.agentPoll) parts.push(`@ ${formatPortalTimestamp(ping.agentPoll * 1000)}`)
   return `    • ${name} · ${parts.join(' · ')}`
@@ -3039,6 +3105,7 @@ export async function tryDirectZabbixAnswer(question, allowedPages, ctx = null) 
       lines.push('  Ping / ICMP sensors (agent.ping · icmpping · meraki.device.status):')
       lines.push(`    Reachable: ${s.reachable} · Unreachable: ${s.unreachable} · Degraded: ${s.degraded || 0} · No data: ${s.noData} · Stale: ${s.stale}`)
       if (s.avgMs != null) lines.push(`    Latency avg: ${s.avgMs} ms · max: ${s.maxMs} ms (fresh polls, last ${PING_STALE_SEC / 60} min)`)
+      if (s.avgJitter != null) lines.push(`    Jitter avg: ${s.avgJitter} ms · max: ${s.maxJitter} ms (custom.ping.jitter, fresh polls)`)
 
       const ranked = data.hosts
         .map(h => ({ ...h, ping: pm.byHost[h.hostid] }))
@@ -3501,7 +3568,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   const includeInterfaceHistory = shouldIncludeInterfaceHistory(userMessage, opts)
   const includeCpuMemoryHistory = shouldIncludeCpuMemoryHistory(userMessage, opts)
   const includePing = wantsPingStatus(userMessage)
-    || /\b(ping|icmp|latency|packet\s*loss|uptime|availability|drops?|disconnect)\b/i.test(String(userMessage || ''))
+    || /\b(ping|icmp|latency|jitter|packet\s*loss|uptime|availability|drops?|disconnect)\b/i.test(String(userMessage || ''))
     || (Boolean(hostFilter) && hasQueryHistoryWindow(resolvedQueryWindow))
   const includeBandwidth = wantsBandwidthUtil(userMessage)
     || /\b(bandwidth|utilization|utilisation|interface|port|traffic|throughput)\b/i.test(String(userMessage || ''))
@@ -3605,6 +3672,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
         ? {
           reach: data.pingMetrics.byHost[hid].reach,
           ms: data.pingMetrics.byHost[hid].ms,
+          jitter: data.pingMetrics.byHost[hid].jitter,
           loss: data.pingMetrics.byHost[hid].loss,
           source: data.pingMetrics.byHost[hid].source,
         }
@@ -3621,6 +3689,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   let interfaceHistory = null
   let pingHistory = null
   let latencyHistory = null
+  let jitterHistory = null
   let uptimeHistory = null
   const historyWindow = historyWindowForFetch
   const historyMaxPoints = historyWindow
@@ -3704,6 +3773,23 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
         diagnostics: { error: err?.message || 'Failed to fetch Store Zabbix custom.ping.ms history' },
       }
     }
+    try {
+      jitterHistory = await fetchJitterHistorySnapshot(
+        client.zabbixRpc,
+        matched,
+        historyWindow,
+      )
+      if (jitterHistory) applySessionJitterToHosts(hosts, jitterHistory)
+    } catch (err) {
+      jitterHistory = {
+        windowSec: historyWindow.rangeSec,
+        windowLabel: historyWindow.windowLabel,
+        from: historyWindow.from,
+        to: historyWindow.to,
+        byHost: {},
+        diagnostics: { error: err?.message || 'Failed to fetch Store Zabbix custom.ping.jitter history' },
+      }
+    }
   }
 
   if (historyWindow && matched.length) {
@@ -3770,8 +3856,8 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     queryWindow: formatQueryWindowMeta(resolvedQueryWindow),
     source: `${sourceLabel} API (host.get + item.get net.if.*)`,
     note: moduleId === 'storeZabbix'
-      ? 'Session window data (use these for past sessions, NOT live hosts[].cpu/memory/ping which is current poll): hosts[].cpuAtSession / memoryAtSession (Zabbix CPU/RAM history.get) · hosts[].zabbixUptimeAtSession or uptimeAtSession (Zabbix uptime counter duration; this is the Store Zabbix Uptime graph) · hosts[].latencyAtSession (custom.ping.ms[8.8.8.8] avg/min/max) · hosts[].pingAtSession (agent.ping/icmpping availabilityPct + loss) · cpuMemoryHistory · interfaceHistory · uptimeHistory · latencyHistory · pingHistory · disconnectEvents. storeAgentMetrics = Influx agent snapshot (alternate source).'
-      : 'Live SNMP/interface metrics at send time. For past windows use cpuMemoryHistory.sessionSnapshot / cpuAtSession, uptimeHistory (device uptime counter duration), latencyHistory (custom.ping.ms[8.8.8.8] avg/min/max), and pingHistory (agent.ping/icmpping availability/loss). interfaceHistory provides historical net.if series when an absolute window or trend/history keywords are used.',
+      ? 'Session window data (use these for past sessions, NOT live hosts[].cpu/memory/ping which is current poll): hosts[].cpuAtSession / memoryAtSession (Zabbix CPU/RAM history.get) · hosts[].zabbixUptimeAtSession or uptimeAtSession (Zabbix uptime counter duration; this is the Store Zabbix Uptime graph) · hosts[].latencyAtSession (custom.ping.ms[8.8.8.8] avg/min/max) · hosts[].jitterAtSession (custom.ping.jitter[8.8.8.8] avg/min/max) · hosts[].pingAtSession (agent.ping/icmpping availabilityPct + loss) · cpuMemoryHistory · interfaceHistory · uptimeHistory · latencyHistory · jitterHistory · pingHistory · disconnectEvents. storeAgentMetrics = Influx agent snapshot (alternate source).'
+      : 'Live SNMP/interface metrics at send time. For past windows use cpuMemoryHistory.sessionSnapshot / cpuAtSession, uptimeHistory (device uptime counter duration), latencyHistory (custom.ping.ms[8.8.8.8] avg/min/max), jitterHistory (custom.ping.jitter[8.8.8.8] avg/min/max), and pingHistory (agent.ping/icmpping availability/loss). interfaceHistory provides historical net.if series when an absolute window or trend/history keywords are used.',
     version: data.version,
     hostFilter: data.hostFilter,
     deviceTypeFilter: data.deviceTypeFilter,
@@ -3792,6 +3878,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     interfaceHistory,
     pingHistory,
     latencyHistory,
+    jitterHistory,
     uptimeHistory,
     pingSummary: includePing && data.pingMetrics ? data.pingMetrics.summary : undefined,
   }

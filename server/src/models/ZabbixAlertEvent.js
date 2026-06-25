@@ -5,6 +5,8 @@ const zabbixAlertEventSchema = new mongoose.Schema({
   ruleName: { type: String, required: true },
   severity: { type: String, enum: ['disaster', 'critical', 'high', 'warning'], required: true },
   condition: { type: Object },
+  conditions: [{ type: Object }],
+  logic: { type: String, enum: ['and', 'or'], default: 'and' },
   affectedCount: { type: Number, default: 0 },
   hosts: [{
     hostid: String,

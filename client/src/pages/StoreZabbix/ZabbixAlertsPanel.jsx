@@ -39,6 +39,40 @@ const BH_POLICIES = [
 
 const BH_DAYS = ['S', 'M', 'T', 'W', 'T', 'F', 'S']
 
+function blankCondition(overrides = {}) {
+  return {
+    metric: 'latency',
+    operator: 'gt',
+    threshold: 150,
+    thresholdMax: 250,
+    target: '8.8.8.8',
+    ...overrides,
+  }
+}
+
+function normalizeRuleForm(rule) {
+  const base = rule ? JSON.parse(JSON.stringify(rule)) : blankRule()
+  if (!base.conditions?.length && base.condition?.metric) {
+    base.conditions = [base.condition]
+  }
+  if (!base.conditions?.length) {
+    base.conditions = [blankCondition()]
+  }
+  base.logic = base.logic === 'or' ? 'or' : 'and'
+  return base
+}
+
+function formatConditionSummary(rule) {
+  const conditions = rule.conditions?.length ? rule.conditions : (rule.condition ? [rule.condition] : [])
+  const logic = (rule.logic || 'and').toUpperCase()
+  const parts = conditions.map((c) => {
+    const label = METRICS.find((m) => m.id === c.metric)?.label || c.metric
+    if (['host_down', 'agent_down', 'interface_down'].includes(c.metric)) return label
+    return `${label} ${c.operator || 'gt'} ${c.threshold ?? ''}`
+  })
+  return parts.length > 1 ? parts.join(` ${logic} `) : (parts[0] || '—')
+}
+
 function blankRule() {
   return {
     name: '',
@@ -46,7 +80,9 @@ function blankRule() {
     enabled: true,
     severity: 'high',
     scope: { type: 'global', groupName: '', hostids: [], hostnames: [] },
-    condition: { metric: 'latency', operator: 'gt', threshold: 150, thresholdMax: 250, target: '8.8.8.8' },
+    condition: blankCondition(),
+    conditions: [blankCondition()],
+    logic: 'and',
     businessHours: {
       enabled: false,
       policy: 'always',
@@ -77,22 +113,103 @@ function SummaryCard({ label, value, color, sub }) {
   )
 }
 
+function ConditionEditor({ condition, onChange, onRemove, canRemove, inp }) {
+  const setCond = (patch) => onChange({ ...condition, ...patch })
+  return (
+    <div style={{
+      padding: 10, borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg3)', marginBottom: 8,
+    }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: 8, alignItems: 'start' }}>
+        <select value={condition.metric} onChange={(e) => setCond({ metric: e.target.value })} style={inp}>
+          {METRICS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+        </select>
+        {!['host_down', 'agent_down', 'interface_down'].includes(condition.metric) && (
+          <>
+            <select value={condition.operator} onChange={(e) => setCond({ operator: e.target.value })} style={inp}>
+              {OPERATORS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+            </select>
+            <input type="number" value={condition.threshold} onChange={(e) => setCond({ threshold: Number(e.target.value) })} style={inp} />
+          </>
+        )}
+        {canRemove && (
+          <button type="button" onClick={onRemove}
+            style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: '#ef4444', cursor: 'pointer', fontSize: 11 }}>
+            ✕
+          </button>
+        )}
+      </div>
+      {condition.operator === 'between' && (
+        <input type="number" value={condition.thresholdMax ?? ''} onChange={(e) => setCond({ thresholdMax: Number(e.target.value) })}
+          placeholder="Max threshold" style={{ ...inp, marginTop: 8 }} />
+      )}
+      {['latency', 'jitter', 'packet_loss'].includes(condition.metric) && (
+        <>
+          <p style={{ margin: '8px 0 4px', fontSize: 10, color: 'var(--cyan)', fontFamily: 'var(--mono)' }}>
+            Sensor: {condition.metric === 'latency' ? 'custom.ping.ms' : condition.metric === 'jitter' ? 'custom.ping.jitter' : 'custom.ping.loss'}
+            [{condition.target || '8.8.8.8'}]
+          </p>
+          <input value={condition.target || '8.8.8.8'} onChange={(e) => setCond({ target: e.target.value })}
+            placeholder="Ping target IP (default 8.8.8.8)" style={inp} />
+        </>
+      )}
+      {METRICS.find((m) => m.id === condition.metric)?.hint && (
+        <p style={{ margin: '4px 0 0', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+          {METRICS.find((m) => m.id === condition.metric).hint}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function RuleModal({ open, initial, groups, onClose, onSave, saving }) {
   const [form, setForm] = useState(blankRule())
   const [testResult, setTestResult] = useState({})
 
   useEffect(() => {
     if (!open) return
-    setForm(initial ? JSON.parse(JSON.stringify(initial)) : blankRule())
+    setForm(normalizeRuleForm(initial))
     setTestResult({})
   }, [open, initial])
 
   if (!open) return null
 
   const set = (patch) => setForm((f) => ({ ...f, ...patch }))
-  const setCond = (patch) => setForm((f) => ({ ...f, condition: { ...f.condition, ...patch } }))
   const setBh = (patch) => setForm((f) => ({ ...f, businessHours: { ...f.businessHours, ...patch } }))
   const setScope = (patch) => setForm((f) => ({ ...f, scope: { ...f.scope, ...patch } }))
+
+  const setConditionAt = (idx, cond) => {
+    setForm((f) => {
+      const conditions = [...(f.conditions || [])]
+      conditions[idx] = cond
+      return { ...f, conditions, condition: conditions[0] }
+    })
+  }
+
+  const addCondition = () => {
+    setForm((f) => ({
+      ...f,
+      conditions: [...(f.conditions || []), blankCondition({ metric: 'jitter', operator: 'gt', threshold: 30 })],
+    }))
+  }
+
+  const removeCondition = (idx) => {
+    setForm((f) => {
+      const conditions = [...(f.conditions || [])]
+      if (conditions.length <= 1) return f
+      conditions.splice(idx, 1)
+      return { ...f, conditions, condition: conditions[0] }
+    })
+  }
+
+  const handleSave = () => {
+    const conditions = (form.conditions || []).filter((c) => c?.metric)
+    onSave({
+      ...form,
+      conditions: conditions.length ? conditions : [blankCondition()],
+      condition: conditions[0] || blankCondition(),
+      logic: form.logic === 'or' ? 'or' : 'and',
+    })
+  }
 
   const addChannel = (type) => {
     setForm((f) => ({
@@ -204,41 +321,41 @@ function RuleModal({ open, initial, groups, onClose, onSave, saving }) {
             )}
           </div>
 
-          {/* Condition */}
+          {/* Conditions */}
           <div style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 12 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text3)', marginBottom: 8, fontFamily: 'var(--mono)' }}>CONDITION</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-              <select value={form.condition.metric} onChange={(e) => setCond({ metric: e.target.value })} style={inp}>
-                {METRICS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-              </select>
-              {!['host_down', 'agent_down', 'interface_down'].includes(form.condition.metric) && (
-                <>
-                  <select value={form.condition.operator} onChange={(e) => setCond({ operator: e.target.value })} style={inp}>
-                    {OPERATORS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
-                  </select>
-                  <input type="number" value={form.condition.threshold} onChange={(e) => setCond({ threshold: Number(e.target.value) })} style={inp} />
-                </>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>CONDITIONS</div>
+              {(form.conditions || []).length > 1 && (
+                <select value={form.logic || 'and'} onChange={(e) => set({ logic: e.target.value })} style={{ ...inp, width: 140, marginLeft: 'auto' }}>
+                  <option value="and">Match ALL (AND)</option>
+                  <option value="or">Match ANY (OR)</option>
+                </select>
               )}
+              <button type="button" onClick={addCondition}
+                style={{
+                  padding: '4px 10px', borderRadius: 6, fontSize: 10, fontFamily: 'var(--mono)',
+                  border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--accent)', cursor: 'pointer',
+                  marginLeft: (form.conditions || []).length > 1 ? 0 : 'auto',
+                }}>
+                + Add condition
+              </button>
             </div>
-            {form.condition.operator === 'between' && (
-              <input type="number" value={form.condition.thresholdMax ?? ''} onChange={(e) => setCond({ thresholdMax: Number(e.target.value) })}
-                placeholder="Max threshold" style={{ ...inp, marginTop: 8 }} />
-            )}
-            {['latency', 'jitter', 'packet_loss'].includes(form.condition.metric) && (
-              <>
-                <p style={{ margin: '8px 0 4px', fontSize: 10, color: 'var(--cyan)', fontFamily: 'var(--mono)' }}>
-                  Sensor: {form.condition.metric === 'latency' ? 'custom.ping.ms' : form.condition.metric === 'jitter' ? 'custom.ping.jitter' : 'custom.ping.loss'}
-                  [{form.condition.target || '8.8.8.8'}] — same as Custom Dashboard / RP store workstations
-                </p>
-                <input value={form.condition.target || '8.8.8.8'} onChange={(e) => setCond({ target: e.target.value })}
-                  placeholder="Ping target IP (default 8.8.8.8)" style={inp} />
-              </>
-            )}
-            {METRICS.find((m) => m.id === form.condition.metric)?.hint && (
-              <p style={{ margin: '4px 0 0', fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
-                {METRICS.find((m) => m.id === form.condition.metric).hint}
-              </p>
-            )}
+            {(form.conditions || []).map((cond, idx) => (
+              <div key={idx}>
+                {idx > 0 && (
+                  <div style={{ textAlign: 'center', fontSize: 10, fontWeight: 700, color: 'var(--amber)', fontFamily: 'var(--mono)', margin: '4px 0' }}>
+                    {(form.logic || 'and').toUpperCase()}
+                  </div>
+                )}
+                <ConditionEditor
+                  condition={cond}
+                  onChange={(c) => setConditionAt(idx, c)}
+                  onRemove={() => removeCondition(idx)}
+                  canRemove={(form.conditions || []).length > 1}
+                  inp={inp}
+                />
+              </div>
+            ))}
           </div>
 
           {/* Business Hours */}
@@ -319,7 +436,7 @@ function RuleModal({ open, initial, groups, onClose, onSave, saving }) {
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
           <button type="button" onClick={onClose} style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg3)', cursor: 'pointer', fontFamily: 'var(--mono)', fontSize: 12 }}>Cancel</button>
-          <button type="button" disabled={saving || !form.name.trim()} onClick={() => onSave(form)}
+          <button type="button" disabled={saving || !form.name.trim()} onClick={handleSave}
             style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: 'var(--accent)', color: '#fff', cursor: 'pointer', fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 700, opacity: saving || !form.name.trim() ? .5 : 1 }}>
             {saving ? 'Saving…' : 'Save Rule'}
           </button>
@@ -520,7 +637,7 @@ export default function ZabbixAlertsPanel({ apiBase = '/api/store-zabbix' }) {
                 <div key={r._id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid var(--border)', fontSize: 11, fontFamily: 'var(--mono)' }}>
                   <span style={{ width: 8, height: 8, borderRadius: '50%', background: SEV_COLORS[r.severity] || '#64748b' }} />
                   <span style={{ flex: 1, color: 'var(--text2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.name}</span>
-                  <span style={{ color: 'var(--text3)' }}>{metricLabel(r.condition?.metric)}</span>
+                  <span style={{ color: 'var(--text3)' }}>{formatConditionSummary(r)}</span>
                 </div>
               ))}
               {!rules.filter((r) => r.enabled).length && (
@@ -554,16 +671,15 @@ export default function ZabbixAlertsPanel({ apiBase = '/api/store-zabbix' }) {
                     <div style={{ fontSize: 10, color: SEV_COLORS[r.severity] }}>{r.severity}</div>
                   </td>
                   <td style={{ padding: '10px 12px', color: 'var(--text2)' }}>
-                    {metricLabel(r.condition?.metric)}
-                    {!['host_down', 'agent_down'].includes(r.condition?.metric) && (
-                      <> {r.condition?.operator} {r.condition?.threshold}</>
-                    )}
-                    {['latency', 'jitter', 'packet_loss'].includes(r.condition?.metric) && r.condition?.target && (
-                      <div style={{ fontSize: 9, color: 'var(--cyan)', marginTop: 2 }}>
-                        {r.condition.metric === 'latency' ? 'custom.ping.ms' : r.condition.metric === 'jitter' ? 'custom.ping.jitter' : 'custom.ping.loss'}
-                        [{r.condition.target}]
-                      </div>
-                    )}
+                    <div>{formatConditionSummary(r)}</div>
+                    {(r.conditions?.length ? r.conditions : [r.condition]).filter(Boolean).map((c, i) => (
+                      ['latency', 'jitter', 'packet_loss'].includes(c?.metric) && c?.target ? (
+                        <div key={i} style={{ fontSize: 9, color: 'var(--cyan)', marginTop: 2 }}>
+                          {c.metric === 'latency' ? 'custom.ping.ms' : c.metric === 'jitter' ? 'custom.ping.jitter' : 'custom.ping.loss'}
+                          [{c.target}]
+                        </div>
+                      ) : null
+                    ))}
                   </td>
                   <td style={{ padding: '10px 12px', color: 'var(--text3)' }}>
                     {r.scope?.type === 'global' ? 'All hosts' : r.scope?.type === 'group' ? r.scope.groupName : (r.scope?.hostnames || []).join(', ')}

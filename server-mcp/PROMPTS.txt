@@ -756,6 +756,7 @@ Run ALL of these in parallel (replace <CODE>, <DATE>, <FROM>, <TO>):
                            OR storeAgentMetrics.cpuPct (label source)
        RAM Usage (%)     → hosts[].memory.percent OR storeAgentMetrics.memPct
        Avg latency (ms)  → hosts[].ping.ms (per target; also check storeMonitor)
+       Avg jitter (ms)   → hosts[].ping.jitter (live) or hosts[].jitterAtSession.avgMs (session window)
        Packet loss (%)   → hosts[].ping.loss (latest + max if in history)
        # Internet Drops  → disconnectEvents[] in window (count + IST times)
      If hosts[] empty: re-query with "RP<CODE>" only.
@@ -1068,6 +1069,14 @@ VALUE EXTRACTION — STRICT SOURCE RULES (no cross-source fallbacks):
                             hosts[].ping.ms (live lastvalue).
                           DO NOT use storeMonitor ping. Empty → "0".
 
+  Ping jitter (ms)      → STORE ZABBIX (custom.ping.jitter history)
+                          PRIMARY:   hosts[].jitterAtSession.avgMs / minMs / maxMs
+                          SECONDARY: jitterHistory.byHost[<hostid>].avgMs / minMs / maxMs
+                          EXACT Store Zabbix UI item:
+                            custom.ping.jitter[8.8.8.8]
+                          Last resort (live): hosts[].ping.jitter
+                          Empty → "0".
+
   Packet loss (%)       → STORE ZABBIX (icmppingloss / custom.ping.loss history)
                           PRIMARY:   hosts[].pingAtSession.avgLossPct
                           SECONDARY: pingHistory.byHost[<hostid>].avgLossPct
@@ -1203,6 +1212,8 @@ OUTPUT VALUE RULES (strict):
        Ping / Loss:
          hosts[].latencyAtSession.{avgMs, minMs, maxMs}
          latencyHistory.byHost[<hostid>].{avgMs, minMs, maxMs}
+         hosts[].jitterAtSession.{avgMs, minMs, maxMs}
+         jitterHistory.byHost[<hostid>].{avgMs, minMs, maxMs}
          hosts[].pingAtSession.{avgMs, minMs, maxMs, avgLossPct}
          pingHistory.byHost[<hostid>].{avgMs, minMs, maxMs, avgLossPct}
     If ANY of these is populated, USE IT — do not write "0".

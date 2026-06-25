@@ -9,6 +9,25 @@ const channelSchema = new mongoose.Schema({
   headers: { type: Object, default: {} },
 }, { _id: false })
 
+const zabbixConditionSchema = new mongoose.Schema({
+  metric: {
+    type: String,
+    enum: [
+      'host_down', 'agent_down', 'interface_down',
+      'cpu', 'memory', 'disk',
+      'latency', 'jitter', 'packet_loss',
+      'bandwidth', 'zabbix_problem',
+    ],
+    required: true,
+  },
+  operator: { type: String, enum: ['gt', 'lt', 'eq', 'gte', 'lte', 'between'], default: 'gt' },
+  threshold: { type: Number, default: 0 },
+  thresholdMax: { type: Number, default: null },
+  target: { type: String, default: '8.8.8.8' },
+  /** Zabbix trigger name substring when metric = zabbix_problem */
+  triggerPattern: { type: String, default: '' },
+}, { _id: false })
+
 const zabbixAlertRuleSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   description: { type: String, default: '' },
@@ -20,24 +39,11 @@ const zabbixAlertRuleSchema = new mongoose.Schema({
     hostids: [{ type: String }],
     hostnames: [{ type: String }],
   },
-  condition: {
-    metric: {
-      type: String,
-      enum: [
-        'host_down', 'agent_down', 'interface_down',
-        'cpu', 'memory', 'disk',
-        'latency', 'jitter', 'packet_loss',
-        'bandwidth', 'zabbix_problem',
-      ],
-      required: true,
-    },
-    operator: { type: String, enum: ['gt', 'lt', 'eq', 'gte', 'lte', 'between'], default: 'gt' },
-    threshold: { type: Number, default: 0 },
-    thresholdMax: { type: Number, default: null },
-    target: { type: String, default: '8.8.8.8' },
-    /** Zabbix trigger name substring when metric = zabbix_problem */
-    triggerPattern: { type: String, default: '' },
-  },
+  /** Legacy primary condition — kept in sync with conditions[0] */
+  condition: { type: zabbixConditionSchema, required: true },
+  /** Multiple conditions evaluated with logic (default AND) */
+  conditions: { type: [zabbixConditionSchema], default: undefined },
+  logic: { type: String, enum: ['and', 'or'], default: 'and' },
   /** Business-hours notification policy */
   businessHours: {
     enabled: { type: Boolean, default: false },
