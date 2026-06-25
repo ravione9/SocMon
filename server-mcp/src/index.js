@@ -34,7 +34,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { NetPulseClient, resolveMcpTimeoutMs, verifyJwtAgainstNetPulse } from './netpulseClient.js'
-import { createNetPulseMcpServer } from './server.js'
+import { createNetPulseMcpServer, isMinimalMcpToolMode } from './server.js'
 
 const NETPULSE_API_BASE = process.env.NETPULSE_API_BASE || 'http://server:5000'
 const MCP_TIMEOUT_MS = resolveMcpTimeoutMs()
@@ -83,9 +83,11 @@ async function runStdio() {
     bearer,
     timeoutMs: MCP_TIMEOUT_MS,
   })
+  const minimalTools = isMinimalMcpToolMode()
   const { server, attachDynamicModules, dispose } = createNetPulseMcpServer({
     netpulse,
     refreshMs: REFRESH_MS,
+    minimalTools,
   })
   const transport = new StdioServerTransport()
   await server.connect(transport)
@@ -98,7 +100,7 @@ async function runStdio() {
   process.stderr.write(
     `[netpulse-mcp] stdio transport ready (api=${NETPULSE_API_BASE}, ` +
     `user=${verify.meta?.serviceUser?.email || 'unknown'}, refresh=${REFRESH_MS}ms, ` +
-    `timeout=${MCP_TIMEOUT_MS}ms)\n`,
+    `minimalTools=${minimalTools}, timeout=${MCP_TIMEOUT_MS}ms)\n`,
   )
 }
 
@@ -113,6 +115,9 @@ async function runHttp() {
       api: NETPULSE_API_BASE,
       auth: 'netpulse-jwt',
       moduleRefreshMs: REFRESH_MS,
+      minimalTools: isMinimalMcpToolMode(),
+      readOnlyTools: true,
+      note: 'Claude Desktop Allow prompts are client-side; set NETPULSE_MCP_MINIMAL_TOOLS=1 to expose only 3 tools, or use autoapprove in claude_desktop_config.json (see README).',
     }),
   )
 
@@ -160,6 +165,7 @@ async function runHttp() {
       const { server, attachDynamicModules, dispose } = createNetPulseMcpServer({
         netpulse,
         refreshMs: REFRESH_MS,
+        minimalTools: isMinimalMcpToolMode(),
       })
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),

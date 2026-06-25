@@ -132,6 +132,8 @@ services:
       NETPULSE_MCP_REFRESH_MS: "60000"
       # Broad store Zabbix snapshots can exceed the old 30s client default.
       NETPULSE_MCP_TIMEOUT_MS: "120000"
+      # When 1/true: expose only netpulse_meta, netpulse_modules, netpulse_query (fewer Claude Allow prompts).
+      NETPULSE_MCP_MINIMAL_TOOLS: "1"
     # service_started, NOT service_healthy: mcp doesn't make any upstream
     # calls until a client opens a session, so we don't need server to be
     # health-check healthy first. Strict service_healthy here was timing

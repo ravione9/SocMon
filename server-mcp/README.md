@@ -120,9 +120,83 @@ MCP client (Claude / Cursor / agent / n8n)
 | `PORT` | no (http only) | `5050` | HTTP listen port. |
 | `NETPULSE_USER_JWT` | yes (stdio only) | – | The NetPulse JWT to use for all calls. Only consulted in stdio mode (HTTP mode uses the per-session `Authorization` header instead). |
 | `NETPULSE_MCP_REFRESH_MS` | no | `60000` | How often to re-poll `AI_CONTEXT_MODULES` and add/remove per-dashboard tools. `0` disables (one-shot at session-init). 5 s floor enforced. |
+| `NETPULSE_MCP_MINIMAL_TOOLS` | no | `0` | When `1`/`true`, expose only `netpulse_meta`, `netpulse_modules`, and `netpulse_query` (no per-dashboard tools). Reduces Claude Desktop **Allow** prompts — use `netpulse_query` for all dashboards. Prod compose sets this to `1` by default. |
 
 No `JWT_SECRET`, no `MCP_PUBLIC_KEYS`, no static agent key — auth is
 end-to-end JWT pass-through.
+
+---
+
+## Claude Desktop: stop repeated “Allow” prompts
+
+**NetPulse cannot disable Claude’s tool-approval UI from the backend.** Every MCP
+tool call is gated by Claude Desktop (or Cursor) on the client. Once your JWT is
+accepted, the backend already allows all read-only queries for your role.
+
+What you *can* do:
+
+### 1. Minimal tool mode (recommended — server-side)
+
+Set on the MCP container (already enabled in `docker-compose.prod.yml`):
+
+```env
+NETPULSE_MCP_MINIMAL_TOOLS=1
+```
+
+This exposes **3 tools** instead of 10+:
+
+| Tool | Use for |
+|---|---|
+| `netpulse_query` | **Primary** — any natural-language question across all dashboards |
+| `netpulse_modules` | Discover module ids |
+| `netpulse_meta` | Who am I / allowed pages |
+
+Example prompt: *“Use netpulse_query: RP973 latency and jitter last hour”*
+
+Rebuild MCP after changing: `docker compose -f docker-compose.prod.yml up -d --build --force-recreate --no-deps mcp`
+
+### 2. “Always approve” in Claude Desktop
+
+When Claude asks to run a NetPulse tool, click **Always approve** (or **Always allow**). That persists for that tool in normal chat mode.
+
+### 3. `autoapprove` list (power users)
+
+Community helper [claude-autoapprove-mcp](https://github.com/wallneradam/claude_autoapprove_mcp) reads an `autoapprove` array per server in `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "claude-autoapprove-mcp": {
+      "command": "uvx",
+      "args": ["claude-autoapprove-mcp"]
+    },
+    "netpulse": {
+      "url": "https://your-netpulse.example.com/mcp",
+      "headers": { "Authorization": "Bearer <NetPulse API token>" },
+      "autoapprove": [
+        "netpulse_meta",
+        "netpulse_modules",
+        "netpulse_query",
+        "netpulse_storeZabbix",
+        "netpulse_storeMonitor",
+        "netpulse_zabbixInfra",
+        "netpulse_soc",
+        "netpulse_sentinelXdr",
+        "netpulse_orian",
+        "netpulse_storeProblems"
+      ]
+    }
+  }
+}
+```
+
+With `NETPULSE_MCP_MINIMAL_TOOLS=1`, only the first three names are needed.
+
+### 4. Backend access (JWT / API token)
+
+Use a **NetPulse API token** (Profile → API Tokens) for an **admin** user with all dashboard pages enabled. The MCP server forwards your JWT; if pages are missing you get empty modules, not extra Allow prompts.
+
+All NetPulse MCP tools are annotated **`readOnlyHint: true`** (read-only data fetch). Future Claude builds may auto-approve these without prompts.
 
 ---
 

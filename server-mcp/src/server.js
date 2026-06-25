@@ -50,6 +50,37 @@ natural-language question that may span multiple modules.`
 const DEFAULT_REFRESH_MS = 60_000
 const TOOL_NAME_PREFIX = 'netpulse_'
 
+/** All NetPulse MCP tools are read-only data fetches — safe to auto-approve in MCP clients that honor readOnlyHint. */
+const READ_ONLY_TOOL = {
+  annotations: {
+    readOnlyHint: true,
+    destructiveHint: false,
+    openWorldHint: false,
+  },
+}
+
+function toolMeta(partial) {
+  return {
+    ...partial,
+    annotations: {
+      ...READ_ONLY_TOOL.annotations,
+      ...partial.annotations,
+    },
+  }
+}
+
+export const NETPULSE_MCP_STATIC_TOOLS = [
+  'netpulse_meta',
+  'netpulse_modules',
+  'netpulse_context',
+  'netpulse_query',
+]
+
+export function isMinimalMcpToolMode() {
+  const raw = String(process.env.NETPULSE_MCP_MINIMAL_TOOLS || '').trim().toLowerCase()
+  return raw === '1' || raw === 'true' || raw === 'yes'
+}
+
 /**
  * Build a fresh MCP server bound to one client session.
  * `netpulse` already carries the per-session JWT.
@@ -60,30 +91,30 @@ const TOOL_NAME_PREFIX = 'netpulse_'
  *   // ... session runs ...
  *   dispose()                          // stop polling on session close
  */
-export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_MS }) {
+export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_MS, minimalTools = false }) {
   const server = new McpServer(SERVER_INFO, { instructions: SERVER_INSTRUCTIONS })
 
   // ---------- Static core tools ----------
 
   server.registerTool(
     'netpulse_meta',
-    {
+    toolMeta({
       title: 'NetPulse: server identity',
       description:
         'Return the connected NetPulse instance metadata (auth method, current user, allowed pages, configured forward URLs).',
       inputSchema: {},
-    },
+    }),
     async () => jsonResult(await netpulse.meta()),
   )
 
   server.registerTool(
     'netpulse_modules',
-    {
+    toolMeta({
       title: 'NetPulse: list available dashboards',
       description:
         'List every NetPulse dashboard / context module currently visible to the authenticated user. Each entry includes the matching tool name (e.g. `netpulse_storeMonitor`), data freshness, and a description.',
       inputSchema: {},
-    },
+    }),
     async () => {
       const data = await netpulse.modules()
       const enriched = {
@@ -97,47 +128,50 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
     },
   )
 
-  server.registerTool(
-    'netpulse_context',
-    {
-      title: 'NetPulse: fetch structured context across modules',
-      description:
-        'Fetch a cross-module structured JSON snapshot. Use the per-module tools for a single dashboard; use this when you want several at once or to hint module selection from a natural-language question.',
-      inputSchema: {
-        modules: z
-          .array(z.string())
-          .optional()
-          .describe('Module ids to include. Omit with autoModules=true to let NetPulse pick.'),
-        question: z
-          .string()
-          .optional()
-          .describe('Optional natural-language hint that drives auto module selection.'),
-        autoModules: z
-          .boolean()
-          .optional()
-          .describe('When true (default), NetPulse picks modules based on the question.'),
-        ...historyWindowSchema,
-      },
-    },
-    async (args) =>
-      jsonResult(
-        await netpulse.context({
-          modules: args.modules,
-          question: args.question,
-          autoModules: args.autoModules ?? true,
-          format: 'json',
-          historyFrom: args.historyFrom,
-          historyTo: args.historyTo,
-        }),
-      ),
-  )
+  if (!minimalTools) {
+    server.registerTool(
+      'netpulse_context',
+      toolMeta({
+        title: 'NetPulse: fetch structured context across modules',
+        description:
+          'Fetch a cross-module structured JSON snapshot. Use the per-module tools for a single dashboard; use this when you want several at once or to hint module selection from a natural-language question.',
+        inputSchema: {
+          modules: z
+            .array(z.string())
+            .optional()
+            .describe('Module ids to include. Omit with autoModules=true to let NetPulse pick.'),
+          question: z
+            .string()
+            .optional()
+            .describe('Optional natural-language hint that drives auto module selection.'),
+          autoModules: z
+            .boolean()
+            .optional()
+            .describe('When true (default), NetPulse picks modules based on the question.'),
+          ...historyWindowSchema,
+        },
+      }),
+      async (args) =>
+        jsonResult(
+          await netpulse.context({
+            modules: args.modules,
+            question: args.question,
+            autoModules: args.autoModules ?? true,
+            format: 'json',
+            historyFrom: args.historyFrom,
+            historyTo: args.historyTo,
+          }),
+        ),
+    )
+  }
 
   server.registerTool(
     'netpulse_query',
-    {
+    toolMeta({
       title: 'NetPulse: answer question with context',
-      description:
-        'Run a natural-language question through NetPulse. Returns any fast-path direct answer plus the structured context the answer was derived from. Examples: "Which Mumbai stores are offline?", "List critical alerts in the last hour", "What tickets are open for site BLR-01?"',
+      description: minimalTools
+        ? 'Primary NetPulse tool (minimal MCP mode). Run a natural-language question; NetPulse picks dashboards and returns live context. Prefer this over per-dashboard tools.'
+        : 'Run a natural-language question through NetPulse. Returns any fast-path direct answer plus the structured context the answer was derived from. Examples: "Which Mumbai stores are offline?", "List critical alerts in the last hour", "What tickets are open for site BLR-01?"',
       inputSchema: {
         question: z.string().min(1).describe('User question, in plain English.'),
         modules: z
@@ -150,7 +184,7 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
           .describe('Include the resolved context payload in the response (default true).'),
         ...historyWindowSchema,
       },
-    },
+    }),
     async (args) =>
       jsonResult(
         await netpulse.query({
@@ -163,6 +197,7 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
         }),
       ),
   )
+
 
   // ---------- Static resources ----------
 
@@ -246,7 +281,7 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
 
     const handle = server.registerTool(
       toolName,
-      {
+      toolMeta({
         title: `NetPulse: ${moduleMeta.label}`,
         description,
         inputSchema: {
@@ -256,7 +291,7 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
             .describe(`Optional natural-language refinement for the ${moduleMeta.label} dashboard.`),
           ...historyWindowSchema,
         },
-      },
+      }),
       async (args) =>
         jsonResult(
           await netpulse.context({
@@ -325,6 +360,12 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
   }
 
   async function attachDynamicModules() {
+    if (minimalTools) {
+      process.stderr.write(
+        '[netpulse-mcp] minimal tool mode — only netpulse_meta, netpulse_modules, netpulse_query (use netpulse_query for all dashboards)\n',
+      )
+      return
+    }
     await reconcileModuleTools()
     if (refreshMs > 0) {
       refreshTimer = setInterval(() => {
@@ -347,7 +388,7 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
     }
   }
 
-  return { server, attachDynamicModules, dispose }
+  return { server, attachDynamicModules, dispose, minimalTools }
 }
 
 function sanitizeToolName(id) {
