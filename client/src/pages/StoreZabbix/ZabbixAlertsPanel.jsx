@@ -62,6 +62,19 @@ function normalizeRuleForm(rule) {
   return base
 }
 
+function ruleForClone(rule) {
+  const copy = normalizeRuleForm(rule)
+  delete copy._id
+  delete copy.lastFiredAt
+  delete copy.createdAt
+  delete copy.updatedAt
+  delete copy.createdBy
+  const baseName = String(copy.name || 'Rule').replace(/ \(copy(?: \d+)?\)$/i, '')
+  copy.name = `${baseName} (copy)`
+  copy.enabled = false
+  return copy
+}
+
 function formatConditionSummary(rule) {
   const conditions = rule.conditions?.length ? rule.conditions : (rule.condition ? [rule.condition] : [])
   const logic = (rule.logic || 'and').toUpperCase()
@@ -113,7 +126,12 @@ function SummaryCard({ label, value, color, sub }) {
   )
 }
 
-function ConditionEditor({ condition, onChange, onRemove, canRemove, inp }) {
+const actionBtn = {
+  padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)',
+  cursor: 'pointer', fontSize: 11, fontFamily: 'var(--mono)', whiteSpace: 'nowrap',
+}
+
+function ConditionEditor({ condition, onChange, onClone, onRemove, canRemove, inp }) {
   const setCond = (patch) => onChange({ ...condition, ...patch })
   return (
     <div style={{
@@ -131,12 +149,16 @@ function ConditionEditor({ condition, onChange, onRemove, canRemove, inp }) {
             <input type="number" value={condition.threshold} onChange={(e) => setCond({ threshold: Number(e.target.value) })} style={inp} />
           </>
         )}
-        {canRemove && (
-          <button type="button" onClick={onRemove}
-            style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: '#ef4444', cursor: 'pointer', fontSize: 11 }}>
-            ✕
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <button type="button" onClick={onClone} title="Clone this condition" style={{ ...actionBtn, color: 'var(--accent)' }}>
+            Clone
           </button>
-        )}
+          {canRemove && (
+            <button type="button" onClick={onRemove} title="Remove condition" style={{ ...actionBtn, color: '#ef4444' }}>
+              ✕
+            </button>
+          )}
+        </div>
       </div>
       {condition.operator === 'between' && (
         <input type="number" value={condition.thresholdMax ?? ''} onChange={(e) => setCond({ thresholdMax: Number(e.target.value) })}
@@ -201,6 +223,14 @@ function RuleModal({ open, initial, groups, onClose, onSave, saving }) {
     })
   }
 
+  const cloneConditionAt = (idx) => {
+    setForm((f) => {
+      const conditions = [...(f.conditions || [])]
+      conditions.splice(idx + 1, 0, JSON.parse(JSON.stringify(conditions[idx])))
+      return { ...f, conditions, condition: conditions[0] }
+    })
+  }
+
   const handleSave = () => {
     const conditions = (form.conditions || []).filter((c) => c?.metric)
     onSave({
@@ -228,6 +258,13 @@ function RuleModal({ open, initial, groups, onClose, onSave, saving }) {
     setForm((f) => {
       const chs = [...f.channels]
       chs.splice(i, 1)
+      return { ...f, channels: chs }
+    })
+  }
+  const cloneChannel = (i) => {
+    setForm((f) => {
+      const chs = [...f.channels]
+      chs.splice(i + 1, 0, JSON.parse(JSON.stringify(chs[i])))
       return { ...f, channels: chs }
     })
   }
@@ -265,7 +302,7 @@ function RuleModal({ open, initial, groups, onClose, onSave, saving }) {
         background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 14, padding: 20,
       }} onClick={(e) => e.stopPropagation()}>
         <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--text)', marginBottom: 12 }}>
-          {initial?._id ? 'Edit Alert Rule' : 'New Alert Rule'}
+          {initial?._id ? 'Edit Alert Rule' : initial ? 'Clone Alert Rule' : 'New Alert Rule'}
         </div>
 
         <div style={{ display: 'grid', gap: 12 }}>
@@ -350,6 +387,7 @@ function RuleModal({ open, initial, groups, onClose, onSave, saving }) {
                 <ConditionEditor
                   condition={cond}
                   onChange={(c) => setConditionAt(idx, c)}
+                  onClone={() => cloneConditionAt(idx)}
                   onRemove={() => removeCondition(idx)}
                   canRemove={(form.conditions || []).length > 1}
                   inp={inp}
@@ -418,7 +456,8 @@ function RuleModal({ open, initial, groups, onClose, onSave, saving }) {
               <div key={i} style={{ marginBottom: 10, padding: 10, borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg3)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                   <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)', fontFamily: 'var(--mono)', textTransform: 'uppercase' }}>{ch.type}</span>
-                  <button type="button" onClick={() => testCh(ch, i)} style={{ marginLeft: 'auto', padding: '2px 8px', fontSize: 10, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg2)', cursor: 'pointer' }}>Test</button>
+                  <button type="button" onClick={() => cloneChannel(i)} style={{ marginLeft: 'auto', padding: '2px 8px', fontSize: 10, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--accent)', cursor: 'pointer' }}>Clone</button>
+                  <button type="button" onClick={() => testCh(ch, i)} style={{ padding: '2px 8px', fontSize: 10, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg2)', cursor: 'pointer' }}>Test</button>
                   <button type="button" onClick={() => removeChannel(i)} style={{ padding: '2px 8px', fontSize: 10, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg2)', color: '#ef4444', cursor: 'pointer' }}>✕</button>
                 </div>
                 {testResult[i] && <div style={{ fontSize: 10, color: 'var(--text3)', marginBottom: 4 }}>{testResult[i]}</div>}
@@ -438,7 +477,7 @@ function RuleModal({ open, initial, groups, onClose, onSave, saving }) {
           <button type="button" onClick={onClose} style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg3)', cursor: 'pointer', fontFamily: 'var(--mono)', fontSize: 12 }}>Cancel</button>
           <button type="button" disabled={saving || !form.name.trim()} onClick={handleSave}
             style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: 'var(--accent)', color: '#fff', cursor: 'pointer', fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 700, opacity: saving || !form.name.trim() ? .5 : 1 }}>
-            {saving ? 'Saving…' : 'Save Rule'}
+            {saving ? 'Saving…' : initial?._id ? 'Save Rule' : 'Create Rule'}
           </button>
         </div>
       </div>
@@ -538,6 +577,10 @@ export default function ZabbixAlertsPanel({ apiBase = '/api/store-zabbix' }) {
     } finally {
       setEvalBusy(false)
     }
+  }
+
+  const cloneRule = (rule) => {
+    setModal(ruleForClone(rule))
   }
 
   const summary = dashboard?.summary || {}
@@ -698,6 +741,7 @@ export default function ZabbixAlertsPanel({ apiBase = '/api/store-zabbix' }) {
                   </td>
                   <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
                     <button type="button" onClick={() => setModal(r)} style={{ marginRight: 6, padding: '2px 8px', fontSize: 10, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg3)', cursor: 'pointer' }}>Edit</button>
+                    <button type="button" onClick={() => cloneRule(r)} style={{ marginRight: 6, padding: '2px 8px', fontSize: 10, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--accent)', cursor: 'pointer' }}>Clone</button>
                     <button type="button" onClick={() => deleteRule(r._id)} style={{ padding: '2px 8px', fontSize: 10, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg3)', color: '#ef4444', cursor: 'pointer' }}>Delete</button>
                   </td>
                 </tr>
@@ -758,7 +802,7 @@ export default function ZabbixAlertsPanel({ apiBase = '/api/store-zabbix' }) {
 
       <RuleModal
         open={!!modal}
-        initial={modal?._id ? modal : null}
+        initial={modal && Object.keys(modal).length > 0 ? modal : null}
         groups={groups}
         onClose={() => setModal(null)}
         onSave={saveRule}
