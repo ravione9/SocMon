@@ -19,6 +19,7 @@
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { runGoodMinutesCompliance } from './goodMinutesCompliance.js'
 
 const historyWindowSchema = {
   historyFrom: z
@@ -74,6 +75,7 @@ export const NETPULSE_MCP_STATIC_TOOLS = [
   'netpulse_modules',
   'netpulse_context',
   'netpulse_query',
+  'good_minutes_compliance',
 ]
 
 export function isMinimalMcpToolMode() {
@@ -164,6 +166,78 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
         ),
     )
   }
+
+  const businessHoursSchema = z
+    .object({
+      startHour: z
+        .number()
+        .int()
+        .min(0)
+        .max(23)
+        .optional()
+        .describe('Local opening hour, 24h clock (default 10 = 10am).'),
+      endHour: z
+        .number()
+        .int()
+        .min(1)
+        .max(24)
+        .optional()
+        .describe('Local closing hour, exclusive (default 22 = through 10pm).'),
+      tzOffsetMinutes: z
+        .number()
+        .int()
+        .optional()
+        .describe('Minutes east of UTC (default 330 = IST).'),
+    })
+    .optional()
+    .describe(
+      'Business-hours filter for minute scoring. Default: 10am–10pm IST (startHour=10, endHour=22, tzOffsetMinutes=330). Override any field, e.g. { startHour: 9, endHour: 21 } for 9am–9pm.',
+    )
+
+  const thresholdsSchema = z
+    .object({
+      latencyMaxMs: z.number().positive().optional(),
+      jitterMaxMs: z.number().positive().optional(),
+      uploadMinMbps: z.number().positive().optional(),
+      complianceTargetPct: z.number().positive().max(100).optional(),
+    })
+    .optional()
+    .describe('Connectivity gates (default latency<60ms, jitter<30ms, upload≥10Mbps, target 99%).')
+
+  server.registerTool(
+    'good_minutes_compliance',
+    toolMeta({
+      title: 'NetPulse: Good-Minutes connectivity compliance (Internet Matrix)',
+      description:
+        'Compute per-store Internet Matrix and Good-Minutes % for LKST stores from Store Zabbix ping history. ' +
+        'Returns each signal (reachable, packet loss, latency, jitter, upload bandwidth) with PASS/FAIL prefix vs threshold. ' +
+        'Store codes accept with or without LKST prefix (e.g. "1514" or "LKST1514"). ' +
+        'Ask: "Give me the internet matrix for LKST1514" with fromUnix/toUnix window.',
+      inputSchema: {
+        storeCodes: z
+          .array(z.string().min(1))
+          .min(1)
+          .describe('Store codes with or without LKST prefix, e.g. ["1514","LKST4711"].'),
+        fromUnix: z.number().int().positive().describe('Window start, unix seconds (inclusive).'),
+        toUnix: z.number().int().positive().describe('Window end, unix seconds (exclusive).'),
+        businessHours: businessHoursSchema,
+        thresholds: thresholdsSchema,
+        roStoreCodes: z
+          .array(z.string())
+          .optional()
+          .describe('Optional subset for Remote-Optometry fleet rollup.'),
+      },
+    }),
+    async (args) => {
+      const { structured, summary } = await runGoodMinutesCompliance(netpulse, args)
+      return {
+        content: [
+          { type: 'text', text: summary },
+          { type: 'text', text: JSON.stringify(structured, null, 2) },
+        ],
+      }
+    },
+  )
 
   server.registerTool(
     'netpulse_query',
