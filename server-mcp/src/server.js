@@ -256,6 +256,12 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
           .describe(
             'Label for CEO one-liner, e.g. "this month". Auto-inferred from window span when omitted.',
           ),
+        adjustBhForStoreHours: z
+          .boolean()
+          .optional()
+          .describe(
+            'When true (default): trim expected BH minutes per store using boot time (system.uptime/crash log) and early shutdown (last ping). E.g. BH 10–10 but store up at 11 → count from 11am.',
+          ),
       },
     }),
     async (args) => {

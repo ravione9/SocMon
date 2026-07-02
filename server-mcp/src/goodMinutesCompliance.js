@@ -15,6 +15,11 @@ import {
   hostMatchesStoreCode,
   STORE_DISPLAY_PREFIX,
 } from './storeCodeAlias.js'
+import {
+  buildEffectiveBhMinutes,
+  extractUptimePoints,
+  extractCrashEventTimes,
+} from './storeOperatingWindow.js'
 
 /** Default BH window: 10am–10pm local (endHour 22 = exclusive, last minute 21:59). */
 export const DEFAULT_BUSINESS_HOURS = {
@@ -213,7 +218,9 @@ export function buildStoreHistoryQuestion(storeIdentity) {
     'Return time-series history of the Store Zabbix connectivity metrics over this window — ' +
     'ping packet loss %, ping average RTT (ms), ping max RTT (ms), and jitter / std-dev of ping RTT. ' +
     'I need per-sample values with timestamps (not just the latest snapshot). ' +
-    'Also return BH-filtered disconnect events and storeMonitor speedtest upload/download Mbps.'
+    'Also return app crash event log with timestamps (Influx crashEvents), ' +
+    'system.uptime Zabbix history points (for boot/reboot detection), ' +
+    'BH-filtered disconnect events, and storeMonitor speedtest upload/download Mbps.'
   )
 }
 
@@ -502,6 +509,10 @@ export const GOOD_MINUTES_DEFINITIONS = {
     description:
       'Same fleet metrics filtered to Remote-Optometry stores (~1,000 stores). Pass roStoreCodes to compute this view.',
   },
+  operatingWindow: {
+    adjustBhForStoreHours:
+      'When enabled (default): expected minutes per store/day start at boot (system.uptime reboot or first crash in BH) and end at early shutdown (no pings for 30+ min before BH close). Example: BH 10–10, store up 11am → count from 11am only.',
+  },
 }
 
 export function computeFleetSummary(perStore, complianceTargetPct, { periodLabel = 'this period', label = 'Fleet' } = {}) {
@@ -555,6 +566,9 @@ export function buildHumanSummary(result) {
     const status = (s.compliant ?? s.compliantStrict) ? 'COMPLIANT' : 'NON-COMPLIANT'
     lines.push(
       `  ${store}: ${pct}% Good-Minutes (${s.goodMin}/${s.expectedMin} minutes) — ${status}` +
+        (s.expectedMinNominal != null && s.expectedMinNominal !== s.expectedMin
+          ? ` · BH adjusted ${s.expectedMinNominal}→${s.expectedMin} min`
+          : '') +
         (s.goodMinutesPctCovered != null && s.goodMinutesPctCovered !== pct
           ? ` · covered-only ${s.goodMinutesPctCovered}%`
           : '') +
@@ -599,11 +613,15 @@ export async function fetchStorePingHistory(netpulse, storeInput, fromUnix, toUn
     const data = JSON.parse(raw)
     const samples = extractPingSamples(data)
     const latestUploadMbps = extractLatestUploadMbps(data, storeIdentity)
-    return { samples, latestUploadMbps, storeIdentity, fetchError: null }
+    const uptimePoints = extractUptimePoints(data)
+    const crashTimes = extractCrashEventTimes(data, storeIdentity)
+    return { samples, latestUploadMbps, uptimePoints, crashTimes, storeIdentity, fetchError: null }
   } catch (err) {
     return {
       samples: { latency: [], jitter: [] },
       latestUploadMbps: null,
+      uptimePoints: [],
+      crashTimes: [],
       storeIdentity,
       fetchError: err?.message || String(err),
     }
@@ -626,6 +644,7 @@ export async function runGoodMinutesCompliance(netpulse, args) {
     thresholds = DEFAULT_THRESHOLDS,
     roStoreCodes,
     periodLabel,
+    adjustBhForStoreHours = true,
   } = args
 
   if (!Array.isArray(storeCodes) || storeCodes.length === 0) {
@@ -638,18 +657,25 @@ export async function runGoodMinutesCompliance(netpulse, args) {
   const { fromUnix, toUnix } = window
   const resolvedPeriodLabel = window.periodLabel
 
-  const bhMinutes = enumerateBhMinutes(fromUnix, toUnix, mergedBh)
+  const bhMinutesNominal = enumerateBhMinutes(fromUnix, toUnix, mergedBh)
 
   const perStore = []
   const internetMatrix = []
   for (const storeInput of storeCodes) {
     const storeIdentity = resolveStoreIdentity(storeInput)
-    const { samples, latestUploadMbps, fetchError } = await fetchStorePingHistory(
-      netpulse,
-      storeInput,
-      fromUnix,
-      toUnix,
-    )
+    const { samples, latestUploadMbps, uptimePoints, crashTimes, fetchError } =
+      await fetchStorePingHistory(netpulse, storeInput, fromUnix, toUnix)
+
+    const operatingWindow = buildEffectiveBhMinutes({
+      businessHours: mergedBh,
+      nominalBhMinutes: bhMinutesNominal,
+      latencySamples: samples.latency,
+      uptimePoints,
+      crashTimes,
+      enabled: adjustBhForStoreHours,
+    })
+    const bhMinutes = operatingWindow.minutes
+
     const sampleStats = aggregateBhSampleStats(samples.latency, samples.jitter, bhMinutes)
     const row = scoreStoreCompliance({
       store: storeIdentity.displayCode,
@@ -664,6 +690,8 @@ export async function runGoodMinutesCompliance(netpulse, args) {
     row.numericCode = storeIdentity.numericCode
     row.zabbixHostPrefix = storeIdentity.zabbixPrimary
     row.queryAliases = storeIdentity.queryTerms
+    row.expectedMinNominal = operatingWindow.nominalExpectedMin
+    row.operatingWindow = operatingWindow
     row.internetMatrix = buildInternetMatrix(row, sampleStats, mergedThresholds)
     perStore.push(row)
     internetMatrix.push(row.internetMatrix)
@@ -700,6 +728,7 @@ export async function runGoodMinutesCompliance(netpulse, args) {
       'Disconnect events track store-PC agent heartbeat, not WAN outages — excluded from gates.',
       'Missing ping in a BH minute counts as packet loss on the strict basis (60s cadence).',
       'Bandwidth gate uses latest speedtest upload snapshot only; excluded from per-minute scoring.',
+      'When adjustBhForStoreHours is true (default): expected minutes start at store boot (system.uptime / crash log) and end at early shutdown (no pings before BH close).',
     ],
   }
 
