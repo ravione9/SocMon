@@ -209,23 +209,53 @@ export function createNetPulseMcpServer({ netpulse, refreshMs = DEFAULT_REFRESH_
     toolMeta({
       title: 'NetPulse: Good-Minutes connectivity compliance (Internet Matrix)',
       description:
-        'Compute per-store Internet Matrix and Good-Minutes % for LKST stores from Store Zabbix ping history. ' +
-        'Returns each signal (reachable, packet loss, latency, jitter, upload bandwidth) with PASS/FAIL prefix vs threshold. ' +
-        'Store codes accept with or without LKST prefix (e.g. "1514" or "LKST1514"). ' +
-        'Ask: "Give me the internet matrix for LKST1514" with fromUnix/toUnix window.',
+        'Compute per-store Good-Minutes % and fleet % Stores Compliant (CEO metric) from Store Zabbix ping history. ' +
+        'Good-Minutes % = minutes passing ALL gates ÷ expected BH minutes (one bad sample fails the whole minute). ' +
+        '% Stores Compliant = stores with Good-Minutes % ≥ target ÷ all stores. ' +
+        'Pass roStoreCodes for Remote-Optometry fleet view. LKST336 resolves to Zabbix RP336-* host automatically.',
       inputSchema: {
         storeCodes: z
           .array(z.string().min(1))
           .min(1)
-          .describe('Store codes with or without LKST prefix, e.g. ["1514","LKST4711"].'),
-        fromUnix: z.number().int().positive().describe('Window start, unix seconds (inclusive).'),
-        toUnix: z.number().int().positive().describe('Window end, unix seconds (exclusive).'),
+          .describe('Store code: LKST336, 336, or RP336 — LKST336 auto-resolves to Zabbix RP336-* host.'),
+        fromDate: z
+          .string()
+          .optional()
+          .describe('Window start date YYYY-MM-DD (IST). Use with toDate, e.g. "2025-06-01".'),
+        toDate: z
+          .string()
+          .optional()
+          .describe('Window end date YYYY-MM-DD (IST, inclusive). e.g. "2025-06-30".'),
+        month: z
+          .string()
+          .optional()
+          .describe('Whole calendar month: "2025-06" or "June 2025". Alternative to fromDate/toDate.'),
+        fromUnix: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('Advanced: window start unix seconds (use fromDate/toDate instead).'),
+        toUnix: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('Advanced: window end unix seconds exclusive (use fromDate/toDate instead).'),
         businessHours: businessHoursSchema,
         thresholds: thresholdsSchema,
         roStoreCodes: z
           .array(z.string())
           .optional()
-          .describe('Optional subset for Remote-Optometry fleet rollup.'),
+          .describe(
+            'Remote-Optometry store subset (~1,000 stores). Computes roFleet with same CEO one-liner for this view only.',
+          ),
+        periodLabel: z
+          .string()
+          .optional()
+          .describe(
+            'Label for CEO one-liner, e.g. "this month". Auto-inferred from window span when omitted.',
+          ),
       },
     }),
     async (args) => {

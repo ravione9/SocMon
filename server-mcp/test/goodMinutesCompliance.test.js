@@ -15,6 +15,8 @@ import {
   formatInternetMatrixText,
   resolveBusinessHours,
   formatBusinessHoursLabel,
+  formatCeoOneLiner,
+  computeFleetSummary,
   DEFAULT_BUSINESS_HOURS,
   DEFAULT_THRESHOLDS,
 } from '../src/goodMinutesCompliance.js'
@@ -62,6 +64,27 @@ describe('resolveBusinessHours', () => {
 describe('formatBusinessHoursLabel', () => {
   it('formats am/pm labels', () => {
     assert.equal(formatBusinessHoursLabel(DEFAULT_BUSINESS_HOURS), '10am–10pm IST')
+  })
+})
+
+describe('formatCeoOneLiner', () => {
+  it('formats the CEO fleet one-liner', () => {
+    const line = formatCeoOneLiner(2640, 3000, 99, 'this month')
+    assert.equal(line, '2,640 / 3,000 stores met the connectivity standard this month — target 99%.')
+  })
+})
+
+describe('computeFleetSummary', () => {
+  it('counts stores with goodMinutesPct at target', () => {
+    const perStore = [
+      { compliant: true, goodMinutesPct: 99.5 },
+      { compliant: true, goodMinutesPct: 100 },
+      { compliant: false, goodMinutesPct: 95 },
+    ]
+    const fleet = computeFleetSummary(perStore, 99, { periodLabel: 'this month' })
+    assert.equal(fleet.storesCompliant, 2)
+    assert.equal(fleet.totalStores, 3)
+    assert.equal(fleet.oneLineSummary, '2 / 3 stores met the connectivity standard this month — target 99%.')
   })
 })
 
@@ -160,8 +183,8 @@ describe('scoreStoreCompliance', () => {
       latestUploadMbps: 50,
     })
 
-    assert.equal(row.goodPctStrict, 100)
-    assert.equal(row.goodPctCovered, 100)
+    assert.equal(row.goodMinutesPct, 100)
+    assert.equal(row.compliant, true)
     assert.equal(row.compliantStrict, true)
     assert.equal(row.dataQualityFlag, 'ok')
     assert.equal(row.lossMin, 0)
@@ -183,8 +206,8 @@ describe('scoreStoreCompliance', () => {
       thresholds: DEFAULT_THRESHOLDS,
     })
 
-    assert.ok(row.goodPctStrict < 20, `expected low strict, got ${row.goodPctStrict}`)
-    assert.equal(row.goodPctCovered, 100)
+    assert.ok(row.goodMinutesPct < 20, `expected low good-minutes, got ${row.goodMinutesPct}`)
+    assert.equal(row.goodMinutesPctCovered, 100)
     assert.equal(row.dataQualityFlag, 'monitoring_gap')
     assert.ok(row.biggestGapMin >= 600)
     assert.equal(row.compliantStrict, false)

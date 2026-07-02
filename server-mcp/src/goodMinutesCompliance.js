@@ -7,6 +7,14 @@
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
+import { resolveComplianceWindow, formatWindowInputHelp } from './resolveComplianceWindow.js'
+import {
+  normalizeStoreCode,
+  normalizeStoreCodes,
+  resolveStoreIdentity,
+  hostMatchesStoreCode,
+  STORE_DISPLAY_PREFIX,
+} from './storeCodeAlias.js'
 
 /** Default BH window: 10am–10pm local (endHour 22 = exclusive, last minute 21:59). */
 export const DEFAULT_BUSINESS_HOURS = {
@@ -53,22 +61,12 @@ export const DEFAULT_THRESHOLDS = {
 
 const LATENCY_KEY = 'custom.ping.ms[8.8.8.8]'
 const JITTER_KEY = 'custom.ping.jitter[8.8.8.8]'
-const STORE_CODE_PREFIX = 'LKST'
 const PING_CADENCE_TARGET_SEC = 60
 const PING_CADENCE_WARN_LOW = 45
 const PING_CADENCE_WARN_HIGH = 90
 
-/** Ensure store code carries LKST prefix (e.g. "1514" → "LKST1514"). */
-export function normalizeStoreCode(code) {
-  const raw = String(code || '').trim().toUpperCase()
-  if (!raw) return raw
-  if (raw.startsWith(STORE_CODE_PREFIX)) return raw
-  return `${STORE_CODE_PREFIX}${raw}`
-}
-
-export function normalizeStoreCodes(codes) {
-  return (codes || []).map(normalizeStoreCode)
-}
+/** Ensure store code carries LKST prefix — re-exported from storeCodeAlias. */
+export { normalizeStoreCode, normalizeStoreCodes, resolveStoreIdentity, extractNumericStoreCode } from './storeCodeAlias.js'
 
 /** Aggregate latency/jitter stats over BH samples only. */
 export function aggregateBhSampleStats(latencySamples, jitterSamples, bhMinutes) {
@@ -162,11 +160,12 @@ export function buildInternetMatrix(storeRow, sampleStats, thresholds = DEFAULT_
       prefix: matrixPrefix(uploadMbps != null ? uploadMbps >= uploadMinMbps : null),
     },
     {
-      signal: 'Good-minutes compliance',
-      source: 'Minute-based BH score (latency + jitter gates)',
+      signal: 'Good-Minutes %',
+      source:
+        'Minute-based BH score — one bad sample fails the entire minute (not averaged like uptime metrics)',
       threshold: `≥ ${complianceTargetPct}%`,
-      value: `${storeRow.goodPctStrict}% strict · ${storeRow.goodPctCovered}% covered`,
-      prefix: matrixPrefix(storeRow.compliantStrict),
+      value: `${storeRow.goodMinutesPct ?? storeRow.goodPctStrict}% (${storeRow.goodMin}/${storeRow.expectedMin} good minutes)`,
+      prefix: matrixPrefix(storeRow.compliant ?? storeRow.compliantStrict),
     },
   ]
 
@@ -175,7 +174,9 @@ export function buildInternetMatrix(storeRow, sampleStats, thresholds = DEFAULT_
 
   return {
     store,
-    prefix: STORE_CODE_PREFIX,
+    prefix: STORE_DISPLAY_PREFIX,
+    zabbixHostPrefix: storeRow.zabbixHostPrefix || null,
+    queryAliases: storeRow.queryAliases || [],
     overallPrefix: allPass ? 'PASS' : anyFail ? 'FAIL' : 'PARTIAL',
     rows,
   }
@@ -199,14 +200,20 @@ export function buildInternetMatrixSummary(perStoreMatrices) {
   return perStoreMatrices.map(formatInternetMatrixText).join('\n\n')
 }
 
-/** Build the natural-language question that triggers per-sample Zabbix history (not null). */
-export function buildStoreHistoryQuestion(storeCode) {
+/** Build netpulse_query question — includes LKST→RP aliases so Zabbix host resolves. */
+export function buildStoreHistoryQuestion(storeIdentity) {
+  const id = typeof storeIdentity === 'string' ? resolveStoreIdentity(storeIdentity) : storeIdentity
+  const aliasNote =
+    id.numericCode != null
+      ? `Store ${id.displayCode} — Zabbix workstation host is usually ${id.zabbixPrimary}-* ` +
+        `(match aliases: ${id.queryTerms.join(', ')}). `
+      : `For store ${id.displayCode}. `
   return (
-    `For store ${storeCode}, return time-series history of the Store Zabbix connectivity ` +
-    'metrics over this window — ping packet loss %, ping average RTT (ms), ping max RTT (ms), ' +
-    'and jitter / std-dev of ping RTT. I need per-sample values with timestamps ' +
-    '(not just the latest snapshot). Also return BH-filtered disconnect events and ' +
-    'storeMonitor speedtest upload/download Mbps.'
+    aliasNote +
+    'Return time-series history of the Store Zabbix connectivity metrics over this window — ' +
+    'ping packet loss %, ping average RTT (ms), ping max RTT (ms), and jitter / std-dev of ping RTT. ' +
+    'I need per-sample values with timestamps (not just the latest snapshot). ' +
+    'Also return BH-filtered disconnect events and storeMonitor speedtest upload/download Mbps.'
   )
 }
 
@@ -262,8 +269,8 @@ export function extractPingSamples(root) {
 }
 
 /** Find latest uploadMbps from storeMonitor context (snapshot only — not per-minute). */
-export function extractLatestUploadMbps(root, storeCode) {
-  const code = String(storeCode || '').toUpperCase()
+export function extractLatestUploadMbps(root, storeIdentity) {
+  const id = typeof storeIdentity === 'string' ? resolveStoreIdentity(storeIdentity) : storeIdentity
   let best = null
 
   function matchesStore(obj) {
@@ -275,8 +282,12 @@ export function extractLatestUploadMbps(root, storeCode) {
       obj.storeCode,
       obj.host,
       obj.name,
-    ].filter(Boolean).map((s) => String(s).toUpperCase())
-    return candidates.some((c) => c.includes(code))
+    ].filter(Boolean)
+    if (id.numericCode != null) {
+      return candidates.some((c) => hostMatchesStoreCode(c, id.numericCode))
+    }
+    const code = id.displayCode
+    return candidates.some((c) => String(c).toUpperCase().includes(code))
   }
 
   function walk(node) {
@@ -286,7 +297,7 @@ export function extractLatestUploadMbps(root, storeCode) {
       return
     }
     if (node.uploadMbps != null && Number.isFinite(Number(node.uploadMbps))) {
-      if (!code || matchesStore(node)) {
+      if (matchesStore(node)) {
         const val = Number(node.uploadMbps)
         if (best == null || val > best) best = val
       }
@@ -444,8 +455,13 @@ export function scoreStoreCompliance({
     lossMin,
     latencyBadMin,
     jitterBadMin,
+    /** Primary metric: minutes passing ALL gates ÷ expected BH minutes. One bad sample fails the whole minute. */
+    goodMinutesPct: roundPct(goodPctStrict),
+    /** Diagnostic: good minutes ÷ only minutes with any ping sample (ignores missing as loss). */
+    goodMinutesPctCovered: roundPct(goodPctCovered),
     goodPctStrict: roundPct(goodPctStrict),
     goodPctCovered: roundPct(goodPctCovered),
+    compliant: compliantStrict,
     compliantStrict,
     compliantCovered,
     biggestGapMin,
@@ -461,48 +477,90 @@ function roundPct(n) {
   return Math.round(n * 100) / 100
 }
 
-export function computeFleetSummary(perStore, complianceTargetPct) {
+/** CEO one-liner: "2,640 / 3,000 stores met the connectivity standard this month — target 99%." */
+export function formatCeoOneLiner(storesCompliant, total, complianceTargetPct, periodLabel = 'this period') {
+  const fmt = (n) => Number(n).toLocaleString('en-US')
+  return `${fmt(storesCompliant)} / ${fmt(total)} stores met the connectivity standard ${periodLabel} — target ${complianceTargetPct}%.`
+}
+
+export const GOOD_MINUTES_DEFINITIONS = {
+  perStore: {
+    goodMinutesPct:
+      'Share of business-hour monitoring minutes where the store passed ALL quality gates simultaneously. ' +
+      'Formula: goodMinutesPct = goodMin ÷ expectedMin. Any single bad latency/jitter sample fails the entire minute ' +
+      '(highlights minor fluctuations vs averaging).',
+    gates:
+      'Packet loss <1% (missing ping = loss), latency < threshold, jitter < threshold. Bandwidth is reported separately (snapshot only).',
+  },
+  fleet: {
+    pctStoresCompliant:
+      'CEO metric — share of stores whose Good-Minutes % is at or above the compliance target (default 99%). ' +
+      'Formula: storesCompliant ÷ totalStores.',
+    oneLineSummary: 'Reads as: "N / M stores met the connectivity standard this month — target 99%."',
+  },
+  roFleet: {
+    description:
+      'Same fleet metrics filtered to Remote-Optometry stores (~1,000 stores). Pass roStoreCodes to compute this view.',
+  },
+}
+
+export function computeFleetSummary(perStore, complianceTargetPct, { periodLabel = 'this period', label = 'Fleet' } = {}) {
   const total = perStore.length
-  const storesCompliantStrict = perStore.filter((s) => s.compliantStrict).length
+  const storesCompliant = perStore.filter((s) => s.compliant ?? s.compliantStrict).length
   const storesCompliantCovered = perStore.filter((s) => s.compliantCovered).length
-  const pctStoresCompliantStrict = total > 0 ? roundPct((storesCompliantStrict / total) * 100) : 0
+  const pctStoresCompliant = total > 0 ? roundPct((storesCompliant / total) * 100) : 0
   const pctStoresCompliantCovered = total > 0 ? roundPct((storesCompliantCovered / total) * 100) : 0
-  const oneLineSummary =
-    `${storesCompliantStrict} / ${total} stores met the connectivity standard (strict) — target ${complianceTargetPct}%.`
+  const oneLineSummary = formatCeoOneLiner(storesCompliant, total, complianceTargetPct, periodLabel)
 
   return {
-    storesCompliantStrict,
+    label,
+    storesCompliant,
+    storesCompliantStrict: storesCompliant,
     storesCompliantCovered,
     total,
-    pctStoresCompliantStrict,
+    totalStores: total,
+    pctStoresCompliant,
+    pctStoresCompliantStrict: pctStoresCompliant,
     pctStoresCompliantCovered,
+    complianceTargetPct,
     oneLineSummary,
   }
 }
 
 export function buildHumanSummary(result) {
   const lines = []
-  if (result.internetMatrix?.length) {
-    lines.push('=== Internet Matrix ===', '', buildInternetMatrixSummary(result.internetMatrix), '')
+
+  lines.push('=== CEO — % Stores Compliant ===', result.fleet.oneLineSummary)
+  if (result.fleet.pctStoresCompliant != null) {
+    lines.push(`Fleet Good-Minutes compliance rate: ${result.fleet.pctStoresCompliant}% of stores at target.`)
   }
+  if (result.roFleet) {
+    lines.push('', '=== Remote-Optometry — % Stores Compliant ===', result.roFleet.oneLineSummary)
+  }
+
+  if (result.internetMatrix?.length) {
+    lines.push('', '=== Internet Matrix ===', '', buildInternetMatrixSummary(result.internetMatrix))
+  }
+
   lines.push(
-    result.fleet.oneLineSummary,
-    `Covered basis: ${result.fleet.storesCompliantCovered} / ${result.fleet.total} stores (${result.fleet.pctStoresCompliantCovered}%).`,
-    `Window: ${result.window.fromUnix} – ${result.window.toUnix} (${result.window.label}).`,
-    `Business hours: ${result.businessHours.label || formatBusinessHoursLabel(result.businessHours)} (startHour=${result.businessHours.startHour}, endHour=${result.businessHours.endHour}, tzOffsetMinutes=${result.businessHours.tzOffsetMinutes}).`,
     '',
-    'Per store (strict good-min %):',
+    `Window: ${result.window.fromDate} – ${result.window.toDate} (${result.window.periodLabel})`,
+    `Business hours: ${result.businessHours.label || formatBusinessHoursLabel(result.businessHours)}.`,
+    '',
+    'Per store — Good-Minutes % (minutes passing ALL gates ÷ expected BH minutes):',
   )
   for (const s of result.perStore) {
     const store = normalizeStoreCode(s.store)
+    const pct = s.goodMinutesPct ?? s.goodPctStrict
+    const status = (s.compliant ?? s.compliantStrict) ? 'COMPLIANT' : 'NON-COMPLIANT'
     lines.push(
-      `  ${store}: ${s.goodPctStrict}% strict / ${s.goodPctCovered}% covered` +
-        ` (${s.goodMin}/${s.expectedMin} good min, flag=${s.dataQualityFlag})` +
+      `  ${store}: ${pct}% Good-Minutes (${s.goodMin}/${s.expectedMin} minutes) — ${status}` +
+        (s.goodMinutesPctCovered != null && s.goodMinutesPctCovered !== pct
+          ? ` · covered-only ${s.goodMinutesPctCovered}%`
+          : '') +
+        (s.dataQualityFlag !== 'ok' ? ` · data=${s.dataQualityFlag}` : '') +
         (s.latestUploadMbps != null ? ` · upload ${s.latestUploadMbps} Mbps` : ''),
     )
-  }
-  if (result.roFleet) {
-    lines.push('', `Remote-Optometry fleet: ${result.roFleet.oneLineSummary}`)
   }
   const allWarnings = result.perStore.flatMap((s) => s.warnings || [])
   if (allWarnings.length) {
@@ -519,8 +577,9 @@ export function buildHumanSummary(result) {
 /**
  * Fetch one store's history via netpulse_query, persist to temp file, parse samples only.
  */
-export async function fetchStorePingHistory(netpulse, storeCode, fromUnix, toUnix) {
-  const question = buildStoreHistoryQuestion(storeCode)
+export async function fetchStorePingHistory(netpulse, storeInput, fromUnix, toUnix) {
+  const storeIdentity = resolveStoreIdentity(storeInput)
+  const question = buildStoreHistoryQuestion(storeIdentity)
   const payload = await netpulse.query({
     question,
     modules: ['storeZabbix', 'storeMonitor'],
@@ -532,19 +591,20 @@ export async function fetchStorePingHistory(netpulse, storeCode, fromUnix, toUni
 
   const tmpPath = path.join(
     os.tmpdir(),
-    `netpulse-gmc-${sanitizeFilename(storeCode)}-${Date.now()}.json`,
+    `netpulse-gmc-${sanitizeFilename(storeIdentity.displayCode)}-${Date.now()}.json`,
   )
   try {
     await fs.writeFile(tmpPath, JSON.stringify(payload), 'utf8')
     const raw = await fs.readFile(tmpPath, 'utf8')
     const data = JSON.parse(raw)
     const samples = extractPingSamples(data)
-    const latestUploadMbps = extractLatestUploadMbps(data, storeCode)
-    return { samples, latestUploadMbps, fetchError: null }
+    const latestUploadMbps = extractLatestUploadMbps(data, storeIdentity)
+    return { samples, latestUploadMbps, storeIdentity, fetchError: null }
   } catch (err) {
     return {
       samples: { latency: [], jitter: [] },
       latestUploadMbps: null,
+      storeIdentity,
       fetchError: err?.message || String(err),
     }
   } finally {
@@ -562,43 +622,37 @@ function sanitizeFilename(s) {
 export async function runGoodMinutesCompliance(netpulse, args) {
   const {
     storeCodes,
-    fromUnix,
-    toUnix,
     businessHours: businessHoursOverride,
     thresholds = DEFAULT_THRESHOLDS,
     roStoreCodes,
+    periodLabel,
   } = args
 
   if (!Array.isArray(storeCodes) || storeCodes.length === 0) {
     throw new Error('storeCodes must be a non-empty string array')
   }
-  if (!Number.isFinite(fromUnix) || !Number.isFinite(toUnix) || fromUnix >= toUnix) {
-    throw new Error('fromUnix and toUnix must be valid unix seconds with fromUnix < toUnix')
-  }
 
   const mergedThresholds = { ...DEFAULT_THRESHOLDS, ...thresholds }
   const mergedBh = resolveBusinessHours(businessHoursOverride)
-  const bhMinutes = enumerateBhMinutes(fromUnix, toUnix, mergedBh)
-  const normalizedStores = normalizeStoreCodes(storeCodes)
+  const window = resolveComplianceWindow({ ...args, businessHours: mergedBh, periodLabel })
+  const { fromUnix, toUnix } = window
+  const resolvedPeriodLabel = window.periodLabel
 
-  const window = {
-    fromUnix,
-    toUnix,
-    label: `${new Date(fromUnix * 1000).toISOString()} – ${new Date(toUnix * 1000).toISOString()}`,
-  }
+  const bhMinutes = enumerateBhMinutes(fromUnix, toUnix, mergedBh)
 
   const perStore = []
   const internetMatrix = []
-  for (const store of normalizedStores) {
+  for (const storeInput of storeCodes) {
+    const storeIdentity = resolveStoreIdentity(storeInput)
     const { samples, latestUploadMbps, fetchError } = await fetchStorePingHistory(
       netpulse,
-      store,
+      storeInput,
       fromUnix,
       toUnix,
     )
     const sampleStats = aggregateBhSampleStats(samples.latency, samples.jitter, bhMinutes)
     const row = scoreStoreCompliance({
-      store,
+      store: storeIdentity.displayCode,
       bhMinutes,
       latencySamples: samples.latency,
       jitterSamples: samples.jitter,
@@ -606,26 +660,38 @@ export async function runGoodMinutesCompliance(netpulse, args) {
       latestUploadMbps,
     })
     if (fetchError) row.warnings = [...(row.warnings || []), `Fetch/parse error: ${fetchError}`]
-    row.store = normalizeStoreCode(row.store)
+    row.store = storeIdentity.displayCode
+    row.numericCode = storeIdentity.numericCode
+    row.zabbixHostPrefix = storeIdentity.zabbixPrimary
+    row.queryAliases = storeIdentity.queryTerms
     row.internetMatrix = buildInternetMatrix(row, sampleStats, mergedThresholds)
     perStore.push(row)
     internetMatrix.push(row.internetMatrix)
   }
 
-  const fleet = computeFleetSummary(perStore, mergedThresholds.complianceTargetPct)
+  const fleet = computeFleetSummary(perStore, mergedThresholds.complianceTargetPct, {
+    periodLabel: resolvedPeriodLabel,
+    label: 'Fleet',
+  })
 
   let roFleet = null
   if (Array.isArray(roStoreCodes) && roStoreCodes.length > 0) {
     const roSet = new Set(normalizeStoreCodes(roStoreCodes))
     const roRows = perStore.filter((s) => roSet.has(normalizeStoreCode(s.store)))
-    roFleet = computeFleetSummary(roRows, mergedThresholds.complianceTargetPct)
+    roFleet = computeFleetSummary(roRows, mergedThresholds.complianceTargetPct, {
+      periodLabel: resolvedPeriodLabel,
+      label: 'Remote-Optometry',
+    })
   }
 
   const result = {
+    definitions: GOOD_MINUTES_DEFINITIONS,
+    windowInputHelp: formatWindowInputHelp(),
     window,
     businessHours: mergedBh,
     thresholds: mergedThresholds,
-    storeCodePrefix: STORE_CODE_PREFIX,
+    storeCodePrefix: STORE_DISPLAY_PREFIX,
+    storeAliasNote: 'LKST<code> queries resolve to Zabbix RP<code>-* hosts (e.g. LKST336 → RP336).',
     internetMatrix,
     perStore,
     fleet,
