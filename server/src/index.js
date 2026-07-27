@@ -53,6 +53,7 @@ import emailSimRoutes from './routes/emailSim.js'
 import emailSimPublicRoutes from './routes/emailSimPublic.js'
 import customRoleRoutes from './routes/customRoles.js'
 import sslRoutes from './routes/ssl.js'
+import samlRoutes, { samlAdminRoutes } from './routes/saml.js'
 import { errorHandler } from './middleware/errorHandler.js'
 import { getAIProviderConfigStatus } from './services/ai/aiRouter.js'
 
@@ -155,6 +156,8 @@ app.use(
 )
 
 app.use('/api/auth',    authRoutes)
+app.use('/api/auth/saml', samlRoutes)
+app.use('/api/admin/saml', samlAdminRoutes)
 app.use('/api/users',   userRoutes)
 app.use('/api/custom-roles', customRoleRoutes)
 app.use('/api/devices', deviceRoutes)

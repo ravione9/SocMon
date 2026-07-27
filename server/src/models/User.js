@@ -6,8 +6,8 @@ const userSchema = new mongoose.Schema({
   email:     { type: String, required: true, unique: true, lowercase: true },
   /** Omit for portal users who authenticate against Active Directory (see authKind). */
   password:  { type: String, required: false, select: false },
-  /** Local = bcrypt portal password; ad = LDAP bind against the configured domain (still requires a Mongo row + access grants). */
-  authKind:  { type: String, enum: ['local', 'ad'], default: 'local' },
+  /** Local = bcrypt portal password; ad = LDAP bind; saml = SAML SSO (no portal password). */
+  authKind:  { type: String, enum: ['local', 'ad', 'saml'], default: 'local' },
   /** When authKind is ad: UPN / DOMAIN\samAccount / DN — leave empty to bind with portal email as the LDAP user name (typical when UPN matches email). */
   adLoginIdentity: { type: String, default: '' },
   role:      { type: String, enum: ['admin', 'custom_admin', 'role_template', 'analyst', 'viewer'], default: 'viewer' },
@@ -28,7 +28,7 @@ const userSchema = new mongoose.Schema({
 }, { timestamps: true })
 
 userSchema.pre('validate', function(next) {
-  if (this.authKind === 'ad') {
+  if (this.authKind === 'ad' || this.authKind === 'saml') {
     return next()
   }
   const needPw = this.isNew || this.isModified('password')

@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { useAuthStore } from './store/authStore'
 import Layout from './components/layout/Layout'
 import LoginPage from './pages/Login/LoginPage'
+import SamlCallbackPage from './pages/Login/SamlCallbackPage.jsx'
 import PageLoading from './components/ui/PageLoading.jsx'
 import { canAccessPage, getFirstAllowedPath } from './utils/pageAccess'
 
@@ -45,6 +46,7 @@ export default function App() {
     <Suspense fallback={<PageLoading />}>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/login/saml/callback" element={<SamlCallbackPage />} />
         <Route path="/api-docs" element={<PrivateRoute><ApiDocsPage /></PrivateRoute>} />
         <Route path="/" element={<PrivateRoute><Layout /></PrivateRoute>}>
           <Route index element={<DefaultRedirect />} />

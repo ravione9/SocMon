@@ -83,6 +83,9 @@ router.post('/login', async (req, res) => {
 
     const authKind = user.authKind || 'local'
     let valid = false
+    if (authKind === 'saml') {
+      return res.status(401).json({ error: 'This account uses SSO. Sign in with SAML instead of a password.' })
+    }
     if (authKind === 'ad') {
       const bindIdentity = String(user.adLoginIdentity || '').trim() || user.email
       try {

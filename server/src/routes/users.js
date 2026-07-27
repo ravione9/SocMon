@@ -33,10 +33,12 @@ function pickUserPayload(body, opts = {}) {
   if (typeof rawApiAccess === 'boolean') out.apiAccessEnabled = rawApiAccess
 
   if (!existingUser) {
-    const authKind = rawAuthKind === 'ad' ? 'ad' : 'local'
+    const authKind = rawAuthKind === 'ad' ? 'ad' : rawAuthKind === 'saml' ? 'saml' : 'local'
     out.authKind = authKind
     if (authKind === 'ad') {
       out.adLoginIdentity = trim(rawAdIdentity)
+    } else if (authKind === 'saml') {
+      out.adLoginIdentity = ''
     } else {
       out.adLoginIdentity = ''
       if (!password || String(password).length < 1) {
@@ -49,6 +51,8 @@ function pickUserPayload(body, opts = {}) {
     if (ak === 'ad') {
       if (password) throw new Error('Cannot set a portal password on an Active Directory–linked account.')
       if (rawAdIdentity !== undefined) out.adLoginIdentity = trim(rawAdIdentity)
+    } else if (ak === 'saml') {
+      if (password) throw new Error('Cannot set a portal password on a SAML SSO account.')
     } else if (password) {
       out.password = password
     }

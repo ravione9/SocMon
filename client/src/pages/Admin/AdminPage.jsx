@@ -26,6 +26,7 @@ const TABS = [
   { id:'custom_roles', label:'Custom roles', icon:'🏷️', desc:'Templates: read-only or full per page' },
   { id:'users',    label:'Users',       icon:'👥', desc:'Assign roles & templates' },
   { id:'alerts',   label:'Alert Rules', icon:'🔔', desc:'Thresholds & patterns' },
+  { id:'sso',      label:'SSO',         icon:'🔐', desc:'SAML single sign-on (any IdP)' },
   { id:'system',   label:'System',      icon:'⚙️', desc:'AI, search, stats' },
 ]
 
@@ -165,6 +166,26 @@ export default function AdminPage() {
   const [sslForm, setSslForm]   = useState({ cert: '', key: '' })
   const [sslPreview, setSslPreview] = useState(null)  // validated cert info before saving
 
+  const [saml, setSaml] = useState(null)
+  const [samlForm, setSamlForm] = useState({
+    enabled: false,
+    allowLocalLogin: true,
+    autoProvision: false,
+    defaultRole: 'viewer',
+    idpEntityId: '',
+    idpSsoUrl: '',
+    idpCertPem: '',
+    spEntityId: '',
+    emailAttribute: 'email',
+    nameAttribute: 'displayName',
+  })
+  const [samlLoading, setSamlLoading] = useState(false)
+  const [samlTesting, setSamlTesting] = useState(false)
+  const [samlTestResult, setSamlTestResult] = useState(null)
+  const [idpMetadataUrl, setIdpMetadataUrl] = useState('')
+  const [idpMetadataXml, setIdpMetadataXml] = useState('')
+  const [idpImportBusy, setIdpImportBusy] = useState(false)
+
   const f = key => val => setForm(p => ({ ...p, [key]: val }))
 
   const ADMIN_DEVICE_COLS = [160, 130, 100, 140, 88, 200, 128]
@@ -213,7 +234,102 @@ export default function AdminPage() {
 
   useEffect(() => {
     if (tab === 'system') loadSslStatus()
+    if (tab === 'sso') loadSamlConfig()
   }, [tab])
+
+  async function loadSamlConfig() {
+    try {
+      const { data } = await api.get('/api/admin/saml')
+      setSaml(data)
+      setSamlForm({
+        enabled: !!data.enabled,
+        allowLocalLogin: data.allowLocalLogin !== false,
+        autoProvision: !!data.autoProvision,
+        defaultRole: data.defaultRole || 'viewer',
+        idpEntityId: data.idpEntityId || '',
+        idpSsoUrl: data.idpSsoUrl || '',
+        idpCertPem: '',
+        spEntityId: data.spEntityId || '',
+        emailAttribute: data.emailAttribute || 'email',
+        nameAttribute: data.nameAttribute || 'displayName',
+      })
+    } catch {
+      setSaml(null)
+    }
+  }
+
+  async function saveSamlConfig() {
+    if (!adminEditable) {
+      toast.error('You need full Admin access to save SSO settings.')
+      return
+    }
+    setSamlLoading(true)
+    try {
+      const body = { ...samlForm }
+      if (!body.idpCertPem && saml?.idpCertConfigured) {
+        delete body.idpCertPem
+      }
+      const { data } = await api.put('/api/admin/saml', body)
+      setSaml(data)
+      setSamlForm((p) => ({ ...p, idpCertPem: '' }))
+      toast.success('SSO settings saved')
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to save SSO settings')
+    } finally {
+      setSamlLoading(false)
+    }
+  }
+
+  function copyText(label, text) {
+    if (!text) return
+    navigator.clipboard?.writeText(text).then(() => toast.success(`${label} copied`)).catch(() => toast.error('Copy failed'))
+  }
+
+  async function importIdpMetadata() {
+    const url = idpMetadataUrl.trim()
+    const xml = idpMetadataXml.trim()
+    if (!url && !xml) {
+      toast.error('Enter an IdP metadata URL or paste metadata XML')
+      return
+    }
+    setIdpImportBusy(true)
+    try {
+      const { data } = await api.post('/api/admin/saml/import-metadata', {
+        metadataUrl: url || undefined,
+        metadataXml: xml || undefined,
+      })
+      setSamlForm((p) => ({
+        ...p,
+        idpEntityId: data.idpEntityId || p.idpEntityId,
+        idpSsoUrl: data.idpSsoUrl || p.idpSsoUrl,
+        idpCertPem: data.idpCertPem || p.idpCertPem,
+      }))
+      toast.success('IdP metadata imported — review fields, test connection, then save')
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to import IdP metadata')
+    } finally {
+      setIdpImportBusy(false)
+    }
+  }
+
+  async function testSamlConnection() {
+    setSamlTesting(true)
+    setSamlTestResult(null)
+    try {
+      const body = { ...samlForm }
+      if (!body.idpCertPem && saml?.idpCertConfigured) {
+        delete body.idpCertPem
+      }
+      const { data } = await api.post('/api/admin/saml/test', body)
+      setSamlTestResult(data)
+      if (data.ok) toast.success('SSO configuration looks good')
+      else toast.error('SSO test found issues — review checks below')
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'SSO test failed')
+    } finally {
+      setSamlTesting(false)
+    }
+  }
 
   async function save() {
     if (!adminEditable) {
@@ -225,7 +341,7 @@ export default function AdminPage() {
       const { _type, _id, ...data } = form
       let payload = data
       if (_type === 'users') {
-        if (!_id && data.authKind !== 'ad') {
+        if (!_id && data.authKind !== 'ad' && data.authKind !== 'saml') {
           const pw = (data.password || '').trim()
           if (pw.length < 8) {
             toast.error('Password must be at least 8 characters')
@@ -244,6 +360,8 @@ export default function AdminPage() {
           if (data.authKind === 'ad') {
             payload.authKind = 'ad'
             payload.adLoginIdentity = (data.adLoginIdentity || '').trim()
+          } else if (data.authKind === 'saml') {
+            payload.authKind = 'saml'
           } else {
             payload.password = data.password
           }
@@ -445,7 +563,7 @@ export default function AdminPage() {
       else pages = Array.isArray(item.allowedPages) ? item.allowedPages : [...APP_PAGE_KEYS]
       base.allowedPages = pages
       base.customRoleId = item.customRoleId ? String(item.customRoleId) : ''
-      base.authKind = item.authKind === 'ad' ? 'ad' : 'local'
+      base.authKind = item.authKind === 'ad' ? 'ad' : item.authKind === 'saml' ? 'saml' : 'local'
       base.adLoginIdentity = item.authKind === 'ad' ? (item.adLoginIdentity || '') : ''
     }
     setForm(base)
@@ -771,7 +889,7 @@ export default function AdminPage() {
                       </TD>
                       <TD>{u.email}</TD>
                       <TD color="var(--text3)">
-                        <Badge label={u.authKind === 'ad' ? 'AD' : 'local'} />
+                        <Badge label={u.authKind === 'ad' ? 'AD' : u.authKind === 'saml' ? 'SSO' : 'local'} />
                       </TD>
                       <TD><Badge label={roleBadgeLabel(u.role)} /></TD>
                       <TD color="var(--text3)">
@@ -792,7 +910,7 @@ export default function AdminPage() {
                       <td style={{ padding:'10px 14px', borderBottom:'1px solid var(--border)', verticalAlign:'middle' }}>
                         <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
                           <Btn label="Edit" small onClick={()=>openEdit('users',u)} />
-                          {u.authKind !== 'ad' && (
+                          {u.authKind !== 'ad' && u.authKind !== 'saml' && (
                           <Btn label="Password" small color="amber" title="Set a new password for this user" onClick={()=>openResetPassword(u)} />
                           )}
                           <Btn label="Delete" small danger onClick={()=>remove('users',u._id,u.name)} />
@@ -896,6 +1014,166 @@ export default function AdminPage() {
                 No alert rules yet. Add rules to get notified when thresholds or patterns match.
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* -- SSO -- */}
+      {tab === 'sso' && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 16, maxWidth: 920 }}>
+          {!adminEditable && (
+            <div style={{ padding: '12px 16px', background: 'rgba(245,166,35,0.08)', border: '1px solid rgba(245,166,35,0.25)', borderRadius: 12, fontSize: 12, fontFamily: 'var(--mono)', color: 'var(--text2)' }}>
+              <strong style={{ color: 'var(--amber)' }}>View only</strong> — You need full Admin access to change SSO settings.
+            </div>
+          )}
+          <div className="card" style={{ borderRadius: 14, border: '1px solid var(--border)', overflow: 'hidden' }}>
+            <div className="card-header" style={{ background: 'var(--bg3)' }}>
+              <span className="card-title">SAML SSO</span>
+              <span className="badge badge-purple">Authentication</span>
+            </div>
+            <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div style={{ fontSize: 12, color: 'var(--text3)', fontFamily: 'var(--mono)', lineHeight: 1.55 }}>
+                Generic SAML 2.0 SSO — works with any identity provider. In your SSO tool, register Netpulse using the SP URLs below, then import your IdP metadata or enter settings manually.
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+                {[
+                  { key: 'enabled', label: 'Enable SAML SSO' },
+                  { key: 'allowLocalLogin', label: 'Allow password login alongside SSO' },
+                  { key: 'autoProvision', label: 'Auto-provision users on first SSO sign-in' },
+                ].map(({ key, label }) => (
+                  <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 14px', background: 'var(--bg3)', borderRadius: 10, border: '1px solid var(--border)', cursor: adminEditable ? 'pointer' : 'default' }}>
+                    <input
+                      type="checkbox"
+                      checked={!!samlForm[key]}
+                      disabled={!adminEditable}
+                      onChange={(e) => setSamlForm((p) => ({ ...p, [key]: e.target.checked }))}
+                    />
+                    <span style={{ fontSize: 12, color: 'var(--text2)', fontFamily: 'var(--mono)' }}>{label}</span>
+                  </label>
+                ))}
+              </div>
+
+              <Field
+                label="Default role for auto-provisioned users"
+                value={samlForm.defaultRole}
+                onChange={(v) => setSamlForm((p) => ({ ...p, defaultRole: v }))}
+                options={[
+                  { value: 'viewer', label: 'Viewer' },
+                  { value: 'analyst', label: 'Analyst' },
+                  { value: 'custom_admin', label: 'Custom admin' },
+                  { value: 'admin', label: 'Admin' },
+                ]}
+              />
+
+              {saml && (
+                <div style={{ padding: 14, background: 'var(--bg3)', borderRadius: 10, border: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text3)', letterSpacing: 1, textTransform: 'uppercase', fontFamily: 'var(--mono)' }}>
+                    Register in your SSO tool (Service Provider)
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', lineHeight: 1.5 }}>
+                    Give your IdP the Metadata URL (easiest) or ACS URL + Entity ID. Map user attributes so assertions include email and display name.
+                  </div>
+                  {[
+                    ['Metadata URL', saml.metadataUrl],
+                    ['ACS URL (Reply URL)', saml.acsUrl],
+                    ['SP Entity ID', saml.metadataUrl],
+                    ['Login URL', saml.loginUrl],
+                  ].map(([label, url]) => (
+                    <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', minWidth: 120 }}>{label}</span>
+                      <code style={{ flex: 1, fontSize: 10, color: 'var(--cyan)', wordBreak: 'break-all', fontFamily: 'var(--mono)' }}>{url}</code>
+                      <Btn label="Copy" small variant="ghost" onClick={() => copyText(label, url)} />
+                    </div>
+                  ))}
+                  <div style={{ fontSize: 11, color: saml.enabled && saml.configured ? 'var(--green)' : 'var(--amber)', fontFamily: 'var(--mono)' }}>
+                    Status: {saml.enabled && saml.configured ? 'Enabled and configured' : saml.configured ? 'Configured but disabled' : 'Not fully configured'}
+                  </div>
+                </div>
+              )}
+
+              <div style={{ padding: 14, background: 'var(--bg3)', borderRadius: 10, border: '1px solid var(--border)' }}>
+                <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text3)', letterSpacing: 1, textTransform: 'uppercase', fontFamily: 'var(--mono)', marginBottom: 10 }}>
+                  Import from your IdP
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', lineHeight: 1.5, marginBottom: 12 }}>
+                  Paste the federation metadata URL from your SSO tool, or paste the metadata XML export. This fills entity ID, SSO URL, and certificate automatically.
+                </div>
+                <Field label="IdP metadata URL" value={idpMetadataUrl} onChange={setIdpMetadataUrl} placeholder="https://your-sso.example.com/metadata/saml" />
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ fontSize: 10, fontWeight: 600, color: 'var(--text3)', letterSpacing: 1, textTransform: 'uppercase', fontFamily: 'var(--mono)', display: 'block', marginBottom: 6 }}>Or paste metadata XML</label>
+                  <textarea
+                    value={idpMetadataXml}
+                    onChange={(e) => setIdpMetadataXml(e.target.value)}
+                    disabled={!adminEditable}
+                    placeholder={'<?xml version="1.0"?>\n<EntityDescriptor entityID="..." ...'}
+                    rows={5}
+                    style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--mono)', fontSize: 11 }}
+                  />
+                </div>
+                <Btn label={idpImportBusy ? 'Importing…' : 'Import IdP metadata'} onClick={importIdpMetadata} disabled={!adminEditable || idpImportBusy} />
+              </div>
+
+              <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text3)', letterSpacing: 1, textTransform: 'uppercase', fontFamily: 'var(--mono)' }}>
+                IdP settings (manual or after import)
+              </div>
+
+              <Field label="IdP Entity ID" value={samlForm.idpEntityId} onChange={(v) => setSamlForm((p) => ({ ...p, idpEntityId: v }))} placeholder="https://your-sso.example.com/idp" />
+              <Field label="IdP SSO URL (login URL)" value={samlForm.idpSsoUrl} onChange={(v) => setSamlForm((p) => ({ ...p, idpSsoUrl: v }))} placeholder="https://your-sso.example.com/sso/saml/login" />
+
+              <div style={{ marginBottom: 0 }}>
+                <label style={{ fontSize: 10, fontWeight: 600, color: 'var(--text3)', letterSpacing: 1, textTransform: 'uppercase', fontFamily: 'var(--mono)', display: 'block', marginBottom: 6 }}>
+                  IdP X.509 certificate {saml?.idpCertConfigured ? '(leave blank to keep existing)' : '*'}
+                </label>
+                <textarea
+                  value={samlForm.idpCertPem}
+                  onChange={(e) => setSamlForm((p) => ({ ...p, idpCertPem: e.target.value }))}
+                  disabled={!adminEditable}
+                  placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"
+                  rows={6}
+                  style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--mono)', fontSize: 11 }}
+                />
+              </div>
+
+              <Field label="SP Entity ID (optional — auto-generated if blank)" value={samlForm.spEntityId} onChange={(v) => setSamlForm((p) => ({ ...p, spEntityId: v }))} />
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <Field label="Email SAML attribute" value={samlForm.emailAttribute} onChange={(v) => setSamlForm((p) => ({ ...p, emailAttribute: v }))} placeholder="email" />
+                <Field label="Name SAML attribute" value={samlForm.nameAttribute} onChange={(v) => setSamlForm((p) => ({ ...p, nameAttribute: v }))} placeholder="displayName" />
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', lineHeight: 1.45 }}>
+                Attribute names must match what your SSO tool sends in the SAML assertion (e.g. <code>email</code>, <code>mail</code>, <code>nameID</code>, or a custom claim URI).
+              </div>
+
+              {samlTestResult?.checks?.length > 0 && (
+                <div style={{ padding: 14, background: 'var(--bg3)', borderRadius: 10, border: `1px solid ${samlTestResult.ok ? 'rgba(34,211,160,0.35)' : 'rgba(245,83,79,0.35)'}` }}>
+                  <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text3)', letterSpacing: 1, textTransform: 'uppercase', fontFamily: 'var(--mono)', marginBottom: 10 }}>
+                    Connection test {samlTestResult.ok ? '— passed' : '— issues found'}
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {samlTestResult.checks.map((c) => (
+                      <div key={c.id} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 11, fontFamily: 'var(--mono)' }}>
+                        <span style={{ color: c.ok ? 'var(--green)' : 'var(--red)', fontWeight: 700, minWidth: 14 }}>{c.ok ? '✓' : '✗'}</span>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ color: 'var(--text2)', fontWeight: 600 }}>{c.label}</div>
+                          <div style={{ color: 'var(--text3)', marginTop: 2, lineHeight: 1.45, wordBreak: 'break-word' }}>{c.detail}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', paddingTop: 8, flexWrap: 'wrap' }}>
+                <Btn variant="ghost" label="Reload" onClick={loadSamlConfig} disabled={samlLoading || samlTesting} />
+                <Btn
+                  label={samlTesting ? 'Testing…' : 'Test connection'}
+                  color="amber"
+                  onClick={testSamlConnection}
+                  disabled={samlTesting || samlLoading}
+                />
+                <Btn label={samlLoading ? 'Saving…' : 'Save SSO settings'} onClick={saveSamlConfig} disabled={!adminEditable || samlLoading || samlTesting} />
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -1342,22 +1620,31 @@ export default function AdminPage() {
             <Field
               label="Sign-in"
               value={form.authKind || 'local'}
-              onChange={(v) => setForm((p) => ({ ...p, authKind: v, password: v === 'ad' ? '' : p.password }))}
+              onChange={(v) => setForm((p) => ({ ...p, authKind: v, password: (v === 'ad' || v === 'saml') ? '' : p.password }))}
               options={[
                 { value: 'local', label: 'Local — portal password' },
                 { value: 'ad', label: 'Active Directory — domain password' },
+                { value: 'saml', label: 'SAML SSO — no portal password' },
               ]}
             />
           )}
           {modal.includes('edit') && (
             <div style={{ marginBottom: 12, padding: '10px 12px', background: 'var(--bg3)', borderRadius: 10, border: '1px solid var(--border)', fontSize: 12, color: 'var(--text2)', lineHeight: 1.45 }}>
               Sign-in type is fixed after creation:{' '}
-              <strong style={{ color: 'var(--text)' }}>{form.authKind === 'ad' ? 'Active Directory' : 'Local account'}</strong>
+              <strong style={{ color: 'var(--text)' }}>
+                {form.authKind === 'ad' ? 'Active Directory' : form.authKind === 'saml' ? 'SAML SSO' : 'Local account'}
+              </strong>
               {form.authKind === 'ad' ? ' — password is checked against the domain on each login.' : ''}
+              {form.authKind === 'saml' ? ' — user signs in via SSO only.' : ''}
             </div>
           )}
           {modal.includes('create') && form.authKind === 'local' && (
             <Field label="Password" value={form.password || ''} onChange={f('password')} type="password" required />
+          )}
+          {modal.includes('create') && form.authKind === 'saml' && (
+            <div style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: 12, lineHeight: 1.45 }}>
+              No password is stored. The user must sign in with SAML SSO (email must match the IdP assertion).
+            </div>
           )}
           {((modal.includes('create') && form.authKind === 'ad') || (modal.includes('edit') && form.authKind === 'ad')) && (
             <>
