@@ -208,12 +208,69 @@ function ensureCertsDir() {
   if (!existsSync(CERTS_DIR)) mkdirSync(CERTS_DIR, { recursive: true })
 }
 
+/** Split a PEM blob into individual certificate blocks. */
+function parseCertChainPem(pem) {
+  const text = String(pem || '').replace(/\r\n/g, '\n')
+  const blocks = text.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) || []
+  return blocks.map((block) => {
+    try {
+      return new X509Certificate(block)
+    } catch {
+      return null
+    }
+  }).filter(Boolean)
+}
+
+/** Detect missing intermediate / self-signed issues that cause browser trust errors. */
+function analyzeCertChain(pem) {
+  const certs = parseCertChainPem(pem)
+  if (!certs.length) {
+    return {
+      certCount: 0,
+      chainComplete: false,
+      warnings: ['No certificates found in PEM text.'],
+      browserHint: null,
+    }
+  }
+  const leaf = certs[0]
+  const warnings = []
+  let browserHint = null
+  const selfSigned = leaf.subject === leaf.issuer
+
+  if (certs.length === 1 && !selfSigned) {
+    warnings.push(
+      'Only the leaf certificate is present — intermediate CA certificate(s) are missing. '
+      + 'Browsers show NET::ERR_CERT_AUTHORITY_INVALID or UNABLE_TO_VERIFY_LEAF_SIGNATURE until the full chain is installed.',
+    )
+    browserHint = 'Append the intermediate certificate(s) below the leaf in the cert PEM (full chain), then reload nginx.'
+  } else if (certs.length === 1 && selfSigned) {
+    warnings.push(
+      'Certificate appears self-signed or signed by a private CA. '
+      + 'Browsers will not trust it unless users install your root CA on each device.',
+    )
+    browserHint = 'Use a publicly trusted cert, or distribute your internal root CA to all workstations.'
+  } else if (certs.length >= 2) {
+    warnings.push(`Full chain detected (${certs.length} certificate(s) in PEM).`)
+  }
+
+  return {
+    certCount: certs.length,
+    chainComplete: certs.length > 1 || selfSigned,
+    selfSigned,
+    leafSubject: leaf.subject,
+    leafIssuer: leaf.issuer,
+    warnings,
+    browserHint,
+  }
+}
+
 /** Parse an installed certificate and return human-readable fields. */
 function readCertInfo() {
   if (!existsSync(CERT_PATH)) return null
   try {
     const pem  = readFileSync(CERT_PATH, 'utf8')
     const cert = new X509Certificate(pem)
+    const chain = analyzeCertChain(pem)
     return {
       subject:        cert.subject,
       issuer:         cert.issuer,
@@ -224,6 +281,7 @@ function readCertInfo() {
       serialNumber:   cert.serialNumber,
       expired:        new Date(cert.validTo) < new Date(),
       daysLeft:       Math.ceil((new Date(cert.validTo) - new Date()) / 86_400_000),
+      chain:          chain,
     }
   } catch {
     return null
@@ -387,7 +445,8 @@ router.post('/upload', authenticate, authorize('admin'), (req, res) => {
     // nginx (uid 101) must read these from a separate container via shared volume
     writeFileSync(CERT_PATH, certPem + '\n', { mode: 0o644 })
     writeFileSync(KEY_PATH,  keyPem  + '\n', { mode: 0o644 })
-    res.json({ ok: true, cert: readCertInfo() })
+    const chain = analyzeCertChain(certPem)
+    res.json({ ok: true, cert: readCertInfo(), chain })
   } catch (err) {
     res.status(500).json({ error: `Failed to write certificate files: ${err.message}` })
   }
@@ -431,9 +490,12 @@ router.post('/test', authenticate, authorize('admin'), (req, res) => {
   if (!cert || !key) return res.status(400).json({ error: 'cert and key are required' })
   try {
     createSecureContext({ cert, key })
-    const x = new X509Certificate(cert)
+    const x = new X509Certificate(cert.replace(/\r\n/g, '\n').trim())
+    const chain = analyzeCertChain(cert)
+    const chainOk = chain.certCount > 1 || chain.selfSigned
     res.json({
-      ok:      true,
+      ok: true,
+      chainOk,
       cert: {
         subject:   x.subject,
         issuer:    x.issuer,
@@ -442,6 +504,7 @@ router.post('/test', authenticate, authorize('admin'), (req, res) => {
         daysLeft:  Math.ceil((new Date(x.validTo) - new Date()) / 86_400_000),
         expired:   new Date(x.validTo) < new Date(),
       },
+      chain,
     })
   } catch (err) {
     res.status(400).json({ ok: false, error: err.message })

@@ -1370,6 +1370,7 @@ export default function AdminPage() {
                       { label:'Valid from',  value: ssl.cert.validFrom },
                       { label:'Expires',     value: ssl.cert.validTo },
                       { label:'Days left',   value: ssl.cert.expired ? 'EXPIRED' : `${ssl.cert.daysLeft} days`, danger: ssl.cert.expired || ssl.cert.daysLeft < 30 },
+                      { label:'Chain',       value: ssl.cert.chain?.certCount ? `${ssl.cert.chain.certCount} cert(s) in file` : '—', danger: ssl.cert.chain && !ssl.cert.chain.chainComplete && !ssl.cert.chain.selfSigned },
                       { label:'Fingerprint', value: ssl.cert.fingerprint256 },
                     ].map((r, i) => (
                       <div key={i} style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', padding:'8px 0', borderBottom:'1px solid var(--border)', gap:12 }}>
@@ -1381,6 +1382,18 @@ export default function AdminPage() {
                 ) : (
                   <div style={{ padding:'18px 0', color:'var(--text3)', fontSize:12, fontFamily:'var(--mono)' }}>
                     No certificate installed. Upload a PEM certificate and private key to enable HTTPS.
+                  </div>
+                )}
+
+                {ssl?.cert?.chain?.warnings?.length > 0 && !ssl.cert.chain.chainComplete && (
+                  <div style={{ marginTop:12, padding:'12px 14px', background:'rgba(245,83,79,0.08)', border:'1px solid rgba(245,83,79,0.35)', borderRadius:10 }}>
+                    <div style={{ fontSize:11, fontWeight:600, color:'var(--red)', fontFamily:'var(--mono)', marginBottom:6 }}>Browser trust issue likely</div>
+                    {ssl.cert.chain.warnings.map((w) => (
+                      <div key={w} style={{ fontSize:11, color:'var(--text2)', fontFamily:'var(--mono)', lineHeight:1.55, marginBottom:6 }}>{w}</div>
+                    ))}
+                    {ssl.cert.chain.browserHint && (
+                      <div style={{ fontSize:11, color:'var(--amber)', fontFamily:'var(--mono)', lineHeight:1.55 }}>{ssl.cert.chain.browserHint}</div>
+                    )}
                   </div>
                 )}
 
@@ -1500,12 +1513,22 @@ export default function AdminPage() {
 
                 {/* Preview result */}
                 {sslPreview && (
-                  <div style={{ marginBottom:14, padding:'12px 14px', background:'rgba(34,211,160,0.07)', border:'1px solid var(--green)', borderRadius:10 }}>
-                    <div style={{ fontSize:11, fontWeight:600, color:'var(--green)', fontFamily:'var(--mono)', marginBottom:6 }}>Certificate looks valid</div>
+                  <div style={{ marginBottom:14, padding:'12px 14px', background: sslPreview.chainOk === false ? 'rgba(245,166,35,0.08)' : 'rgba(34,211,160,0.07)', border:`1px solid ${sslPreview.chainOk === false ? 'var(--amber)' : 'var(--green)'}`, borderRadius:10 }}>
+                    <div style={{ fontSize:11, fontWeight:600, color: sslPreview.chainOk === false ? 'var(--amber)' : 'var(--green)', fontFamily:'var(--mono)', marginBottom:6 }}>
+                      {sslPreview.chainOk === false ? 'Cert/key match — chain incomplete for browsers' : 'Certificate and key look valid'}
+                    </div>
                     <div style={{ fontSize:11, color:'var(--text2)', fontFamily:'var(--mono)', lineHeight:1.6 }}>
                       <div>Subject: {sslPreview.subject?.replace(/\n/g,' ')}</div>
+                      <div>Issuer: {sslPreview.issuer?.replace(/\n/g,' ')}</div>
                       <div>Expires: {sslPreview.validTo} ({sslPreview.daysLeft}d)</div>
+                      {sslPreview.chain?.certCount != null && <div>Chain: {sslPreview.chain.certCount} cert(s) in PEM</div>}
                     </div>
+                    {sslPreview.chain?.warnings?.map((w) => (
+                      <div key={w} style={{ fontSize:11, color:'var(--text2)', fontFamily:'var(--mono)', lineHeight:1.55, marginTop:8 }}>{w}</div>
+                    ))}
+                    {sslPreview.chain?.browserHint && (
+                      <div style={{ fontSize:11, color:'var(--amber)', fontFamily:'var(--mono)', lineHeight:1.55, marginTop:6 }}>{sslPreview.chain.browserHint}</div>
+                    )}
                   </div>
                 )}
 
@@ -1519,8 +1542,9 @@ export default function AdminPage() {
                       setSslPreview(null)
                       try {
                         const { data } = await api.post('/api/ssl/test', sslForm)
-                        setSslPreview(data.cert)
-                        toast.success('Certificate and key match')
+                        setSslPreview({ ...data.cert, chainOk: data.chainOk, chain: data.chain })
+                        if (data.chainOk === false) toast.error('Missing intermediate certificate — browsers will not trust this site')
+                        else toast.success('Certificate and key match')
                       } catch (err) {
                         toast.error(err.response?.data?.error || 'Validation failed')
                       } finally { setSslLoading(false) }
@@ -1545,7 +1569,7 @@ export default function AdminPage() {
                 </div>
 
                 <div style={{ marginTop:14, padding:'10px 14px', background:'var(--bg3)', borderRadius:10, border:'1px solid var(--border)', fontSize:11, color:'var(--text3)', fontFamily:'var(--mono)', lineHeight:1.6 }}>
-                  Paste or browse PEM files. Use the full certificate chain in the cert box if browsers show untrusted errors. After upload, enable the HTTPS toggle or click <strong style={{ color:'var(--text)' }}>Apply &amp; reload nginx</strong>.
+                  Paste the <strong style={{ color:'var(--text)' }}>full chain</strong> in the cert box: leaf certificate first, then intermediate(s). A single leaf-only PEM causes <strong style={{ color:'var(--text)' }}>NET::ERR_CERT_AUTHORITY_INVALID</strong> even when the cert is valid. Download the intermediate from your CA (e.g. DigiCert/Thawte bundle) and concatenate. After upload, click <strong style={{ color:'var(--text)' }}>Apply &amp; reload nginx</strong>.
                 </div>
               </div>
             </div>
