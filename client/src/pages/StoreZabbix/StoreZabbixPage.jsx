@@ -2119,7 +2119,7 @@ function RoProblematicStoresTable({ rows, emptyMsg, storeByHost, storeManualCode
           <th>Store</th>
           {showStoreProfile && <th style={{ width: 88 }}>Connection</th>}
           {showStoreProfile && <th style={{ width: 108 }}>Store Type</th>}
-          <th style={{ width: 110, textAlign: 'right' }} title="Actual agent offline time in the selected range (BH-aware when enabled)">Downtime</th>
+          <th style={{ width: 110, textAlign: 'right' }} title="Actual downtime from system.uptime in the selected range (reboots and reporting gaps; BH-aware when enabled)">Downtime</th>
           <th style={{ width: 110, textAlign: 'right' }} title="Mean jitter over the selected date range (and business hours when enabled)">Mean Jitter</th>
           <th style={{ width: 110, textAlign: 'right' }} title="Mean latency over the selected date range (and business hours when enabled)">Mean Latency</th>
         </tr>

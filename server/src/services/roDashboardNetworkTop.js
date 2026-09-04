@@ -148,7 +148,7 @@ async function fetchHistorySeries(zabbixRpc, itemEntries, from, to) {
 async function fetchSeriesForRange(zabbixRpc, itemEntries, fromSec, toSec, { historyOnly = false } = {}) {
   if (!itemEntries.length) return { byItem: {}, source: 'none' }
   if (historyOnly) {
-    const byItem = await fetchAgentPingHistory(zabbixRpc, itemEntries, fromSec, toSec)
+    const byItem = await fetchHistoryDayChunked(zabbixRpc, itemEntries, fromSec, toSec)
     return { byItem, source: 'history' }
   }
   const span = toSec - fromSec
@@ -177,8 +177,8 @@ async function fetchSeriesForRange(zabbixRpc, itemEntries, fromSec, toSec, { his
   return { byItem, source }
 }
 
-/** agent.ping is binary — always use raw history, day-chunked for full-range coverage. */
-async function fetchAgentPingHistory(zabbixRpc, itemEntries, fromSec, toSec) {
+/** Raw history only, day-chunked for full-range coverage (uptime, agent.ping, etc.). */
+async function fetchHistoryDayChunked(zabbixRpc, itemEntries, fromSec, toSec) {
   const byItem = {}
   const DAY_SEC = 86400
   const chunks = []
@@ -249,41 +249,45 @@ function bhClippedSpanSec(fromTs, toTs, bh, tzOffsetMin = IST_OFFSET_MIN) {
   return total
 }
 
-function isAgentDown(value) {
-  return Number(value) < 0.5
-}
+const UPTIME_GAP_THRESHOLD_SEC = 240
 
 /**
- * Actual agent.ping downtime in the selected window (BH-clipped when enabled).
- * Each down sample holds until the next sample or range end; leading down
- * state is counted from range start.
+ * Downtime from system.uptime — same heuristics as Custom Dashboard
+ * (reboots, reporting gaps, BH-clipped when enabled).
  */
-function computeDowntimeMinutes(points, fromSec, toSec, bh, tzOffsetMin) {
+function computeUptimeDowntime(points, fromSec, toSec, bh, tzOffsetMin) {
   const inRange = [...(points || [])]
     .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
     .filter((p) => p.clock >= fromSec && p.clock <= toSec)
     .sort((a, b) => a.clock - b.clock)
 
-  if (!inRange.length) return { downtimeMin: 0, downtimeSec: 0, pointCount: 0 }
-
-  let downtimeSec = 0
-  const addDown = (t1, t2) => {
-    const start = Math.max(fromSec, t1)
-    const end = Math.min(toSec, t2)
-    if (end > start) downtimeSec += bhClippedSpanSec(start, end, bh, tzOffsetMin)
+  if (!inRange.length) {
+    return { downtimeMin: 0, downtimeSec: 0, pointCount: 0 }
   }
 
-  for (let i = 0; i < inRange.length; i++) {
-    const p = inRange[i]
-    if (!isAgentDown(p.value)) continue
-    const segStart = i === 0 ? fromSec : p.clock
-    const segEnd = i + 1 < inRange.length ? inRange[i + 1].clock : toSec
-    addDown(segStart, segEnd)
+  let downSec = 0
+  if (inRange[0].clock - fromSec > UPTIME_GAP_THRESHOLD_SEC) {
+    downSec += bhClippedSpanSec(fromSec, inRange[0].clock, bh, tzOffsetMin)
+  }
+  for (let i = 1; i < inRange.length; i++) {
+    const prev = inRange[i - 1]
+    const cur = inRange[i]
+    const gap = cur.clock - prev.clock
+    if (cur.value < prev.value) {
+      const bootAt = cur.clock - cur.value
+      const at = bootAt > prev.clock ? bootAt : cur.clock
+      if (at > prev.clock) downSec += bhClippedSpanSec(prev.clock, at, bh, tzOffsetMin)
+    } else if (gap > UPTIME_GAP_THRESHOLD_SEC) {
+      downSec += bhClippedSpanSec(prev.clock, cur.clock, bh, tzOffsetMin)
+    }
+  }
+  if (toSec - inRange[inRange.length - 1].clock > UPTIME_GAP_THRESHOLD_SEC) {
+    downSec += bhClippedSpanSec(inRange[inRange.length - 1].clock, toSec, bh, tzOffsetMin)
   }
 
   return {
-    downtimeMin: Math.round((downtimeSec / 60) * 10) / 10,
-    downtimeSec: Math.round(downtimeSec),
+    downtimeMin: Math.round((downSec / 60) * 10) / 10,
+    downtimeSec: Math.round(downSec),
     pointCount: inRange.length,
   }
 }
@@ -324,7 +328,7 @@ function buildMetricMap(hostMap, itemByHost, seriesByItem, fromSec, toSec, bh, t
     if (!it) continue
     const raw = seriesByItem[String(it.itemid)] || []
     if (metric === 'downtime') {
-      const { downtimeMin, downtimeSec, pointCount } = computeDowntimeMinutes(raw, fromSec, toSec, bh, tzOffsetMin)
+      const { downtimeMin, downtimeSec, pointCount } = computeUptimeDowntime(raw, fromSec, toSec, bh, tzOffsetMin)
       if (downtimeSec <= 0 && pointCount === 0) continue
       map[hid] = {
         hostid: hid,
@@ -484,33 +488,33 @@ export async function fetchRoDashboardNetworkTop(opts) {
     return empty
   }
 
-  const [latencyItems, jitterItems, agentPingItems] = await Promise.all([
+  const [latencyItems, jitterItems, uptimeItems] = await Promise.all([
     fetchItemsChunked(zabbixRpc, hostids, 'custom.ping.ms'),
     fetchItemsChunked(zabbixRpc, hostids, 'custom.ping.jitter'),
-    fetchItemsChunked(zabbixRpc, hostids, 'agent.ping'),
+    fetchItemsChunked(zabbixRpc, hostids, 'system.uptime'),
   ])
 
   const latencyByHost = pickItemPerHost(latencyItems, '8.8.8.8')
   const jitterByHost = pickItemPerHost(jitterItems, '8.8.8.8')
-  const agentPingByHost = pickItemPerHost(agentPingItems, 'agent.ping')
+  const uptimeByHost = pickItemPerHost(uptimeItems, 'system.uptime')
   const latencyEntries = Object.values(latencyByHost)
   const jitterEntries = Object.values(jitterByHost)
-  const agentPingEntries = Object.values(agentPingByHost)
+  const uptimeEntries = Object.values(uptimeByHost)
 
   const windowSec = toSec - fromSec
 
-  const [latencyFetch, jitterFetch, agentPingFetch] = await Promise.all([
+  const [latencyFetch, jitterFetch, uptimeFetch] = await Promise.all([
     fetchSeriesForRange(zabbixRpc, latencyEntries, fromSec, toSec),
     fetchSeriesForRange(zabbixRpc, jitterEntries, fromSec, toSec),
-    fetchSeriesForRange(zabbixRpc, agentPingEntries, fromSec, toSec, { historyOnly: true }),
+    fetchSeriesForRange(zabbixRpc, uptimeEntries, fromSec, toSec, { historyOnly: true }),
   ])
   const latencySeries = latencyFetch.byItem
   const jitterSeries = jitterFetch.byItem
-  const agentPingSeries = agentPingFetch.byItem
+  const uptimeSeries = uptimeFetch.byItem
 
   const latencyMap = buildMetricMap(hostMap, latencyByHost, latencySeries, fromSec, toSec, bh, tzOffsetMinutes, 'latency')
   const jitterMap = buildMetricMap(hostMap, jitterByHost, jitterSeries, fromSec, toSec, bh, tzOffsetMinutes, 'jitter')
-  const downtimeMap = buildMetricMap(hostMap, agentPingByHost, agentPingSeries, fromSec, toSec, bh, tzOffsetMinutes, 'downtime')
+  const downtimeMap = buildMetricMap(hostMap, uptimeByHost, uptimeSeries, fromSec, toSec, bh, tzOffsetMinutes, 'downtime')
 
   const latency = buildTopRows(hostMap, latencyByHost, latencySeries, fromSec, toSec, bh, tzOffsetMinutes, limit)
   const jitter = buildTopRows(hostMap, jitterByHost, jitterSeries, fromSec, toSec, bh, tzOffsetMinutes, limit)
