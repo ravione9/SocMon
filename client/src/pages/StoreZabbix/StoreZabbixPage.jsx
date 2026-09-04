@@ -1935,6 +1935,227 @@ function TopMonSection({ title }) {
   )
 }
 
+function fmtMinutesShort(m) {
+  if (m == null || !Number.isFinite(m)) return '—'
+  if (m < 1) return '< 1 m'
+  if (m < 60) return `${Math.round(m)} m`
+  if (m < 1440) return `${(m / 60).toFixed(1)} h`
+  return `${(m / 1440).toFixed(1)} d`
+}
+
+function RoNetworkTopFilters({
+  title,
+  scopeLabel,
+  roNetTopRange,
+  setRoNetTopRange,
+  roNetTopRangeLabel,
+  roNetTopCustomFrom,
+  setRoNetTopCustomFrom,
+  roNetTopCustomTo,
+  setRoNetTopCustomTo,
+  roNetTopCustomEpoch,
+  setRoNetTopCustomEpoch,
+  roNetTopBhEnabled,
+  setRoNetTopBhEnabled,
+  roNetTopBhStart,
+  setRoNetTopBhStart,
+  roNetTopBhEnd,
+  setRoNetTopBhEnd,
+  roNetTopBhDays,
+  setRoNetTopBhDays,
+  roNetTopBhLabel,
+  onRefresh,
+  busy,
+  refreshNote,
+}) {
+  return (
+    <div className="opm-toolbar">
+      <div className="opm-toolbar-row" style={{ alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span className="opm-toolbar-label">{title}</span>
+          {scopeLabel && (
+            <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', fontSize: 10 }}>
+              {scopeLabel}
+            </span>
+          )}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          {refreshNote && (
+            <span className="opm-pill" style={{ background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
+              {refreshNote}
+            </span>
+          )}
+          <button type="button" onClick={onRefresh} disabled={busy}
+            style={{ padding: '5px 14px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', fontSize: 11, fontFamily: 'var(--mono)', cursor: busy ? 'wait' : 'pointer', fontWeight: 600 }}>
+            {busy ? '↻ Loading…' : '↻ Refresh'}
+          </button>
+        </div>
+      </div>
+      <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span className="opm-toolbar-label">Date range</span>
+        {CUSTOM_DASH_RANGE_CHIPS.map((r) => {
+          const active = roNetTopRange === r.id
+          return (
+            <button key={r.id} type="button" onClick={() => setRoNetTopRange(r.id)}
+              style={{
+                padding: '4px 12px', borderRadius: 6, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600,
+                border: active ? '1px solid var(--accent)' : '1px solid var(--border)',
+                background: active ? 'rgba(59,130,246,.12)' : 'transparent',
+                color: active ? 'var(--accent)' : 'var(--text3)', cursor: 'pointer', transition: 'all .12s',
+              }}>
+              {r.label}
+            </button>
+          )
+        })}
+        <span style={{ width: 1, height: 14, background: 'var(--border)', margin: '0 4px' }} />
+        <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 600 }}>
+          {roNetTopRangeLabel}
+        </span>
+      </div>
+      {roNetTopRange === 'custom' && (
+        <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span className="opm-toolbar-label">Custom</span>
+          <input type="datetime-local" value={roNetTopCustomFrom} onChange={(e) => setRoNetTopCustomFrom(e.target.value)}
+            style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none' }} />
+          <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>to</span>
+          <input type="datetime-local" value={roNetTopCustomTo} onChange={(e) => setRoNetTopCustomTo(e.target.value)}
+            style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none' }} />
+          <button type="button"
+            onClick={() => {
+              if (!roNetTopCustomFrom || !roNetTopCustomTo) return
+              const from = Math.floor(new Date(roNetTopCustomFrom).getTime() / 1000)
+              const to = Math.floor(new Date(roNetTopCustomTo).getTime() / 1000)
+              if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) return
+              setRoNetTopCustomEpoch({ from, to })
+            }}
+            disabled={!roNetTopCustomFrom || !roNetTopCustomTo}
+            style={{ padding: '5px 14px', borderRadius: 5, fontSize: 11, fontWeight: 700, fontFamily: 'var(--mono)', border: 'none', background: 'var(--accent)', color: '#fff', cursor: roNetTopCustomFrom && roNetTopCustomTo ? 'pointer' : 'not-allowed', opacity: roNetTopCustomFrom && roNetTopCustomTo ? 1 : .4 }}>
+            Apply
+          </button>
+          {roNetTopCustomEpoch && <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', fontSize: 10 }}>Custom range active</span>}
+        </div>
+      )}
+      <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <span className="opm-toolbar-label">Business hours</span>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text2)', cursor: 'pointer' }}>
+          <input type="checkbox" checked={!!roNetTopBhEnabled} onChange={(e) => setRoNetTopBhEnabled(e.target.checked)} />
+          Apply BH filter
+        </label>
+        <span style={{ width: 1, height: 14, background: 'var(--border)' }} />
+        <select value={roNetTopBhStart} onChange={(e) => setRoNetTopBhStart(Number(e.target.value))} disabled={!roNetTopBhEnabled}
+          style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: roNetTopBhEnabled ? 1 : .5 }}>
+          {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+        </select>
+        <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>to</span>
+        <select value={roNetTopBhEnd} onChange={(e) => setRoNetTopBhEnd(Number(e.target.value))} disabled={!roNetTopBhEnabled}
+          style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: roNetTopBhEnabled ? 1 : .5 }}>
+          {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+        </select>
+        <span style={{ width: 1, height: 14, background: 'var(--border)' }} />
+        <div style={{ display: 'inline-flex', gap: 4 }}>
+          {CUSTOM_DASH_DAY_LABELS.map((lbl, idx) => {
+            const on = roNetTopBhDays.has(idx)
+            return (
+              <button key={idx} type="button"
+                onClick={() => {
+                  const next = new Set(roNetTopBhDays)
+                  if (next.has(idx)) next.delete(idx); else next.add(idx)
+                  if (next.size) setRoNetTopBhDays(next)
+                }}
+                disabled={!roNetTopBhEnabled}
+                title={CUSTOM_DASH_DAY_FULL[idx]}
+                style={{
+                  width: 24, height: 24, borderRadius: 5, fontSize: 10, fontWeight: 700, fontFamily: 'var(--mono)',
+                  border: on ? '1px solid var(--accent)' : '1px solid var(--border)',
+                  background: on ? 'rgba(59,130,246,.18)' : 'var(--bg3)',
+                  color: on ? 'var(--accent)' : 'var(--text3)', cursor: roNetTopBhEnabled ? 'pointer' : 'not-allowed', opacity: roNetTopBhEnabled ? 1 : .5,
+                }}>
+                {lbl}
+              </button>
+            )
+          })}
+        </div>
+        <button type="button" onClick={() => setRoNetTopBhDays(new Set([1, 2, 3, 4, 5]))} disabled={!roNetTopBhEnabled}
+          style={{ padding: '3px 10px', borderRadius: 5, fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text3)', cursor: roNetTopBhEnabled ? 'pointer' : 'not-allowed', opacity: roNetTopBhEnabled ? 1 : .5 }}>
+          Mon–Fri
+        </button>
+        <button type="button" onClick={() => setRoNetTopBhDays(new Set([0, 1, 2, 3, 4, 5, 6]))} disabled={!roNetTopBhEnabled}
+          style={{ padding: '3px 10px', borderRadius: 5, fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text3)', cursor: roNetTopBhEnabled ? 'pointer' : 'not-allowed', opacity: roNetTopBhEnabled ? 1 : .5 }}>
+          All days
+        </button>
+        <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>{roNetTopBhLabel}</span>
+      </div>
+    </div>
+  )
+}
+
+function RoProblematicStoresTable({ rows, emptyMsg, storeByHost, storeManualCodes, onRowClick }) {
+  const showStoreProfile = storeByHost != null
+  if (!rows?.length) {
+    return (
+      <div className="topmon-empty">
+        <span className="topmon-empty-icon">◎</span>
+        {emptyMsg || 'No problematic stores in the selected range.'}
+      </div>
+    )
+  }
+  const downtimeColor = (m) => {
+    if (m == null || !Number.isFinite(m) || m <= 0) return 'var(--text3)'
+    if (m >= 120) return '#ef4444'
+    if (m >= 30) return '#f59e0b'
+    return '#eab308'
+  }
+  return (
+    <table className="topmon-rank-table">
+      <thead>
+        <tr>
+          <th style={{ width: 36 }}>#</th>
+          <th>Store</th>
+          {showStoreProfile && <th style={{ width: 88 }}>Connection</th>}
+          {showStoreProfile && <th style={{ width: 108 }}>Store Type</th>}
+          <th style={{ width: 110, textAlign: 'right' }}>Downtime</th>
+          <th style={{ width: 110, textAlign: 'right' }} title="Mean jitter over the selected date range (and business hours when enabled)">Mean Jitter</th>
+          <th style={{ width: 110, textAlign: 'right' }} title="Mean latency over the selected date range (and business hours when enabled)">Mean Latency</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r, i) => {
+          const latSev = r.latencyMs != null ? topMonSeverity(0, r.latencyMs, ' ms', 'latency') : null
+          const jitSev = r.jitterMs != null ? topMonSeverity(0, r.jitterMs, ' ms', 'jitter') : null
+          const { connType, storeType } = showStoreProfile
+            ? getHostStoreProfile({ host: r.host, name: r.name }, storeByHost, storeManualCodes)
+            : {}
+          return (
+            <tr key={r.hostid || `${r.host}-${i}`} onClick={onRowClick ? () => onRowClick(r) : undefined}>
+              <td>
+                <span className={`topmon-rank-num ${i < 3 ? 'top3' : ''}`} style={i < 3 ? { background: '#ef4444', color: '#fff' } : undefined}>{i + 1}</span>
+              </td>
+              <td>
+                <div style={{ color: 'var(--text)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 220 }}>{r.name || r.host}</div>
+              </td>
+              {showStoreProfile && (
+                <td style={{ color: connTypeColor(connType), fontSize: 11, fontWeight: 600, fontFamily: 'var(--mono)' }}>{connType || '—'}</td>
+              )}
+              {showStoreProfile && (
+                <td style={{ color: storeTypeColor(storeType), fontSize: 11, fontWeight: 600, fontFamily: 'var(--mono)' }}>{storeType || '—'}</td>
+              )}
+              <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: 700, color: downtimeColor(r.downtimeMin) }}>
+                {fmtMinutesShort(r.downtimeMin)}
+              </td>
+              <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: 700, color: jitSev?.color || 'var(--text3)' }}>
+                {r.jitterMs != null ? `${r.jitterMs} ms` : '—'}
+              </td>
+              <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: 700, color: latSev?.color || 'var(--text3)' }}>
+                {r.latencyMs != null ? `${r.latencyMs} ms` : '—'}
+              </td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
+  )
+}
+
 function TopMonRankTable({ rows, accent, unitSuffix = '%', emptyMsg, onRowClick, showMount, showBytes, severityMode, storeByHost, storeManualCodes }) {
   const showStoreProfile = storeByHost != null
   if (!rows?.length) {
@@ -4818,6 +5039,14 @@ export default function StoreZabbixPage({
   const [problemAckBusy, setProblemAckBusy] = useState(null)
   const [roNetworkTop, setRoNetworkTop] = useState(null)
   const [roNetworkTopBusy, setRoNetworkTopBusy] = useState(false)
+  const [roNetTopRange, setRoNetTopRange] = useState('7d')
+  const [roNetTopCustomFrom, setRoNetTopCustomFrom] = useState('')
+  const [roNetTopCustomTo, setRoNetTopCustomTo] = useState('')
+  const [roNetTopCustomEpoch, setRoNetTopCustomEpoch] = useState(null)
+  const [roNetTopBhEnabled, setRoNetTopBhEnabled] = useState(true)
+  const [roNetTopBhStart, setRoNetTopBhStart] = useState(9)
+  const [roNetTopBhEnd, setRoNetTopBhEnd] = useState(21)
+  const [roNetTopBhDays, setRoNetTopBhDays] = useState(() => new Set([0, 1, 2, 3, 4, 5, 6]))
 
   /* ── Network Health tab state ── */
   const [netHealth, setNetHealth] = useState(null)
@@ -5025,8 +5254,21 @@ export default function StoreZabbixPage({
   }, [apiBase, scopedHostGroup, dashboardSearch])
   const loadRoNetworkTop = useCallback(async () => {
     if (dashboardVariant !== 'ro') return
-    const qs = new URLSearchParams({ limit: '30', range: '7d', bizStart: '9', bizEnd: '21' })
+    if (roNetTopRange === 'custom' && (!roNetTopCustomEpoch?.from || !roNetTopCustomEpoch?.to)) return
+    const qs = new URLSearchParams({
+      limit: '30',
+      range: roNetTopRange,
+      bizEnabled: roNetTopBhEnabled ? '1' : '0',
+      bizStart: String(roNetTopBhStart),
+      bizEnd: String(roNetTopBhEnd),
+      bizDays: [...roNetTopBhDays].sort((a, b) => a - b).join(','),
+      tzOffset: String(-new Date().getTimezoneOffset()),
+    })
     if (scopedHostGroup) qs.set('group', scopedHostGroup)
+    if (roNetTopRange === 'custom' && roNetTopCustomEpoch?.from && roNetTopCustomEpoch?.to) {
+      qs.set('from', String(roNetTopCustomEpoch.from))
+      qs.set('to', String(roNetTopCustomEpoch.to))
+    }
     setRoNetworkTopBusy(true)
     try {
       const { data } = await api.get(`${apiBase}/ro-dashboard-network-top?${qs}`, { timeout: 120000 })
@@ -5039,7 +5281,10 @@ export default function StoreZabbixPage({
     } finally {
       setRoNetworkTopBusy(false)
     }
-  }, [apiBase, scopedHostGroup, dashboardVariant, parseErr])
+  }, [
+    apiBase, scopedHostGroup, dashboardVariant, parseErr,
+    roNetTopRange, roNetTopCustomEpoch, roNetTopBhEnabled, roNetTopBhStart, roNetTopBhEnd, roNetTopBhDays,
+  ])
   const loadHosts = useCallback(async () => {
     const { data } = await api.get(`${apiBase}/hosts?limit=10000&includeAgentLastConnected=1`)
     setHosts(data.hosts || [])
@@ -5667,11 +5912,16 @@ export default function StoreZabbixPage({
   }, [dashboardVariant, customDashWidget])
 
   useEffect(() => {
-    if (dashboardVariant !== 'ro' || !config?.configured || config.reachable === false || tab !== 'overview') return
+    if (dashboardVariant !== 'ro' || !config?.configured || config.reachable === false) return
+    if (tab !== 'overview' && tab !== 'netHealth') return
+    if (roNetTopRange === 'custom' && (!roNetTopCustomEpoch?.from || !roNetTopCustomEpoch?.to)) return
     let cancelled = false
     loadRoNetworkTop().catch(() => { if (!cancelled) { /* error handled in loader */ } })
     return () => { cancelled = true }
-  }, [dashboardVariant, config?.configured, config?.reachable, tab, scopedHostGroup, loadRoNetworkTop])
+  }, [
+    dashboardVariant, config?.configured, config?.reachable, tab, scopedHostGroup, loadRoNetworkTop,
+    roNetTopRange, roNetTopCustomEpoch, roNetTopBhEnabled, roNetTopBhStart, roNetTopBhEnd, roNetTopBhDays,
+  ])
 
   // Background refresh of Zabbix config + overview. useSmartPolling pauses when the
   // tab is hidden (no point polling Zabbix while the user is on another browser tab).
@@ -5704,11 +5954,12 @@ export default function StoreZabbixPage({
     return () => { c = true }
   }, [tab, config?.configured, eventLimit, parseErr, apiBase])
 
-  /* Custom Dashboard: load host list when tab opens */
+  /* Custom Dashboard: load host list when tab opens (Ro overview preloads for host drill-down). */
   useEffect(() => {
-    if (!config?.configured || tab !== 'custom') return
+    if (!config?.configured) return
+    if (tab !== 'custom' && !(dashboardVariant === 'ro' && tab === 'overview')) return
     if (customDashHosts === null && !customDashHostsBusy) loadCustomDashHosts()
-  }, [tab, config?.configured, customDashHosts, customDashHostsBusy, loadCustomDashHosts])
+  }, [tab, config?.configured, dashboardVariant, customDashHosts, customDashHostsBusy, loadCustomDashHosts])
 
   /** Load per-user Custom Dashboard filter prefs from the server profile. */
   useEffect(() => {
@@ -6025,7 +6276,7 @@ export default function StoreZabbixPage({
   /* Ro dashboard: Store Monitor snapshot for store profile widget, inventory, and network top tables. */
   useEffect(() => {
     if (dashboardVariant !== 'ro' || !config?.configured) return
-    if (tab !== 'custom' && tab !== 'hosts' && tab !== 'overview') return
+    if (tab !== 'custom' && tab !== 'hosts' && tab !== 'overview' && tab !== 'netHealth') return
     if (tab === 'custom' && !(customDashSelected || []).length) {
       setCustomDashStoreByHost({})
       setCustomDashStoreManualCodes([])
@@ -6059,15 +6310,26 @@ export default function StoreZabbixPage({
   }, [tab, config?.configured, topLimit, topMonGroup, loadTopUtil, parseErr])
 
   useEffect(() => {
-    if (tab !== 'netHealth' || !config?.configured) return
+    if (dashboardVariant === 'ro' || tab !== 'netHealth' || !config?.configured) return
     loadNetHealth(netHealthGroup, netBizStart, netBizEnd)
-  }, [tab, config?.configured, netHealthGroup, netBizStart, netBizEnd, loadNetHealth])
+  }, [dashboardVariant, tab, config?.configured, netHealthGroup, netBizStart, netBizEnd, loadNetHealth])
 
   useSmartPolling(
     () => loadNetHealth(netHealthGroup, netBizStart, netBizEnd),
     120_000,
     [netHealthGroup, netBizStart, netBizEnd, loadNetHealth],
-    { enabled: tab === 'netHealth' && !!config?.configured && config?.reachable !== false, skipImmediate: true },
+    { enabled: dashboardVariant !== 'ro' && tab === 'netHealth' && !!config?.configured && config?.reachable !== false, skipImmediate: true },
+  )
+
+  useSmartPolling(
+    () => loadRoNetworkTop(),
+    300_000,
+    [loadRoNetworkTop],
+    {
+      enabled: dashboardVariant === 'ro' && tab === 'netHealth' && !!config?.configured && config?.reachable !== false
+        && !(roNetTopRange === 'custom' && (!roNetTopCustomEpoch?.from || !roNetTopCustomEpoch?.to)),
+      skipImmediate: true,
+    },
   )
 
   useEffect(() => {
@@ -6241,6 +6503,24 @@ export default function StoreZabbixPage({
     }
     return counts
   }, [scopedInventoryHosts, customDashStoreByHost, customDashStoreManualCodes])
+  const roNetTopRangeLabel = useMemo(() => {
+    if (roNetTopRange === 'custom' && roNetTopCustomEpoch?.from && roNetTopCustomEpoch?.to) {
+      const fromStr = new Date(roNetTopCustomEpoch.from * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      const toStr = new Date(roNetTopCustomEpoch.to * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      return `${fromStr} – ${toStr}`
+    }
+    const m = { '24h': 'Last 24 hours', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days' }
+    return m[roNetTopRange] || roNetTopRange
+  }, [roNetTopRange, roNetTopCustomEpoch])
+  const roNetTopBhLabel = useMemo(() => {
+    if (!roNetTopBhEnabled) return 'OFF (24/7)'
+    const dayList = [...roNetTopBhDays].sort((a, b) => a - b)
+    const allDays = dayList.length === 7
+    const weekdays = dayList.length === 5 && [1, 2, 3, 4, 5].every((d) => roNetTopBhDays.has(d))
+    const dayShort = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+    const dayLabel = allDays ? 'Every day' : weekdays ? 'Mon–Fri' : dayList.map((d) => dayShort[d]).join(', ')
+    return `${String(roNetTopBhStart).padStart(2, '0')}:00–${String(roNetTopBhEnd).padStart(2, '0')}:00 · ${dayLabel}`
+  }, [roNetTopBhEnabled, roNetTopBhStart, roNetTopBhEnd, roNetTopBhDays])
   const filteredInventory = useMemo(() => {
     let base = scopedInventoryHosts
     if (inventoryGroupFilter) base = base.filter((h) => (h.groups || []).includes(inventoryGroupFilter))
@@ -6335,6 +6615,24 @@ export default function StoreZabbixPage({
       }
     }
   }, [hostsExplorer, loadAllHosts, loadHostGraphs, loadHostItemsLatest, parseErr])
+
+  /** Ro dashboard: open a single host in the Custom Dashboard tab. */
+  const goToCustomDash = useCallback((host) => {
+    if (!host?.hostid) return
+    setCustomDashWidget(null)
+    setCustomDashExpandedItem(null)
+    const hid = String(host.hostid)
+    const fromList = customDashHosts?.find((h) => String(h.hostid) === hid)
+      || (hosts || []).find((h) => String(h.hostid) === hid)
+    setCustomDashSelected([fromList || host])
+    if (!fromList) {
+      customDashPendingHostIdsRef.current = [hid]
+      if (customDashHosts === null && !customDashHostsBusy) loadCustomDashHosts()
+    } else {
+      customDashPendingHostIdsRef.current = null
+    }
+    setTab('custom')
+  }, [customDashHosts, customDashHostsBusy, hosts, loadCustomDashHosts, setTab])
 
   /* Navigate to Snapshot tab with a group filter (no host preselected) */
   const goToGroup = useCallback((groupName) => {
@@ -6433,7 +6731,10 @@ export default function StoreZabbixPage({
       if (tab === 'problems') await refetchProblems()
       if (tab === 'events') await loadEvents(eventLimit)
       if (tab === 'topMon') await loadTopUtil(topLimit, topMonGroup)
-      if (tab === 'netHealth') await loadNetHealth(netHealthGroup, netBizStart, netBizEnd)
+      if (tab === 'netHealth') {
+        if (dashboardVariant === 'ro') await loadRoNetworkTop()
+        else await loadNetHealth(netHealthGroup, netBizStart, netBizEnd)
+      }
       if ((tab === 'rop' || tab === 'reports') && (ropRange !== 'custom' || ropCustomEpoch)) await loadRopUptime({
         range: ropRange,
         customEpoch: ropCustomEpoch,
@@ -6456,7 +6757,7 @@ export default function StoreZabbixPage({
       }
     } catch (e) { const r = parseErr(e); setError(r.message); setErrorHint(r.hint) }
     finally { setLoading(false) }
-  }, [tab, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries, loadTopUtil, topLimit, topMonGroup, refetchProblems, apiBase, urlEnvVar, loadNetHealth, netHealthGroup, netBizStart, netBizEnd, loadRopUptime, ropRange, ropCustomEpoch, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla])
+  }, [tab, dashboardVariant, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries, loadTopUtil, topLimit, topMonGroup, refetchProblems, apiBase, urlEnvVar, loadNetHealth, loadRoNetworkTop, netHealthGroup, netBizStart, netBizEnd, loadRopUptime, ropRange, ropCustomEpoch, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla])
 
   /* ─── column definitions ─── */
   const hostCols = useMemo(() => [
@@ -6639,19 +6940,113 @@ export default function StoreZabbixPage({
             <CounterTile label="Unknown" value={avail?.unknown ?? 0} sub="Unchecked" color="cyan" icon="?" onClick={() => { setInventoryAvailFilter('Unknown'); setTab('hosts') }} />
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
-              Mean latency &amp; jitter · top 30 · BH {roNetworkTop?.businessHours?.label || '09:00–21:00'} · {roNetworkTop?.window?.rangeLabel || '7d'}
-            </span>
-            <button type="button" onClick={() => loadRoNetworkTop()} disabled={roNetworkTopBusy}
-              style={{ padding: '5px 14px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', fontSize: 11, fontFamily: 'var(--mono)', cursor: roNetworkTopBusy ? 'wait' : 'pointer', fontWeight: 600 }}>
-              {roNetworkTopBusy ? '↻ Loading…' : '↻ Refresh'}
-            </button>
+          <div className="opm-toolbar">
+            <div className="opm-toolbar-row" style={{ alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+              <span className="opm-toolbar-label">Mean latency &amp; jitter · top 30</span>
+              <button type="button" onClick={() => loadRoNetworkTop()} disabled={roNetworkTopBusy}
+                style={{ padding: '5px 14px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', fontSize: 11, fontFamily: 'var(--mono)', cursor: roNetworkTopBusy ? 'wait' : 'pointer', fontWeight: 600 }}>
+                {roNetworkTopBusy ? '↻ Loading…' : '↻ Refresh'}
+              </button>
+            </div>
+            <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span className="opm-toolbar-label">Range</span>
+              {CUSTOM_DASH_RANGE_CHIPS.map((r) => {
+                const active = roNetTopRange === r.id
+                return (
+                  <button key={r.id} type="button" onClick={() => setRoNetTopRange(r.id)}
+                    style={{
+                      padding: '4px 12px', borderRadius: 6, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600,
+                      border: active ? '1px solid var(--accent)' : '1px solid var(--border)',
+                      background: active ? 'rgba(59,130,246,.12)' : 'transparent',
+                      color: active ? 'var(--accent)' : 'var(--text3)', cursor: 'pointer', transition: 'all .12s',
+                    }}>
+                    {r.label}
+                  </button>
+                )
+              })}
+              <span style={{ width: 1, height: 14, background: 'var(--border)', margin: '0 4px' }} />
+              <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 600 }}>
+                {roNetTopRangeLabel}
+              </span>
+            </div>
+            {roNetTopRange === 'custom' && (
+              <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span className="opm-toolbar-label">Custom</span>
+                <input type="datetime-local" value={roNetTopCustomFrom} onChange={(e) => setRoNetTopCustomFrom(e.target.value)}
+                  style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none' }} />
+                <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>to</span>
+                <input type="datetime-local" value={roNetTopCustomTo} onChange={(e) => setRoNetTopCustomTo(e.target.value)}
+                  style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none' }} />
+                <button type="button"
+                  onClick={() => {
+                    if (!roNetTopCustomFrom || !roNetTopCustomTo) return
+                    const from = Math.floor(new Date(roNetTopCustomFrom).getTime() / 1000)
+                    const to = Math.floor(new Date(roNetTopCustomTo).getTime() / 1000)
+                    if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) return
+                    setRoNetTopCustomEpoch({ from, to })
+                  }}
+                  disabled={!roNetTopCustomFrom || !roNetTopCustomTo}
+                  style={{ padding: '5px 14px', borderRadius: 5, fontSize: 11, fontWeight: 700, fontFamily: 'var(--mono)', border: 'none', background: 'var(--accent)', color: '#fff', cursor: roNetTopCustomFrom && roNetTopCustomTo ? 'pointer' : 'not-allowed', opacity: roNetTopCustomFrom && roNetTopCustomTo ? 1 : .4 }}>
+                  Apply
+                </button>
+                {roNetTopCustomEpoch && <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', fontSize: 10 }}>Custom range active</span>}
+              </div>
+            )}
+            <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <span className="opm-toolbar-label">Business hours</span>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text2)', cursor: 'pointer' }}>
+                <input type="checkbox" checked={!!roNetTopBhEnabled} onChange={(e) => setRoNetTopBhEnabled(e.target.checked)} />
+                Apply BH filter
+              </label>
+              <span style={{ width: 1, height: 14, background: 'var(--border)' }} />
+              <select value={roNetTopBhStart} onChange={(e) => setRoNetTopBhStart(Number(e.target.value))} disabled={!roNetTopBhEnabled}
+                style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: roNetTopBhEnabled ? 1 : .5 }}>
+                {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+              </select>
+              <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>to</span>
+              <select value={roNetTopBhEnd} onChange={(e) => setRoNetTopBhEnd(Number(e.target.value))} disabled={!roNetTopBhEnabled}
+                style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: roNetTopBhEnabled ? 1 : .5 }}>
+                {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+              </select>
+              <span style={{ width: 1, height: 14, background: 'var(--border)' }} />
+              <div style={{ display: 'inline-flex', gap: 4 }}>
+                {CUSTOM_DASH_DAY_LABELS.map((lbl, idx) => {
+                  const on = roNetTopBhDays.has(idx)
+                  return (
+                    <button key={idx} type="button"
+                      onClick={() => {
+                        const next = new Set(roNetTopBhDays)
+                        if (next.has(idx)) next.delete(idx); else next.add(idx)
+                        if (next.size) setRoNetTopBhDays(next)
+                      }}
+                      disabled={!roNetTopBhEnabled}
+                      title={CUSTOM_DASH_DAY_FULL[idx]}
+                      style={{
+                        width: 24, height: 24, borderRadius: 5, fontSize: 10, fontWeight: 700, fontFamily: 'var(--mono)',
+                        border: on ? '1px solid var(--accent)' : '1px solid var(--border)',
+                        background: on ? 'rgba(59,130,246,.18)' : 'var(--bg3)',
+                        color: on ? 'var(--accent)' : 'var(--text3)', cursor: roNetTopBhEnabled ? 'pointer' : 'not-allowed', opacity: roNetTopBhEnabled ? 1 : .5,
+                      }}>
+                      {lbl}
+                    </button>
+                  )
+                })}
+              </div>
+              <button type="button" onClick={() => setRoNetTopBhDays(new Set([1, 2, 3, 4, 5]))} disabled={!roNetTopBhEnabled}
+                style={{ padding: '3px 10px', borderRadius: 5, fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text3)', cursor: roNetTopBhEnabled ? 'pointer' : 'not-allowed', opacity: roNetTopBhEnabled ? 1 : .5 }}>
+                Mon–Fri
+              </button>
+              <button type="button" onClick={() => setRoNetTopBhDays(new Set([0, 1, 2, 3, 4, 5, 6]))} disabled={!roNetTopBhEnabled}
+                style={{ padding: '3px 10px', borderRadius: 5, fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text3)', cursor: roNetTopBhEnabled ? 'pointer' : 'not-allowed', opacity: roNetTopBhEnabled ? 1 : .5 }}>
+                All days
+              </button>
+              <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>{roNetTopBhLabel}</span>
+            </div>
           </div>
 
           {roNetworkTopBusy && !roNetworkTop && (
             <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>
-              <span className="np-page-loading-dot" style={{ width: 14, height: 14 }} />Loading BH mean network metrics…
+              <span className="np-page-loading-dot" style={{ width: 14, height: 14 }} />Loading mean network metrics…
             </div>
           )}
 
@@ -6662,10 +7057,10 @@ export default function StoreZabbixPage({
                   rows={roNetworkTop.latency}
                   unitSuffix=" ms"
                   severityMode="latency"
-                  emptyMsg="No latency history in business hours."
+                  emptyMsg={roNetTopBhEnabled ? 'No latency history in business hours.' : 'No latency history in selected range.'}
                   storeByHost={customDashStoreByHost}
                   storeManualCodes={customDashStoreManualCodes}
-                  onRowClick={(r) => goToHostGraphs({ hostid: r.hostid, host: r.host, name: r.name })}
+                  onRowClick={(r) => goToCustomDash({ hostid: r.hostid, host: r.host, name: r.name })}
                 />
               </Widget>
               <Widget title="Top Jitter (mean)" badge={roNetworkTop.jitter?.length ?? 0} badgeColor="purple" noPad>
@@ -6673,10 +7068,10 @@ export default function StoreZabbixPage({
                   rows={roNetworkTop.jitter}
                   unitSuffix=" ms"
                   severityMode="jitter"
-                  emptyMsg="No jitter history in business hours."
+                  emptyMsg={roNetTopBhEnabled ? 'No jitter history in business hours.' : 'No jitter history in selected range.'}
                   storeByHost={customDashStoreByHost}
                   storeManualCodes={customDashStoreManualCodes}
-                  onRowClick={(r) => goToHostGraphs({ hostid: r.hostid, host: r.host, name: r.name })}
+                  onRowClick={(r) => goToCustomDash({ hostid: r.hostid, host: r.host, name: r.name })}
                 />
               </Widget>
             </div>
@@ -7350,8 +7745,105 @@ export default function StoreZabbixPage({
         </div>
       )}
 
+      {/* ═══════════ NETWORK HEALTH TAB — Ro Dashboard ═══════════ */}
+      {configured && reachable && tab === 'netHealth' && dashboardVariant === 'ro' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <RoNetworkTopFilters
+            title="Mean latency & jitter over selected range"
+            scopeLabel={resolvedLockedGroup || lockedHostGroup || 'RP System'}
+            roNetTopRange={roNetTopRange}
+            setRoNetTopRange={setRoNetTopRange}
+            roNetTopRangeLabel={roNetTopRangeLabel}
+            roNetTopCustomFrom={roNetTopCustomFrom}
+            setRoNetTopCustomFrom={setRoNetTopCustomFrom}
+            roNetTopCustomTo={roNetTopCustomTo}
+            setRoNetTopCustomTo={setRoNetTopCustomTo}
+            roNetTopCustomEpoch={roNetTopCustomEpoch}
+            setRoNetTopCustomEpoch={setRoNetTopCustomEpoch}
+            roNetTopBhEnabled={roNetTopBhEnabled}
+            setRoNetTopBhEnabled={setRoNetTopBhEnabled}
+            roNetTopBhStart={roNetTopBhStart}
+            setRoNetTopBhStart={setRoNetTopBhStart}
+            roNetTopBhEnd={roNetTopBhEnd}
+            setRoNetTopBhEnd={setRoNetTopBhEnd}
+            roNetTopBhDays={roNetTopBhDays}
+            setRoNetTopBhDays={setRoNetTopBhDays}
+            roNetTopBhLabel={roNetTopBhLabel}
+            onRefresh={() => loadRoNetworkTop()}
+            busy={roNetworkTopBusy}
+            refreshNote="Auto-refresh every 5 min"
+          />
+
+          {roNetworkTopBusy && !roNetworkTop && (
+            <div style={{ padding: 40, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center' }}>
+              <span className="np-page-loading-dot" /> Loading problematic stores…
+            </div>
+          )}
+
+          {roNetworkTop && (
+            <>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 14 }}>
+              <Widget title="Top Latency (mean)" badge={roNetworkTop.latency?.length ?? 0} badgeColor="cyan" noPad
+                actions={(
+                  <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                    {roNetTopRangeLabel}{roNetTopBhEnabled ? ` · ${roNetTopBhLabel}` : ' · 24/7'}
+                  </span>
+                )}>
+                <TopMonRankTable
+                  rows={roNetworkTop.latency}
+                  unitSuffix=" ms"
+                  severityMode="latency"
+                  emptyMsg={roNetTopBhEnabled ? 'No latency history in business hours.' : 'No latency history in selected range.'}
+                  storeByHost={customDashStoreByHost}
+                  storeManualCodes={customDashStoreManualCodes}
+                  onRowClick={(r) => goToCustomDash({ hostid: r.hostid, host: r.host, name: r.name })}
+                />
+              </Widget>
+              <Widget title="Top Jitter (mean)" badge={roNetworkTop.jitter?.length ?? 0} badgeColor="purple" noPad
+                actions={(
+                  <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                    {roNetTopRangeLabel}{roNetTopBhEnabled ? ` · ${roNetTopBhLabel}` : ' · 24/7'}
+                  </span>
+                )}>
+                <TopMonRankTable
+                  rows={roNetworkTop.jitter}
+                  unitSuffix=" ms"
+                  severityMode="jitter"
+                  emptyMsg={roNetTopBhEnabled ? 'No jitter history in business hours.' : 'No jitter history in selected range.'}
+                  storeByHost={customDashStoreByHost}
+                  storeManualCodes={customDashStoreManualCodes}
+                  onRowClick={(r) => goToCustomDash({ hostid: r.hostid, host: r.host, name: r.name })}
+                />
+              </Widget>
+            </div>
+
+            <Widget
+              title="Top Problematic Stores"
+              badge={String(roNetworkTop.problematic?.length ?? 0)}
+              badgeColor="red"
+              noPad
+              actions={roNetworkTop.window?.fromAt && roNetworkTop.window?.toAt ? (
+                <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                  Mean latency &amp; jitter · {roNetworkTop.window.fromAt} – {roNetworkTop.window.toAt}
+                  {roNetTopBhEnabled ? ` · ${roNetTopBhLabel}` : ' · 24/7'}
+                </span>
+              ) : null}
+            >
+              <RoProblematicStoresTable
+                rows={roNetworkTop.problematic}
+                emptyMsg={roNetTopBhEnabled ? 'No problematic stores in business hours for the selected range.' : 'No problematic stores in the selected range.'}
+                storeByHost={customDashStoreByHost}
+                storeManualCodes={customDashStoreManualCodes}
+                onRowClick={(r) => goToCustomDash({ hostid: r.hostid, host: r.host, name: r.name })}
+              />
+            </Widget>
+            </>
+          )}
+        </div>
+      )}
+
       {/* ═══════════ NETWORK HEALTH TAB ═══════════ */}
-      {configured && reachable && tab === 'netHealth' && (() => {
+      {configured && reachable && tab === 'netHealth' && dashboardVariant !== 'ro' && (() => {
         const nh = netHealth
         const fmtUptime = (s) => {
           if (!s || !Number.isFinite(s)) return '—'

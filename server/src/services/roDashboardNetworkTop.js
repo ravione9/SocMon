@@ -132,7 +132,7 @@ async function fetchHistorySeries(zabbixRpc, itemEntries, from, to) {
         output: ['itemid', 'clock', 'value'],
         sortfield: 'clock',
         sortorder: 'ASC',
-        limit: 10000,
+        limit: 15000,
       }).catch(() => [])
       for (const r of rows || []) {
         const iid = String(r.itemid)
@@ -144,7 +144,42 @@ async function fetchHistorySeries(zabbixRpc, itemEntries, from, to) {
   return byItem
 }
 
+/** History-first for short spans, trend-first for long spans — with fallback per item. */
+async function fetchSeriesForRange(zabbixRpc, itemEntries, fromSec, toSec) {
+  if (!itemEntries.length) return { byItem: {}, source: 'none' }
+  const span = toSec - fromSec
+  const preferTrend = span > 2 * 86400
+  const primary = preferTrend
+    ? await fetchTrendSeries(zabbixRpc, itemEntries, fromSec, toSec)
+    : await fetchHistorySeries(zabbixRpc, itemEntries, fromSec, toSec)
+  const byItem = { ...primary }
+  const missing = itemEntries.filter((e) => !(byItem[String(e.itemid)]?.length))
+  if (missing.length) {
+    const fallback = preferTrend
+      ? await fetchHistorySeries(zabbixRpc, missing, fromSec, toSec)
+      : await fetchTrendSeries(zabbixRpc, missing, fromSec, toSec)
+    for (const [iid, pts] of Object.entries(fallback || {})) {
+      if (!byItem[iid]?.length && pts?.length) byItem[iid] = pts
+    }
+  }
+  const usedTrend = itemEntries.filter((e) => {
+    const iid = String(e.itemid)
+    const pts = byItem[iid]
+    if (!pts?.length) return false
+    if (preferTrend) return primary[iid]?.length > 0
+    return !primary[iid]?.length
+  }).length
+  const source = usedTrend > itemEntries.length / 2 ? 'trend' : 'history'
+  return { byItem, source }
+}
+
 function filterPointsBusinessHours(points, fromSec, toSec, bh, tzOffsetMin) {
+  if (!bh?.enabled) {
+    return (points || []).filter((p) => {
+      const clock = Number(p.clock)
+      return Number.isFinite(clock) && clock >= fromSec && clock <= toSec
+    })
+  }
   const days = enumerateDays(fromSec, toSec, tzOffsetMin)
   return (points || []).filter((p) => {
     const clock = Number(p.clock)
@@ -165,6 +200,96 @@ function meanFromPoints(points) {
     avgMs: Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10,
     pointCount: vals.length,
   }
+}
+
+function computeDowntimeMinutes(points, fromSec, toSec, bh, tzOffsetMin) {
+  const inBh = filterPointsBusinessHours(points, fromSec, toSec, bh, tzOffsetMin)
+  if (!inBh.length) return { downtimeMin: 0, pointCount: 0 }
+  inBh.sort((a, b) => a.clock - b.clock)
+  let downtimeSec = 0
+  const defaultIntervalSec = 300
+  for (let i = 0; i < inBh.length; i++) {
+    const p = inBh[i]
+    if (Number(p.value) >= 0.5) continue
+    const nextClock = i + 1 < inBh.length ? inBh[i + 1].clock : Math.min(toSec, p.clock + defaultIntervalSec)
+    downtimeSec += Math.max(0, Math.min(nextClock, toSec) - p.clock)
+  }
+  return {
+    downtimeMin: Math.round((downtimeSec / 60) * 10) / 10,
+    pointCount: inBh.length,
+  }
+}
+
+function buildMetricMap(hostMap, itemByHost, seriesByItem, fromSec, toSec, bh, tzOffsetMin, metric) {
+  const map = {}
+  for (const [hid, host] of Object.entries(hostMap || {})) {
+    const it = itemByHost[hid]
+    if (!it) continue
+    const raw = seriesByItem[String(it.itemid)] || []
+    if (metric === 'downtime') {
+      const { downtimeMin, pointCount } = computeDowntimeMinutes(raw, fromSec, toSec, bh, tzOffsetMin)
+      if (downtimeMin <= 0 && pointCount === 0) continue
+      map[hid] = {
+        hostid: hid,
+        host: host.host,
+        name: host.name || host.host,
+        downtimeMin,
+        pointCount,
+      }
+      continue
+    }
+    const inBh = filterPointsBusinessHours(raw, fromSec, toSec, bh, tzOffsetMin)
+    const { avgMs, pointCount } = meanFromPoints(inBh)
+    if (avgMs == null) continue
+    map[hid] = {
+      hostid: hid,
+      host: host.host,
+      name: host.name || host.host,
+      value: avgMs,
+      pointCount,
+    }
+  }
+  return map
+}
+
+function buildProblematicRows(latencyMap, jitterMap, downtimeMap, limit) {
+  const hostids = new Set([
+    ...Object.keys(latencyMap || {}),
+    ...Object.keys(jitterMap || {}),
+    ...Object.keys(downtimeMap || {}),
+  ])
+  const rows = []
+  for (const hid of hostids) {
+    const lat = latencyMap[hid]
+    const jit = jitterMap[hid]
+    const down = downtimeMap[hid]
+    const downtimeMin = down?.downtimeMin ?? 0
+    const latencyMs = lat?.value ?? null
+    const jitterMs = jit?.value ?? null
+    if (downtimeMin <= 0 && latencyMs == null && jitterMs == null) continue
+    const score = (downtimeMin * 10) + (latencyMs ?? 0) * 0.3 + (jitterMs ?? 0) * 1.5
+    rows.push({
+      hostid: hid,
+      host: lat?.host || jit?.host || down?.host,
+      name: lat?.name || jit?.name || down?.name,
+      downtimeMin,
+      latencyMs,
+      jitterMs,
+      meanLatencyMs: latencyMs,
+      meanJitterMs: jitterMs,
+      latencyPoints: lat?.pointCount ?? 0,
+      jitterPoints: jit?.pointCount ?? 0,
+      downtimePoints: down?.pointCount ?? 0,
+      score: Math.round(score * 10) / 10,
+    })
+  }
+  rows.sort((a, b) => b.score - a.score)
+  const top = rows.slice(0, limit)
+  const maxScore = top[0]?.score || 1
+  for (const r of top) {
+    r.percent = Math.round((r.score / maxScore) * 1000) / 10
+  }
+  return top
 }
 
 function buildTopRows(hostMap, itemByHost, seriesByItem, fromSec, toSec, bh, tzOffsetMin, limit) {
@@ -228,17 +353,18 @@ export async function fetchRoDashboardNetworkTop(opts) {
   const groupFilter = String(opts.query?.group || '').trim()
   const bizStart = Math.min(23, Math.max(0, parseInt(String(opts.query?.bizStart ?? '9'), 10) || 9))
   const bizEnd = Math.min(24, Math.max(0, parseInt(String(opts.query?.bizEnd ?? '21'), 10) || 21))
+  const bizEnabled = !['0', 'false', 'off', 'no'].includes(String(opts.query?.bizEnabled ?? '1').toLowerCase())
   const tzOffsetMinutes = parseInt(String(opts.query?.tzOffset ?? String(IST_OFFSET_MIN)), 10) || IST_OFFSET_MIN
   const bizDaysRaw = String(opts.query?.bizDays ?? '0,1,2,3,4,5,6')
   const weekdays = bizDaysRaw.split(',').map((d) => parseInt(d.trim(), 10)).filter((d) => Number.isFinite(d) && d >= 0 && d <= 6)
   const bh = {
-    enabled: true,
+    enabled: bizEnabled,
     start: bizStart,
     end: bizEnd,
     days: weekdays.length ? weekdays : [0, 1, 2, 3, 4, 5, 6],
   }
 
-  const key = cacheKey({ groupFilter, fromSec, toSec, limit, bizStart, bizEnd, tzOffsetMinutes, weekdays })
+  const key = cacheKey({ groupFilter, fromSec, toSec, limit, bizEnabled, bizStart, bizEnd, tzOffsetMinutes, weekdays })
   const hit = _cache.get(key)
   if (hit && Date.now() - hit.at < REPORT_CACHE_MS) return hit.data
 
@@ -247,40 +373,48 @@ export async function fetchRoDashboardNetworkTop(opts) {
     const empty = {
       groupFilter: resolvedGroup,
       window: { from: fromSec, to: toSec, rangeLabel, fromAt: formatPortalTimestamp(fromSec * 1000), toAt: formatPortalTimestamp(toSec * 1000) },
-      businessHours: { startHour: bizStart, endHour: bizEnd, tzOffsetMinutes, weekdays: bh.days },
+      businessHours: { enabled: bizEnabled, startHour: bizStart, endHour: bizEnd, tzOffsetMinutes, weekdays: bh.days, label: bizEnabled ? `${String(bizStart).padStart(2, '0')}:00–${String(bizEnd).padStart(2, '0')}:00` : 'OFF (24/7)' },
       limit,
       latency: [],
       jitter: [],
+      problematic: [],
       note: 'No hosts in scope.',
     }
     _cache.set(key, { at: Date.now(), data: empty })
     return empty
   }
 
-  const [latencyItems, jitterItems] = await Promise.all([
+  const [latencyItems, jitterItems, agentPingItems] = await Promise.all([
     fetchItemsChunked(zabbixRpc, hostids, 'custom.ping.ms'),
     fetchItemsChunked(zabbixRpc, hostids, 'custom.ping.jitter'),
+    fetchItemsChunked(zabbixRpc, hostids, 'agent.ping'),
   ])
 
   const latencyByHost = pickItemPerHost(latencyItems, '8.8.8.8')
   const jitterByHost = pickItemPerHost(jitterItems, '8.8.8.8')
+  const agentPingByHost = pickItemPerHost(agentPingItems, 'agent.ping')
   const latencyEntries = Object.values(latencyByHost)
   const jitterEntries = Object.values(jitterByHost)
+  const agentPingEntries = Object.values(agentPingByHost)
 
   const windowSec = toSec - fromSec
-  const useTrends = windowSec >= 3600
 
-  const [latencySeries, jitterSeries] = await Promise.all([
-    useTrends
-      ? fetchTrendSeries(zabbixRpc, latencyEntries, fromSec, toSec)
-      : fetchHistorySeries(zabbixRpc, latencyEntries, fromSec, toSec),
-    useTrends
-      ? fetchTrendSeries(zabbixRpc, jitterEntries, fromSec, toSec)
-      : fetchHistorySeries(zabbixRpc, jitterEntries, fromSec, toSec),
+  const [latencyFetch, jitterFetch, agentPingFetch] = await Promise.all([
+    fetchSeriesForRange(zabbixRpc, latencyEntries, fromSec, toSec),
+    fetchSeriesForRange(zabbixRpc, jitterEntries, fromSec, toSec),
+    fetchSeriesForRange(zabbixRpc, agentPingEntries, fromSec, toSec),
   ])
+  const latencySeries = latencyFetch.byItem
+  const jitterSeries = jitterFetch.byItem
+  const agentPingSeries = agentPingFetch.byItem
+
+  const latencyMap = buildMetricMap(hostMap, latencyByHost, latencySeries, fromSec, toSec, bh, tzOffsetMinutes, 'latency')
+  const jitterMap = buildMetricMap(hostMap, jitterByHost, jitterSeries, fromSec, toSec, bh, tzOffsetMinutes, 'jitter')
+  const downtimeMap = buildMetricMap(hostMap, agentPingByHost, agentPingSeries, fromSec, toSec, bh, tzOffsetMinutes, 'downtime')
 
   const latency = buildTopRows(hostMap, latencyByHost, latencySeries, fromSec, toSec, bh, tzOffsetMinutes, limit)
   const jitter = buildTopRows(hostMap, jitterByHost, jitterSeries, fromSec, toSec, bh, tzOffsetMinutes, limit)
+  const problematic = buildProblematicRows(latencyMap, jitterMap, downtimeMap, limit)
 
   const data = {
     groupFilter: resolvedGroup,
@@ -293,20 +427,23 @@ export async function fetchRoDashboardNetworkTop(opts) {
       toAt: formatPortalTimestamp(toSec * 1000),
     },
     businessHours: {
+      enabled: bizEnabled,
       startHour: bizStart,
       endHour: bizEnd,
       tzOffsetMinutes,
       weekdays: bh.days,
-      label: `${String(bizStart).padStart(2, '0')}:00–${String(bizEnd).padStart(2, '0')}:00`,
+      label: bizEnabled ? `${String(bizStart).padStart(2, '0')}:00–${String(bizEnd).padStart(2, '0')}:00` : 'OFF (24/7)',
     },
     limit,
     latency,
     jitter,
+    problematic,
     summary: {
       hostsInScope: hostids.length,
       latencyRanked: latency.length,
       jitterRanked: jitter.length,
-      source: useTrends ? 'trend' : 'history',
+      problematicRanked: problematic.length,
+      source: latencyFetch.source || jitterFetch.source || 'history',
     },
     sampledAt: nowSec,
   }
