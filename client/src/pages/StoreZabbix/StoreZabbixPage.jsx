@@ -2120,8 +2120,10 @@ function RoProblematicStoresTable({ rows, emptyMsg, storeByHost, storeManualCode
       </thead>
       <tbody>
         {rows.map((r, i) => {
-          const latSev = r.latencyMs != null ? topMonSeverity(0, r.latencyMs, ' ms', 'latency') : null
-          const jitSev = r.jitterMs != null ? topMonSeverity(0, r.jitterMs, ' ms', 'jitter') : null
+          const latMs = r.meanLatencyMs ?? r.latencyMs
+          const jitMs = r.meanJitterMs ?? r.jitterMs
+          const latSev = latMs != null ? topMonSeverity(0, latMs, ' ms', 'latency') : null
+          const jitSev = jitMs != null ? topMonSeverity(0, jitMs, ' ms', 'jitter') : null
           const { connType, storeType } = showStoreProfile
             ? getHostStoreProfile({ host: r.host, name: r.name }, storeByHost, storeManualCodes)
             : {}
@@ -2143,10 +2145,10 @@ function RoProblematicStoresTable({ rows, emptyMsg, storeByHost, storeManualCode
                 {fmtMinutesShort(r.downtimeMin)}
               </td>
               <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: 700, color: jitSev?.color || 'var(--text3)' }}>
-                {r.jitterMs != null ? `${r.jitterMs} ms` : '—'}
+                {jitMs != null ? `${jitMs} ms` : '—'}
               </td>
               <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: 700, color: latSev?.color || 'var(--text3)' }}>
-                {r.latencyMs != null ? `${r.latencyMs} ms` : '—'}
+                {latMs != null ? `${latMs} ms` : '—'}
               </td>
             </tr>
           )
@@ -7749,7 +7751,7 @@ export default function StoreZabbixPage({
       {configured && reachable && tab === 'netHealth' && dashboardVariant === 'ro' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <RoNetworkTopFilters
-            title="Mean latency & jitter over selected range"
+            title="Top problematic stores"
             scopeLabel={resolvedLockedGroup || lockedHostGroup || 'RP System'}
             roNetTopRange={roNetTopRange}
             setRoNetTopRange={setRoNetTopRange}
@@ -7781,42 +7783,6 @@ export default function StoreZabbixPage({
           )}
 
           {roNetworkTop && (
-            <>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 14 }}>
-              <Widget title="Top Latency (mean)" badge={roNetworkTop.latency?.length ?? 0} badgeColor="cyan" noPad
-                actions={(
-                  <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
-                    {roNetTopRangeLabel}{roNetTopBhEnabled ? ` · ${roNetTopBhLabel}` : ' · 24/7'}
-                  </span>
-                )}>
-                <TopMonRankTable
-                  rows={roNetworkTop.latency}
-                  unitSuffix=" ms"
-                  severityMode="latency"
-                  emptyMsg={roNetTopBhEnabled ? 'No latency history in business hours.' : 'No latency history in selected range.'}
-                  storeByHost={customDashStoreByHost}
-                  storeManualCodes={customDashStoreManualCodes}
-                  onRowClick={(r) => goToCustomDash({ hostid: r.hostid, host: r.host, name: r.name })}
-                />
-              </Widget>
-              <Widget title="Top Jitter (mean)" badge={roNetworkTop.jitter?.length ?? 0} badgeColor="purple" noPad
-                actions={(
-                  <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
-                    {roNetTopRangeLabel}{roNetTopBhEnabled ? ` · ${roNetTopBhLabel}` : ' · 24/7'}
-                  </span>
-                )}>
-                <TopMonRankTable
-                  rows={roNetworkTop.jitter}
-                  unitSuffix=" ms"
-                  severityMode="jitter"
-                  emptyMsg={roNetTopBhEnabled ? 'No jitter history in business hours.' : 'No jitter history in selected range.'}
-                  storeByHost={customDashStoreByHost}
-                  storeManualCodes={customDashStoreManualCodes}
-                  onRowClick={(r) => goToCustomDash({ hostid: r.hostid, host: r.host, name: r.name })}
-                />
-              </Widget>
-            </div>
-
             <Widget
               title="Top Problematic Stores"
               badge={String(roNetworkTop.problematic?.length ?? 0)}
@@ -7837,7 +7803,6 @@ export default function StoreZabbixPage({
                 onRowClick={(r) => goToCustomDash({ hostid: r.hostid, host: r.host, name: r.name })}
               />
             </Widget>
-            </>
           )}
         </div>
       )}
