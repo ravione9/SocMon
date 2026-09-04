@@ -177,7 +177,7 @@ async function fetchSeriesForRange(zabbixRpc, itemEntries, fromSec, toSec, { his
   return { byItem, source }
 }
 
-/** Raw history only, day-chunked for full-range coverage (uptime, agent.ping, etc.). */
+/** Raw history only, day-chunked for full-range coverage (latency/jitter batches). */
 async function fetchHistoryDayChunked(zabbixRpc, itemEntries, fromSec, toSec) {
   const byItem = {}
   const DAY_SEC = 86400
@@ -221,24 +221,61 @@ async function fetchHistoryDayChunked(zabbixRpc, itemEntries, fromSec, toSec) {
   return byItem
 }
 
+/** One item per request, day-chunked — avoids history.get truncation when batching many hosts. */
+async function fetchUptimeHistoryPerItem(zabbixRpc, itemEntries, fromSec, toSec) {
+  const byItem = {}
+  const DAY_SEC = 86400
+  const tasks = []
+  for (const entry of itemEntries) {
+    const hk = historyKind(entry.value_type)
+    if (!hk) continue
+    for (let dayStart = fromSec; dayStart < toSec; dayStart += DAY_SEC) {
+      const dayEnd = Math.min(dayStart + DAY_SEC, toSec)
+      tasks.push({ entry, hk, dayStart, dayEnd })
+    }
+  }
+  await mapConcurrent(tasks, async ({ entry, hk, dayStart, dayEnd }) => {
+    const iid = String(entry.itemid)
+    const rows = await zabbixRpc('history.get', {
+      history: hk.history,
+      itemids: [iid],
+      time_from: dayStart,
+      time_till: dayEnd,
+      output: ['itemid', 'clock', 'value'],
+      sortfield: 'clock',
+      sortorder: 'ASC',
+      limit: 50000,
+    }).catch(() => [])
+    for (const r of rows || []) {
+      if (!byItem[iid]) byItem[iid] = []
+      byItem[iid].push({ clock: Number(r.clock), value: Number(r.value) })
+    }
+  }, 8)
+  for (const pts of Object.values(byItem)) {
+    pts.sort((a, b) => a.clock - b.clock)
+  }
+  return byItem
+}
+
 function clipSpanSec(rangeFrom, rangeTo, spanFrom, spanTo) {
   return Math.max(0, Math.min(rangeTo, spanTo) - Math.max(rangeFrom, spanFrom))
 }
 
-/** Seconds of [fromTs, toTs) that fall inside business hours. */
-function bhClippedSpanSec(fromTs, toTs, bh, tzOffsetMin = IST_OFFSET_MIN) {
+/** Total seconds of [fromTs, toTs) inside BH (matches Custom Dashboard bhSecondsInRange). */
+function bhSecondsInRange(fromTs, toTs, bh, tzOffsetMin = IST_OFFSET_MIN) {
   if (toTs <= fromTs) return 0
   if (!bh?.enabled) return toTs - fromTs
-  const bhDays = new Set(bh.days || [])
   const bhStartSec = (Number(bh.start) || 0) * 3600
   const bhEndSec = (Number(bh.end) || 0) * 3600
+  const bhDays = new Set(bh.days || [])
   let total = 0
-  for (const day of enumerateDays(fromTs, toTs, tzOffsetMin)) {
+  const first = dayBounds(fromTs, tzOffsetMin)
+  for (let cursor = first.start; cursor < toTs; cursor += 86400) {
+    const d = dayBounds(cursor, tzOffsetMin)
     const offSec = tzOffsetMin * 60
-    const dayDate = new Date((day.start + offSec) * 1000)
+    const dayDate = new Date((d.start + offSec) * 1000)
     const dow = dayDate.getUTCDay()
     if (bhDays.size && !bhDays.has(dow)) continue
-    const cursor = day.start
     if (bhEndSec <= bhStartSec) {
       total += clipSpanSec(fromTs, toTs, cursor, cursor + bhEndSec)
       total += clipSpanSec(fromTs, toTs, cursor + bhStartSec, cursor + 86400)
@@ -247,6 +284,23 @@ function bhClippedSpanSec(fromTs, toTs, bh, tzOffsetMin = IST_OFFSET_MIN) {
     }
   }
   return total
+}
+
+function dayBounds(epochSec, tzOffsetMin = IST_OFFSET_MIN) {
+  const offSec = tzOffsetMin * 60
+  const local = epochSec + offSec
+  const startLocal = Math.floor(local / 86400) * 86400
+  return {
+    start: startLocal - offSec,
+    end: startLocal - offSec + 86400,
+  }
+}
+
+/** Seconds of [fromTs, toTs) that fall inside business hours when BH is enabled. */
+function bhClippedSpanSec(fromTs, toTs, bh, tzOffsetMin = IST_OFFSET_MIN) {
+  if (toTs <= fromTs) return 0
+  if (!bh?.enabled) return toTs - fromTs
+  return bhSecondsInRange(fromTs, toTs, bh, tzOffsetMin)
 }
 
 const UPTIME_GAP_THRESHOLD_SEC = 240
@@ -503,14 +557,13 @@ export async function fetchRoDashboardNetworkTop(opts) {
 
   const windowSec = toSec - fromSec
 
-  const [latencyFetch, jitterFetch, uptimeFetch] = await Promise.all([
+  const [latencyFetch, jitterFetch] = await Promise.all([
     fetchSeriesForRange(zabbixRpc, latencyEntries, fromSec, toSec),
     fetchSeriesForRange(zabbixRpc, jitterEntries, fromSec, toSec),
-    fetchSeriesForRange(zabbixRpc, uptimeEntries, fromSec, toSec, { historyOnly: true }),
   ])
+  const uptimeSeries = await fetchUptimeHistoryPerItem(zabbixRpc, uptimeEntries, fromSec, toSec)
   const latencySeries = latencyFetch.byItem
   const jitterSeries = jitterFetch.byItem
-  const uptimeSeries = uptimeFetch.byItem
 
   const latencyMap = buildMetricMap(hostMap, latencyByHost, latencySeries, fromSec, toSec, bh, tzOffsetMinutes, 'latency')
   const jitterMap = buildMetricMap(hostMap, jitterByHost, jitterSeries, fromSec, toSec, bh, tzOffsetMinutes, 'jitter')

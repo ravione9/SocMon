@@ -5277,6 +5277,7 @@ export default function StoreZabbixPage({
       qs.set('from', String(roNetTopCustomEpoch.from))
       qs.set('to', String(roNetTopCustomEpoch.to))
     }
+    setRoNetworkTop(null)
     setRoNetworkTopBusy(true)
     try {
       const { data } = await api.get(`${apiBase}/ro-dashboard-network-top?${qs}`, { timeout: 120000 })
@@ -7796,7 +7797,7 @@ export default function StoreZabbixPage({
               noPad
               actions={roNetworkTop.window?.fromAt && roNetworkTop.window?.toAt ? (
                 <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
-                  Mean latency &amp; jitter · {roNetworkTop.window.fromAt} – {roNetworkTop.window.toAt}
+                  {roNetTopRangeLabel} · Mean latency &amp; jitter · {roNetworkTop.window.fromAt} – {roNetworkTop.window.toAt}
                   {roNetTopBhEnabled ? ` · ${roNetTopBhLabel}` : ' · 24/7'}
                 </span>
               ) : null}
