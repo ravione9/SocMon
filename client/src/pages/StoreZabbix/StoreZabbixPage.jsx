@@ -1031,6 +1031,40 @@ function classifyStoreTypeLabel(store, manualCodes = []) {
   return 'Other'
 }
 
+const INVENTORY_STORE_TYPE_FILTERS = [
+  { value: 'SD-WAN', label: 'SD-WAN' },
+  { value: 'Non SD-WAN', label: 'Non SD-WAN' },
+  { value: 'Manual SD-WAN', label: 'Manual SD-WAN' },
+  { value: 'Other', label: 'Other' },
+  { value: '__unmatched__', label: 'Unmatched' },
+]
+
+function getInventoryHostStoreType(host, storeByHost, manualCodes = []) {
+  const store = findStoreMonitorStore(host, storeByHost)
+  if (!store) return '__unmatched__'
+  return classifyStoreTypeLabel(store, manualCodes) || 'Other'
+}
+
+function getHostStoreProfile(host, storeByHost, manualCodes = []) {
+  const store = findStoreMonitorStore(host, storeByHost)
+  const conn = formatStoreConnectionType(store)
+  const storeType = store ? (classifyStoreTypeLabel(store, manualCodes) || 'Other') : null
+  return { store, connType: conn?.label || null, storeType }
+}
+
+function storeTypeColor(storeType) {
+  if (storeType === 'SD-WAN') return '#8b5cf6'
+  if (storeType === 'Manual SD-WAN') return '#f59e0b'
+  if (storeType === 'Non SD-WAN') return '#3b82f6'
+  return 'var(--text3)'
+}
+
+function connTypeColor(connType) {
+  if (connType === 'WiFi') return '#06b6d4'
+  if (connType === 'LAN') return '#22c55e'
+  return 'var(--text3)'
+}
+
 function buildStoreProfileRows(hostMetricItems, storeByHost, manualCodes) {
   return (hostMetricItems || []).map((row) => {
     const store = findStoreMonitorStore(row.host, storeByHost)
@@ -1901,7 +1935,8 @@ function TopMonSection({ title }) {
   )
 }
 
-function TopMonRankTable({ rows, accent, unitSuffix = '%', emptyMsg, onRowClick, showMount, showBytes, severityMode }) {
+function TopMonRankTable({ rows, accent, unitSuffix = '%', emptyMsg, onRowClick, showMount, showBytes, severityMode, storeByHost, storeManualCodes }) {
+  const showStoreProfile = storeByHost != null
   if (!rows?.length) {
     return (
       <div className="topmon-empty">
@@ -1917,6 +1952,8 @@ function TopMonRankTable({ rows, accent, unitSuffix = '%', emptyMsg, onRowClick,
           <th style={{ width: 36 }}>#</th>
           <th>Device</th>
           {showMount && <th>Volume</th>}
+          {showStoreProfile && <th style={{ width: 88 }}>Connection</th>}
+          {showStoreProfile && <th style={{ width: 108 }}>Store Type</th>}
           <th style={{ width: 72 }}>Status</th>
           <th style={{ width: 140, textAlign: 'right' }}>Value</th>
         </tr>
@@ -1929,6 +1966,9 @@ function TopMonRankTable({ rows, accent, unitSuffix = '%', emptyMsg, onRowClick,
           const used = fmtBytes(r.usedBytes)
           const total = fmtBytes(r.totalBytes)
           const displayVal = r.value != null ? (rawVal >= 100 ? Math.round(rawVal) : rawVal.toFixed(1)) : barPct.toFixed(1)
+          const { connType, storeType } = showStoreProfile
+            ? getHostStoreProfile({ host: r.host, name: r.name }, storeByHost, storeManualCodes)
+            : {}
           return (
             <tr key={r.itemid || `${r.hostid}-${i}`} onClick={onRowClick ? () => onRowClick(r) : undefined}>
               <td>
@@ -1941,6 +1981,12 @@ function TopMonRankTable({ rows, accent, unitSuffix = '%', emptyMsg, onRowClick,
                 )}
               </td>
               {showMount && <td style={{ color: 'var(--text3)', fontSize: 10 }}>{r.mount || '—'}</td>}
+              {showStoreProfile && (
+                <td style={{ color: connTypeColor(connType), fontSize: 11, fontWeight: 600, fontFamily: 'var(--mono)' }}>{connType || '—'}</td>
+              )}
+              {showStoreProfile && (
+                <td style={{ color: storeTypeColor(storeType), fontSize: 11, fontWeight: 600, fontFamily: 'var(--mono)' }}>{storeType || '—'}</td>
+              )}
               <td>
                 <span className="topmon-sev-pill" style={{ color: sev.color, background: sev.bg, border: `1px solid ${sev.color}33` }}>{sev.label}</span>
               </td>
@@ -4198,6 +4244,7 @@ function CustomDashDetailPanel({
     const reporting = rows.filter((r) => r.item)
     const isUptimeWidget = widget === 'uptime' || widget === 'systemUptime'
     const isRangeMaxMsWidget = CUSTOM_DASH_RANGE_MS_TILES.has(widget)
+    const showLatencyJitterStoreCols = isRangeMaxMsWidget && (widget === 'maxLatency' || widget === 'maxJitter') && storeByHost != null
     const rangeMsStats = widget === 'maxLatency' ? latencyStats
       : widget === 'maxJitter' ? jitterStats
         : widget === 'maxGatewayLatency' ? gatewayStats
@@ -4261,6 +4308,9 @@ function CustomDashDetailPanel({
               ? ((crashesByHost?.get(hostKey1) || crashesByHost?.get(hostKey2) || []))
               : []
             const hostCrashCount = hostCrashEvents.reduce((acc, ev) => acc + (Number(ev.count) || 1), 0)
+            const { connType, storeType } = showLatencyJitterStoreCols
+              ? getHostStoreProfile(host, storeByHost, storeManualCodes)
+              : {}
             const stopAndCall = (e, fn) => { e.preventDefault(); e.stopPropagation(); fn?.(host) }
             return (
               <div key={host.hostid} style={{ borderBottom: '1px solid var(--border)' }}>
@@ -4284,6 +4334,18 @@ function CustomDashDetailPanel({
                       ) : 'No metric'}
                     </div>
                   </div>
+                  {showLatencyJitterStoreCols && (
+                    <>
+                      <div style={{ width: 90, textAlign: 'right' }}>
+                        <div style={{ fontSize: 10, color: 'var(--text3)' }}>Connection</div>
+                        <div style={{ fontWeight: 700, color: connTypeColor(connType) }}>{connType || '—'}</div>
+                      </div>
+                      <div style={{ width: 110, textAlign: 'right' }}>
+                        <div style={{ fontSize: 10, color: 'var(--text3)' }}>Store type</div>
+                        <div style={{ fontWeight: 700, color: storeTypeColor(storeType) }}>{storeType || '—'}</div>
+                      </div>
+                    </>
+                  )}
                   {!isUptimeWidget && !isRangeMaxMsWidget && (
                     <div style={{ flex: '0 1 220px', minWidth: 120, display: (isPct || isMsMetricWidget) ? 'flex' : 'none', alignItems: 'center', gap: 8 }}>
                       <div style={{ flex: 1, height: 5, borderRadius: 3, background: 'var(--bg4)', overflow: 'hidden' }}>
@@ -4740,6 +4802,8 @@ export default function StoreZabbixPage({
   const [inventoryGroupFilter, setInventoryGroupFilter] = useState('')
   /** '' = all, or Zabbix availability label: Available | Unavailable | Unknown */
   const [inventoryAvailFilter, setInventoryAvailFilter] = useState('')
+  /** Ro inventory: '' = all, or store type from Store Monitor classification */
+  const [inventoryStoreTypeFilter, setInventoryStoreTypeFilter] = useState('')
   const [topUtil, setTopUtil] = useState(null)
   const [topUtilBusy, setTopUtilBusy] = useState(false)
   const [topLimit, setTopLimit] = useState(10)
@@ -5958,10 +6022,10 @@ export default function StoreZabbixPage({
     loadCustomDashGatewayStats,
   ])
 
-  /* Ro dashboard: Store Monitor snapshot for store profile widget + inventory store type. */
+  /* Ro dashboard: Store Monitor snapshot for store profile widget, inventory, and network top tables. */
   useEffect(() => {
     if (dashboardVariant !== 'ro' || !config?.configured) return
-    if (tab !== 'custom' && tab !== 'hosts') return
+    if (tab !== 'custom' && tab !== 'hosts' && tab !== 'overview') return
     if (tab === 'custom' && !(customDashSelected || []).length) {
       setCustomDashStoreByHost({})
       setCustomDashStoreManualCodes([])
@@ -6169,12 +6233,23 @@ export default function StoreZabbixPage({
       Unknown: h.filter((x) => x.availability === 'Unknown').length,
     }
   }, [scopedInventoryHosts])
+  const inventoryStoreTypeCounts = useMemo(() => {
+    const counts = { all: scopedInventoryHosts.length }
+    for (const h of scopedInventoryHosts) {
+      const t = getInventoryHostStoreType(h, customDashStoreByHost, customDashStoreManualCodes)
+      counts[t] = (counts[t] || 0) + 1
+    }
+    return counts
+  }, [scopedInventoryHosts, customDashStoreByHost, customDashStoreManualCodes])
   const filteredInventory = useMemo(() => {
     let base = scopedInventoryHosts
     if (inventoryGroupFilter) base = base.filter((h) => (h.groups || []).includes(inventoryGroupFilter))
     if (inventoryAvailFilter) base = base.filter((h) => h.availability === inventoryAvailFilter)
+    if (inventoryStoreTypeFilter) {
+      base = base.filter((h) => getInventoryHostStoreType(h, customDashStoreByHost, customDashStoreManualCodes) === inventoryStoreTypeFilter)
+    }
     return scoreHosts(base, (inventorySearch || '').trim().toLowerCase())
-  }, [scopedInventoryHosts, inventorySearch, inventoryGroupFilter, inventoryAvailFilter, scoreHosts])
+  }, [scopedInventoryHosts, inventorySearch, inventoryGroupFilter, inventoryAvailFilter, inventoryStoreTypeFilter, customDashStoreByHost, customDashStoreManualCodes, scoreHosts])
   const availableGroups = useMemo(() => {
     const set = new Set()
     for (const h of hostsExplorer || []) for (const g of h.groups || []) if (g) set.add(g)
@@ -6401,17 +6476,20 @@ export default function StoreZabbixPage({
       )
     }},
     ...(dashboardVariant === 'ro' ? [{
+      key: 'connType',
+      label: 'Connection',
+      render: (h) => {
+        const { connType } = getHostStoreProfile(h, customDashStoreByHost, customDashStoreManualCodes)
+        if (!connType) return <span style={{ color: 'var(--text3)', fontSize: 11 }}>—</span>
+        return <span style={{ color: connTypeColor(connType), fontSize: 11, fontWeight: 600, fontFamily: 'var(--mono)' }}>{connType}</span>
+      },
+    }, {
       key: 'storeType',
       label: 'Store Type',
       render: (h) => {
-        const store = findStoreMonitorStore(h, customDashStoreByHost)
-        const storeType = classifyStoreTypeLabel(store, customDashStoreManualCodes)
+        const { storeType } = getHostStoreProfile(h, customDashStoreByHost, customDashStoreManualCodes)
         if (!storeType) return <span style={{ color: 'var(--text3)', fontSize: 11 }}>—</span>
-        const typeColor = storeType === 'SD-WAN' ? '#8b5cf6'
-          : storeType === 'Manual SD-WAN' ? '#f59e0b'
-          : storeType === 'Non SD-WAN' ? '#3b82f6'
-          : 'var(--text3)'
-        return <span style={{ color: typeColor, fontSize: 11, fontWeight: 600, fontFamily: 'var(--mono)' }}>{storeType}</span>
+        return <span style={{ color: storeTypeColor(storeType), fontSize: 11, fontWeight: 600, fontFamily: 'var(--mono)' }}>{storeType}</span>
       },
     }] : []),
     { key: 'name', label: 'Device Name', render: (h) => <span style={{ color: 'var(--accent)', fontWeight: 600 }}>{h.name || h.host}</span> },
@@ -6585,6 +6663,8 @@ export default function StoreZabbixPage({
                   unitSuffix=" ms"
                   severityMode="latency"
                   emptyMsg="No latency history in business hours."
+                  storeByHost={customDashStoreByHost}
+                  storeManualCodes={customDashStoreManualCodes}
                   onRowClick={(r) => goToHostGraphs({ hostid: r.hostid, host: r.host, name: r.name })}
                 />
               </Widget>
@@ -6594,6 +6674,8 @@ export default function StoreZabbixPage({
                   unitSuffix=" ms"
                   severityMode="jitter"
                   emptyMsg="No jitter history in business hours."
+                  storeByHost={customDashStoreByHost}
+                  storeManualCodes={customDashStoreManualCodes}
                   onRowClick={(r) => goToHostGraphs({ hostid: r.hostid, host: r.host, name: r.name })}
                 />
               </Widget>
@@ -6746,15 +6828,36 @@ export default function StoreZabbixPage({
                   style={{ padding: '2px 8px', borderRadius: 5, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text3)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 700 }}>✕</button>
               )}
             </div>
+            {dashboardVariant === 'ro' && (
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 10px', borderRadius: 9, border: '1px solid var(--border)', background: 'var(--bg3)' }}>
+              <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, letterSpacing: .5, textTransform: 'uppercase' }}>Store Type</span>
+              <select value={inventoryStoreTypeFilter} onChange={(e) => setInventoryStoreTypeFilter(e.target.value)}
+                style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', outline: 'none', minWidth: 168, maxWidth: 220 }}>
+                <option value="">All ({inventoryStoreTypeCounts.all})</option>
+                {INVENTORY_STORE_TYPE_FILTERS.map(({ value, label }) => (
+                  <option key={value} value={value}>{label} ({inventoryStoreTypeCounts[value] || 0})</option>
+                ))}
+              </select>
+              {inventoryStoreTypeFilter && (
+                <button type="button" onClick={() => setInventoryStoreTypeFilter('')} title="Clear store type"
+                  style={{ padding: '2px 8px', borderRadius: 5, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text3)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 700 }}>✕</button>
+              )}
+            </div>
+            )}
           </div>
-          <Widget title="Device Inventory" badge={`${filteredInventory.length}${(inventorySearch || inventoryGroupFilter || inventoryAvailFilter) && scopedInventoryHosts.length ? ` / ${scopedInventoryHosts.length}` : ''}`} badgeColor="green" noPad
+          <Widget title="Device Inventory" badge={`${filteredInventory.length}${(inventorySearch || inventoryGroupFilter || inventoryAvailFilter || inventoryStoreTypeFilter) && scopedInventoryHosts.length ? ` / ${scopedInventoryHosts.length}` : ''}`} badgeColor="green" noPad
             actions={null}>
             {hosts === null || tabBusy
               ? <div style={{ padding: 24, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}><span className="np-page-loading-dot" style={{ width: 14, height: 14 }} />Loading devices…</div>
               : <DataTable columns={hostCols} rows={filteredInventory} empty={(() => {
+                  const storeTypeLabel = INVENTORY_STORE_TYPE_FILTERS.find((f) => f.value === inventoryStoreTypeFilter)?.label
                   if (!hosts?.length) return 'No monitored devices.'
-                  if (inventorySearch) return `No devices match "${inventorySearch}"${inventoryAvailFilter ? ` with status ${inventoryAvailFilter}` : ''}${inventoryGroupFilter ? ` in group “${inventoryGroupFilter}”` : ''}.`
-                  if (inventoryAvailFilter || inventoryGroupFilter) return `No devices${inventoryAvailFilter ? ` with status “${inventoryAvailFilter}”` : ''}${inventoryGroupFilter ? ` in group “${inventoryGroupFilter}”` : ''}.`
+                  if (inventorySearch) {
+                    return `No devices match "${inventorySearch}"${inventoryAvailFilter ? ` with status ${inventoryAvailFilter}` : ''}${inventoryGroupFilter ? ` in group “${inventoryGroupFilter}”` : ''}${storeTypeLabel ? ` with store type “${storeTypeLabel}”` : ''}.`
+                  }
+                  if (inventoryAvailFilter || inventoryGroupFilter || inventoryStoreTypeFilter) {
+                    return `No devices${inventoryAvailFilter ? ` with status “${inventoryAvailFilter}”` : ''}${inventoryGroupFilter ? ` in group “${inventoryGroupFilter}”` : ''}${storeTypeLabel ? ` with store type “${storeTypeLabel}”` : ''}.`
+                  }
                   return 'No monitored devices.'
                 })()} rowKey={(h) => h.hostid} onRowClick={(h) => goToHostGraphs(h)} />
             }
