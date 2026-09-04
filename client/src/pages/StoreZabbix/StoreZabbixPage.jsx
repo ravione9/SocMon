@@ -1935,12 +1935,17 @@ function TopMonSection({ title }) {
   )
 }
 
-function fmtMinutesShort(m) {
-  if (m == null || !Number.isFinite(m)) return '—'
-  if (m < 1) return '< 1 m'
-  if (m < 60) return `${Math.round(m)} m`
-  if (m < 1440) return `${(m / 60).toFixed(1)} h`
-  return `${(m / 1440).toFixed(1)} d`
+function fmtMinutesShort(m, downtimeSec) {
+  const sec = Number.isFinite(downtimeSec) ? Math.max(0, Math.round(downtimeSec)) : null
+  const totalSec = sec != null ? sec : (Number.isFinite(m) ? Math.round(m * 60) : null)
+  if (totalSec == null) return '—'
+  if (totalSec < 60) return totalSec <= 0 ? '0 min' : totalSec === 1 ? '1 min' : `${totalSec} sec`
+  const mins = Math.round(totalSec / 60)
+  if (mins < 60) return mins === 1 ? '1 min' : `${mins} min`
+  const hrs = Math.floor(mins / 60)
+  const remMin = mins % 60
+  if (remMin === 0) return hrs === 1 ? '1 hr' : `${hrs} hr`
+  return hrs === 1 ? `1 hr ${remMin} min` : `${hrs} hr ${remMin} min`
 }
 
 function RoNetworkTopFilters({
@@ -2099,10 +2104,11 @@ function RoProblematicStoresTable({ rows, emptyMsg, storeByHost, storeManualCode
       </div>
     )
   }
-  const downtimeColor = (m) => {
-    if (m == null || !Number.isFinite(m) || m <= 0) return 'var(--text3)'
-    if (m >= 120) return '#ef4444'
-    if (m >= 30) return '#f59e0b'
+  const downtimeColor = (m, sec) => {
+    const totalSec = Number.isFinite(sec) ? sec : (Number.isFinite(m) ? m * 60 : 0)
+    if (!totalSec || totalSec <= 0) return 'var(--text3)'
+    if (totalSec >= 7200) return '#ef4444'
+    if (totalSec >= 1800) return '#f59e0b'
     return '#eab308'
   }
   return (
@@ -2113,7 +2119,7 @@ function RoProblematicStoresTable({ rows, emptyMsg, storeByHost, storeManualCode
           <th>Store</th>
           {showStoreProfile && <th style={{ width: 88 }}>Connection</th>}
           {showStoreProfile && <th style={{ width: 108 }}>Store Type</th>}
-          <th style={{ width: 110, textAlign: 'right' }}>Downtime</th>
+          <th style={{ width: 110, textAlign: 'right' }} title="Actual agent offline time in the selected range (BH-aware when enabled)">Downtime</th>
           <th style={{ width: 110, textAlign: 'right' }} title="Mean jitter over the selected date range (and business hours when enabled)">Mean Jitter</th>
           <th style={{ width: 110, textAlign: 'right' }} title="Mean latency over the selected date range (and business hours when enabled)">Mean Latency</th>
         </tr>
@@ -2141,8 +2147,8 @@ function RoProblematicStoresTable({ rows, emptyMsg, storeByHost, storeManualCode
               {showStoreProfile && (
                 <td style={{ color: storeTypeColor(storeType), fontSize: 11, fontWeight: 600, fontFamily: 'var(--mono)' }}>{storeType || '—'}</td>
               )}
-              <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: 700, color: downtimeColor(r.downtimeMin) }}>
-                {fmtMinutesShort(r.downtimeMin)}
+              <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: 700, color: downtimeColor(r.downtimeMin, r.downtimeSec) }}>
+                {fmtMinutesShort(r.downtimeMin, r.downtimeSec)}
               </td>
               <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: 700, color: jitSev?.color || 'var(--text3)' }}>
                 {jitMs != null ? `${jitMs} ms` : '—'}

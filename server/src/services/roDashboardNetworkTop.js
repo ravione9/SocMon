@@ -145,8 +145,12 @@ async function fetchHistorySeries(zabbixRpc, itemEntries, from, to) {
 }
 
 /** History-first for short spans, trend-first for long spans — with fallback per item. */
-async function fetchSeriesForRange(zabbixRpc, itemEntries, fromSec, toSec) {
+async function fetchSeriesForRange(zabbixRpc, itemEntries, fromSec, toSec, { historyOnly = false } = {}) {
   if (!itemEntries.length) return { byItem: {}, source: 'none' }
+  if (historyOnly) {
+    const byItem = await fetchAgentPingHistory(zabbixRpc, itemEntries, fromSec, toSec)
+    return { byItem, source: 'history' }
+  }
   const span = toSec - fromSec
   const preferTrend = span > 2 * 86400
   const primary = preferTrend
@@ -171,6 +175,117 @@ async function fetchSeriesForRange(zabbixRpc, itemEntries, fromSec, toSec) {
   }).length
   const source = usedTrend > itemEntries.length / 2 ? 'trend' : 'history'
   return { byItem, source }
+}
+
+/** agent.ping is binary — always use raw history, day-chunked for full-range coverage. */
+async function fetchAgentPingHistory(zabbixRpc, itemEntries, fromSec, toSec) {
+  const byItem = {}
+  const DAY_SEC = 86400
+  const chunks = []
+  for (let i = 0; i < itemEntries.length; i += HISTORY_CHUNK) {
+    chunks.push(itemEntries.slice(i, i + HISTORY_CHUNK))
+  }
+  await mapConcurrent(chunks, async (entryChunk) => {
+    const byKind = new Map()
+    for (const e of entryChunk) {
+      const hk = historyKind(e.value_type)
+      if (!hk) continue
+      if (!byKind.has(hk.history)) byKind.set(hk.history, [])
+      byKind.get(hk.history).push(e)
+    }
+    for (const [historyType, entries] of byKind) {
+      const itemids = entries.map((e) => String(e.itemid))
+      for (let dayStart = fromSec; dayStart < toSec; dayStart += DAY_SEC) {
+        const dayEnd = Math.min(dayStart + DAY_SEC, toSec)
+        const rows = await zabbixRpc('history.get', {
+          history: historyType,
+          itemids,
+          time_from: dayStart,
+          time_till: dayEnd,
+          output: ['itemid', 'clock', 'value'],
+          sortfield: 'clock',
+          sortorder: 'ASC',
+          limit: 50000,
+        }).catch(() => [])
+        for (const r of rows || []) {
+          const iid = String(r.itemid)
+          if (!byItem[iid]) byItem[iid] = []
+          byItem[iid].push({ clock: Number(r.clock), value: Number(r.value) })
+        }
+      }
+    }
+  })
+  for (const pts of Object.values(byItem)) {
+    pts.sort((a, b) => a.clock - b.clock)
+  }
+  return byItem
+}
+
+function clipSpanSec(rangeFrom, rangeTo, spanFrom, spanTo) {
+  return Math.max(0, Math.min(rangeTo, spanTo) - Math.max(rangeFrom, spanFrom))
+}
+
+/** Seconds of [fromTs, toTs) that fall inside business hours. */
+function bhClippedSpanSec(fromTs, toTs, bh, tzOffsetMin = IST_OFFSET_MIN) {
+  if (toTs <= fromTs) return 0
+  if (!bh?.enabled) return toTs - fromTs
+  const bhDays = new Set(bh.days || [])
+  const bhStartSec = (Number(bh.start) || 0) * 3600
+  const bhEndSec = (Number(bh.end) || 0) * 3600
+  let total = 0
+  for (const day of enumerateDays(fromTs, toTs, tzOffsetMin)) {
+    const offSec = tzOffsetMin * 60
+    const dayDate = new Date((day.start + offSec) * 1000)
+    const dow = dayDate.getUTCDay()
+    if (bhDays.size && !bhDays.has(dow)) continue
+    const cursor = day.start
+    if (bhEndSec <= bhStartSec) {
+      total += clipSpanSec(fromTs, toTs, cursor, cursor + bhEndSec)
+      total += clipSpanSec(fromTs, toTs, cursor + bhStartSec, cursor + 86400)
+    } else {
+      total += clipSpanSec(fromTs, toTs, cursor + bhStartSec, cursor + bhEndSec)
+    }
+  }
+  return total
+}
+
+function isAgentDown(value) {
+  return Number(value) < 0.5
+}
+
+/**
+ * Actual agent.ping downtime in the selected window (BH-clipped when enabled).
+ * Each down sample holds until the next sample or range end; leading down
+ * state is counted from range start.
+ */
+function computeDowntimeMinutes(points, fromSec, toSec, bh, tzOffsetMin) {
+  const inRange = [...(points || [])]
+    .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+    .filter((p) => p.clock >= fromSec && p.clock <= toSec)
+    .sort((a, b) => a.clock - b.clock)
+
+  if (!inRange.length) return { downtimeMin: 0, downtimeSec: 0, pointCount: 0 }
+
+  let downtimeSec = 0
+  const addDown = (t1, t2) => {
+    const start = Math.max(fromSec, t1)
+    const end = Math.min(toSec, t2)
+    if (end > start) downtimeSec += bhClippedSpanSec(start, end, bh, tzOffsetMin)
+  }
+
+  for (let i = 0; i < inRange.length; i++) {
+    const p = inRange[i]
+    if (!isAgentDown(p.value)) continue
+    const segStart = i === 0 ? fromSec : p.clock
+    const segEnd = i + 1 < inRange.length ? inRange[i + 1].clock : toSec
+    addDown(segStart, segEnd)
+  }
+
+  return {
+    downtimeMin: Math.round((downtimeSec / 60) * 10) / 10,
+    downtimeSec: Math.round(downtimeSec),
+    pointCount: inRange.length,
+  }
 }
 
 function filterPointsBusinessHours(points, fromSec, toSec, bh, tzOffsetMin) {
@@ -202,24 +317,6 @@ function meanFromPoints(points) {
   }
 }
 
-function computeDowntimeMinutes(points, fromSec, toSec, bh, tzOffsetMin) {
-  const inBh = filterPointsBusinessHours(points, fromSec, toSec, bh, tzOffsetMin)
-  if (!inBh.length) return { downtimeMin: 0, pointCount: 0 }
-  inBh.sort((a, b) => a.clock - b.clock)
-  let downtimeSec = 0
-  const defaultIntervalSec = 300
-  for (let i = 0; i < inBh.length; i++) {
-    const p = inBh[i]
-    if (Number(p.value) >= 0.5) continue
-    const nextClock = i + 1 < inBh.length ? inBh[i + 1].clock : Math.min(toSec, p.clock + defaultIntervalSec)
-    downtimeSec += Math.max(0, Math.min(nextClock, toSec) - p.clock)
-  }
-  return {
-    downtimeMin: Math.round((downtimeSec / 60) * 10) / 10,
-    pointCount: inBh.length,
-  }
-}
-
 function buildMetricMap(hostMap, itemByHost, seriesByItem, fromSec, toSec, bh, tzOffsetMin, metric) {
   const map = {}
   for (const [hid, host] of Object.entries(hostMap || {})) {
@@ -227,13 +324,14 @@ function buildMetricMap(hostMap, itemByHost, seriesByItem, fromSec, toSec, bh, t
     if (!it) continue
     const raw = seriesByItem[String(it.itemid)] || []
     if (metric === 'downtime') {
-      const { downtimeMin, pointCount } = computeDowntimeMinutes(raw, fromSec, toSec, bh, tzOffsetMin)
-      if (downtimeMin <= 0 && pointCount === 0) continue
+      const { downtimeMin, downtimeSec, pointCount } = computeDowntimeMinutes(raw, fromSec, toSec, bh, tzOffsetMin)
+      if (downtimeSec <= 0 && pointCount === 0) continue
       map[hid] = {
         hostid: hid,
         host: host.host,
         name: host.name || host.host,
         downtimeMin,
+        downtimeSec,
         pointCount,
       }
       continue
@@ -264,15 +362,17 @@ function buildProblematicRows(latencyMap, jitterMap, downtimeMap, limit) {
     const jit = jitterMap[hid]
     const down = downtimeMap[hid]
     const downtimeMin = down?.downtimeMin ?? 0
+    const downtimeSec = down?.downtimeSec ?? Math.round(downtimeMin * 60)
     const latencyMs = lat?.value ?? null
     const jitterMs = jit?.value ?? null
-    if (downtimeMin <= 0 && latencyMs == null && jitterMs == null) continue
+    if (downtimeSec <= 0 && downtimeMin <= 0 && latencyMs == null && jitterMs == null) continue
     const score = (downtimeMin * 10) + (latencyMs ?? 0) * 0.3 + (jitterMs ?? 0) * 1.5
     rows.push({
       hostid: hid,
       host: lat?.host || jit?.host || down?.host,
       name: lat?.name || jit?.name || down?.name,
       downtimeMin,
+      downtimeSec,
       latencyMs,
       jitterMs,
       meanLatencyMs: latencyMs,
@@ -402,7 +502,7 @@ export async function fetchRoDashboardNetworkTop(opts) {
   const [latencyFetch, jitterFetch, agentPingFetch] = await Promise.all([
     fetchSeriesForRange(zabbixRpc, latencyEntries, fromSec, toSec),
     fetchSeriesForRange(zabbixRpc, jitterEntries, fromSec, toSec),
-    fetchSeriesForRange(zabbixRpc, agentPingEntries, fromSec, toSec),
+    fetchSeriesForRange(zabbixRpc, agentPingEntries, fromSec, toSec, { historyOnly: true }),
   ])
   const latencySeries = latencyFetch.byItem
   const jitterSeries = jitterFetch.byItem
