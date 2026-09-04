@@ -1,5 +1,5 @@
 /** Keep in sync with server/src/constants/appPages.js */
-export const APP_PAGE_KEYS = ['soc', 'noc', 'sentinel', 'infra', 'storeZabbix', 'storeMonitor', 'solarwinds', 'idcs', 'ad', 'nexs', 'tickets', 'reports', 'emailSim', 'ai', 'admin']
+export const APP_PAGE_KEYS = ['soc', 'noc', 'sentinel', 'infra', 'storeZabbix', 'roDashboard', 'storeMonitor', 'solarwinds', 'idcs', 'ad', 'nexs', 'tickets', 'reports', 'emailSim', 'ai', 'admin']
 
 /** Hidden from sidebar + direct routes until re-enabled (remove key to show again). */
 export const HIDDEN_APP_PAGE_KEYS = []
@@ -14,6 +14,7 @@ export const APP_PAGES = [
   { key: 'sentinel', label: 'XDR / Sentinel', path: '/sentinel' },
   { key: 'infra',    label: 'Infra monitoring', path: '/infra' },
   { key: 'storeZabbix', label: 'Store Zabbix', path: '/store-zabbix' },
+  { key: 'roDashboard', label: 'Ro Dashboard', path: '/ro-dashboard' },
   { key: 'storeMonitor', label: 'Store Monitor', path: '/store-monitor' },
   { key: 'solarwinds', label: 'SolarWinds Orion', path: '/solarwinds' },
   { key: 'idcs',     label: 'IDCS Users',      path: '/idcs' },

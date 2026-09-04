@@ -30,7 +30,7 @@ function normalizeAllowedPages(pages) {
  * have an explicit Mongo `allowedPages` array that omitted these — they would never
  * see new nav entries. If the only gaps vs current ALL are listed here, treat as migration.
  */
-const IMPLICIT_GRANT_IF_ONLY_MISSING = ['idcs', 'ad', 'emailSim', 'solarwinds', 'storeZabbix', 'storeMonitor', 'nexs']
+const IMPLICIT_GRANT_IF_ONLY_MISSING = ['idcs', 'ad', 'emailSim', 'solarwinds', 'storeZabbix', 'roDashboard', 'storeMonitor', 'nexs']
 
 /** @internal */
 function mergeLegacyImplicitGrant(role, filtered) {
@@ -88,7 +88,7 @@ export function canWritePage(user, pageKey) {
   return getPageAccessLevel(user, pageKey) === 'full'
 }
 
-const NAV_ORDER = ['soc', 'noc', 'sentinel', 'infra', 'storeZabbix', 'storeMonitor', 'solarwinds', 'idcs', 'ad', 'nexs', 'tickets', 'reports', 'emailSim', 'ai', 'admin']
+const NAV_ORDER = ['soc', 'noc', 'sentinel', 'infra', 'storeZabbix', 'roDashboard', 'storeMonitor', 'solarwinds', 'idcs', 'ad', 'nexs', 'tickets', 'reports', 'emailSim', 'ai', 'admin']
 
 export function getFirstAllowedPath(user) {
   const allowed = getEffectiveAllowedPages(user)

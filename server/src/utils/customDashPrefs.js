@@ -1,7 +1,11 @@
 const RANGE_IDS = new Set(['24h', '7d', '14d', '30d', 'custom'])
-const WIDGET_IDS = new Set(['cpu', 'memory', 'uptime', 'latency', 'jitter', 'internet', 'usb', 'appCrash'])
+const WIDGET_IDS = new Set([
+  'cpu', 'memory', 'uptime', 'systemUptime', 'latency', 'jitter',
+  'maxLatency', 'maxJitter', 'maxGatewayLatency',
+  'internet', 'usb', 'appCrash', 'agentLastConnected', 'storeProfile',
+])
 const EVENT_LIMITS = new Set([500, 1000, 2000, 5000])
-const SCOPES = new Set(['store-zabbix', 'zabbix'])
+const SCOPES = new Set(['store-zabbix', 'zabbix', 'ro-dashboard'])
 
 export function normalizeCustomDashScope(raw) {
   const s = String(raw || '').trim().toLowerCase()

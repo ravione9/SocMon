@@ -3,7 +3,7 @@ import CustomRole from '../models/CustomRole.js'
 
 const ALL = [...APP_PAGE_KEYS]
 
-const IMPLICIT_GRANT_IF_ONLY_MISSING = ['idcs', 'ad', 'emailSim', 'solarwinds', 'storeZabbix', 'storeMonitor', 'nexs']
+const IMPLICIT_GRANT_IF_ONLY_MISSING = ['idcs', 'ad', 'emailSim', 'solarwinds', 'storeZabbix', 'roDashboard', 'storeMonitor', 'nexs']
 
 function mergeLegacyImplicitGrant(role, filtered) {
   if (role === 'custom_admin' || role === 'admin' || role === 'role_template') return filtered

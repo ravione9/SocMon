@@ -4,6 +4,7 @@ import { createZabbixClient } from '../services/zabbix.js'
 import { fetchAllMonitoredHosts, ZABBIX_HOST_FETCH_MAX } from '../services/zabbixHostFetch.js'
 import { fetchRopUptimeReport, fetchRopStoreDisconnectEvents, fetchRopGroupDisconnectEvents } from '../services/ropUptimeReport.js'
 import { fetchRpFleetHealthReport } from '../services/rpFleetHealthReport.js'
+import { fetchRoDashboardNetworkTop } from '../services/roDashboardNetworkTop.js'
 import { buildCustomDashReport } from '../services/customDashReports.js'
 import { buildCustomDashReportExcel } from '../services/customDashReportExcel.js'
 import {
@@ -505,11 +506,28 @@ router.get('/hosts', async (req, res) => {
       sortfield: 'name',
       ...hostSearchParams(req.query.q),
     }, { maxTotal: limit })
+    const includeAgentLastConnected = ['1', 'true', 'yes'].includes(
+      String(req.query.includeAgentLastConnected || '').toLowerCase(),
+    )
+    const staleAfterSec = parseNetHealthStaleAfter(req.query)
+    const nowSec = Math.floor(Date.now() / 1000)
+    let agentPingMap = {}
+    if (includeAgentLastConnected && (raw || []).length) {
+      try {
+        agentPingMap = await fetchAgentPingMap((raw || []).map((h) => String(h.hostid)))
+      } catch {
+        agentPingMap = {}
+      }
+    }
     const hosts = (raw || []).map((h) => {
       const ifaces = Array.isArray(h.interfaces) ? h.interfaces : []
       const primary = ifaces.find((i) => String(i.main) === '1') || ifaces[0]
       const ip = primary?.ip || ''
       const dns = primary?.dns || ''
+      const hid = String(h.hostid)
+      const ap = agentPingMap[hid]
+      const agentLastConnected = ap?.clock || null
+      const agentPingStale = !agentLastConnected || (nowSec - agentLastConnected) > staleAfterSec
       return {
         hostid: h.hostid,
         host: h.host,
@@ -520,6 +538,11 @@ router.get('/hosts', async (req, res) => {
         availability: availLabel(deriveHostAvail(h)),
         availabilityCode: deriveHostAvail(h),
         groups: (h.hostgroups || h.groups || []).map((g) => g.name).filter(Boolean),
+        ...(includeAgentLastConnected ? {
+          agentLastConnected,
+          agentPing: ap?.value ?? null,
+          agentPingStale,
+        } : {}),
       }
     })
     res.json({ hosts, total: monitoredHostTotal, returned: hosts.length, truncated: hostsTruncated })
@@ -1689,6 +1712,7 @@ function isSkipTopHost(h) {
 const TOP_NETWORK_KEY_RES = {
   latency: /^custom\.ping\.ms(\b|\[)/i,
   packetLoss: /^custom\.ping\.loss(\b|\[)/i,
+  jitter: /^custom\.ping\.jitter(\b|\[)/i,
 }
 
 function pickBestNetworkItem(items, hostids) {
@@ -1729,7 +1753,7 @@ function topNetworkRows(metric, hostMap, itemRows, limit, { staleAfterSec = NET_
       itemid: String(e.item.itemid),
       itemName: e.item.name || e.item.key_,
       key: e.item.key_,
-      units: metric === 'latency' ? 'ms' : '%',
+      units: metric === 'packetLoss' ? '%' : 'ms',
       value: Math.round(e.value * 10) / 10,
       percent: metric === 'packetLoss' ? Math.min(100, e.value) : e.value,
       lastclock: clock,
@@ -1737,7 +1761,7 @@ function topNetworkRows(metric, hostMap, itemRows, limit, { staleAfterSec = NET_
   }
   out.sort((a, b) => b.value - a.value)
   const top = out.slice(0, limit)
-  if (metric === 'latency' && top.length) {
+  if ((metric === 'latency' || metric === 'jitter') && top.length) {
     const maxVal = top[0].value || 1
     for (const r of top) r.percent = Math.round((r.value / maxVal) * 1000) / 10
   }
@@ -1809,6 +1833,35 @@ async function fetchUtilizationItems(hostids) {
   return out
 }
 
+/** Latest agent.ping poll per host (lastclock + value). */
+async function fetchAgentPingMap(hostids, { hostChunk = 400, pageLimit = 500 } = {}) {
+  const map = {}
+  if (!hostids?.length) return map
+  for (let i = 0; i < hostids.length; i += hostChunk) {
+    const chunk = hostids.slice(i, i + hostChunk)
+    const batch = await zabbixRpc('item.get', {
+      hostids: chunk,
+      monitored: true,
+      filter: { status: 0 },
+      search: { key_: 'agent.ping' },
+      searchByAny: true,
+      output: ['hostid', 'key_', 'lastvalue', 'lastclock'],
+      limit: pageLimit,
+    })
+    for (const it of batch || []) {
+      const hid = String(it.hostid)
+      const clock = Number(it.lastclock) || 0
+      if (!clock) continue
+      const prev = map[hid]
+      if (!prev || clock >= prev.clock) {
+        const v = parseFloat(it.lastvalue)
+        map[hid] = { clock, value: Number.isFinite(v) ? v : null }
+      }
+    }
+  }
+  return map
+}
+
 /** Convert lastvalue → number in 0..100, ASSUMING the item is already a percentage. */
 function readPercent(it) {
   const v = parseLooseNumber(it.lastvalue)
@@ -1835,7 +1888,7 @@ router.get('/top-utilization', async (req, res) => {
       return res.json({
         allGroups,
         groupFilter: resolvedGroup,
-        cpu: [], memory: [], disk: [], latency: [], packetLoss: [],
+        cpu: [], memory: [], disk: [], latency: [], packetLoss: [], jitter: [],
         summary: {
           monitoredHosts: 0, withCpu: 0, withMemory: 0, withDisk: 0, withLatency: 0, withPacketLoss: 0,
           cpuCritical: 0, cpuHigh: 0, memoryCritical: 0, memoryHigh: 0, diskCritical: 0, diskHigh: 0,
@@ -2110,6 +2163,7 @@ router.get('/top-utilization', async (req, res) => {
       disk: rowsFor('disk'),
       latency: topNetworkRows('latency', hostMap, itemRows, limit, { staleAfterSec, nowSec }),
       packetLoss: topNetworkRows('packetLoss', hostMap, itemRows, limit, { staleAfterSec, nowSec }),
+      jitter: topNetworkRows('jitter', hostMap, itemRows, limit, { staleAfterSec, nowSec }),
       summary,
       distributions,
       limit,
@@ -2991,6 +3045,21 @@ router.get('/rop-store-disconnect-export', async (req, res) => {
     await wb.xlsx.write(res)
   } catch (e) {
     return res.status(500).json({ error: e.message || 'Failed to export store disconnect events', code: e.code })
+  }
+})
+
+/* Ro Dashboard — BH mean latency / jitter top-N for overview widgets */
+router.get('/ro-dashboard-network-top', async (req, res) => {
+  try {
+    if (!isZabbixConfigured()) return res.status(503).json({ error: 'Zabbix not configured' })
+    const data = await fetchRoDashboardNetworkTop({
+      zabbixRpc,
+      query: req.query,
+      resolveMonitoredHostsForGroup: (group) => resolveMonitoredHostsForGroup(group),
+    })
+    res.json(data)
+  } catch (e) {
+    return sendZabbixError(res, e)
   }
 })
 

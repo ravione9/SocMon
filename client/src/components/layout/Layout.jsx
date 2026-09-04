@@ -10,6 +10,7 @@ import { getPageAccessLevel } from '../../utils/pageAccess'
 /** Path segments that differ from APP_PAGE_KEYS (e.g. kebab-case routes). */
 const PATH_SEGMENT_TO_PAGE_KEY = {
   'email-sim': 'emailSim',
+  'ro-dashboard': 'roDashboard',
 }
 
 function pathToPageKey(pathname) {

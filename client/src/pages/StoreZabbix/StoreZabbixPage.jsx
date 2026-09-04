@@ -33,10 +33,15 @@ import { getThemeCssColors } from '../../utils/themeCssColors.js'
 import { useSmartPolling } from '../../hooks/useSmartPolling.js'
 import { useUrlTab } from '../../hooks/useUrlTab.js'
 import { RP_OUTAGE_LABELS, ROP_SUBTABS, isRpGroupKey } from '../../utils/storeRopGrouping.js'
+import { resolveZabbixHostGroup, hostMatchesZabbixGroup } from '../../utils/zabbixHostGroup.js'
+import { deriveGroups } from '../../utils/storeRopGrouping.js'
+import { storeMatchesManualCode } from '../../config/manualRopSdwanStoreCodes.js'
 import { parseManualStoreCodes } from '../../config/manualRopSdwanStoreCodes.js'
 import ZabbixAlertsPanel from './ZabbixAlertsPanel.jsx'
 
 const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'rop', 'reports', 'custom', 'alerts']
+const RO_DASHBOARD_HIDDEN_TABS = new Set(['problems', 'alerts', 'events', 'rop'])
+const RO_DASHBOARD_HIDDEN_TOPMON = new Set(['cpu', 'memory', 'disk', 'packetLoss'])
 
 const ROP_GROUP_LABELS = {
   rp: 'All ROP',
@@ -973,14 +978,97 @@ const CUSTOM_DASH_KEY_RES = {
   gatewayLatency: [
     /^custom\.gateway\.ms(\b|\[)/i,
   ],
+  agentPing: [
+    /^agent\.ping(\b|\[)/i,
+  ],
 }
 /** Metrics displayed in ms with latency-style tiles and detail panels. */
 const CUSTOM_DASH_MS_METRICS = new Set(['latency', 'jitter', 'gatewayLatency'])
 /** Range-history tiles that show max ms over [from, to] (BH-aware). */
-const CUSTOM_DASH_RANGE_MS_TILES = new Set(['maxJitter', 'maxGatewayLatency'])
+const CUSTOM_DASH_RANGE_MS_TILES = new Set(['maxLatency', 'maxJitter', 'maxGatewayLatency'])
 const CUSTOM_DASH_RANGE_MS_WIDGET = {
+  maxLatency: { itemKey: 'latency', label: 'Latency' },
   maxJitter: { itemKey: 'jitter', label: 'Jitter' },
   maxGatewayLatency: { itemKey: 'gatewayLatency', label: 'Gateway latency' },
+}
+/** Ro Dashboard custom tab — simplified widget set only. */
+const RO_CUSTOM_DASH_WIDGETS = new Set([
+  'cpu', 'memory', 'systemUptime', 'maxLatency', 'maxJitter', 'appCrash', 'agentLastConnected', 'storeProfile',
+])
+const CUSTOM_DASH_AGENT_STALE_SEC = 300
+
+function findStoreMonitorStore(host, storeByHost) {
+  const map = storeByHost instanceof Map ? storeByHost : new Map(Object.entries(storeByHost || {}))
+  const keys = [host?.host, host?.name].map((k) => String(k || '').toLowerCase()).filter(Boolean)
+  for (const k of keys) {
+    if (map.has(k)) return map.get(k)
+  }
+  return null
+}
+
+/** Wi-Fi vs LAN from Store Monitor active_interface / conn_state. */
+function formatStoreConnectionType(store) {
+  if (!store) return null
+  const iface = String(store.activeInterface || '').trim()
+  const ifaceLc = iface.toLowerCase()
+  if (ifaceLc.includes('wi')) return { label: 'WiFi', raw: iface || 'Wi-Fi' }
+  if (ifaceLc.includes('ethernet') || ifaceLc.includes('lan') || ifaceLc.includes('local area')) {
+    return { label: 'LAN', raw: iface || 'Ethernet' }
+  }
+  if (iface) return { label: ifaceLc.includes('wireless') ? 'WiFi' : 'LAN', raw: iface }
+  if (store.connState === 'wifi_healthy') return { label: 'WiFi', raw: 'Wi-Fi' }
+  if (store.connState === 'lan_healthy') return { label: 'LAN', raw: 'Ethernet' }
+  return null
+}
+
+/** SD-WAN / Non SD-WAN / Manual SD-WAN — same rules as Store Monitor ROP tabs. */
+function classifyStoreTypeLabel(store, manualCodes = []) {
+  if (!store) return null
+  if (manualCodes?.length && storeMatchesManualCode(store, manualCodes)) return 'Manual SD-WAN'
+  const groups = deriveGroups(store)
+  if (groups.includes('SD-WAN Group')) return 'SD-WAN'
+  if (groups.includes('RP Group')) return 'Non SD-WAN'
+  return 'Other'
+}
+
+function buildStoreProfileRows(hostMetricItems, storeByHost, manualCodes) {
+  return (hostMetricItems || []).map((row) => {
+    const store = findStoreMonitorStore(row.host, storeByHost)
+    const conn = formatStoreConnectionType(store)
+    const storeType = classifyStoreTypeLabel(store, manualCodes)
+    return { host: row.host, store, connType: conn?.label || null, connRaw: conn?.raw || null, storeType }
+  })
+}
+
+function aggregateStoreProfile(hostMetricItems, storeByHost, manualCodes) {
+  const rows = buildStoreProfileRows(hostMetricItems, storeByHost, manualCodes)
+  const matched = rows.filter((r) => r.store)
+  if (!matched.length) {
+    return { reporting: [], total: rows.length, kind: 'storeProfile', summary: null }
+  }
+  const connCounts = {}
+  const typeCounts = {}
+  for (const r of matched) {
+    if (r.connType) connCounts[r.connType] = (connCounts[r.connType] || 0) + 1
+    if (r.storeType) typeCounts[r.storeType] = (typeCounts[r.storeType] || 0) + 1
+  }
+  const connParts = Object.entries(connCounts).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${k}`)
+  const typeParts = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${k}`)
+  const primaryConn = connParts[0] || '—'
+  const primaryType = typeParts[0] || '—'
+  return {
+    reporting: matched,
+    total: rows.length,
+    kind: 'storeProfile',
+    summary: {
+      matchedCount: matched.length,
+      connLabel: matched.length === 1 ? (matched[0].connType || '—') : connParts.join(' · ') || '—',
+      storeTypeLabel: matched.length === 1 ? (matched[0].storeType || '—') : typeParts.join(' · ') || '—',
+      primaryConn,
+      primaryType,
+      host: matched.length === 1 ? matched[0].host : null,
+    },
+  }
 }
 const CUSTOM_DASH_INVERT_RE = /pavailable|pfree/i
 /** Per-mode CPU keys that are NOT the aggregate (we deprioritize these). */
@@ -1288,6 +1376,38 @@ function buildMaxRangeMsAgg(hostMetricItems, itemKey, kind, statsByHost, statsBu
     reporting, total: rows.length, kind,
     summary: { value: peak.maxMs, host: peak.host, avg: fleetAvg },
     busy: statsBusy,
+  }
+}
+
+/** Aggregate agent.ping lastclock across selected hosts for the agent-last-connected tile. */
+function aggregateAgentLastConnected(hostMetricItems, staleAfterSec = CUSTOM_DASH_AGENT_STALE_SEC) {
+  const now = Math.floor(Date.now() / 1000)
+  const rows = (hostMetricItems || []).map((row) => {
+    const it = row.agentPing
+    const clock = it?.lastclock != null ? Number(it.lastclock) : null
+    const up = it != null && Number.isFinite(Number(it.value)) ? Number(it.value) === 1 : null
+    const ageSec = Number.isFinite(clock) ? Math.max(0, now - clock) : null
+    const stale = ageSec != null ? ageSec > staleAfterSec : true
+    return { host: row.host, item: it, lastclock: clock, up, ageSec, stale }
+  })
+  const reporting = rows.filter((r) => r.item && Number.isFinite(r.lastclock))
+  if (!reporting.length) {
+    return { reporting: [], total: rows.length, kind: 'agentLastConnected', summary: null }
+  }
+  const freshest = reporting.reduce((acc, r) => (acc == null || r.lastclock > acc.lastclock ? r : acc), null)
+  const stalest = reporting.reduce((acc, r) => (acc == null || r.lastclock < acc.lastclock ? r : acc), null)
+  const staleCount = reporting.filter((r) => r.stale).length
+  const downCount = reporting.filter((r) => r.up === false).length
+  return {
+    reporting, total: rows.length, kind: 'agentLastConnected',
+    summary: {
+      lastclock: freshest.lastclock,
+      host: freshest.host,
+      stalest,
+      staleCount,
+      downCount,
+      reportingCount: reporting.length,
+    },
   }
 }
 
@@ -1680,9 +1800,14 @@ function TopUtilWidget({ rows, accent, unitSuffix = '%', emptyMsg = 'No data ava
   )
 }
 
-function topMonSeverity(pct, rawVal, unitSuffix) {
-  const isLatency = unitSuffix.trim() === 'ms'
+function topMonSeverity(pct, rawVal, unitSuffix, severityMode) {
   const v = rawVal != null ? rawVal : pct
+  if (severityMode === 'jitter') {
+    if (v >= 30) return { label: 'Critical', color: '#ef4444', bg: 'rgba(239,68,68,.12)' }
+    if (v >= 15) return { label: 'Warning', color: '#f59e0b', bg: 'rgba(245,158,11,.12)' }
+    return { label: 'Normal', color: '#22c55e', bg: 'rgba(34,197,94,.12)' }
+  }
+  const isLatency = unitSuffix.trim() === 'ms' || severityMode === 'latency'
   if (isLatency) {
     if (v >= 150) return { label: 'Critical', color: '#ef4444', bg: 'rgba(239,68,68,.12)' }
     if (v >= 50) return { label: 'Warning', color: '#f59e0b', bg: 'rgba(245,158,11,.12)' }
@@ -1776,7 +1901,7 @@ function TopMonSection({ title }) {
   )
 }
 
-function TopMonRankTable({ rows, accent, unitSuffix = '%', emptyMsg, onRowClick, showMount, showBytes }) {
+function TopMonRankTable({ rows, accent, unitSuffix = '%', emptyMsg, onRowClick, showMount, showBytes, severityMode }) {
   if (!rows?.length) {
     return (
       <div className="topmon-empty">
@@ -1800,7 +1925,7 @@ function TopMonRankTable({ rows, accent, unitSuffix = '%', emptyMsg, onRowClick,
         {rows.map((r, i) => {
           const barPct = Number(r.percent) || 0
           const rawVal = r.value != null ? Number(r.value) : barPct
-          const sev = topMonSeverity(barPct, rawVal, unitSuffix)
+          const sev = topMonSeverity(barPct, rawVal, unitSuffix, severityMode)
           const used = fmtBytes(r.usedBytes)
           const total = fmtBytes(r.totalBytes)
           const displayVal = r.value != null ? (rawVal >= 100 ? Math.round(rawVal) : rawVal.toFixed(1)) : barPct.toFixed(1)
@@ -1842,7 +1967,8 @@ const TOP_MON_BUILTIN = [
   { id: 'memory', title: 'Top Memory Utilization', dataKey: 'memory', accent: '#8b5cf6', badgeColor: 'purple', unitSuffix: '%', emptyMsg: 'No memory utilization items found.', section: 'infra' },
   { id: 'disk', title: 'Top Disk Space Usage', dataKey: 'disk', accent: '#f59e0b', badgeColor: 'amber', unitSuffix: '%', showMount: true, showBytes: true, emptyMsg: 'No filesystem usage items found.', section: 'infra' },
   { id: 'packetLoss', title: 'Top Packet Loss', dataKey: 'packetLoss', accent: '#ef4444', badgeColor: 'red', unitSuffix: '%', emptyMsg: 'No packet loss sensors found.', section: 'network', useValue: true },
-  { id: 'latency', title: 'Top Latency', dataKey: 'latency', accent: '#06b6d4', badgeColor: 'cyan', unitSuffix: ' ms', emptyMsg: 'No latency sensors found.', section: 'network', useValue: true },
+  { id: 'jitter', title: 'Top Jitter', dataKey: 'jitter', accent: '#a855f7', badgeColor: 'purple', unitSuffix: ' ms', emptyMsg: 'No jitter sensors found.', section: 'network', useValue: true, severityMode: 'jitter' },
+  { id: 'latency', title: 'Top Latency', dataKey: 'latency', accent: '#06b6d4', badgeColor: 'cyan', unitSuffix: ' ms', emptyMsg: 'No latency sensors found.', section: 'network', useValue: true, severityMode: 'latency' },
 ]
 const TOP_MON_ACCENT_PRESETS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444', '#06b6d4', '#22c55e', '#ec4899', '#64748b']
 
@@ -2987,13 +3113,16 @@ function CustomDashboardPanel({
   crashes, crashesBusy, crashesError,
   uptimeStats, uptimeStatsBusy,
   jitterStats, jitterStatsBusy,
+  latencyStats, latencyStatsBusy,
   gatewayStats, gatewayStatsBusy,
+  storeByHost, storeManualCodes, storeProfileBusy, storeProfileError,
   onOpenRebootModal, onOpenCrashModal,
   onRefresh,
   prefsSavedAt, prefsBusy,
   savedFilters, savedFiltersBusy, savedFiltersError,
   appliedFilterId,
   onApplySavedFilter, onCreateSavedFilter, onDeleteSavedFilter, onRenameSavedFilter,
+  dashboardVariant = 'full',
 }) {
   const dropdownRef = useRef(null)
   useEffect(() => {
@@ -3030,6 +3159,8 @@ function CustomDashboardPanel({
     onSetSelected(next)
   }, [filteredHosts, selectedHosts, onSetSelected])
   const clearAll = useCallback(() => onSetSelected([]), [onSetSelected])
+  const isRoVariant = dashboardVariant === 'ro'
+  const showWidget = useCallback((id) => !isRoVariant || RO_CUSTOM_DASH_WIDGETS.has(id), [isRoVariant])
 
   /* ── Per-host metric items ── */
   const hostMetricItems = useMemo(() => {
@@ -3044,6 +3175,7 @@ function CustomDashboardPanel({
         latency: pickCustomDashItem(items, 'latency'),
         jitter: pickCustomDashItem(items, 'jitter'),
         gatewayLatency: pickCustomDashItem(items, 'gatewayLatency'),
+        agentPing: pickCustomDashItem(items, 'agentPing'),
       }
     })
   }, [selectedHosts, latestByHost])
@@ -3065,8 +3197,8 @@ function CustomDashboardPanel({
   /* ── Aggregates for tiles ── */
   const cpuAgg = useMemo(() => aggregateMetric(hostMetricItems, 'cpu'), [hostMetricItems])
   const memAgg = useMemo(() => aggregateMetric(hostMetricItems, 'memory'), [hostMetricItems])
-  /* Uptime tile shows range-aware uptime% (BH-aware) instead of the
-     last-value snapshot. Big number = worst host in range, sub-text = fleet avg. */
+  /* Uptime tile shows range-aware uptime% (BH-aware) from system.uptime history.
+     Big number = worst host in range, sub-text = fleet avg. */
   const upAgg = useMemo(() => {
     const rows = (hostMetricItems || []).map((row) => {
       const stat = uptimeStats?.[String(row.host.hostid)]
@@ -3086,9 +3218,21 @@ function CustomDashboardPanel({
     () => buildMaxRangeMsAgg(hostMetricItems, 'jitter', 'maxJitter', jitterStats, jitterStatsBusy),
     [hostMetricItems, jitterStats, jitterStatsBusy],
   )
+  const maxLatencyAgg = useMemo(
+    () => buildMaxRangeMsAgg(hostMetricItems, 'latency', 'maxLatency', latencyStats, latencyStatsBusy),
+    [hostMetricItems, latencyStats, latencyStatsBusy],
+  )
   const maxGatewayLatencyAgg = useMemo(
     () => buildMaxRangeMsAgg(hostMetricItems, 'gatewayLatency', 'maxGatewayLatency', gatewayStats, gatewayStatsBusy),
     [hostMetricItems, gatewayStats, gatewayStatsBusy],
+  )
+  const agentLastConnectedAgg = useMemo(
+    () => aggregateAgentLastConnected(hostMetricItems),
+    [hostMetricItems],
+  )
+  const storeProfileAgg = useMemo(
+    () => aggregateStoreProfile(hostMetricItems, storeByHost, storeManualCodes),
+    [hostMetricItems, storeByHost, storeManualCodes],
   )
 
   /** Index InfluxDB crash events by lowercase host/store key for fast per-host lookup. */
@@ -3369,7 +3513,9 @@ function CustomDashboardPanel({
           <span style={{ fontSize: 40, opacity: .25 }}>🧩</span>
           <span style={{ fontSize: 14, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Pick one or more hosts to see the custom dashboard</span>
           <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', opacity: .65 }}>
-            CPU · Memory · Uptime · Avg Latency · Avg Jitter · Internet disconnects · USB connect/disconnect · App crashes
+            {isRoVariant
+              ? 'CPU · Memory · System Uptime · Max Latency · Max Jitter · App crashes · Agent last connected · Store profile'
+              : 'CPU · Memory · Uptime · Avg Latency · Avg Jitter · Internet disconnects · USB connect/disconnect · App crashes'}
           </span>
         </div>
       )}
@@ -3400,58 +3546,112 @@ function CustomDashboardPanel({
 
           {/* Widget grid */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+            {showWidget('cpu') && (
             <CustomDashMetricTile
               kind="cpu" active={activeWidget === 'cpu'} onClick={() => onSelectWidget('cpu')}
               title="CPU Usage" icon="◇" color="#3b82f6"
-              busy={latestBusy} agg={cpuAgg}
+              busy={latestBusy} agg={cpuAgg} compact={isRoVariant}
             />
+            )}
+            {showWidget('memory') && (
             <CustomDashMetricTile
               kind="memory" active={activeWidget === 'memory'} onClick={() => onSelectWidget('memory')}
               title="Memory Usage" icon="▤" color="#8b5cf6"
-              busy={latestBusy} agg={memAgg}
+              busy={latestBusy} agg={memAgg} compact={isRoVariant}
             />
+            )}
+            {showWidget('systemUptime') && (
+            <CustomDashMetricTile
+              kind="uptimePct" active={activeWidget === 'systemUptime'} onClick={() => onSelectWidget('systemUptime')}
+              title={bhEnabled ? 'System Uptime % (BH)' : 'System Uptime % (range)'} icon="↑" color="#22c55e"
+              busy={latestBusy || uptimeStatsBusy} agg={upAgg}
+              contextLine={`${rangeLabel}${bhEnabled ? ` · ${bhLabel}` : ''}`}
+              compact={isRoVariant}
+            />
+            )}
+            {showWidget('uptime') && (
             <CustomDashMetricTile
               kind="uptime" active={activeWidget === 'uptime'} onClick={() => onSelectWidget('uptime')}
               title={bhEnabled ? 'Uptime % (BH)' : 'Uptime % (range)'} icon="↑" color="#22c55e"
               busy={latestBusy || uptimeStatsBusy} agg={upAgg}
               contextLine={`${rangeLabel}${bhEnabled ? ` · ${bhLabel}` : ''}`}
+              compact={isRoVariant}
             />
+            )}
+            {showWidget('latency') && (
             <CustomDashMetricTile
               kind="latency" active={activeWidget === 'latency'} onClick={() => onSelectWidget('latency')}
               title="Avg Latency" icon="⇅" color="#06b6d4"
-              busy={latestBusy} agg={latAgg}
+              busy={latestBusy} agg={latAgg} compact={isRoVariant}
             />
+            )}
+            {showWidget('jitter') && (
             <CustomDashMetricTile
               kind="jitter" active={activeWidget === 'jitter'} onClick={() => onSelectWidget('jitter')}
               title="Avg Jitter" icon="∿" color="#a855f7"
-              busy={latestBusy} agg={jitterAgg}
+              busy={latestBusy} agg={jitterAgg} compact={isRoVariant}
             />
+            )}
+            {showWidget('maxLatency') && (
+            <CustomDashMetricTile
+              kind="maxLatency" active={activeWidget === 'maxLatency'} onClick={() => onSelectWidget('maxLatency')}
+              title={bhEnabled ? 'Max Latency (BH)' : 'Max Latency (range)'} icon="⇅" color="#06b6d4"
+              busy={latencyStatsBusy} agg={maxLatencyAgg}
+              contextLine={`${rangeLabel}${bhEnabled ? ` · ${bhLabel}` : ''}`}
+              compact={isRoVariant}
+            />
+            )}
+            {showWidget('maxJitter') && (
             <CustomDashMetricTile
               kind="maxJitter" active={activeWidget === 'maxJitter'} onClick={() => onSelectWidget('maxJitter')}
               title={bhEnabled ? 'Max Jitter (BH)' : 'Max Jitter (range)'} icon="↗" color="#d946ef"
               busy={jitterStatsBusy} agg={maxJitterAgg}
               contextLine={`${rangeLabel}${bhEnabled ? ` · ${bhLabel}` : ''}`}
+              compact={isRoVariant}
             />
+            )}
+            {showWidget('maxGatewayLatency') && (
             <CustomDashMetricTile
               kind="maxGatewayLatency" active={activeWidget === 'maxGatewayLatency'} onClick={() => onSelectWidget('maxGatewayLatency')}
               title={bhEnabled ? 'Max Local Gateway Latency (BH)' : 'Max Local Gateway Latency (range)'} icon="⌂" color="#0ea5e9"
               busy={gatewayStatsBusy} agg={maxGatewayLatencyAgg}
               contextLine={`${rangeLabel}${bhEnabled ? ` · ${bhLabel}` : ''}`}
+              compact={isRoVariant}
             />
+            )}
+            {showWidget('internet') && (
             <CustomDashEventTile
               kind="internet" active={activeWidget === 'internet'} onClick={() => onSelectWidget('internet')}
               title="Internet Disconnect" icon="📡" color="#f97316"
               busy={eventsBusy} bucket={eventBuckets.internet}
             />
+            )}
+            {showWidget('usb') && (
             <CustomDashEventTile
               kind="usb" active={activeWidget === 'usb'} onClick={() => onSelectWidget('usb')}
               title="USB Connect / Disconnect" icon="🔌" color="#06b6d4"
               busy={eventsBusy} bucket={eventBuckets.usb}
             />
+            )}
+            {showWidget('appCrash') && (
             <CustomDashCrashTile
               active={activeWidget === 'appCrash'} onClick={() => onSelectWidget('appCrash')}
-              busy={crashesBusy} crashes={crashes} error={crashesError}
+              busy={crashesBusy} crashes={crashes} error={crashesError} compact={isRoVariant}
             />
+            )}
+            {showWidget('agentLastConnected') && (
+            <CustomDashAgentTile
+              active={activeWidget === 'agentLastConnected'} onClick={() => onSelectWidget('agentLastConnected')}
+              busy={latestBusy} agg={agentLastConnectedAgg} compact={isRoVariant}
+            />
+            )}
+            {showWidget('storeProfile') && (
+            <CustomDashStoreProfileTile
+              active={activeWidget === 'storeProfile'} onClick={() => onSelectWidget('storeProfile')}
+              busy={storeProfileBusy || latestBusy} agg={storeProfileAgg} error={storeProfileError}
+              compact={isRoVariant}
+            />
+            )}
           </div>
 
           {/* Detail panel for the active widget */}
@@ -3482,8 +3682,12 @@ function CustomDashboardPanel({
             uptimeStatsBusy={uptimeStatsBusy}
             jitterStats={jitterStats}
             jitterStatsBusy={jitterStatsBusy}
+            latencyStats={latencyStats}
+            latencyStatsBusy={latencyStatsBusy}
             gatewayStats={gatewayStats}
             gatewayStatsBusy={gatewayStatsBusy}
+            storeByHost={storeByHost}
+            storeManualCodes={storeManualCodes}
             onOpenRebootModal={onOpenRebootModal}
             onOpenCrashModal={onOpenCrashModal}
           />
@@ -3523,11 +3727,12 @@ function fmtLatencyMs(v) {
 }
 
 /** Aggregate-aware metric tile (CPU / memory / uptime% / latency). */
-function CustomDashMetricTile({ active, onClick, title, icon, color, busy, agg, contextLine }) {
+function CustomDashMetricTile({ active, onClick, title, icon, color, busy, agg, contextLine, compact = false }) {
   let bigText = '—'
   let subText = ''
   let keyHint = ''
   let meterPct = 0
+  const singleHost = (agg?.total || 0) <= 1
   /* Allow the tile to override the accent color for context-sensitive metrics
      (e.g. uptime% green/amber/red by health threshold). */
   let bigColor = color
@@ -3568,8 +3773,10 @@ function CustomDashMetricTile({ active, onClick, title, icon, color, busy, agg, 
     /* Reporting list is empty (e.g. no matching items on the selected hosts). */
     bigText = '—'
   }
+  if (compact && singleHost) subText = ''
   /** Show the most-common matched item key so the user can verify the source. */
   const sourceKey = useMemo(() => {
+    if (compact) return ''
     const keys = new Map()
     for (const r of agg?.reporting || []) {
       const k = r.item?.key || ''
@@ -3581,14 +3788,14 @@ function CustomDashMetricTile({ active, onClick, title, icon, color, busy, agg, 
     let max = 0
     for (const [k, n] of keys) { if (n > max) { max = n; best = k } }
     return keys.size === 1 ? best : `${best} (+${keys.size - 1} variants)`
-  }, [agg])
+  }, [agg, compact])
   if (sourceKey) keyHint = sourceKey
   return (
     <button
       type="button"
       onClick={onClick}
       className="opm-row-hover"
-      title={keyHint || undefined}
+      title={!compact && keyHint ? keyHint : title}
       style={{
         position: 'relative', textAlign: 'left',
         padding: 14, borderRadius: 12, cursor: 'pointer',
@@ -3610,34 +3817,38 @@ function CustomDashMetricTile({ active, onClick, title, icon, color, busy, agg, 
           <div style={{ width: `${meterPct}%`, height: '100%', background: bigColor, transition: 'width .35s' }} />
         </div>
       )}
-      <div style={{ marginTop: 6, fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
-        {agg ? `${agg.reporting.length}/${agg.total} hosts reporting` : ''}
-      </div>
-      {contextLine && (
+      {!compact && (
+        <div style={{ marginTop: 6, fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+          {agg ? `${agg.reporting.length}/${agg.total} hosts reporting` : ''}
+        </div>
+      )}
+      {!compact && contextLine && (
         <div style={{ marginTop: 2, fontSize: 9, color: 'var(--text3)', fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={contextLine}>
           {contextLine}
         </div>
       )}
-      {subText && (
+      {!compact && subText && (
         <div style={{ marginTop: 2, fontSize: 10, color: 'var(--text2)', fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {subText}
         </div>
       )}
-      {keyHint && (
+      {!compact && keyHint && (
         <div style={{ marginTop: 2, fontSize: 9, color: 'var(--text3)', fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={keyHint}>
           src: {keyHint}
         </div>
       )}
-      <div style={{ marginTop: 4, fontSize: 9, color: active ? color : 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
-        Click for full per-host log →
-      </div>
+      {!compact && (
+        <div style={{ marginTop: 4, fontSize: 9, color: active ? color : 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+          Click for full per-host log →
+        </div>
+      )}
     </button>
   )
 }
 
 /** Tile for an event bucket (internet / usb). */
 /** Tile for InfluxDB-backed application crash events (independent of Zabbix events). */
-function CustomDashCrashTile({ active, onClick, busy, crashes, error }) {
+function CustomDashCrashTile({ active, onClick, busy, crashes, error, compact = false }) {
   const list = crashes || []
   const total = list.reduce((acc, ev) => acc + (Number(ev.count) || 1), 0)
   const critical = list.filter((ev) => ev.severity === 'critical').reduce((acc, ev) => acc + (Number(ev.count) || 1), 0)
@@ -3665,19 +3876,26 @@ function CustomDashCrashTile({ active, onClick, busy, crashes, error }) {
       <div style={{ marginTop: 8, fontSize: 24, fontWeight: 800, color, fontFamily: 'var(--mono)', lineHeight: 1.1 }}>
         {busy ? '…' : total.toLocaleString()}
       </div>
-      <div style={{ marginTop: 6, display: 'flex', gap: 10, fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)', flexWrap: 'wrap' }}>
-        <span><span style={{ color: '#ef4444', fontWeight: 700 }}>{critical}</span> critical</span>
-        <span><span style={{ color: 'var(--text2)', fontWeight: 700 }}>{types}</span> types</span>
-        <span><span style={{ color: 'var(--text2)', fontWeight: 700 }}>{list.length}</span> entries</span>
-      </div>
-      {error
-        ? <div style={{ marginTop: 4, fontSize: 9, color: '#ef4444', fontFamily: 'var(--mono)', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={error}>
-            InfluxDB: {error}
-          </div>
-        : <div style={{ marginTop: 4, fontSize: 9, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700 }}>src: InfluxDB · app_crash, app_hang, bsod_kernel_power…</div>}
-      <div style={{ marginTop: 4, fontSize: 9, color: active ? color : 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
-        Click for full event log →
-      </div>
+      {!compact && (
+        <div style={{ marginTop: 6, display: 'flex', gap: 10, fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)', flexWrap: 'wrap' }}>
+          <span><span style={{ color: '#ef4444', fontWeight: 700 }}>{critical}</span> critical</span>
+          <span><span style={{ color: 'var(--text2)', fontWeight: 700 }}>{types}</span> types</span>
+          <span><span style={{ color: 'var(--text2)', fontWeight: 700 }}>{list.length}</span> entries</span>
+        </div>
+      )}
+      {error && (
+        <div style={{ marginTop: 4, fontSize: 9, color: '#ef4444', fontFamily: 'var(--mono)', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={error}>
+          {error}
+        </div>
+      )}
+      {!compact && !error && (
+        <div style={{ marginTop: 4, fontSize: 9, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700 }}>src: InfluxDB · app_crash, app_hang, bsod_kernel_power…</div>
+      )}
+      {!compact && (
+        <div style={{ marginTop: 4, fontSize: 9, color: active ? color : 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+          Click for full event log →
+        </div>
+      )}
     </button>
   )
 }
@@ -3718,6 +3936,131 @@ function CustomDashEventTile({ active, onClick, title, icon, color, busy, bucket
   )
 }
 
+/** Agent last-connected tile (agent.ping lastclock). */
+function CustomDashAgentTile({ active, onClick, busy, agg, compact = false }) {
+  const summary = agg?.summary
+  let bigText = '—'
+  let subText = ''
+  let bigColor = '#22c55e'
+  if (busy && !summary) {
+    bigText = '…'
+  } else if (summary) {
+    const age = relAge(summary.lastclock)
+    bigText = age ? `${age} ago` : fmtClock(summary.lastclock)
+    const hostName = summary.host?.name || summary.host?.host || ''
+    if (agg.reporting.length === 1) {
+      subText = compact ? '' : (hostName ? `${hostName} · ${fmtClock(summary.lastclock)}` : fmtClock(summary.lastclock))
+    } else {
+      const staleTxt = summary.staleCount > 0 ? `${summary.staleCount} stale` : 'all fresh'
+      const downTxt = summary.downCount > 0 ? ` · ${summary.downCount} down` : ''
+      subText = `${summary.reportingCount}/${agg.total} hosts · ${staleTxt}${downTxt}`
+    }
+    if (summary.staleCount > 0 || summary.downCount > 0) bigColor = '#ef4444'
+    else if (summary.stalest?.ageSec > 120) bigColor = '#eab308'
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="opm-row-hover"
+      title={compact ? 'Agent last connected' : 'src: agent.ping'}
+      style={{
+        position: 'relative', textAlign: 'left',
+        padding: 14, borderRadius: 12, cursor: 'pointer',
+        background: 'linear-gradient(135deg,var(--bg2) 0%,var(--bg3) 100%)',
+        border: active ? '1px solid var(--accent)' : '1px solid var(--border)',
+        boxShadow: active ? '0 0 0 3px rgba(59,130,246,.12)' : 'none',
+        transition: 'all .18s', overflow: 'hidden',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text3)', letterSpacing: .6, textTransform: 'uppercase', fontFamily: 'var(--mono)' }}>Agent Last Connected</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, borderRadius: 7, background: 'rgba(34,197,94,.15)', color: '#22c55e', fontSize: 13 }}>◎</span>
+      </div>
+      <div style={{ marginTop: 8, fontSize: 22, fontWeight: 800, color: bigColor, fontFamily: 'var(--mono)', lineHeight: 1.1 }}>
+        {bigText}
+      </div>
+      {subText && (
+        <div style={{ marginTop: 6, fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {subText}
+        </div>
+      )}
+      {!compact && !subText && (
+        <div style={{ marginTop: 6, fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {`${agg?.reporting?.length || 0}/${agg?.total || 0} hosts reporting`}
+        </div>
+      )}
+      {!compact && (
+        <>
+          <div style={{ marginTop: 4, fontSize: 9, color: active ? '#22c55e' : 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700 }}>src: agent.ping</div>
+          <div style={{ marginTop: 4, fontSize: 9, color: active ? '#22c55e' : 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+            Click for per-host detail →
+          </div>
+        </>
+      )}
+    </button>
+  )
+}
+
+/** Store profile tile — connection type (WiFi/LAN) + store type (SD-WAN / Non SD-WAN) from Store Monitor. */
+function CustomDashStoreProfileTile({ active, onClick, busy, agg, error, compact = false }) {
+  const summary = agg?.summary
+  let connText = '—'
+  let typeText = '—'
+  let bigColor = '#06b6d4'
+  if (busy && !summary) {
+    connText = '…'
+  } else if (error) {
+    connText = 'Unavailable'
+    typeText = error
+    bigColor = '#ef4444'
+  } else if (summary) {
+    connText = summary.connLabel || '—'
+    typeText = summary.storeTypeLabel || '—'
+    if (summary.matchedCount < (agg?.total || 0)) bigColor = '#eab308'
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="opm-row-hover"
+      title="Store Monitor: active_interface + SD-WAN classification"
+      style={{
+        position: 'relative', textAlign: 'left',
+        padding: 14, borderRadius: 12, cursor: 'pointer',
+        background: 'linear-gradient(135deg,var(--bg2) 0%,var(--bg3) 100%)',
+        border: active ? '1px solid var(--accent)' : '1px solid var(--border)',
+        boxShadow: active ? '0 0 0 3px rgba(59,130,246,.12)' : 'none',
+        transition: 'all .18s', overflow: 'hidden',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text3)', letterSpacing: .6, textTransform: 'uppercase', fontFamily: 'var(--mono)' }}>Store Profile</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, borderRadius: 7, background: 'rgba(6,182,212,.15)', color: '#06b6d4', fontSize: 13 }}>🏪</span>
+      </div>
+      <div style={{ marginTop: 8, fontSize: 20, fontWeight: 800, color: bigColor, fontFamily: 'var(--mono)', lineHeight: 1.15 }}>
+        {connText}
+      </div>
+      <div style={{ marginTop: 6, fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text2)', fontWeight: 700 }}>
+        {typeText}
+      </div>
+      {!compact && (
+        <div style={{ marginTop: 6, fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>
+          {summary ? `${summary.matchedCount}/${agg?.total || 0} matched in Store Monitor` : `${agg?.reporting?.length || 0}/${agg?.total || 0} hosts`}
+        </div>
+      )}
+      {!compact && (
+        <>
+          <div style={{ marginTop: 4, fontSize: 9, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700 }}>src: Store Monitor · active_interface · gateway vendor</div>
+          <div style={{ marginTop: 4, fontSize: 9, color: active ? '#06b6d4' : 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+            Click for per-host detail →
+          </div>
+        </>
+      )}
+    </button>
+  )
+}
+
 /** Detail panel rendered below the widget grid. */
 function CustomDashDetailPanel({
   apiBase, chartOpts, widget,
@@ -3729,7 +4072,9 @@ function CustomDashDetailPanel({
   rangeLabel, bhEnabled, bhStart, bhEnd, bhDays, bhLabel, timeWindow,
   uptimeStats, uptimeStatsBusy,
   jitterStats, jitterStatsBusy,
+  latencyStats, latencyStatsBusy,
   gatewayStats, gatewayStatsBusy,
+  storeByHost, storeManualCodes,
   onOpenRebootModal, onOpenCrashModal,
 }) {
   if (!widget) {
@@ -3741,24 +4086,126 @@ function CustomDashDetailPanel({
       </Widget>
     )
   }
-  if (widget === 'cpu' || widget === 'memory' || widget === 'uptime' || widget === 'latency' || widget === 'jitter' || CUSTOM_DASH_RANGE_MS_TILES.has(widget)) {
+  if (widget === 'agentLastConnected') {
+    const rows = (hostMetricItems || []).map((row) => {
+      const it = row.agentPing
+      const clock = it?.lastclock != null ? Number(it.lastclock) : null
+      const up = it != null && Number.isFinite(Number(it.value)) ? Number(it.value) === 1 : null
+      const ageSec = Number.isFinite(clock) ? Math.max(0, Math.floor(Date.now() / 1000) - clock) : null
+      const stale = ageSec != null ? ageSec > CUSTOM_DASH_AGENT_STALE_SEC : true
+      return { host: row.host, item: it, lastclock: clock, up, ageSec, stale }
+    })
+    const reporting = rows.filter((r) => r.item && Number.isFinite(r.lastclock))
+    return (
+      <Widget title="Agent Last Connected — per-host detail" badge={`${reporting.length}/${rows.length}`} badgeColor="blue" noPad>
+        <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>
+          Last poll time from <strong style={{ color: 'var(--text2)' }}>agent.ping</strong> · stale if older than {Math.round(CUSTOM_DASH_AGENT_STALE_SEC / 60)}m
+        </div>
+        {!rows.length && (
+          <div style={{ padding: 24, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12, textAlign: 'center' }}>
+            No hosts selected.
+          </div>
+        )}
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {rows.map(({ host, item, lastclock, up, ageSec, stale }) => (
+            <div key={host.hostid} className="opm-row-hover" style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', borderBottom: '1px solid var(--border)', fontSize: 12, fontFamily: 'var(--mono)' }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: up === true && !stale ? '#22c55e' : up === false ? '#ef4444' : stale ? '#f59e0b' : '#64748b', flexShrink: 0 }} />
+              <div style={{ flex: '1 1 200px', minWidth: 160, overflow: 'hidden' }}>
+                <div style={{ fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{host.name || host.host}</div>
+                <div style={{ fontSize: 10, color: 'var(--text3)' }}>{item?.key || 'No agent.ping item'}</div>
+              </div>
+              <div style={{ width: 90, textAlign: 'right' }}>
+                <div style={{ fontSize: 10, color: 'var(--text3)' }}>Status</div>
+                <div style={{ fontWeight: 700, color: up === true ? '#22c55e' : up === false ? '#ef4444' : 'var(--text3)' }}>
+                  {up === true ? 'Up' : up === false ? 'Down' : '—'}
+                </div>
+              </div>
+              <div style={{ width: 130, textAlign: 'right' }}>
+                <div style={{ fontSize: 10, color: 'var(--text3)' }}>Last connected</div>
+                <div style={{ fontWeight: 700, color: stale ? '#f59e0b' : 'var(--text2)' }} title={fmtClock(lastclock)}>
+                  {Number.isFinite(lastclock) ? (relAge(lastclock) ? `${relAge(lastclock)} ago` : fmtClock(lastclock)) : '—'}
+                </div>
+              </div>
+              <div style={{ width: 150, textAlign: 'right', fontSize: 10, color: 'var(--text3)' }}>
+                {Number.isFinite(lastclock) ? fmtClock(lastclock) : '—'}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Widget>
+    )
+  }
+  if (widget === 'storeProfile') {
+    const rows = buildStoreProfileRows(hostMetricItems, storeByHost, storeManualCodes)
+    const matched = rows.filter((r) => r.store)
+    return (
+      <Widget title="Store Profile — per-host detail" badge={`${matched.length}/${rows.length}`} badgeColor="blue" noPad>
+        <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>
+          Connection type from <strong style={{ color: 'var(--text2)' }}>active_interface</strong> · store type from Store Monitor SD-WAN rules (Fortinet gateway / manual ROP list)
+        </div>
+        {!rows.length && (
+          <div style={{ padding: 24, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12, textAlign: 'center' }}>
+            No hosts selected.
+          </div>
+        )}
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {rows.map(({ host, store, connType, connRaw, storeType }) => {
+            const connColor = connType === 'WiFi' ? '#06b6d4' : connType === 'LAN' ? '#22c55e' : 'var(--text3)'
+            const typeColor = storeType === 'SD-WAN' ? '#8b5cf6' : storeType === 'Manual SD-WAN' ? '#f59e0b' : storeType === 'Non SD-WAN' ? '#3b82f6' : 'var(--text3)'
+            return (
+              <div key={host.hostid} className="opm-row-hover" style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', borderBottom: '1px solid var(--border)', fontSize: 12, fontFamily: 'var(--mono)' }}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: store ? '#22c55e' : '#64748b', flexShrink: 0 }} />
+                <div style={{ flex: '1 1 180px', minWidth: 140, overflow: 'hidden' }}>
+                  <div style={{ fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{host.name || host.host}</div>
+                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>{store?.storeTag || 'Not in Store Monitor'}</div>
+                </div>
+                <div style={{ width: 100, textAlign: 'right' }}>
+                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>Connection</div>
+                  <div style={{ fontWeight: 700, color: connColor }}>{connType || '—'}</div>
+                </div>
+                <div style={{ width: 130, textAlign: 'right', fontSize: 10, color: 'var(--text3)' }} title={connRaw || ''}>
+                  {connRaw || store?.connState || '—'}
+                </div>
+                <div style={{ width: 110, textAlign: 'right' }}>
+                  <div style={{ fontSize: 10, color: 'var(--text3)' }}>Store type</div>
+                  <div style={{ fontWeight: 700, color: typeColor }}>{storeType || '—'}</div>
+                </div>
+                <div style={{ width: 90, textAlign: 'right', fontSize: 10, color: 'var(--text3)' }}>
+                  {store?.gatewayVendor || '—'}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </Widget>
+    )
+  }
+  if (widget === 'cpu' || widget === 'memory' || widget === 'systemUptime' || widget === 'uptime' || widget === 'latency' || widget === 'jitter' || CUSTOM_DASH_RANGE_MS_TILES.has(widget)) {
     const rangeMsCfg = CUSTOM_DASH_RANGE_MS_WIDGET[widget]
     const titleMap = {
       cpu: 'CPU Usage — per-host detail',
       memory: 'Memory Usage — per-host detail',
+      systemUptime: 'System Uptime — availability & per-host detail',
       uptime: 'Uptime — per-host detail',
       latency: 'Avg Latency — per-host detail',
       jitter: 'Avg Jitter — per-host detail',
+      maxLatency: 'Max Latency — per-host detail',
       maxJitter: 'Max Jitter — per-host detail',
       maxGatewayLatency: 'Max Local Gateway Latency — per-host detail',
     }
-    const metricKey = rangeMsCfg?.itemKey || widget
+    const metricKey = rangeMsCfg?.itemKey || (widget === 'systemUptime' ? 'uptime' : widget)
     const rows = (hostMetricItems || []).map((row) => ({ host: row.host, item: row[metricKey] }))
     const reporting = rows.filter((r) => r.item)
-    const isUptimeWidget = widget === 'uptime'
+    const isUptimeWidget = widget === 'uptime' || widget === 'systemUptime'
     const isRangeMaxMsWidget = CUSTOM_DASH_RANGE_MS_TILES.has(widget)
-    const rangeMsStats = widget === 'maxJitter' ? jitterStats : widget === 'maxGatewayLatency' ? gatewayStats : null
-    const rangeMsStatsBusy = widget === 'maxJitter' ? jitterStatsBusy : widget === 'maxGatewayLatency' ? gatewayStatsBusy : false
+    const rangeMsStats = widget === 'maxLatency' ? latencyStats
+      : widget === 'maxJitter' ? jitterStats
+        : widget === 'maxGatewayLatency' ? gatewayStats
+          : null
+    const rangeMsStatsBusy = widget === 'maxLatency' ? latencyStatsBusy
+      : widget === 'maxJitter' ? jitterStatsBusy
+        : widget === 'maxGatewayLatency' ? gatewayStatsBusy
+          : false
     const isMsMetricWidget = CUSTOM_DASH_MS_METRICS.has(widget) || isRangeMaxMsWidget
     const msMetricLabel = widget === 'jitter' || widget === 'maxJitter'
       ? 'Jitter'
@@ -3770,6 +4217,7 @@ function CustomDashDetailPanel({
         <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 14, fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--text3)', flexWrap: 'wrap' }}>
           <span>Range: <strong style={{ color: 'var(--text2)' }}>{rangeLabel}</strong></span>
           {bhEnabled && <span>BH window: <strong style={{ color: 'var(--text2)' }}>{bhLabel}</strong> <em style={{ color: 'var(--text3)' }}>(stats + charts use BH window only)</em></span>}
+          {isUptimeWidget && <span>Chart: <strong style={{ color: 'var(--text2)' }}>Availability</strong> <em style={{ color: 'var(--text3)' }}>(step graph from system.uptime — expand a host row)</em></span>}
           {isUptimeWidget && uptimeStatsBusy && <span style={{ color: 'var(--accent)' }}>Computing range uptime…</span>}
           {isRangeMaxMsWidget && rangeMsStatsBusy && <span style={{ color: 'var(--accent)' }}>Computing range {msMetricLabel.toLowerCase()}…</span>}
         </div>
@@ -3786,7 +4234,7 @@ function CustomDashDetailPanel({
               ? rangeMsStat?.maxMs
               : (item ? Number(item._displayValue ?? item.value) : null)
             const display = item
-              ? (widget === 'uptime'
+              ? (isUptimeWidget
                   ? fmtValue(Number(item.value), 'uptime')
                   : (isMsMetricWidget ? fmtLatencyMs(v) : fmtValue(v, item.units)))
               : '—'
@@ -3929,6 +4377,24 @@ function CustomDashDetailPanel({
             )
           })}
         </div>
+        {isUptimeWidget && reporting.length === 1 && reporting[0].item && (
+          <div style={{ padding: '12px 14px', borderTop: '1px solid var(--border)', background: 'var(--bg2)' }}>
+            <div style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: .5 }}>
+              Availability graph · {reporting[0].host.name || reporting[0].host.host}
+            </div>
+            <ItemHistoryChart
+              key={`${reporting[0].host.hostid}-${reporting[0].item.itemid}-${widget}-inline`}
+              itemId={reporting[0].item.itemid}
+              itemName={`${reporting[0].host.name || reporting[0].host.host} · Availability`}
+              itemUnits="%"
+              chartOpts={chartOpts}
+              apiBase={apiBase}
+              defaultRange={timeWindow}
+              displayMode="availability"
+              bh={{ bhEnabled, bhStart, bhEnd, bhDays }}
+            />
+          </div>
+        )}
       </Widget>
     )
   }
@@ -4227,8 +4693,18 @@ export default function StoreZabbixPage({
   urlEnvVar = 'STORE_ZABBIX_URL',
   tokenEnvVar = 'STORE_ZABBIX_API_TOKEN',
   loadingLabel = 'Loading store infrastructure data…',
+  lockedHostGroup = null,
+  lockedRopGroupKey = null,
+  customDashScope = null,
+  dashboardVariant = 'full',
 } = {}) {
-  const [tab, setTab] = useUrlTab('overview', INFRA_TAB_IDS)
+  const allowedTabIds = useMemo(
+    () => (dashboardVariant === 'ro'
+      ? INFRA_TAB_IDS.filter((id) => !RO_DASHBOARD_HIDDEN_TABS.has(id))
+      : INFRA_TAB_IDS),
+    [dashboardVariant],
+  )
+  const [tab, setTab] = useUrlTab('overview', allowedTabIds)
   const [config, setConfig] = useState(null)
   const [overview, setOverview] = useState(null)
   const [hosts, setHosts] = useState(null)
@@ -4276,6 +4752,8 @@ export default function StoreZabbixPage({
   const [hiddenTopWidgets, setHiddenTopWidgets] = useState(() => loadHiddenTopWidgets('/api/zabbix'))
   const [overviewBusy, setOverviewBusy] = useState(false)
   const [problemAckBusy, setProblemAckBusy] = useState(null)
+  const [roNetworkTop, setRoNetworkTop] = useState(null)
+  const [roNetworkTopBusy, setRoNetworkTopBusy] = useState(false)
 
   /* ── Network Health tab state ── */
   const [netHealth, setNetHealth] = useState(null)
@@ -4296,7 +4774,7 @@ export default function StoreZabbixPage({
   const [ropCustomFrom, setRopCustomFrom] = useState('')
   const [ropCustomTo, setRopCustomTo] = useState('')
   const [ropCustomEpoch, setRopCustomEpoch] = useState(null)
-  const [ropGroupKey, setRopGroupKey] = useState('rp')
+  const [ropGroupKey, setRopGroupKey] = useState(lockedRopGroupKey || 'rp')
   const [ropBhStart, setRopBhStart] = useState(9)
   const [ropBhEnd, setRopBhEnd] = useState(18)
   const [ropBhDays, setRopBhDays] = useState(() => new Set([0, 1, 2, 3, 4, 5, 6]))
@@ -4381,14 +4859,50 @@ export default function StoreZabbixPage({
   /** Per-host max/avg jitter (ms) over selected range from custom.ping.jitter history. */
   const [customDashJitterStats, setCustomDashJitterStats] = useState({})
   const [customDashJitterStatsBusy, setCustomDashJitterStatsBusy] = useState(false)
+  /** Per-host max/avg ping latency (ms) from custom.ping.ms history. */
+  const [customDashLatencyStats, setCustomDashLatencyStats] = useState({})
+  const [customDashLatencyStatsBusy, setCustomDashLatencyStatsBusy] = useState(false)
   /** Per-host max/avg local gateway latency (ms) from custom.gateway.ms history. */
   const [customDashGatewayStats, setCustomDashGatewayStats] = useState({})
   const [customDashGatewayStatsBusy, setCustomDashGatewayStatsBusy] = useState(false)
+  /** Store Monitor snapshot keyed by lowercase hostname/storeTag for custom dash store profile widget. */
+  const [customDashStoreByHost, setCustomDashStoreByHost] = useState({})
+  const [customDashStoreManualCodes, setCustomDashStoreManualCodes] = useState([])
+  const [customDashStoreProfileBusy, setCustomDashStoreProfileBusy] = useState(false)
+  const [customDashStoreProfileError, setCustomDashStoreProfileError] = useState(null)
   /** Modals shown when user clicks the Reboots / App-crash count cells. */
   const [customDashRebootModalHost, setCustomDashRebootModalHost] = useState(null)
   const [customDashCrashModalHost, setCustomDashCrashModalHost] = useState(null)
   const authUser = useAuthStore((s) => s.user)
-  const customDashPrefsScopeKey = useMemo(() => customDashPrefsScope(apiBase), [apiBase])
+  const customDashPrefsScopeKey = useMemo(
+    () => customDashScope || customDashPrefsScope(apiBase),
+    [customDashScope, apiBase],
+  )
+  const resolvedLockedGroup = useMemo(() => {
+    if (!lockedHostGroup) return ''
+    const names = (overview?.allHostGroups || overview?.hostGroups || []).map((g) => g.name).filter(Boolean)
+    if (names.length) return resolveZabbixHostGroup(lockedHostGroup, names)
+    const fromHosts = new Set()
+    for (const h of [...(hosts || []), ...(hostsExplorer || [])]) {
+      for (const g of h.groups || []) if (g) fromHosts.add(g)
+    }
+    if (fromHosts.size) return resolveZabbixHostGroup(lockedHostGroup, [...fromHosts])
+    return String(lockedHostGroup).trim()
+  }, [lockedHostGroup, overview?.allHostGroups, overview?.hostGroups, hosts, hostsExplorer])
+  const scopedHostGroup = lockedHostGroup ? resolvedLockedGroup : dashboardGroupFilter
+
+  useEffect(() => {
+    if (!lockedHostGroup || !resolvedLockedGroup) return
+    setDashboardGroupFilter(resolvedLockedGroup)
+    setGroupFilter(resolvedLockedGroup)
+    setInventoryGroupFilter(resolvedLockedGroup)
+    setTopMonGroup(resolvedLockedGroup)
+    setNetHealthGroup(resolvedLockedGroup)
+  }, [lockedHostGroup, resolvedLockedGroup])
+
+  useEffect(() => {
+    if (lockedRopGroupKey) setRopGroupKey(lockedRopGroupKey)
+  }, [lockedRopGroupKey])
   const customDashPrefsLoadedRef = useRef(false)
   const customDashPrefsSkipSaveRef = useRef(true)
   const customDashPendingHostIdsRef = useRef(null)
@@ -4434,7 +4948,7 @@ export default function StoreZabbixPage({
   }, [])
   const loadOverview = useCallback(async () => {
     const qs = new URLSearchParams()
-    if (dashboardGroupFilter) qs.set('group', dashboardGroupFilter)
+    if (scopedHostGroup) qs.set('group', scopedHostGroup)
     if (dashboardSearch.trim()) qs.set('q', dashboardSearch.trim())
     const suf = qs.toString() ? `?${qs}` : ''
     setOverviewBusy(true)
@@ -4444,8 +4958,28 @@ export default function StoreZabbixPage({
     } finally {
       setOverviewBusy(false)
     }
-  }, [apiBase, dashboardGroupFilter, dashboardSearch])
-  const loadHosts = useCallback(async () => { const { data } = await api.get(`${apiBase}/hosts?limit=10000`); setHosts(data.hosts || []) }, [apiBase])
+  }, [apiBase, scopedHostGroup, dashboardSearch])
+  const loadRoNetworkTop = useCallback(async () => {
+    if (dashboardVariant !== 'ro') return
+    const qs = new URLSearchParams({ limit: '30', range: '7d', bizStart: '9', bizEnd: '21' })
+    if (scopedHostGroup) qs.set('group', scopedHostGroup)
+    setRoNetworkTopBusy(true)
+    try {
+      const { data } = await api.get(`${apiBase}/ro-dashboard-network-top?${qs}`, { timeout: 120000 })
+      setRoNetworkTop(data)
+    } catch (e) {
+      const { message, hint } = parseErr(e)
+      setError(message)
+      setErrorHint(hint)
+      setRoNetworkTop(null)
+    } finally {
+      setRoNetworkTopBusy(false)
+    }
+  }, [apiBase, scopedHostGroup, dashboardVariant, parseErr])
+  const loadHosts = useCallback(async () => {
+    const { data } = await api.get(`${apiBase}/hosts?limit=10000&includeAgentLastConnected=1`)
+    setHosts(data.hosts || [])
+  }, [apiBase])
   const loadAllHosts = useCallback(async () => {
     const { data } = await api.get(`${apiBase}/hosts?limit=10000`)
     setHostsExplorer(data.hosts || [])
@@ -4475,13 +5009,15 @@ export default function StoreZabbixPage({
     setCustomDashHostsBusy(true)
     try {
       const { data } = await api.get(`${apiBase}/hosts?limit=10000`)
-      setCustomDashHosts(data.hosts || [])
+      let rows = data.hosts || []
+      if (lockedHostGroup) rows = rows.filter((h) => hostMatchesZabbixGroup(h, lockedHostGroup))
+      setCustomDashHosts(rows)
     } catch (e) {
       const { message, hint } = parseErr(e); setError(message); setErrorHint(hint)
     } finally {
       setCustomDashHostsBusy(false)
     }
-  }, [apiBase, parseErr])
+  }, [apiBase, parseErr, lockedHostGroup])
   /** Fetches latest items for all selected hosts in parallel and stores by hostid. */
   const loadCustomDashLatest = useCallback(async (hostids) => {
     const ids = (hostids || []).filter(Boolean)
@@ -4574,10 +5110,48 @@ export default function StoreZabbixPage({
     (pairs, fromTs, toTs, bh) => loadCustomDashRangeMsStats(pairs, fromTs, toTs, bh, setCustomDashJitterStats, setCustomDashJitterStatsBusy),
     [loadCustomDashRangeMsStats],
   )
+  const loadCustomDashLatencyStats = useCallback(
+    (pairs, fromTs, toTs, bh) => loadCustomDashRangeMsStats(pairs, fromTs, toTs, bh, setCustomDashLatencyStats, setCustomDashLatencyStatsBusy),
+    [loadCustomDashRangeMsStats],
+  )
   const loadCustomDashGatewayStats = useCallback(
     (pairs, fromTs, toTs, bh) => loadCustomDashRangeMsStats(pairs, fromTs, toTs, bh, setCustomDashGatewayStats, setCustomDashGatewayStatsBusy),
     [loadCustomDashRangeMsStats],
   )
+
+  /** Load Store Monitor stores for connection type + SD-WAN classification on Ro custom dashboard. */
+  const loadCustomDashStoreProfiles = useCallback(async () => {
+    setCustomDashStoreProfileBusy(true)
+    setCustomDashStoreProfileError(null)
+    try {
+      const [overviewRes, settingsRes] = await Promise.all([
+        api.get('/api/store-monitor/overview'),
+        api.get('/api/store-monitor/settings').catch(() => ({ data: {} })),
+      ])
+      const stores = overviewRes.data?.stores || []
+      const manualCodes = settingsRes.data?.manualRopSdwanCodeList
+        || settingsRes.data?.manualRopSdwanCodes
+        || []
+      const parsedCodes = Array.isArray(manualCodes)
+        ? manualCodes
+        : String(manualCodes || '').split(/[\n,;|\t]+/).map((c) => c.trim().toUpperCase()).filter(Boolean)
+      const byHost = {}
+      for (const s of stores) {
+        for (const key of [s.hostname, s.storeTag].filter(Boolean)) {
+          byHost[String(key).toLowerCase()] = s
+        }
+      }
+      setCustomDashStoreByHost(byHost)
+      setCustomDashStoreManualCodes(parsedCodes)
+    } catch (e) {
+      const msg = e?.response?.data?.error || e?.message || 'Store Monitor unavailable'
+      setCustomDashStoreProfileError(msg)
+      setCustomDashStoreByHost({})
+      setCustomDashStoreManualCodes([])
+    } finally {
+      setCustomDashStoreProfileBusy(false)
+    }
+  }, [])
 
   /**
    * Fetch app/service crash events from InfluxDB for the selected hosts over [from, to].
@@ -4969,9 +5543,10 @@ export default function StoreZabbixPage({
   const refetchProblems = useCallback(async () => {
     const qs = new URLSearchParams({ limit: '250' })
     if (severityFilter != null) qs.set('severity', String(severityFilter))
+    if (scopedHostGroup) qs.set('group', scopedHostGroup)
     const { data } = await api.get(`${apiBase}/problems?${qs}`)
     setProblemsFull(data.problems || [])
-  }, [apiBase, severityFilter])
+  }, [apiBase, severityFilter, scopedHostGroup])
 
   const loadConfigAndOverview = useCallback(async () => {
     setError(null); setErrorHint(null)
@@ -5020,7 +5595,19 @@ export default function StoreZabbixPage({
         if (cancelled) return; const r = parseErr(e); setError(r.message); setErrorHint(r.hint)
       })
     return () => { cancelled = true }
-  }, [config?.configured, config?.reachable, tab, dashboardGroupFilter, dashboardSearch, loadOverview, parseErr])
+  }, [config?.configured, config?.reachable, tab, scopedHostGroup, dashboardSearch, loadOverview, parseErr])
+
+  useEffect(() => {
+    if (dashboardVariant !== 'ro' || !customDashWidget) return
+    if (!RO_CUSTOM_DASH_WIDGETS.has(customDashWidget)) setCustomDashWidget(null)
+  }, [dashboardVariant, customDashWidget])
+
+  useEffect(() => {
+    if (dashboardVariant !== 'ro' || !config?.configured || config.reachable === false || tab !== 'overview') return
+    let cancelled = false
+    loadRoNetworkTop().catch(() => { if (!cancelled) { /* error handled in loader */ } })
+    return () => { cancelled = true }
+  }, [dashboardVariant, config?.configured, config?.reachable, tab, scopedHostGroup, loadRoNetworkTop])
 
   // Background refresh of Zabbix config + overview. useSmartPolling pauses when the
   // tab is hidden (no point polling Zabbix while the user is on another browser tab).
@@ -5281,7 +5868,7 @@ export default function StoreZabbixPage({
     const ids = (customDashSelected || []).map((h) => h.hostid).filter(Boolean)
     const hostnames = (customDashSelected || []).map((h) => h.host || h.name).filter(Boolean)
     if (!ids.length) {
-      setCustomDashLatestByHost({}); setCustomDashEvents([]); setCustomDashCrashes([]); setCustomDashCrashesError(null); setCustomDashUptimeStats({}); setCustomDashJitterStats({}); setCustomDashGatewayStats({})
+      setCustomDashLatestByHost({}); setCustomDashEvents([]); setCustomDashCrashes([]); setCustomDashCrashesError(null); setCustomDashUptimeStats({}); setCustomDashJitterStats({}); setCustomDashLatencyStats({}); setCustomDashGatewayStats({}); setCustomDashStoreByHost({}); setCustomDashStoreManualCodes([]); setCustomDashStoreProfileError(null)
       return
     }
     loadCustomDashLatest(ids)
@@ -5333,6 +5920,25 @@ export default function StoreZabbixPage({
     loadCustomDashJitterStats,
   ])
 
+  /* Custom Dashboard: preload per-host max ping latency whenever hosts, range, or BH changes. */
+  useEffect(() => {
+    if (!config?.configured || tab !== 'custom') return
+    const pairs = []
+    for (const h of customDashSelected || []) {
+      const data = customDashLatestByHost?.[String(h.hostid)]
+      const lItem = pickCustomDashItem(data?.latest, 'latency')
+      if (lItem?.itemid) pairs.push({ hostid: String(h.hostid), itemid: lItem.itemid })
+    }
+    if (!pairs.length) { setCustomDashLatencyStats({}); return }
+    const bh = { bhEnabled: customDashBhEnabled, bhStart: customDashBhStart, bhEnd: customDashBhEnd, bhDays: customDashBhDays }
+    loadCustomDashLatencyStats(pairs, customDashTimeWindow.from, customDashTimeWindow.to, bh)
+  }, [
+    tab, config?.configured, customDashSelected, customDashLatestByHost,
+    customDashTimeWindow.from, customDashTimeWindow.to,
+    customDashBhEnabled, customDashBhStart, customDashBhEnd, customDashBhDays,
+    loadCustomDashLatencyStats,
+  ])
+
   /* Custom Dashboard: preload per-host max local gateway latency whenever hosts, range, or BH changes. */
   useEffect(() => {
     if (!config?.configured || tab !== 'custom') return
@@ -5351,6 +5957,19 @@ export default function StoreZabbixPage({
     customDashBhEnabled, customDashBhStart, customDashBhEnd, customDashBhDays,
     loadCustomDashGatewayStats,
   ])
+
+  /* Ro dashboard: Store Monitor snapshot for store profile widget + inventory store type. */
+  useEffect(() => {
+    if (dashboardVariant !== 'ro' || !config?.configured) return
+    if (tab !== 'custom' && tab !== 'hosts') return
+    if (tab === 'custom' && !(customDashSelected || []).length) {
+      setCustomDashStoreByHost({})
+      setCustomDashStoreManualCodes([])
+      setCustomDashStoreProfileError(null)
+      return
+    }
+    loadCustomDashStoreProfiles()
+  }, [dashboardVariant, config?.configured, tab, customDashSelected, loadCustomDashStoreProfiles])
 
   useEffect(() => {
     if (!config?.configured || tab !== 'problems') return; let c = false; setTabBusy(true); setError(null); setErrorHint(null)
@@ -5526,29 +6145,36 @@ export default function StoreZabbixPage({
   }, [])
 
   const filteredHosts = useMemo(() => {
-    const base = (hostsExplorer || []).filter((h) => !groupFilter || (h.groups || []).includes(groupFilter))
+    const explorer = lockedHostGroup
+      ? (hostsExplorer || []).filter((h) => hostMatchesZabbixGroup(h, lockedHostGroup))
+      : (hostsExplorer || [])
+    const base = explorer.filter((h) => !groupFilter || (h.groups || []).includes(groupFilter))
     return scoreHosts(base, (hostSearch || '').trim().toLowerCase())
-  }, [hostsExplorer, hostSearch, groupFilter, scoreHosts])
+  }, [hostsExplorer, hostSearch, groupFilter, scoreHosts, lockedHostGroup])
   const availableInventoryGroups = useMemo(() => {
     const set = new Set()
     for (const h of hosts || []) for (const g of h.groups || []) if (g) set.add(g)
     return Array.from(set).sort((a, b) => a.localeCompare(b))
   }, [hosts])
+  const scopedInventoryHosts = useMemo(() => {
+    if (!lockedHostGroup) return hosts || []
+    return (hosts || []).filter((h) => hostMatchesZabbixGroup(h, lockedHostGroup))
+  }, [hosts, lockedHostGroup])
   const inventoryAvailCounts = useMemo(() => {
-    const h = hosts || []
+    const h = scopedInventoryHosts
     return {
       all: h.length,
       Available: h.filter((x) => x.availability === 'Available').length,
       Unavailable: h.filter((x) => x.availability === 'Unavailable').length,
       Unknown: h.filter((x) => x.availability === 'Unknown').length,
     }
-  }, [hosts])
+  }, [scopedInventoryHosts])
   const filteredInventory = useMemo(() => {
-    let base = hosts || []
+    let base = scopedInventoryHosts
     if (inventoryGroupFilter) base = base.filter((h) => (h.groups || []).includes(inventoryGroupFilter))
     if (inventoryAvailFilter) base = base.filter((h) => h.availability === inventoryAvailFilter)
     return scoreHosts(base, (inventorySearch || '').trim().toLowerCase())
-  }, [hosts, inventorySearch, inventoryGroupFilter, inventoryAvailFilter, scoreHosts])
+  }, [scopedInventoryHosts, inventorySearch, inventoryGroupFilter, inventoryAvailFilter, scoreHosts])
   const availableGroups = useMemo(() => {
     const set = new Set()
     for (const h of hostsExplorer || []) for (const g of h.groups || []) if (g) set.add(g)
@@ -5758,17 +6384,42 @@ export default function StoreZabbixPage({
   }, [tab, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries, loadTopUtil, topLimit, topMonGroup, refetchProblems, apiBase, urlEnvVar, loadNetHealth, netHealthGroup, netBizStart, netBizEnd, loadRopUptime, ropRange, ropCustomEpoch, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla])
 
   /* ─── column definitions ─── */
-  const hostCols = [
+  const hostCols = useMemo(() => [
     { key: 'status', label: 'Status', render: (h) => {
       const color = h.availability === 'Available' ? '#22c55e' : h.availability === 'Unavailable' ? '#ef4444' : '#64748b'
       return <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><span style={{ width: 8, height: 8, borderRadius: '50%', background: color, boxShadow: h.availability === 'Available' ? '0 0 6px rgba(34,197,94,.5)' : 'none' }} /><span style={{ color, fontSize: 11, fontWeight: 600 }}>{h.availability}</span></span>
     }},
+    { key: 'agentLastConnected', label: 'Last Connected', render: (h) => {
+      const clock = h.agentLastConnected
+      if (!clock) return <span style={{ color: 'var(--text3)', fontSize: 11 }}>—</span>
+      const stale = h.agentPingStale
+      const age = relAge(clock)
+      return (
+        <span title={fmtClock(clock)} style={{ color: stale ? '#f59e0b' : '#22c55e', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600 }}>
+          {age ? `${age} ago` : fmtClock(clock)}
+        </span>
+      )
+    }},
+    ...(dashboardVariant === 'ro' ? [{
+      key: 'storeType',
+      label: 'Store Type',
+      render: (h) => {
+        const store = findStoreMonitorStore(h, customDashStoreByHost)
+        const storeType = classifyStoreTypeLabel(store, customDashStoreManualCodes)
+        if (!storeType) return <span style={{ color: 'var(--text3)', fontSize: 11 }}>—</span>
+        const typeColor = storeType === 'SD-WAN' ? '#8b5cf6'
+          : storeType === 'Manual SD-WAN' ? '#f59e0b'
+          : storeType === 'Non SD-WAN' ? '#3b82f6'
+          : 'var(--text3)'
+        return <span style={{ color: typeColor, fontSize: 11, fontWeight: 600, fontFamily: 'var(--mono)' }}>{storeType}</span>
+      },
+    }] : []),
     { key: 'name', label: 'Device Name', render: (h) => <span style={{ color: 'var(--accent)', fontWeight: 600 }}>{h.name || h.host}</span> },
     { key: 'ip', label: 'IP Address', render: (h) => <span style={{ color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 11 }}>{h.ip || '—'}</span> },
     { key: 'host', label: 'Technical Name', render: (h) => <span style={{ color: 'var(--text3)', fontSize: 11 }}>{h.host}</span> },
     { key: 'groups', label: 'Category', render: (h) => <span style={{ color: 'var(--text3)', fontSize: 11 }}>{(h.groups || []).join(', ') || '—'}</span> },
     { key: 'mon', label: 'Monitoring', render: (h) => <span className="opm-pill" style={{ background: h.monitored ? 'rgba(34,197,94,.12)' : 'rgba(234,179,8,.1)', color: h.monitored ? '#22c55e' : '#eab308', border: `1px solid ${h.monitored ? 'rgba(34,197,94,.25)' : 'rgba(234,179,8,.2)'}` }}>{h.monitored ? 'Enabled' : 'Disabled'}</span> },
-  ]
+  ], [dashboardVariant, customDashStoreByHost, customDashStoreManualCodes])
   const problemCols = useMemo(() => [
     { key: 'sev', label: 'Severity', render: (p) => <span className="opm-pill" style={{ color: sevColor(p.severity), background: `${sevColor(p.severity)}15`, border: `1px solid ${sevColor(p.severity)}30` }}>{p.severityLabel}</span> },
     { key: 'ackst', label: 'Ack', render: (p) => (
@@ -5807,8 +6458,10 @@ export default function StoreZabbixPage({
   const statusDotColor = !configured ? '#ef4444' : reachable ? '#22c55e' : '#f59e0b'
   const pageSubtitle = !configured
     ? 'Not configured'
-    : !reachable
+  : !reachable
       ? 'Configured — unreachable from server'
+      : lockedHostGroup && resolvedLockedGroup
+        ? `${resolvedLockedGroup} · ${healthPct != null ? `Health ${healthPct}% · ` : ''}${avail?.available ?? 0}/${avail?.total ?? 0} devices online`
       : healthPct != null
         ? `Health ${healthPct}% · ${avail?.available ?? 0}/${avail?.total ?? 0} devices online`
         : connectedLabel
@@ -5817,13 +6470,13 @@ export default function StoreZabbixPage({
     { id: 'hosts', label: 'Inventory', icon: '▦', badge: hosts?.length ?? avail?.total },
     { id: 'hostGraphs', label: 'Device Snapshot', icon: '▣' },
     { id: 'topMon', label: 'Top Monitoring', icon: '★' },
-    { id: 'problems', label: 'Alarms', icon: '⚠', badge: overview?.activeProblems },
-    { id: 'events', label: 'Events', icon: '◉' },
+    ...(dashboardVariant !== 'ro' ? [{ id: 'problems', label: 'Alarms', icon: '⚠', badge: overview?.activeProblems }] : []),
+    ...(dashboardVariant !== 'ro' ? [{ id: 'events', label: 'Events', icon: '◉' }] : []),
     { id: 'netHealth', label: 'Network Health', icon: '📶' },
-    { id: 'rop', label: 'ROP Dashboard', icon: '🏪', badge: ropUptime?.summary?.totalStores },
+    ...(dashboardVariant !== 'ro' ? [{ id: 'rop', label: 'ROP Dashboard', icon: '🏪', badge: ropUptime?.summary?.totalStores }] : []),
     { id: 'reports', label: 'Reports', icon: '📊' },
     { id: 'custom', label: 'Custom Dashboard', icon: '🧩' },
-    { id: 'alerts', label: 'Alerts Management', icon: '🔔' },
+    ...(dashboardVariant !== 'ro' ? [{ id: 'alerts', label: 'Alerts Management', icon: '🔔' }] : []),
   ]
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 0, minHeight: 0 }}>
@@ -5874,12 +6527,92 @@ export default function StoreZabbixPage({
         </Widget>
       )}
 
-      {/* ═══════════ DASHBOARD (Overview) ═══════════ */}
-      {configured && tab === 'overview' && overview && (
+      {/* ═══════════ DASHBOARD (Overview) — Ro Dashboard (minimal) ═══════════ */}
+      {configured && tab === 'overview' && overview && dashboardVariant === 'ro' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div className="opm-toolbar">
             <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
               <span className="opm-toolbar-label">Dashboard scope</span>
+              <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', fontSize: 10 }}>
+                {resolvedLockedGroup || lockedHostGroup || 'RP System'}
+              </span>
+              <div className="opm-search" style={{ maxWidth: 320, flex: '1 1 200px' }}>
+                <input type="search" value={dashboardSearch} onChange={(e) => setDashboardSearch(e.target.value)} placeholder="Filter by host name…" />
+                <span className="opm-search-icon">⌕</span>
+              </div>
+              {dashboardSearch.trim() && (
+                <button type="button" onClick={() => setDashboardSearch('')}
+                  style={{ padding: '5px 12px', borderRadius: 6, border: '1px solid var(--border)', background: 'transparent', color: 'var(--cyan)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 600 }}>
+                  Clear filters
+                </button>
+              )}
+              {overview.scopeFiltered && (
+                <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', fontSize: 10 }}>
+                  Scoped view
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 12 }}>
+            <CounterTile label="Devices" value={avail?.total ?? 0} sub="Monitored" color="blue" icon="▦" onClick={() => { setInventoryAvailFilter(''); setTab('hosts') }} />
+            <CounterTile label="Available" value={avail?.available ?? 0} sub={healthPct != null ? `${healthPct}% health` : null} color="green" icon="●" onClick={() => { setInventoryAvailFilter('Available'); setTab('hosts') }} />
+            <CounterTile label="Unavailable" value={avail?.unavailable ?? 0} sub="Down" color="red" icon="✕" onClick={() => { setInventoryAvailFilter('Unavailable'); setTab('hosts') }} />
+            <CounterTile label="Unknown" value={avail?.unknown ?? 0} sub="Unchecked" color="cyan" icon="?" onClick={() => { setInventoryAvailFilter('Unknown'); setTab('hosts') }} />
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+              Mean latency &amp; jitter · top 30 · BH {roNetworkTop?.businessHours?.label || '09:00–21:00'} · {roNetworkTop?.window?.rangeLabel || '7d'}
+            </span>
+            <button type="button" onClick={() => loadRoNetworkTop()} disabled={roNetworkTopBusy}
+              style={{ padding: '5px 14px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', fontSize: 11, fontFamily: 'var(--mono)', cursor: roNetworkTopBusy ? 'wait' : 'pointer', fontWeight: 600 }}>
+              {roNetworkTopBusy ? '↻ Loading…' : '↻ Refresh'}
+            </button>
+          </div>
+
+          {roNetworkTopBusy && !roNetworkTop && (
+            <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>
+              <span className="np-page-loading-dot" style={{ width: 14, height: 14 }} />Loading BH mean network metrics…
+            </div>
+          )}
+
+          {roNetworkTop && (
+            <div className="topmon-widget-grid">
+              <Widget title="Top Latency (mean)" badge={roNetworkTop.latency?.length ?? 0} badgeColor="cyan" noPad>
+                <TopMonRankTable
+                  rows={roNetworkTop.latency}
+                  unitSuffix=" ms"
+                  severityMode="latency"
+                  emptyMsg="No latency history in business hours."
+                  onRowClick={(r) => goToHostGraphs({ hostid: r.hostid, host: r.host, name: r.name })}
+                />
+              </Widget>
+              <Widget title="Top Jitter (mean)" badge={roNetworkTop.jitter?.length ?? 0} badgeColor="purple" noPad>
+                <TopMonRankTable
+                  rows={roNetworkTop.jitter}
+                  unitSuffix=" ms"
+                  severityMode="jitter"
+                  emptyMsg="No jitter history in business hours."
+                  onRowClick={(r) => goToHostGraphs({ hostid: r.hostid, host: r.host, name: r.name })}
+                />
+              </Widget>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ═══════════ DASHBOARD (Overview) — Store Zabbix (full) ═══════════ */}
+      {configured && tab === 'overview' && overview && dashboardVariant !== 'ro' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div className="opm-toolbar">
+            <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <span className="opm-toolbar-label">Dashboard scope</span>
+              {lockedHostGroup ? (
+                <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', fontSize: 10 }}>
+                  {resolvedLockedGroup || lockedHostGroup}
+                </span>
+              ) : (
               <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Group</span>
                 <select value={dashboardGroupFilter} onChange={(e) => setDashboardGroupFilter(e.target.value)}
@@ -5890,11 +6623,12 @@ export default function StoreZabbixPage({
                   ))}
                 </select>
               </div>
+              )}
               <div className="opm-search" style={{ maxWidth: 320, flex: '1 1 200px' }}>
                 <input type="search" value={dashboardSearch} onChange={(e) => setDashboardSearch(e.target.value)} placeholder="Filter by host name…" />
                 <span className="opm-search-icon">⌕</span>
               </div>
-              {(dashboardGroupFilter || dashboardSearch.trim()) && (
+              {(dashboardGroupFilter || dashboardSearch.trim()) && !lockedHostGroup && (
                 <button type="button" onClick={() => { setDashboardGroupFilter(''); setDashboardSearch('') }}
                   style={{ padding: '5px 12px', borderRadius: 6, border: '1px solid var(--border)', background: 'transparent', color: 'var(--cyan)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 600 }}>
                   Clear filters
@@ -5979,17 +6713,23 @@ export default function StoreZabbixPage({
             </div>
             <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 10px', borderRadius: 9, border: '1px solid var(--border)', background: 'var(--bg3)' }}>
               <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, letterSpacing: .5, textTransform: 'uppercase' }}>Group</span>
+              {lockedHostGroup ? (
+                <span style={{ fontSize: 12, fontFamily: 'var(--mono)', color: 'var(--accent)', fontWeight: 600 }}>{resolvedLockedGroup || lockedHostGroup}</span>
+              ) : (
+              <>
               <select value={inventoryGroupFilter} onChange={(e) => setInventoryGroupFilter(e.target.value)}
                 style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', outline: 'none', minWidth: 160, maxWidth: 260 }}>
-                <option value="">All ({hosts?.length ?? 0})</option>
+                <option value="">All ({scopedInventoryHosts.length})</option>
                 {availableInventoryGroups.map((g) => {
-                  const n = (hosts || []).filter((h) => (h.groups || []).includes(g)).length
+                  const n = scopedInventoryHosts.filter((h) => (h.groups || []).includes(g)).length
                   return <option key={g} value={g}>{g} ({n})</option>
                 })}
               </select>
               {inventoryGroupFilter && (
                 <button type="button" onClick={() => setInventoryGroupFilter('')} title="Clear group"
                   style={{ padding: '2px 8px', borderRadius: 5, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text3)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 700 }}>✕</button>
+              )}
+              </>
               )}
             </div>
             <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 10px', borderRadius: 9, border: '1px solid var(--border)', background: 'var(--bg3)' }}>
@@ -6007,7 +6747,7 @@ export default function StoreZabbixPage({
               )}
             </div>
           </div>
-          <Widget title="Device Inventory" badge={`${filteredInventory.length}${(inventorySearch || inventoryGroupFilter || inventoryAvailFilter) && hosts ? ` / ${hosts.length}` : ''}`} badgeColor="green" noPad
+          <Widget title="Device Inventory" badge={`${filteredInventory.length}${(inventorySearch || inventoryGroupFilter || inventoryAvailFilter) && scopedInventoryHosts.length ? ` / ${scopedInventoryHosts.length}` : ''}`} badgeColor="green" noPad
             actions={null}>
             {hosts === null || tabBusy
               ? <div style={{ padding: 24, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}><span className="np-page-loading-dot" style={{ width: 14, height: 14 }} />Loading devices…</div>
@@ -6033,6 +6773,10 @@ export default function StoreZabbixPage({
             </div>
             <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 10px', borderRadius: 9, border: '1px solid var(--border)', background: 'var(--bg3)' }}>
               <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontWeight: 700, letterSpacing: .5, textTransform: 'uppercase' }}>Group</span>
+              {lockedHostGroup ? (
+                <span style={{ fontSize: 12, fontFamily: 'var(--mono)', color: 'var(--accent)', fontWeight: 600 }}>{resolvedLockedGroup || lockedHostGroup}</span>
+              ) : (
+              <>
               <select value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)}
                 style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', outline: 'none', minWidth: 160, maxWidth: 260 }}>
                 <option value="">All ({(hostsExplorer || []).length})</option>
@@ -6044,6 +6788,8 @@ export default function StoreZabbixPage({
               {groupFilter && (
                 <button type="button" onClick={() => setGroupFilter('')} title="Clear group filter"
                   style={{ padding: '2px 8px', borderRadius: 5, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text3)', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', fontWeight: 700 }}>✕</button>
+              )}
+              </>
               )}
             </div>
             {selectedHost && (
@@ -6260,6 +7006,12 @@ export default function StoreZabbixPage({
           <div className="opm-toolbar" style={{ marginBottom: 0 }}>
             <div className="opm-toolbar-row" style={{ flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
               <span className="opm-toolbar-label">Host group</span>
+              {lockedHostGroup ? (
+                <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', fontSize: 10, border: '1px solid rgba(59,130,246,.25)' }}>
+                  {resolvedLockedGroup || lockedHostGroup}
+                </span>
+              ) : (
+              <>
               <select value={topMonGroup} onChange={(e) => setTopMonGroup(e.target.value)}
                 style={{ padding: '6px 12px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', minWidth: 200, maxWidth: 320 }}>
                 <option value="">All groups</option>
@@ -6277,6 +7029,8 @@ export default function StoreZabbixPage({
                     Clear group
                   </button>
                 </>
+              )}
+              </>
               )}
               {topUtil?.summary?.monitoredHosts != null && (
                 <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', marginLeft: 'auto' }}>
@@ -6328,7 +7082,8 @@ export default function StoreZabbixPage({
           {topUtil && (() => {
             const s = topUtil.summary || {}
             const d = topUtil.distributions || {}
-            const visibleBuiltin = TOP_MON_BUILTIN.filter((w) => !hiddenTopWidgets.includes(w.id))
+            const roTopMonHidden = dashboardVariant === 'ro' ? RO_DASHBOARD_HIDDEN_TOPMON : null
+            const visibleBuiltin = TOP_MON_BUILTIN.filter((w) => !hiddenTopWidgets.includes(w.id) && !roTopMonHidden?.has(w.id))
             const infraWidgets = visibleBuiltin.filter((w) => w.section === 'infra')
             const netWidgets = visibleBuiltin.filter((w) => w.section === 'network')
             const goHost = (r) => goToHostGraphs({ hostid: r.hostid, host: r.host, name: r.name })
@@ -6396,6 +7151,7 @@ export default function StoreZabbixPage({
                             accent={def.accent}
                             unitSuffix={def.unitSuffix}
                             emptyMsg={def.emptyMsg}
+                            severityMode={def.severityMode}
                             onRowClick={goHost}
                           />
                         </Widget>
@@ -6516,11 +7272,17 @@ export default function StoreZabbixPage({
             <div className="opm-toolbar">
               <div className="opm-toolbar-row" style={{ flexWrap: 'wrap', gap: 10 }}>
                 <span className="opm-toolbar-label">Group</span>
+                {lockedHostGroup ? (
+                  <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', fontSize: 10 }}>
+                    {resolvedLockedGroup || lockedHostGroup}
+                  </span>
+                ) : (
                 <select value={netHealthGroup} onChange={(e) => setNetHealthGroup(e.target.value)}
                   style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', minWidth: 180, maxWidth: 260 }}>
                   <option value="">All groups</option>
                   {(nh?.allGroups || []).map((g) => <option key={g} value={g}>{g}</option>)}
                 </select>
+                )}
                 <span className="opm-toolbar-label" style={{ marginLeft: 8 }}>Business hours</span>
                 <select value={netBizStart} onChange={(e) => setNetBizStart(Number(e.target.value))}
                   style={{ padding: '5px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)', fontSize: 12, fontFamily: 'var(--mono)', width: 70 }}>
@@ -6917,6 +7679,7 @@ export default function StoreZabbixPage({
           return null
         }
         const selectRopGroup = (key) => {
+          if (lockedRopGroupKey && key !== lockedRopGroupKey) return
           setRopGroupKey(key)
           setRopSearch('')
           setRopOutageFilter(null)
@@ -7032,6 +7795,11 @@ export default function StoreZabbixPage({
 
                 <div className="rop-field">
                   <span className="rop-field-label">Group</span>
+                  {lockedRopGroupKey ? (
+                    <span className="rop-meta" style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                      {ROP_GROUP_LABELS[lockedRopGroupKey] || lockedRopGroupKey}
+                    </span>
+                  ) : (
                   <select value={isRpGroupKey(ropGroupKey) ? '' : ropGroupKey}
                     onChange={(e) => { if (e.target.value) selectRopGroup(e.target.value) }}
                     className="rop-control rop-control--select">
@@ -7039,6 +7807,7 @@ export default function StoreZabbixPage({
                     <option value="pos">{groupKeyToLabel.pos}</option>
                     <option value="sdwan">{groupKeyToLabel.sdwan}</option>
                   </select>
+                  )}
                 </div>
 
                 <div className="rop-field-divider" />
@@ -7121,6 +7890,7 @@ export default function StoreZabbixPage({
             </div>
 
             {/* ── ROP group sub-tabs (Store Monitor parity) ── */}
+            {!lockedRopGroupKey && (
             <div className="rop-subtabs">
               {ROP_SUBTABS.map((st) => {
                 const count = ropSubCount(st.id)
@@ -7140,6 +7910,7 @@ export default function StoreZabbixPage({
                 </span>
               )}
             </div>
+            )}
 
             {ropGroupKey === 'manual_sdwan' && (
               <div style={{ borderRadius: 12, border: '1px solid var(--border)', background: 'var(--bg2)', overflow: 'hidden' }}>
@@ -7817,6 +8588,11 @@ export default function StoreZabbixPage({
                 <div className="rop-field-divider" />
                 <div className="rop-field">
                   <span className="rop-field-label">Group</span>
+                  {lockedRopGroupKey ? (
+                    <span className="rop-meta" style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                      {ROP_GROUP_LABELS[lockedRopGroupKey] || lockedRopGroupKey}
+                    </span>
+                  ) : (
                   <select value={isRpGroupKey(ropGroupKey) ? '' : ropGroupKey}
                     onChange={(e) => { if (e.target.value) setRopGroupKey(e.target.value) }}
                     className="rop-control rop-control--select">
@@ -7824,6 +8600,7 @@ export default function StoreZabbixPage({
                     <option value="pos">{ROP_GROUP_LABELS.pos}</option>
                     <option value="sdwan">{ROP_GROUP_LABELS.sdwan}</option>
                   </select>
+                  )}
                 </div>
                 <div className="rop-field-divider" />
                 <div className="rop-field">
@@ -7878,7 +8655,7 @@ export default function StoreZabbixPage({
             </div>
 
             <div className="rop-subtabs">
-              {ROP_SUBTABS.map((st) => {
+              {!lockedRopGroupKey && ROP_SUBTABS.map((st) => {
                 const count = ropSubCount(st.id)
                 const active = ropGroupKey === st.id
                 return (
@@ -8387,11 +9164,18 @@ export default function StoreZabbixPage({
           uptimeStatsBusy={customDashUptimeStatsBusy}
           jitterStats={customDashJitterStats}
           jitterStatsBusy={customDashJitterStatsBusy}
+          latencyStats={customDashLatencyStats}
+          latencyStatsBusy={customDashLatencyStatsBusy}
           gatewayStats={customDashGatewayStats}
           gatewayStatsBusy={customDashGatewayStatsBusy}
+          storeByHost={customDashStoreByHost}
+          storeManualCodes={customDashStoreManualCodes}
+          storeProfileBusy={customDashStoreProfileBusy}
+          storeProfileError={customDashStoreProfileError}
           /* Modal callbacks */
           onOpenRebootModal={(h) => setCustomDashRebootModalHost(h)}
           onOpenCrashModal={(h) => setCustomDashCrashModalHost(h)}
+          dashboardVariant={dashboardVariant}
           onRefresh={() => {
             const ids = (customDashSelected || []).map((h) => h.hostid).filter(Boolean)
             const hostnames = (customDashSelected || []).map((h) => h.host || h.name).filter(Boolean)
@@ -8399,6 +9183,7 @@ export default function StoreZabbixPage({
               loadCustomDashLatest(ids)
               loadCustomDashEvents(ids, customDashEventLimit, customDashTimeWindow.from)
               loadCustomDashCrashes(hostnames, customDashTimeWindow.from, customDashTimeWindow.to)
+              if (dashboardVariant === 'ro') loadCustomDashStoreProfiles()
             }
           }}
           prefsSavedAt={customDashPrefsSavedAt}

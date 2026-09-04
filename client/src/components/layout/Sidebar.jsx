@@ -9,6 +9,7 @@ const nav = [
   { pageKey:'sentinel', to:'/sentinel', label:'XDR',    icon:'🛡️' },
   { pageKey:'infra',    to:'/infra',   label:'Infra',  icon:'📡' },
   { pageKey:'storeZabbix', to:'/store-zabbix', label:'Store Zabbix', icon:'🏪' },
+  { pageKey:'roDashboard', to:'/ro-dashboard', label:'Ro Dashboard', icon:'RO', iconKind:'badge' },
   { pageKey:'storeMonitor', to:'/store-monitor', label:'Store Monitor', icon:'📶' },
   { pageKey:'solarwinds', to:'/solarwinds', label:'Orion', icon:'☀️' },
   { pageKey:'idcs',     to:'/idcs',    label:'IDCS',   icon:'🪪' },
@@ -28,7 +29,22 @@ export default function Sidebar() {
       <AppLogo size={36} title="SocMon" style={{ marginBottom: 16 }} />
       {visible.map(item => (
         <NavLink key={item.to} to={item.to} title={item.label} style={({ isActive }) => ({ width:44, height:44, borderRadius:10, display:'flex', alignItems:'center', justifyContent:'center', fontSize:18, textDecoration:'none', transition:'all 0.15s', background: isActive ? 'var(--bg4)' : 'transparent', border: isActive ? '1px solid var(--border2)' : '1px solid transparent' })}>
-          {item.icon}
+          {item.iconKind === 'badge' ? (
+            <span style={{
+              fontSize: 11,
+              fontWeight: 800,
+              letterSpacing: '-0.04em',
+              lineHeight: 1,
+              color: 'var(--accent)',
+              background: 'color-mix(in srgb, var(--accent) 18%, transparent)',
+              border: '1px solid color-mix(in srgb, var(--accent) 45%, transparent)',
+              borderRadius: 6,
+              padding: '4px 5px',
+              boxShadow: '0 0 10px color-mix(in srgb, var(--accent) 25%, transparent)',
+            }}>
+              {item.icon}
+            </span>
+          ) : item.icon}
         </NavLink>
       ))}
       <div style={{ flex:1 }} />

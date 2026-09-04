@@ -1,5 +1,5 @@
 /** Route segment keys (match client paths /:key). */
-export const APP_PAGE_KEYS = ['soc', 'noc', 'sentinel', 'infra', 'storeZabbix', 'storeMonitor', 'solarwinds', 'idcs', 'ad', 'nexs', 'tickets', 'reports', 'emailSim', 'ai', 'admin']
+export const APP_PAGE_KEYS = ['soc', 'noc', 'sentinel', 'infra', 'storeZabbix', 'roDashboard', 'storeMonitor', 'solarwinds', 'idcs', 'ad', 'nexs', 'tickets', 'reports', 'emailSim', 'ai', 'admin']
 
 export const APP_PAGE_KEY_SET = new Set(APP_PAGE_KEYS)
 

@@ -9,6 +9,7 @@ const titles = {
   '/sentinel': 'Sentinel XDR',
   '/infra': 'Infra Monitoring',
   '/store-zabbix': 'Store Zabbix',
+  '/ro-dashboard': 'Ro Dashboard',
   '/solarwinds': 'SolarWinds Orion',
   '/idcs': 'Oracle IDCS',
   '/ad': 'Active Directory',
