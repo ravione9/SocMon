@@ -45,6 +45,7 @@ const RO_DASHBOARD_HIDDEN_TOPMON = new Set(['cpu', 'memory', 'disk', 'packetLoss
 /** Ro Dashboard — fixed business hours on every tab (12:00–21:00). */
 const RO_DASHBOARD_BH_START = 12
 const RO_DASHBOARD_BH_END = 21
+const RO_DASHBOARD_BH_DAYS = [0, 1, 2, 3, 4, 5, 6]
 
 const ROP_GROUP_LABELS = {
   rp: 'All ROP',
@@ -3772,7 +3773,7 @@ function CustomDashboardPanel({
             {CUSTOM_DASH_DAY_LABELS.map((lbl, idx) => {
               const on = bhDays.has(idx)
               return (
-                <button key={idx} type="button" onClick={() => toggleBhDay(idx)} disabled={!bhEnabled}
+                <button key={idx} type="button" onClick={() => toggleBhDay(idx)} disabled={!bhEnabled || isRoVariant}
                   title={CUSTOM_DASH_DAY_FULL[idx]}
                   style={{
                     width: 24, height: 24, borderRadius: 5, fontSize: 10, fontWeight: 700, fontFamily: 'var(--mono)',
@@ -3785,11 +3786,11 @@ function CustomDashboardPanel({
               )
             })}
           </div>
-          <button type="button" onClick={presetWeekdays} disabled={!bhEnabled}
+          <button type="button" onClick={presetWeekdays} disabled={!bhEnabled || isRoVariant}
             style={{ padding: '3px 10px', borderRadius: 5, fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text3)', cursor: bhEnabled ? 'pointer' : 'not-allowed', opacity: bhEnabled ? 1 : .5 }}>
             Mon–Fri
           </button>
-          <button type="button" onClick={presetEveryday} disabled={!bhEnabled}
+          <button type="button" onClick={presetEveryday} disabled={!bhEnabled || isRoVariant}
             style={{ padding: '3px 10px', borderRadius: 5, fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text3)', cursor: bhEnabled ? 'pointer' : 'not-allowed', opacity: bhEnabled ? 1 : .5 }}>
             All days
           </button>
@@ -5159,10 +5160,10 @@ export default function StoreZabbixPage({
   const [customDashCustomTo, setCustomDashCustomTo] = useState('')
   const [customDashCustomEpoch, setCustomDashCustomEpoch] = useState(null)
   /** BH window — same shape as ROP. bhEnabled toggles whether BH is applied at all. */
-  const [customDashBhEnabled, setCustomDashBhEnabled] = useState(false)
-  const [customDashBhStart, setCustomDashBhStart] = useState(9)
-  const [customDashBhEnd, setCustomDashBhEnd] = useState(18)
-  const [customDashBhDays, setCustomDashBhDays] = useState(() => new Set([1, 2, 3, 4, 5]))
+  const [customDashBhEnabled, setCustomDashBhEnabled] = useState(dashboardVariant === 'ro')
+  const [customDashBhStart, setCustomDashBhStart] = useState(dashboardVariant === 'ro' ? RO_DASHBOARD_BH_START : 9)
+  const [customDashBhEnd, setCustomDashBhEnd] = useState(dashboardVariant === 'ro' ? RO_DASHBOARD_BH_END : 18)
+  const [customDashBhDays, setCustomDashBhDays] = useState(() => new Set(dashboardVariant === 'ro' ? RO_DASHBOARD_BH_DAYS : [1, 2, 3, 4, 5]))
 
   useEffect(() => {
     if (dashboardVariant !== 'ro') return
@@ -5170,6 +5171,8 @@ export default function StoreZabbixPage({
     setRoNetTopBhEnd(RO_DASHBOARD_BH_END)
     setCustomDashBhStart(RO_DASHBOARD_BH_START)
     setCustomDashBhEnd(RO_DASHBOARD_BH_END)
+    setCustomDashBhEnabled(true)
+    setCustomDashBhDays(new Set(RO_DASHBOARD_BH_DAYS))
     setRopBhStart(RO_DASHBOARD_BH_START)
     setRopBhEnd(RO_DASHBOARD_BH_END)
     setReportBhStart(RO_DASHBOARD_BH_START)
@@ -5177,6 +5180,23 @@ export default function StoreZabbixPage({
     setNetBizStart(RO_DASHBOARD_BH_START)
     setNetBizEnd(RO_DASHBOARD_BH_END)
   }, [dashboardVariant])
+
+  const customDashBh = useMemo(() => {
+    if (dashboardVariant === 'ro') {
+      return {
+        bhEnabled: customDashBhEnabled,
+        bhStart: RO_DASHBOARD_BH_START,
+        bhEnd: RO_DASHBOARD_BH_END,
+        bhDays: new Set(RO_DASHBOARD_BH_DAYS),
+      }
+    }
+    return {
+      bhEnabled: customDashBhEnabled,
+      bhStart: customDashBhStart,
+      bhEnd: customDashBhEnd,
+      bhDays: customDashBhDays,
+    }
+  }, [dashboardVariant, customDashBhEnabled, customDashBhStart, customDashBhEnd, customDashBhDays])
 
   /** Per-host expanded item id for inline history chart in metric detail panel. */
   const [customDashExpandedItem, setCustomDashExpandedItem] = useState(null)
@@ -6019,13 +6039,18 @@ export default function StoreZabbixPage({
         }
         if (prefs.customFrom) setCustomDashCustomFrom(prefs.customFrom)
         if (prefs.customTo) setCustomDashCustomTo(prefs.customTo)
-        setCustomDashBhEnabled(!!prefs.bhEnabled)
+        setCustomDashBhEnabled(dashboardVariant === 'ro' ? true : !!prefs.bhEnabled)
         if (dashboardVariant !== 'ro') {
           if (Number.isFinite(Number(prefs.bhStart))) setCustomDashBhStart(Number(prefs.bhStart))
           if (Number.isFinite(Number(prefs.bhEnd))) setCustomDashBhEnd(Number(prefs.bhEnd))
+        } else {
+          setCustomDashBhStart(RO_DASHBOARD_BH_START)
+          setCustomDashBhEnd(RO_DASHBOARD_BH_END)
         }
-        if (Array.isArray(prefs.bhDays) && prefs.bhDays.length) {
+        if (Array.isArray(prefs.bhDays) && prefs.bhDays.length && dashboardVariant !== 'ro') {
           setCustomDashBhDays(new Set(prefs.bhDays))
+        } else if (dashboardVariant === 'ro') {
+          setCustomDashBhDays(new Set(RO_DASHBOARD_BH_DAYS))
         }
         if ([500, 1000, 2000, 5000].includes(Number(prefs.eventLimit))) {
           setCustomDashEventLimit(Number(prefs.eventLimit))
@@ -6085,17 +6110,17 @@ export default function StoreZabbixPage({
       customEpoch: customDashCustomEpoch,
       customFrom: customDashCustomFrom,
       customTo: customDashCustomTo,
-      bhEnabled: customDashBhEnabled,
-      bhStart: customDashBhStart,
-      bhEnd: customDashBhEnd,
-      bhDays: customDashBhDays,
+      bhEnabled: customDashBh.bhEnabled,
+      bhStart: customDashBh.bhStart,
+      bhEnd: customDashBh.bhEnd,
+      bhDays: customDashBh.bhDays,
       eventLimit: customDashEventLimit,
       activeWidget: customDashWidget,
     })
   }, [
     customDashSelected, customDashRange, customDashCustomEpoch,
     customDashCustomFrom, customDashCustomTo,
-    customDashBhEnabled, customDashBhStart, customDashBhEnd, customDashBhDays,
+    customDashBh,
     customDashEventLimit, customDashWidget,
   ])
 
@@ -6112,12 +6137,19 @@ export default function StoreZabbixPage({
     }
     setCustomDashCustomFrom(p.customFrom || '')
     setCustomDashCustomTo(p.customTo || '')
-    setCustomDashBhEnabled(!!p.bhEnabled)
+    setCustomDashBhEnabled(dashboardVariant === 'ro' ? true : !!p.bhEnabled)
     if (dashboardVariant !== 'ro') {
       if (Number.isFinite(Number(p.bhStart))) setCustomDashBhStart(Number(p.bhStart))
       if (Number.isFinite(Number(p.bhEnd))) setCustomDashBhEnd(Number(p.bhEnd))
+    } else {
+      setCustomDashBhStart(RO_DASHBOARD_BH_START)
+      setCustomDashBhEnd(RO_DASHBOARD_BH_END)
     }
-    if (Array.isArray(p.bhDays) && p.bhDays.length) setCustomDashBhDays(new Set(p.bhDays))
+    if (dashboardVariant === 'ro') {
+      setCustomDashBhDays(new Set(RO_DASHBOARD_BH_DAYS))
+    } else if (Array.isArray(p.bhDays) && p.bhDays.length) {
+      setCustomDashBhDays(new Set(p.bhDays))
+    }
     if ([500, 1000, 2000, 5000].includes(Number(p.eventLimit))) {
       setCustomDashEventLimit(Number(p.eventLimit))
     }
@@ -6190,10 +6222,10 @@ export default function StoreZabbixPage({
         customEpoch: customDashCustomEpoch,
         customFrom: customDashCustomFrom,
         customTo: customDashCustomTo,
-        bhEnabled: customDashBhEnabled,
-        bhStart: customDashBhStart,
-        bhEnd: customDashBhEnd,
-        bhDays: customDashBhDays,
+        bhEnabled: customDashBh.bhEnabled,
+        bhStart: customDashBh.bhStart,
+        bhEnd: customDashBh.bhEnd,
+        bhDays: customDashBh.bhDays,
         eventLimit: customDashEventLimit,
         activeWidget: customDashWidget,
       })
@@ -6206,7 +6238,7 @@ export default function StoreZabbixPage({
     authUser?.id, customDashPrefsScopeKey,
     customDashSelected, customDashRange, customDashCustomEpoch,
     customDashCustomFrom, customDashCustomTo,
-    customDashBhEnabled, customDashBhStart, customDashBhEnd, customDashBhDays,
+    customDashBh,
     customDashEventLimit, customDashWidget,
   ])
 
@@ -6251,12 +6283,12 @@ export default function StoreZabbixPage({
       if (uItem?.itemid) pairs.push({ hostid: String(h.hostid), itemid: uItem.itemid })
     }
     if (!pairs.length) { setCustomDashUptimeStats({}); return }
-    const bh = { bhEnabled: customDashBhEnabled, bhStart: customDashBhStart, bhEnd: customDashBhEnd, bhDays: customDashBhDays }
+    const bh = customDashBh
     loadCustomDashUptimeStats(pairs, customDashTimeWindow.from, customDashTimeWindow.to, bh)
   }, [
     tab, config?.configured, customDashSelected, customDashLatestByHost,
     customDashTimeWindow.from, customDashTimeWindow.to,
-    customDashBhEnabled, customDashBhStart, customDashBhEnd, customDashBhDays,
+    customDashBh,
     loadCustomDashUptimeStats,
   ])
 
@@ -6270,12 +6302,12 @@ export default function StoreZabbixPage({
       if (jItem?.itemid) pairs.push({ hostid: String(h.hostid), itemid: jItem.itemid })
     }
     if (!pairs.length) { setCustomDashJitterStats({}); return }
-    const bh = { bhEnabled: customDashBhEnabled, bhStart: customDashBhStart, bhEnd: customDashBhEnd, bhDays: customDashBhDays }
+    const bh = customDashBh
     loadCustomDashJitterStats(pairs, customDashTimeWindow.from, customDashTimeWindow.to, bh)
   }, [
     tab, config?.configured, customDashSelected, customDashLatestByHost,
     customDashTimeWindow.from, customDashTimeWindow.to,
-    customDashBhEnabled, customDashBhStart, customDashBhEnd, customDashBhDays,
+    customDashBh,
     loadCustomDashJitterStats,
   ])
 
@@ -6289,12 +6321,12 @@ export default function StoreZabbixPage({
       if (lItem?.itemid) pairs.push({ hostid: String(h.hostid), itemid: lItem.itemid })
     }
     if (!pairs.length) { setCustomDashLatencyStats({}); return }
-    const bh = { bhEnabled: customDashBhEnabled, bhStart: customDashBhStart, bhEnd: customDashBhEnd, bhDays: customDashBhDays }
+    const bh = customDashBh
     loadCustomDashLatencyStats(pairs, customDashTimeWindow.from, customDashTimeWindow.to, bh)
   }, [
     tab, config?.configured, customDashSelected, customDashLatestByHost,
     customDashTimeWindow.from, customDashTimeWindow.to,
-    customDashBhEnabled, customDashBhStart, customDashBhEnd, customDashBhDays,
+    customDashBh,
     loadCustomDashLatencyStats,
   ])
 
@@ -6308,12 +6340,12 @@ export default function StoreZabbixPage({
       if (gItem?.itemid) pairs.push({ hostid: String(h.hostid), itemid: gItem.itemid })
     }
     if (!pairs.length) { setCustomDashGatewayStats({}); return }
-    const bh = { bhEnabled: customDashBhEnabled, bhStart: customDashBhStart, bhEnd: customDashBhEnd, bhDays: customDashBhDays }
+    const bh = customDashBh
     loadCustomDashGatewayStats(pairs, customDashTimeWindow.from, customDashTimeWindow.to, bh)
   }, [
     tab, config?.configured, customDashSelected, customDashLatestByHost,
     customDashTimeWindow.from, customDashTimeWindow.to,
-    customDashBhEnabled, customDashBhStart, customDashBhEnd, customDashBhDays,
+    customDashBh,
     loadCustomDashGatewayStats,
   ])
 
@@ -9775,13 +9807,13 @@ export default function StoreZabbixPage({
           }}
           timeWindow={customDashTimeWindow}
           /* BH */
-          bhEnabled={customDashBhEnabled}
+          bhEnabled={customDashBh.bhEnabled}
           onBhEnabled={setCustomDashBhEnabled}
-          bhStart={customDashBhStart}
-          onBhStart={setCustomDashBhStart}
-          bhEnd={customDashBhEnd}
-          onBhEnd={setCustomDashBhEnd}
-          bhDays={customDashBhDays}
+          bhStart={customDashBh.bhStart}
+          onBhStart={dashboardVariant === 'ro' ? () => {} : setCustomDashBhStart}
+          bhEnd={customDashBh.bhEnd}
+          onBhEnd={dashboardVariant === 'ro' ? () => {} : setCustomDashBhEnd}
+          bhDays={customDashBh.bhDays}
           onBhDays={setCustomDashBhDays}
           /* Inline expansion */
           expandedItem={customDashExpandedItem}
@@ -9848,7 +9880,7 @@ export default function StoreZabbixPage({
           }
           return ({ '24h': 'Last 24 hours', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days' })[r] || r
         })()}
-        bhEnabled={customDashBhEnabled}
+        bhEnabled={customDashBh.bhEnabled}
         onClose={() => setCustomDashRebootModalHost(null)}
       />
       <CustomDashCrashModal
