@@ -156,6 +156,27 @@ function normGroupName(name) {
   return String(name || '').toLowerCase().replace(/\s+/g, '')
 }
 
+export const RP_SYSTEM_GROUP_ALIASES = ['RP System', 'RPSystem', 'RP Group', 'RP']
+
+/** Pick the Zabbix hostgroup row that best matches a wanted label (exact or fuzzy). */
+export function findHostGroup(allGroups, wanted) {
+  const groups = allGroups || []
+  const gf = String(wanted || '').trim()
+  if (!gf) return null
+  const exact = groups.find((g) => g.name === gf)
+  if (exact) return exact
+  const candidates = [gf, ...RP_SYSTEM_GROUP_ALIASES]
+  for (const g of groups) {
+    const n = normGroupName(g.name)
+    if (!n) continue
+    if (candidates.some((c) => {
+      const cn = normGroupName(c)
+      return cn === n || n.includes(cn) || cn.includes(n)
+    })) return g
+  }
+  return null
+}
+
 /** Extract group names from Zabbix host.get row. */
 export function hostGroupNames(host) {
   return (host?.hostgroups || host?.groups || [])
@@ -167,11 +188,11 @@ export function hostGroupNames(host) {
 export function hostInGroup(hostGroups, wantedGroup) {
   const gn = String(wantedGroup || '').trim()
   if (!gn) return false
-  const want = normGroupName(gn)
+  const candidates = [gn, ...RP_SYSTEM_GROUP_ALIASES].map(normGroupName).filter(Boolean)
   return (hostGroups || []).some((g) => {
     const name = normGroupName(typeof g === 'string' ? g : g?.name || g)
     if (!name) return false
-    return name === want || name.includes(want) || want.includes(name)
+    return candidates.some((a) => name === a || name.includes(a) || a.includes(name))
   })
 }
 

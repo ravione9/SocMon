@@ -10,11 +10,11 @@ import { buildStoreHostAliases, extractStoreCode } from '../services/ai/queryCon
 
 /** Try these Zabbix hostgroup names in order (deployments differ). */
 const ZABBIX_GROUP_ALIASES = {
-  rp: ['RP Group', 'RP'],
-  all: ['RP Group', 'RP'],
-  rp_sdwan: ['RP Group', 'RP'],
-  rp_no_sdwan: ['RP Group', 'RP'],
-  manual_sdwan: ['RP Group', 'RP'],
+  rp: ['RP System', 'RPSystem', 'RP Group', 'RP'],
+  all: ['RP System', 'RPSystem', 'RP Group', 'RP'],
+  rp_sdwan: ['RP System', 'RPSystem', 'RP Group', 'RP'],
+  rp_no_sdwan: ['RP System', 'RPSystem', 'RP Group', 'RP'],
+  manual_sdwan: ['RP System', 'RPSystem', 'RP Group', 'RP'],
   pos: ['POS System Group', 'POS'],
   sdwan: ['SD-WAN Group', 'SD-WAN'],
 }

@@ -7788,7 +7788,15 @@ export default function StoreZabbixPage({
             >
               <RoProblematicStoresTable
                 rows={roNetworkTop.problematic}
-                emptyMsg={roNetTopBhEnabled ? 'No problematic stores in business hours for the selected range.' : 'No problematic stores in the selected range.'}
+                emptyMsg={
+                  roNetworkTop?.summary?.hostsInScope === 0
+                    ? `No hosts found in ${resolvedLockedGroup || lockedHostGroup || 'RP System'}. Check the Zabbix host group name.`
+                    : roNetworkTop?.note
+                      ? roNetworkTop.note
+                      : roNetTopBhEnabled
+                        ? 'No problematic stores in business hours for the selected range. Try disabling the BH filter or widening the date range.'
+                        : 'No problematic stores in the selected range.'
+                }
                 storeByHost={customDashStoreByHost}
                 storeManualCodes={customDashStoreManualCodes}
                 onRowClick={(r) => goToCustomDash({ hostid: r.hostid, host: r.host, name: r.name })}

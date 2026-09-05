@@ -19,6 +19,7 @@ import {
   crashSeverity,
   crashTypeLabel,
 } from '../services/influxStore.js'
+import { findHostGroup, hostInGroup } from '../utils/zabbixStorePingSensors.js'
 
 export function createZabbixRouter(client) {
   const {
@@ -78,7 +79,7 @@ function filterOverviewHosts(rows, groupName, q) {
   let out = rows || []
   const g = String(groupName || '').trim()
   if (g) {
-    out = out.filter((h) => (h.hostgroups || h.groups || []).some((x) => (x.name || '') === g))
+    out = out.filter((h) => hostInGroup(h.hostgroups || h.groups || [], g))
   }
   const search = String(q || '').trim().toLowerCase()
   if (search) {
@@ -1784,8 +1785,10 @@ async function resolveMonitoredHostsForGroup(groupFilter = '') {
   })()
   const allGroups = (allGroupsRaw || []).sort((a, b) => a.name.localeCompare(b.name))
 
+  let resolvedGroupName = null
   if (gf) {
-    const gobj = allGroups.find((g) => g.name === gf)
+    const gobj = findHostGroup(allGroups, gf)
+    resolvedGroupName = gobj?.name || gf
     if (gobj) {
       const hrows = await zabbixRpc('host.get', {
         groupids: [gobj.groupid], monitored_hosts: true,
@@ -1810,7 +1813,7 @@ async function resolveMonitoredHostsForGroup(groupFilter = '') {
 
   return {
     allGroups: allGroups.map((g) => g.name),
-    groupFilter: gf || null,
+    groupFilter: resolvedGroupName,
     hostMap,
     hostids: Object.keys(hostMap),
   }
@@ -2271,7 +2274,7 @@ router.get('/network-health', async (req, res) => {
     const allGroups = (allGroupsRaw || []).sort((a, b) => a.name.localeCompare(b.name))
 
     if (groupFilter) {
-      const gobj = allGroups.find((g) => g.name === groupFilter)
+      const gobj = findHostGroup(allGroups, groupFilter)
       if (gobj) {
         const hrows = await zabbixRpc('host.get', {
           groupids: [gobj.groupid], monitored_hosts: true,
@@ -2620,7 +2623,7 @@ router.get('/rop-dashboard', async (req, res) => {
       try { return await zabbixRpc('hostgroup.get', { output: ['groupid', 'name'] }) } catch { return [] }
     })()
     const allGroups = (allGroupsRaw || []).sort((a, b) => a.name.localeCompare(b.name))
-    const gobj = allGroups.find((g) => g.name === groupFilter)
+    const gobj = findHostGroup(allGroups, groupFilter)
 
     if (!gobj) {
       return res.json({
