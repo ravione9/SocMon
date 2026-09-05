@@ -47,6 +47,41 @@ const RO_DASHBOARD_BH_START = 12
 const RO_DASHBOARD_BH_END = 21
 const RO_DASHBOARD_BH_DAYS = [0, 1, 2, 3, 4, 5, 6]
 
+function toDateInput(ts) {
+  const d = new Date(Number(ts) * 1000)
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+/** Normalize saved custom-range input to YYYY-MM-DD for Ro date pickers. */
+function toRoDateInput(value) {
+  if (!value) return ''
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return String(value)
+  const ts = Math.floor(new Date(value).getTime() / 1000)
+  if (!Number.isFinite(ts)) return ''
+  return toDateInput(ts)
+}
+
+/** Build epoch range from date-only inputs and BH hour window (local time). */
+function roCustomRangeEpoch(dateFrom, dateTo, bhStart = RO_DASHBOARD_BH_START, bhEnd = RO_DASHBOARD_BH_END) {
+  if (!dateFrom || !dateTo) return null
+  const [y1, m1, d1] = String(dateFrom).split('-').map(Number)
+  const [y2, m2, d2] = String(dateTo).split('-').map(Number)
+  if (![y1, m1, d1, y2, m2, d2].every(Number.isFinite)) return null
+  const from = new Date(y1, m1 - 1, d1, bhStart, 0, 0, 0)
+  const to = new Date(y2, m2 - 1, d2, bhEnd, 0, 0, 0)
+  const fromTs = Math.floor(from.getTime() / 1000)
+  const toTs = Math.floor(to.getTime() / 1000)
+  if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || fromTs >= toTs) return null
+  return { from: fromTs, to: toTs }
+}
+
+function roCustomRangeDateTimeLocal(dateStr, hour) {
+  const [y, m, d] = String(dateStr).split('-').map(Number)
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${y}-${pad(m)}-${pad(d)}T${pad(hour)}:00`
+}
+
 const ROP_GROUP_LABELS = {
   rp: 'All ROP',
   rp_sdwan: 'ROP + SD-WAN',
@@ -2019,23 +2054,34 @@ function RoNetworkTopFilters({
       {roNetTopRange === 'custom' && (
         <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span className="opm-toolbar-label">Custom</span>
-          <input type="datetime-local" value={roNetTopCustomFrom} onChange={(e) => setRoNetTopCustomFrom(e.target.value)}
+          <input type={lockBhTimes ? 'date' : 'datetime-local'} value={roNetTopCustomFrom} onChange={(e) => setRoNetTopCustomFrom(e.target.value)}
             style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none' }} />
           <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>to</span>
-          <input type="datetime-local" value={roNetTopCustomTo} onChange={(e) => setRoNetTopCustomTo(e.target.value)}
+          <input type={lockBhTimes ? 'date' : 'datetime-local'} value={roNetTopCustomTo} onChange={(e) => setRoNetTopCustomTo(e.target.value)}
             style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none' }} />
           <button type="button"
             onClick={() => {
               if (!roNetTopCustomFrom || !roNetTopCustomTo) return
-              const from = Math.floor(new Date(roNetTopCustomFrom).getTime() / 1000)
-              const to = Math.floor(new Date(roNetTopCustomTo).getTime() / 1000)
-              if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) return
-              setRoNetTopCustomEpoch({ from, to })
+              if (lockBhTimes) {
+                const epoch = roCustomRangeEpoch(roNetTopCustomFrom, roNetTopCustomTo, roNetTopBhStart, roNetTopBhEnd)
+                if (!epoch) return
+                setRoNetTopCustomEpoch(epoch)
+              } else {
+                const from = Math.floor(new Date(roNetTopCustomFrom).getTime() / 1000)
+                const to = Math.floor(new Date(roNetTopCustomTo).getTime() / 1000)
+                if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) return
+                setRoNetTopCustomEpoch({ from, to })
+              }
             }}
             disabled={!roNetTopCustomFrom || !roNetTopCustomTo}
             style={{ padding: '5px 14px', borderRadius: 5, fontSize: 11, fontWeight: 700, fontFamily: 'var(--mono)', border: 'none', background: 'var(--accent)', color: '#fff', cursor: roNetTopCustomFrom && roNetTopCustomTo ? 'pointer' : 'not-allowed', opacity: roNetTopCustomFrom && roNetTopCustomTo ? 1 : .4 }}>
             Apply
           </button>
+          {lockBhTimes && (
+            <span className="opm-pill" style={{ background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
+              Uses BH {String(roNetTopBhStart).padStart(2, '0')}:00–{String(roNetTopBhEnd).padStart(2, '0')}:00
+            </span>
+          )}
           {roNetTopCustomEpoch && <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', fontSize: 10 }}>Custom range active</span>}
         </div>
       )}
@@ -3537,13 +3583,18 @@ function CustomDashboardPanel({
 
   const rangeLabel = useMemo(() => {
     if (range === 'custom' && customEpoch?.from && customEpoch?.to) {
+      if (isRoVariant) {
+        const fromDate = new Date(customEpoch.from * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+        const toDate = new Date(customEpoch.to * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+        return `${fromDate} – ${toDate} · BH ${String(bhStart).padStart(2, '0')}:00–${String(bhEnd).padStart(2, '0')}:00`
+      }
       const fromStr = new Date(customEpoch.from * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
       const toStr = new Date(customEpoch.to * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
       return `${fromStr} – ${toStr}`
     }
     const m = { '24h': 'Last 24 hours', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days' }
     return m[range] || range
-  }, [range, customEpoch])
+  }, [range, customEpoch, isRoVariant, bhStart, bhEnd])
 
   const bhLabel = useMemo(() => {
     if (!bhEnabled) return 'OFF (24/7)'
@@ -3730,15 +3781,20 @@ function CustomDashboardPanel({
         {range === 'custom' && (
           <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <span className="opm-toolbar-label">Custom</span>
-            <input type="datetime-local" value={customFrom} onChange={(e) => onCustomFrom(e.target.value)}
+            <input type={isRoVariant ? 'date' : 'datetime-local'} value={customFrom} onChange={(e) => onCustomFrom(e.target.value)}
               style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none' }} />
             <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>to</span>
-            <input type="datetime-local" value={customTo} onChange={(e) => onCustomTo(e.target.value)}
+            <input type={isRoVariant ? 'date' : 'datetime-local'} value={customTo} onChange={(e) => onCustomTo(e.target.value)}
               style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none' }} />
             <button type="button" onClick={onApplyCustomRange} disabled={!customFrom || !customTo}
               style={{ padding: '5px 14px', borderRadius: 5, fontSize: 11, fontWeight: 700, fontFamily: 'var(--mono)', border: 'none', background: 'var(--accent)', color: '#fff', cursor: customFrom && customTo ? 'pointer' : 'not-allowed', opacity: customFrom && customTo ? 1 : .4 }}>
               Apply
             </button>
+            {isRoVariant && (
+              <span className="opm-pill" style={{ background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
+                Uses BH {String(bhStart).padStart(2, '0')}:00–{String(bhEnd).padStart(2, '0')}:00
+              </span>
+            )}
             {customEpoch && <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', fontSize: 10 }}>Custom range active</span>}
           </div>
         )}
@@ -5746,8 +5802,19 @@ export default function StoreZabbixPage({
       if (!fromInput || !toInput) {
         throw Object.assign(new Error('Pick a Custom date range — both From and To required.'), { code: 'BAD_RANGE' })
       }
-      fromSec = Math.floor(new Date(fromInput).getTime() / 1000)
-      toSec = Math.floor(new Date(toInput).getTime() / 1000)
+      if (dashboardVariant === 'ro' && reportRangeMode !== 'inherit') {
+        const bhStartHr = reportBhMode === 'inherit' ? ropBhStart : reportBhStart
+        const bhEndHr = reportBhMode === 'inherit' ? ropBhEnd : reportBhEnd
+        const epoch = roCustomRangeEpoch(fromInput, toInput, bhStartHr, bhEndHr)
+        if (!epoch) {
+          throw Object.assign(new Error('Invalid range — pick a valid date window.'), { code: 'BAD_RANGE' })
+        }
+        fromSec = epoch.from
+        toSec = epoch.to
+      } else {
+        fromSec = Math.floor(new Date(fromInput).getTime() / 1000)
+        toSec = Math.floor(new Date(toInput).getTime() / 1000)
+      }
     } else {
       const days = ({ '24h': 1, '7d': 7, '14d': 14, '30d': 30 })[effRange] || 7
       toSec = Math.floor(Date.now() / 1000)
@@ -5800,7 +5867,7 @@ export default function StoreZabbixPage({
     ropUptime, reportHostScopeMode, reportSelectedStoreTags, ropGroupKey, ropRange, ropCustomEpoch, ropBhStart, ropBhEnd, ropBhDays,
     reportRangeMode, reportCustomFrom, reportCustomTo,
     reportBhMode, reportBhStart, reportBhEnd, reportBhDays,
-    reportThresholdMs, reportGapMin, reportTopN,
+    reportThresholdMs, reportGapMin, reportTopN, dashboardVariant,
   ])
 
   const formatReportApiError = (e) => {
@@ -6034,11 +6101,15 @@ export default function StoreZabbixPage({
         if (prefs.range) setCustomDashRange(prefs.range)
         if (prefs.customEpoch?.from && prefs.customEpoch?.to) {
           setCustomDashCustomEpoch({ from: prefs.customEpoch.from, to: prefs.customEpoch.to })
+          if (dashboardVariant === 'ro') {
+            if (!prefs.customFrom) setCustomDashCustomFrom(toDateInput(prefs.customEpoch.from))
+            if (!prefs.customTo) setCustomDashCustomTo(toDateInput(prefs.customEpoch.to))
+          }
         } else {
           setCustomDashCustomEpoch(null)
         }
-        if (prefs.customFrom) setCustomDashCustomFrom(prefs.customFrom)
-        if (prefs.customTo) setCustomDashCustomTo(prefs.customTo)
+        if (prefs.customFrom) setCustomDashCustomFrom(dashboardVariant === 'ro' ? toRoDateInput(prefs.customFrom) : prefs.customFrom)
+        if (prefs.customTo) setCustomDashCustomTo(dashboardVariant === 'ro' ? toRoDateInput(prefs.customTo) : prefs.customTo)
         setCustomDashBhEnabled(dashboardVariant === 'ro' ? true : !!prefs.bhEnabled)
         if (dashboardVariant !== 'ro') {
           if (Number.isFinite(Number(prefs.bhStart))) setCustomDashBhStart(Number(prefs.bhStart))
@@ -6135,8 +6206,8 @@ export default function StoreZabbixPage({
     } else {
       setCustomDashCustomEpoch(null)
     }
-    setCustomDashCustomFrom(p.customFrom || '')
-    setCustomDashCustomTo(p.customTo || '')
+    setCustomDashCustomFrom(dashboardVariant === 'ro' ? toRoDateInput(p.customFrom || '') : (p.customFrom || ''))
+    setCustomDashCustomTo(dashboardVariant === 'ro' ? toRoDateInput(p.customTo || '') : (p.customTo || ''))
     setCustomDashBhEnabled(dashboardVariant === 'ro' ? true : !!p.bhEnabled)
     if (dashboardVariant !== 'ro') {
       if (Number.isFinite(Number(p.bhStart))) setCustomDashBhStart(Number(p.bhStart))
@@ -6570,13 +6641,18 @@ export default function StoreZabbixPage({
   }, [scopedInventoryHosts, customDashStoreByHost, customDashStoreManualCodes])
   const roNetTopRangeLabel = useMemo(() => {
     if (roNetTopRange === 'custom' && roNetTopCustomEpoch?.from && roNetTopCustomEpoch?.to) {
+      if (dashboardVariant === 'ro') {
+        const fromDate = new Date(roNetTopCustomEpoch.from * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+        const toDate = new Date(roNetTopCustomEpoch.to * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+        return `${fromDate} – ${toDate} · BH ${String(roNetTopBhStart).padStart(2, '0')}:00–${String(roNetTopBhEnd).padStart(2, '0')}:00`
+      }
       const fromStr = new Date(roNetTopCustomEpoch.from * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
       const toStr = new Date(roNetTopCustomEpoch.to * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
       return `${fromStr} – ${toStr}`
     }
     const m = { '24h': 'Last 24 hours', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days' }
     return m[roNetTopRange] || roNetTopRange
-  }, [roNetTopRange, roNetTopCustomEpoch])
+  }, [roNetTopRange, roNetTopCustomEpoch, dashboardVariant, roNetTopBhStart, roNetTopBhEnd])
   const roNetTopBhLabel = useMemo(() => {
     if (!roNetTopBhEnabled) return 'OFF (24/7)'
     const dayList = [...roNetTopBhDays].sort((a, b) => a - b)
@@ -7037,23 +7113,25 @@ export default function StoreZabbixPage({
             {roNetTopRange === 'custom' && (
               <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <span className="opm-toolbar-label">Custom</span>
-                <input type="datetime-local" value={roNetTopCustomFrom} onChange={(e) => setRoNetTopCustomFrom(e.target.value)}
+                <input type="date" value={roNetTopCustomFrom} onChange={(e) => setRoNetTopCustomFrom(e.target.value)}
                   style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none' }} />
                 <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>to</span>
-                <input type="datetime-local" value={roNetTopCustomTo} onChange={(e) => setRoNetTopCustomTo(e.target.value)}
+                <input type="date" value={roNetTopCustomTo} onChange={(e) => setRoNetTopCustomTo(e.target.value)}
                   style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none' }} />
                 <button type="button"
                   onClick={() => {
                     if (!roNetTopCustomFrom || !roNetTopCustomTo) return
-                    const from = Math.floor(new Date(roNetTopCustomFrom).getTime() / 1000)
-                    const to = Math.floor(new Date(roNetTopCustomTo).getTime() / 1000)
-                    if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) return
-                    setRoNetTopCustomEpoch({ from, to })
+                    const epoch = roCustomRangeEpoch(roNetTopCustomFrom, roNetTopCustomTo, roNetTopBhStart, roNetTopBhEnd)
+                    if (!epoch) return
+                    setRoNetTopCustomEpoch(epoch)
                   }}
                   disabled={!roNetTopCustomFrom || !roNetTopCustomTo}
                   style={{ padding: '5px 14px', borderRadius: 5, fontSize: 11, fontWeight: 700, fontFamily: 'var(--mono)', border: 'none', background: 'var(--accent)', color: '#fff', cursor: roNetTopCustomFrom && roNetTopCustomTo ? 'pointer' : 'not-allowed', opacity: roNetTopCustomFrom && roNetTopCustomTo ? 1 : .4 }}>
                   Apply
                 </button>
+                <span className="opm-pill" style={{ background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
+                  Uses BH {String(roNetTopBhStart).padStart(2, '0')}:00–{String(roNetTopBhEnd).padStart(2, '0')}:00
+                </span>
                 {roNetTopCustomEpoch && <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', fontSize: 10 }}>Custom range active</span>}
               </div>
             )}
@@ -8375,19 +8453,33 @@ export default function StoreZabbixPage({
         const seedCustomRange = (daysBack = 7) => {
           const to = Math.floor(Date.now() / 1000)
           const from = to - daysBack * 86400
-          const fromStr = toLocalInput(from)
-          const toStr = toLocalInput(to)
-          setRopCustomFrom(fromStr)
-          setRopCustomTo(toStr)
-          setRopCustomEpoch({ from: fromStr, to: toStr })
+          if (dashboardVariant === 'ro') {
+            const fromStr = toDateInput(from)
+            const toStr = toDateInput(to)
+            setRopCustomFrom(fromStr)
+            setRopCustomTo(toStr)
+            const epoch = roCustomRangeEpoch(fromStr, toStr, ropBhStart, ropBhEnd)
+            if (epoch) {
+              setRopCustomEpoch({
+                from: roCustomRangeDateTimeLocal(fromStr, ropBhStart),
+                to: roCustomRangeDateTimeLocal(toStr, ropBhEnd),
+              })
+            }
+          } else {
+            const fromStr = toLocalInput(from)
+            const toStr = toLocalInput(to)
+            setRopCustomFrom(fromStr)
+            setRopCustomTo(toStr)
+            setRopCustomEpoch({ from: fromStr, to: toStr })
+          }
         }
         const selectRopRange = (id) => {
           setRopRange(id)
           if (id === 'custom') {
             if (!ropCustomEpoch) seedCustomRange(7)
             else {
-              setRopCustomFrom(ropCustomEpoch.from)
-              setRopCustomTo(ropCustomEpoch.to)
+              setRopCustomFrom(dashboardVariant === 'ro' ? toRoDateInput(ropCustomEpoch.from) : ropCustomEpoch.from)
+              setRopCustomTo(dashboardVariant === 'ro' ? toRoDateInput(ropCustomEpoch.to) : ropCustomEpoch.to)
             }
           } else {
             setRopCustomEpoch(null)
@@ -8395,10 +8487,19 @@ export default function StoreZabbixPage({
         }
         const applyRopCustomRange = () => {
           if (!ropCustomFrom || !ropCustomTo) return
-          const fromTs = Math.floor(new Date(ropCustomFrom).getTime() / 1000)
-          const toTs = Math.floor(new Date(ropCustomTo).getTime() / 1000)
-          if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || fromTs >= toTs) return
-          setRopCustomEpoch({ from: ropCustomFrom, to: ropCustomTo })
+          if (dashboardVariant === 'ro') {
+            const epoch = roCustomRangeEpoch(ropCustomFrom, ropCustomTo, ropBhStart, ropBhEnd)
+            if (!epoch) return
+            setRopCustomEpoch({
+              from: roCustomRangeDateTimeLocal(ropCustomFrom, ropBhStart),
+              to: roCustomRangeDateTimeLocal(ropCustomTo, ropBhEnd),
+            })
+          } else {
+            const fromTs = Math.floor(new Date(ropCustomFrom).getTime() / 1000)
+            const toTs = Math.floor(new Date(ropCustomTo).getTime() / 1000)
+            if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || fromTs >= toTs) return
+            setRopCustomEpoch({ from: ropCustomFrom, to: ropCustomTo })
+          }
         }
         const bhSummary = (() => {
           const allDays = ropBhDays.size === 7
@@ -8406,10 +8507,12 @@ export default function StoreZabbixPage({
           const dayLabel = allDays ? 'Every day' : weekdays ? 'Mon–Fri' : [...ropBhDays].sort().map((d) => dayOfWeekLabels[d]).join(', ')
           return `${String(ropBhStart).padStart(2,'0')}:00 – ${String(ropBhEnd).padStart(2,'0')}:00 · ${dayLabel}`
         })()
-        const customRangeValid = ropCustomFrom && ropCustomTo
+        const customRangeValid = dashboardVariant === 'ro'
+          ? !!roCustomRangeEpoch(ropCustomFrom, ropCustomTo, ropBhStart, ropBhEnd)
+          : (ropCustomFrom && ropCustomTo
           && Number.isFinite(new Date(ropCustomFrom).getTime())
           && Number.isFinite(new Date(ropCustomTo).getTime())
-          && new Date(ropCustomFrom) < new Date(ropCustomTo)
+          && new Date(ropCustomFrom) < new Date(ropCustomTo))
 
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -8512,13 +8615,18 @@ export default function StoreZabbixPage({
                 <div className="rop-toolbar-row rop-toolbar-row--sub">
                   <div className="rop-field">
                     <span className="rop-field-label">Custom</span>
-                    <input type="datetime-local" value={ropCustomFrom} onChange={(e) => setRopCustomFrom(e.target.value)}
+                    <input type={dashboardVariant === 'ro' ? 'date' : 'datetime-local'} value={ropCustomFrom} onChange={(e) => setRopCustomFrom(e.target.value)}
                       className="rop-control rop-control--datetime" />
                     <span style={{ fontSize: 10, color: 'var(--text3)' }}>–</span>
-                    <input type="datetime-local" value={ropCustomTo} onChange={(e) => setRopCustomTo(e.target.value)}
+                    <input type={dashboardVariant === 'ro' ? 'date' : 'datetime-local'} value={ropCustomTo} onChange={(e) => setRopCustomTo(e.target.value)}
                       className="rop-control rop-control--datetime" />
                     <button type="button" onClick={applyRopCustomRange} disabled={!customRangeValid}
                       className="rop-action-btn">Apply</button>
+                    {dashboardVariant === 'ro' && (
+                      <span className="rop-meta" style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>
+                        Uses BH {String(ropBhStart).padStart(2, '0')}:00–{String(ropBhEnd).padStart(2, '0')}:00
+                      </span>
+                    )}
                     {ropCustomEpoch && (
                       <span className="rop-meta">
                         {new Date(ropCustomEpoch.from).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
@@ -9169,19 +9277,33 @@ export default function StoreZabbixPage({
         const seedCustomRange = (daysBack = 7) => {
           const to = Math.floor(Date.now() / 1000)
           const from = to - daysBack * 86400
-          const fromStr = toLocalInput(from)
-          const toStr = toLocalInput(to)
-          setRopCustomFrom(fromStr)
-          setRopCustomTo(toStr)
-          setRopCustomEpoch({ from: fromStr, to: toStr })
+          if (dashboardVariant === 'ro') {
+            const fromStr = toDateInput(from)
+            const toStr = toDateInput(to)
+            setRopCustomFrom(fromStr)
+            setRopCustomTo(toStr)
+            const epoch = roCustomRangeEpoch(fromStr, toStr, ropBhStart, ropBhEnd)
+            if (epoch) {
+              setRopCustomEpoch({
+                from: roCustomRangeDateTimeLocal(fromStr, ropBhStart),
+                to: roCustomRangeDateTimeLocal(toStr, ropBhEnd),
+              })
+            }
+          } else {
+            const fromStr = toLocalInput(from)
+            const toStr = toLocalInput(to)
+            setRopCustomFrom(fromStr)
+            setRopCustomTo(toStr)
+            setRopCustomEpoch({ from: fromStr, to: toStr })
+          }
         }
         const selectRopRange = (id) => {
           setRopRange(id)
           if (id === 'custom') {
             if (!ropCustomEpoch) seedCustomRange(7)
             else {
-              setRopCustomFrom(ropCustomEpoch.from)
-              setRopCustomTo(ropCustomEpoch.to)
+              setRopCustomFrom(dashboardVariant === 'ro' ? toRoDateInput(ropCustomEpoch.from) : ropCustomEpoch.from)
+              setRopCustomTo(dashboardVariant === 'ro' ? toRoDateInput(ropCustomEpoch.to) : ropCustomEpoch.to)
             }
           } else {
             setRopCustomEpoch(null)
@@ -9189,10 +9311,19 @@ export default function StoreZabbixPage({
         }
         const applyRopCustomRange = () => {
           if (!ropCustomFrom || !ropCustomTo) return
-          const fromTs = Math.floor(new Date(ropCustomFrom).getTime() / 1000)
-          const toTs = Math.floor(new Date(ropCustomTo).getTime() / 1000)
-          if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || fromTs >= toTs) return
-          setRopCustomEpoch({ from: ropCustomFrom, to: ropCustomTo })
+          if (dashboardVariant === 'ro') {
+            const epoch = roCustomRangeEpoch(ropCustomFrom, ropCustomTo, ropBhStart, ropBhEnd)
+            if (!epoch) return
+            setRopCustomEpoch({
+              from: roCustomRangeDateTimeLocal(ropCustomFrom, ropBhStart),
+              to: roCustomRangeDateTimeLocal(ropCustomTo, ropBhEnd),
+            })
+          } else {
+            const fromTs = Math.floor(new Date(ropCustomFrom).getTime() / 1000)
+            const toTs = Math.floor(new Date(ropCustomTo).getTime() / 1000)
+            if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || fromTs >= toTs) return
+            setRopCustomEpoch({ from: ropCustomFrom, to: ropCustomTo })
+          }
         }
         const bhSummary = (() => {
           const allDays = ropBhDays.size === 7
@@ -9200,10 +9331,12 @@ export default function StoreZabbixPage({
           const dayLabel = allDays ? 'Every day' : weekdays ? 'Mon–Fri' : [...ropBhDays].sort().map((d) => ROP_DAY_LABELS[d]).join(', ')
           return `${String(ropBhStart).padStart(2, '0')}:00 – ${String(ropBhEnd).padStart(2, '0')}:00 · ${dayLabel}`
         })()
-        const customRangeValid = ropCustomFrom && ropCustomTo
+        const customRangeValid = dashboardVariant === 'ro'
+          ? !!roCustomRangeEpoch(ropCustomFrom, ropCustomTo, ropBhStart, ropBhEnd)
+          : (ropCustomFrom && ropCustomTo
           && Number.isFinite(new Date(ropCustomFrom).getTime())
           && Number.isFinite(new Date(ropCustomTo).getTime())
-          && new Date(ropCustomFrom) < new Date(ropCustomTo)
+          && new Date(ropCustomFrom) < new Date(ropCustomTo))
         const reportScopeHosts = reportHostScopeMode === 'custom'
           ? (ru?.perStore || []).filter((s) => reportSelectedStoreTags.includes(String(s?.storeTag || '')))
           : (ru?.perStore || [])
@@ -9297,13 +9430,18 @@ export default function StoreZabbixPage({
                 <div className="rop-toolbar-row rop-toolbar-row--sub">
                   <div className="rop-field">
                     <span className="rop-field-label">Custom</span>
-                    <input type="datetime-local" value={ropCustomFrom} onChange={(e) => setRopCustomFrom(e.target.value)}
+                    <input type={dashboardVariant === 'ro' ? 'date' : 'datetime-local'} value={ropCustomFrom} onChange={(e) => setRopCustomFrom(e.target.value)}
                       className="rop-control rop-control--datetime" />
                     <span style={{ fontSize: 10, color: 'var(--text3)' }}>–</span>
-                    <input type="datetime-local" value={ropCustomTo} onChange={(e) => setRopCustomTo(e.target.value)}
+                    <input type={dashboardVariant === 'ro' ? 'date' : 'datetime-local'} value={ropCustomTo} onChange={(e) => setRopCustomTo(e.target.value)}
                       className="rop-control rop-control--datetime" />
                     <button type="button" onClick={applyRopCustomRange} disabled={!customRangeValid}
                       className="rop-action-btn">Apply</button>
+                    {dashboardVariant === 'ro' && (
+                      <span className="rop-meta" style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>
+                        Uses BH {String(ropBhStart).padStart(2, '0')}:00–{String(ropBhEnd).padStart(2, '0')}:00
+                      </span>
+                    )}
                   </div>
                 </div>
               )}
@@ -9487,7 +9625,9 @@ export default function StoreZabbixPage({
                   const effRangeLabel = reportRangeMode === 'inherit'
                     ? `Inherit · ${ropDisconnectRangeLabel}`
                     : (effRangeId === 'custom' && reportCustomFrom && reportCustomTo
-                        ? `${reportCustomFrom} – ${reportCustomTo}`
+                        ? (dashboardVariant === 'ro'
+                          ? `${reportCustomFrom} – ${reportCustomTo} · BH ${String(reportBhMode === 'inherit' ? ropBhStart : reportBhStart).padStart(2, '0')}:00–${String(reportBhMode === 'inherit' ? ropBhEnd : reportBhEnd).padStart(2, '0')}:00`
+                          : `${reportCustomFrom} – ${reportCustomTo}`)
                         : ({ '24h': 'Last 24h', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days', custom: 'Custom (set dates)' })[effRangeId])
                   const effGroupScopeLabel = reportHostScopeMode === 'custom'
                     ? `Custom hosts (${reportSelectedStoreTags.length} selected)`
@@ -9535,13 +9675,18 @@ export default function StoreZabbixPage({
                         ))}
                         {reportRangeMode === 'custom' && (
                           <>
-                            <input type="datetime-local" value={reportCustomFrom}
+                            <input type={dashboardVariant === 'ro' ? 'date' : 'datetime-local'} value={reportCustomFrom}
                               onChange={(e) => setReportCustomFrom(e.target.value)}
                               className="rop-control rop-control--datetime" />
                             <span style={{ fontSize: 10, color: 'var(--text3)' }}>–</span>
-                            <input type="datetime-local" value={reportCustomTo}
+                            <input type={dashboardVariant === 'ro' ? 'date' : 'datetime-local'} value={reportCustomTo}
                               onChange={(e) => setReportCustomTo(e.target.value)}
                               className="rop-control rop-control--datetime" />
+                            {dashboardVariant === 'ro' && (
+                              <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                                Uses BH {String(reportBhMode === 'inherit' ? ropBhStart : reportBhStart).padStart(2, '0')}:00–{String(reportBhMode === 'inherit' ? ropBhEnd : reportBhEnd).padStart(2, '0')}:00
+                              </span>
+                            )}
                           </>
                         )}
                         <span style={{ marginLeft: 'auto', fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>{effRangeLabel}</span>
@@ -9799,9 +9944,18 @@ export default function StoreZabbixPage({
           customEpoch={customDashCustomEpoch}
           onApplyCustomRange={() => {
             if (!customDashCustomFrom || !customDashCustomTo) return
-            const from = Math.floor(new Date(customDashCustomFrom).getTime() / 1000)
-            const to = Math.floor(new Date(customDashCustomTo).getTime() / 1000)
-            if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) return
+            let from
+            let to
+            if (dashboardVariant === 'ro') {
+              const epoch = roCustomRangeEpoch(customDashCustomFrom, customDashCustomTo, RO_DASHBOARD_BH_START, RO_DASHBOARD_BH_END)
+              if (!epoch) return
+              from = epoch.from
+              to = epoch.to
+            } else {
+              from = Math.floor(new Date(customDashCustomFrom).getTime() / 1000)
+              to = Math.floor(new Date(customDashCustomTo).getTime() / 1000)
+              if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) return
+            }
             setCustomDashRange('custom')
             setCustomDashCustomEpoch({ from, to })
           }}
