@@ -12,6 +12,10 @@ const REPORT_CACHE_MS = 90_000
 const ITEM_CHUNK = 400
 const HISTORY_CHUNK = 50
 const HISTORY_CONCURRENCY = 6
+const UPTIME_HISTORY_CONCURRENCY = 20
+const UPTIME_HISTORY_TIMEOUT_MS = 60_000
+/** ~21d at 1/min — stay under history.get limit (50k) per single-item request */
+const UPTIME_MAX_CHUNK_SEC = 21 * 86400
 const _cache = new Map()
 
 function cacheKey(opts) {
@@ -221,36 +225,41 @@ async function fetchHistoryDayChunked(zabbixRpc, itemEntries, fromSec, toSec) {
   return byItem
 }
 
-/** One item per request, day-chunked — avoids history.get truncation when batching many hosts. */
+/** One item per request (not batched) — avoids history.get truncation across many hosts. */
+function uptimeTimeChunks(fromSec, toSec) {
+  const span = toSec - fromSec
+  if (span <= UPTIME_MAX_CHUNK_SEC) return [[fromSec, toSec]]
+  const chunks = []
+  for (let chunkStart = fromSec; chunkStart < toSec; chunkStart += UPTIME_MAX_CHUNK_SEC) {
+    chunks.push([chunkStart, Math.min(chunkStart + UPTIME_MAX_CHUNK_SEC, toSec)])
+  }
+  return chunks
+}
+
 async function fetchUptimeHistoryPerItem(zabbixRpc, itemEntries, fromSec, toSec) {
   const byItem = {}
-  const DAY_SEC = 86400
-  const tasks = []
-  for (const entry of itemEntries) {
+  const timeChunks = uptimeTimeChunks(fromSec, toSec)
+  await mapConcurrent(itemEntries, async (entry) => {
     const hk = historyKind(entry.value_type)
-    if (!hk) continue
-    for (let dayStart = fromSec; dayStart < toSec; dayStart += DAY_SEC) {
-      const dayEnd = Math.min(dayStart + DAY_SEC, toSec)
-      tasks.push({ entry, hk, dayStart, dayEnd })
-    }
-  }
-  await mapConcurrent(tasks, async ({ entry, hk, dayStart, dayEnd }) => {
+    if (!hk) return
     const iid = String(entry.itemid)
-    const rows = await zabbixRpc('history.get', {
-      history: hk.history,
-      itemids: [iid],
-      time_from: dayStart,
-      time_till: dayEnd,
-      output: ['itemid', 'clock', 'value'],
-      sortfield: 'clock',
-      sortorder: 'ASC',
-      limit: 50000,
-    }).catch(() => [])
-    for (const r of rows || []) {
-      if (!byItem[iid]) byItem[iid] = []
-      byItem[iid].push({ clock: Number(r.clock), value: Number(r.value) })
+    if (!byItem[iid]) byItem[iid] = []
+    for (const [chunkStart, chunkEnd] of timeChunks) {
+      const rows = await zabbixRpc('history.get', {
+        history: hk.history,
+        itemids: [iid],
+        time_from: chunkStart,
+        time_till: chunkEnd,
+        output: ['itemid', 'clock', 'value'],
+        sortfield: 'clock',
+        sortorder: 'ASC',
+        limit: 50000,
+      }, { timeoutMs: UPTIME_HISTORY_TIMEOUT_MS }).catch(() => [])
+      for (const r of rows || []) {
+        byItem[iid].push({ clock: Number(r.clock), value: Number(r.value) })
+      }
     }
-  }, 8)
+  }, UPTIME_HISTORY_CONCURRENCY)
   for (const pts of Object.values(byItem)) {
     pts.sort((a, b) => a.clock - b.clock)
   }
@@ -557,11 +566,11 @@ export async function fetchRoDashboardNetworkTop(opts) {
 
   const windowSec = toSec - fromSec
 
-  const [latencyFetch, jitterFetch] = await Promise.all([
+  const [latencyFetch, jitterFetch, uptimeSeries] = await Promise.all([
     fetchSeriesForRange(zabbixRpc, latencyEntries, fromSec, toSec),
     fetchSeriesForRange(zabbixRpc, jitterEntries, fromSec, toSec),
+    fetchUptimeHistoryPerItem(zabbixRpc, uptimeEntries, fromSec, toSec),
   ])
-  const uptimeSeries = await fetchUptimeHistoryPerItem(zabbixRpc, uptimeEntries, fromSec, toSec)
   const latencySeries = latencyFetch.byItem
   const jitterSeries = jitterFetch.byItem
 

@@ -5280,7 +5280,7 @@ export default function StoreZabbixPage({
     setRoNetworkTop(null)
     setRoNetworkTopBusy(true)
     try {
-      const { data } = await api.get(`${apiBase}/ro-dashboard-network-top?${qs}`, { timeout: 120000 })
+      const { data } = await api.get(`${apiBase}/ro-dashboard-network-top?${qs}`, { timeout: 240000 })
       setRoNetworkTop(data)
     } catch (e) {
       const { message, hint } = parseErr(e)
