@@ -1,6 +1,6 @@
 /**
  * Ro Dashboard — top-N mean latency / jitter from Store Zabbix history,
- * filtered to business hours (default 09:00–21:00 IST).
+ * filtered to business hours (default 12:00–21:00 IST).
  */
 import { formatPortalTimestamp } from '../utils/portalTimestamp.js'
 import { __test as customDashTest } from './customDashReports.js'
@@ -518,7 +518,7 @@ export async function fetchRoDashboardNetworkTop(opts) {
   const { fromSec, toSec, rangeLabel } = parseRange(opts.query || {}, nowSec)
   const limit = Math.min(Math.max(parseInt(String(opts.query?.limit || '30'), 10) || 30, 1), 50)
   const groupFilter = String(opts.query?.group || '').trim()
-  const bizStart = Math.min(23, Math.max(0, parseInt(String(opts.query?.bizStart ?? '9'), 10) || 9))
+  const bizStart = Math.min(23, Math.max(0, parseInt(String(opts.query?.bizStart ?? '12'), 10) || 12))
   const bizEnd = Math.min(24, Math.max(0, parseInt(String(opts.query?.bizEnd ?? '21'), 10) || 21))
   const bizEnabled = !['0', 'false', 'off', 'no'].includes(String(opts.query?.bizEnabled ?? '1').toLowerCase())
   const tzOffsetMinutes = parseInt(String(opts.query?.tzOffset ?? String(IST_OFFSET_MIN)), 10) || IST_OFFSET_MIN

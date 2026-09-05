@@ -42,6 +42,9 @@ import ZabbixAlertsPanel from './ZabbixAlertsPanel.jsx'
 const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'rop', 'reports', 'custom', 'alerts']
 const RO_DASHBOARD_HIDDEN_TABS = new Set(['problems', 'alerts', 'events', 'rop'])
 const RO_DASHBOARD_HIDDEN_TOPMON = new Set(['cpu', 'memory', 'disk', 'packetLoss'])
+/** Ro Dashboard — fixed business hours on every tab (12:00–21:00). */
+const RO_DASHBOARD_BH_START = 12
+const RO_DASHBOARD_BH_END = 21
 
 const ROP_GROUP_LABELS = {
   rp: 'All ROP',
@@ -1971,6 +1974,7 @@ function RoNetworkTopFilters({
   roNetTopBhLabel,
   onRefresh,
   busy,
+  lockBhTimes = false,
 }) {
   return (
     <div className="opm-toolbar">
@@ -2041,15 +2045,23 @@ function RoNetworkTopFilters({
           Apply BH filter
         </label>
         <span style={{ width: 1, height: 14, background: 'var(--border)' }} />
-        <select value={roNetTopBhStart} onChange={(e) => setRoNetTopBhStart(Number(e.target.value))} disabled={!roNetTopBhEnabled}
-          style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: roNetTopBhEnabled ? 1 : .5 }}>
-          {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
-        </select>
-        <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>to</span>
-        <select value={roNetTopBhEnd} onChange={(e) => setRoNetTopBhEnd(Number(e.target.value))} disabled={!roNetTopBhEnabled}
-          style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: roNetTopBhEnabled ? 1 : .5 }}>
-          {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
-        </select>
+        {lockBhTimes ? (
+          <span className="opm-pill" style={{ background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
+            {String(roNetTopBhStart).padStart(2, '0')}:00–{String(roNetTopBhEnd).padStart(2, '0')}:00 · Fixed
+          </span>
+        ) : (
+          <>
+          <select value={roNetTopBhStart} onChange={(e) => setRoNetTopBhStart(Number(e.target.value))} disabled={!roNetTopBhEnabled}
+            style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: roNetTopBhEnabled ? 1 : .5 }}>
+            {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+          </select>
+          <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>to</span>
+          <select value={roNetTopBhEnd} onChange={(e) => setRoNetTopBhEnd(Number(e.target.value))} disabled={!roNetTopBhEnabled}
+            style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: roNetTopBhEnabled ? 1 : .5 }}>
+            {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
+          </select>
+          </>
+        )}
         <span style={{ width: 1, height: 14, background: 'var(--border)' }} />
         <div style={{ display: 'inline-flex', gap: 4 }}>
           {CUSTOM_DASH_DAY_LABELS.map((lbl, idx) => {
@@ -3738,6 +3750,12 @@ function CustomDashboardPanel({
             Apply BH filter
           </label>
           <span style={{ width: 1, height: 14, background: 'var(--border)' }} />
+          {isRoVariant ? (
+            <span className="opm-pill" style={{ background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
+              {String(bhStart).padStart(2, '0')}:00–{String(bhEnd).padStart(2, '0')}:00 · Fixed
+            </span>
+          ) : (
+            <>
           <select value={bhStart} onChange={(e) => onBhStart(Number(e.target.value))} disabled={!bhEnabled}
             style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: bhEnabled ? 1 : .5 }}>
             {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
@@ -3747,6 +3765,8 @@ function CustomDashboardPanel({
             style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: bhEnabled ? 1 : .5 }}>
             {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
           </select>
+            </>
+          )}
           <span style={{ width: 1, height: 14, background: 'var(--border)' }} />
           <div style={{ display: 'inline-flex', gap: 4 }}>
             {CUSTOM_DASH_DAY_LABELS.map((lbl, idx) => {
@@ -5047,8 +5067,8 @@ export default function StoreZabbixPage({
   const [roNetTopCustomTo, setRoNetTopCustomTo] = useState('')
   const [roNetTopCustomEpoch, setRoNetTopCustomEpoch] = useState(null)
   const [roNetTopBhEnabled, setRoNetTopBhEnabled] = useState(true)
-  const [roNetTopBhStart, setRoNetTopBhStart] = useState(9)
-  const [roNetTopBhEnd, setRoNetTopBhEnd] = useState(21)
+  const [roNetTopBhStart, setRoNetTopBhStart] = useState(RO_DASHBOARD_BH_START)
+  const [roNetTopBhEnd, setRoNetTopBhEnd] = useState(RO_DASHBOARD_BH_END)
   const [roNetTopBhDays, setRoNetTopBhDays] = useState(() => new Set([0, 1, 2, 3, 4, 5, 6]))
 
   /* ── Network Health tab state ── */
@@ -5143,6 +5163,21 @@ export default function StoreZabbixPage({
   const [customDashBhStart, setCustomDashBhStart] = useState(9)
   const [customDashBhEnd, setCustomDashBhEnd] = useState(18)
   const [customDashBhDays, setCustomDashBhDays] = useState(() => new Set([1, 2, 3, 4, 5]))
+
+  useEffect(() => {
+    if (dashboardVariant !== 'ro') return
+    setRoNetTopBhStart(RO_DASHBOARD_BH_START)
+    setRoNetTopBhEnd(RO_DASHBOARD_BH_END)
+    setCustomDashBhStart(RO_DASHBOARD_BH_START)
+    setCustomDashBhEnd(RO_DASHBOARD_BH_END)
+    setRopBhStart(RO_DASHBOARD_BH_START)
+    setRopBhEnd(RO_DASHBOARD_BH_END)
+    setReportBhStart(RO_DASHBOARD_BH_START)
+    setReportBhEnd(RO_DASHBOARD_BH_END)
+    setNetBizStart(RO_DASHBOARD_BH_START)
+    setNetBizEnd(RO_DASHBOARD_BH_END)
+  }, [dashboardVariant])
+
   /** Per-host expanded item id for inline history chart in metric detail panel. */
   const [customDashExpandedItem, setCustomDashExpandedItem] = useState(null)
   /** App crash events fetched from InfluxDB (not Zabbix). */
@@ -5985,8 +6020,10 @@ export default function StoreZabbixPage({
         if (prefs.customFrom) setCustomDashCustomFrom(prefs.customFrom)
         if (prefs.customTo) setCustomDashCustomTo(prefs.customTo)
         setCustomDashBhEnabled(!!prefs.bhEnabled)
-        if (Number.isFinite(Number(prefs.bhStart))) setCustomDashBhStart(Number(prefs.bhStart))
-        if (Number.isFinite(Number(prefs.bhEnd))) setCustomDashBhEnd(Number(prefs.bhEnd))
+        if (dashboardVariant !== 'ro') {
+          if (Number.isFinite(Number(prefs.bhStart))) setCustomDashBhStart(Number(prefs.bhStart))
+          if (Number.isFinite(Number(prefs.bhEnd))) setCustomDashBhEnd(Number(prefs.bhEnd))
+        }
         if (Array.isArray(prefs.bhDays) && prefs.bhDays.length) {
           setCustomDashBhDays(new Set(prefs.bhDays))
         }
@@ -6011,7 +6048,7 @@ export default function StoreZabbixPage({
         window.setTimeout(() => { customDashPrefsSkipSaveRef.current = false }, 0)
       })
     return () => { cancelled = true }
-  }, [authUser?.id, customDashPrefsScopeKey])
+  }, [authUser?.id, customDashPrefsScopeKey, dashboardVariant])
 
   /** After the host picker list loads, resolve saved host ids into host rows. */
   useEffect(() => {
@@ -6076,8 +6113,10 @@ export default function StoreZabbixPage({
     setCustomDashCustomFrom(p.customFrom || '')
     setCustomDashCustomTo(p.customTo || '')
     setCustomDashBhEnabled(!!p.bhEnabled)
-    if (Number.isFinite(Number(p.bhStart))) setCustomDashBhStart(Number(p.bhStart))
-    if (Number.isFinite(Number(p.bhEnd))) setCustomDashBhEnd(Number(p.bhEnd))
+    if (dashboardVariant !== 'ro') {
+      if (Number.isFinite(Number(p.bhStart))) setCustomDashBhStart(Number(p.bhStart))
+      if (Number.isFinite(Number(p.bhEnd))) setCustomDashBhEnd(Number(p.bhEnd))
+    }
     if (Array.isArray(p.bhDays) && p.bhDays.length) setCustomDashBhDays(new Set(p.bhDays))
     if ([500, 1000, 2000, 5000].includes(Number(p.eventLimit))) {
       setCustomDashEventLimit(Number(p.eventLimit))
@@ -6092,7 +6131,7 @@ export default function StoreZabbixPage({
     }
     setCustomDashAppliedFilterId(filter.id)
     window.setTimeout(() => { customDashPrefsSkipSaveRef.current = false }, 0)
-  }, [customDashHosts])
+  }, [customDashHosts, dashboardVariant])
 
   const handleCreateSavedFilter = useCallback(async (rawName) => {
     const name = String(rawName || '').trim()
@@ -6993,6 +7032,12 @@ export default function StoreZabbixPage({
                 Apply BH filter
               </label>
               <span style={{ width: 1, height: 14, background: 'var(--border)' }} />
+              {dashboardVariant === 'ro' ? (
+                <span className="opm-pill" style={{ background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
+                  {String(roNetTopBhStart).padStart(2, '0')}:00–{String(roNetTopBhEnd).padStart(2, '0')}:00 · Fixed
+                </span>
+              ) : (
+                <>
               <select value={roNetTopBhStart} onChange={(e) => setRoNetTopBhStart(Number(e.target.value))} disabled={!roNetTopBhEnabled}
                 style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: roNetTopBhEnabled ? 1 : .5 }}>
                 {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
@@ -7002,6 +7047,8 @@ export default function StoreZabbixPage({
                 style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none', opacity: roNetTopBhEnabled ? 1 : .5 }}>
                 {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
               </select>
+                </>
+              )}
               <span style={{ width: 1, height: 14, background: 'var(--border)' }} />
               <div style={{ display: 'inline-flex', gap: 4 }}>
                 {CUSTOM_DASH_DAY_LABELS.map((lbl, idx) => {
@@ -7765,6 +7812,7 @@ export default function StoreZabbixPage({
             roNetTopBhLabel={roNetTopBhLabel}
             onRefresh={() => loadRoNetworkTop()}
             busy={roNetworkTopBusy}
+            lockBhTimes
           />
 
           {roNetworkTopBusy && !roNetworkTop && (
@@ -8373,6 +8421,12 @@ export default function StoreZabbixPage({
 
                 <div className="rop-field">
                   <span className="rop-field-label">BH</span>
+                  {dashboardVariant === 'ro' ? (
+                    <span className="rop-meta" style={{ fontWeight: 600 }}>
+                      {String(ropBhStart).padStart(2, '0')}:00–{String(ropBhEnd).padStart(2, '0')}:00 · Fixed
+                    </span>
+                  ) : (
+                    <>
                   <select value={ropBhStart} onChange={(e) => setRopBhStart(Number(e.target.value))}
                     className="rop-control rop-control--time">
                     {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
@@ -8382,6 +8436,8 @@ export default function StoreZabbixPage({
                     className="rop-control rop-control--time">
                     {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
                   </select>
+                    </>
+                  )}
                 </div>
 
                 <div className="rop-field-divider" />
@@ -9164,6 +9220,12 @@ export default function StoreZabbixPage({
                 <div className="rop-field-divider" />
                 <div className="rop-field">
                   <span className="rop-field-label">BH</span>
+                  {dashboardVariant === 'ro' ? (
+                    <span className="rop-meta" style={{ fontWeight: 600 }}>
+                      {String(ropBhStart).padStart(2, '0')}:00–{String(ropBhEnd).padStart(2, '0')}:00 · Fixed
+                    </span>
+                  ) : (
+                    <>
                   <select value={ropBhStart} onChange={(e) => setRopBhStart(Number(e.target.value))}
                     className="rop-control rop-control--time">
                     {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
@@ -9173,6 +9235,8 @@ export default function StoreZabbixPage({
                     className="rop-control rop-control--time">
                     {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
                   </select>
+                    </>
+                  )}
                 </div>
                 <div className="rop-field-divider" />
                 <div className="rop-field">
@@ -9531,6 +9595,12 @@ export default function StoreZabbixPage({
                         </button>
                         {reportBhMode === 'custom' && (
                           <>
+                            {dashboardVariant === 'ro' ? (
+                              <span className="rop-meta" style={{ fontWeight: 600 }}>
+                                {String(reportBhStart).padStart(2, '0')}:00–{String(reportBhEnd).padStart(2, '0')}:00 · Fixed
+                              </span>
+                            ) : (
+                              <>
                             <select value={reportBhStart} onChange={(e) => setReportBhStart(Number(e.target.value))}
                               className="rop-control rop-control--time">
                               {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
@@ -9540,6 +9610,8 @@ export default function StoreZabbixPage({
                               className="rop-control rop-control--time">
                               {Array.from({ length: 24 }, (_, i) => <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>)}
                             </select>
+                              </>
+                            )}
                             <div className="rop-day-row" style={{ marginLeft: 4 }}>
                               {ROP_DAY_LABELS.map((lbl, idx) => {
                                 const on = reportBhDays.has(idx)
