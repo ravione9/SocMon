@@ -1971,7 +1971,6 @@ function RoNetworkTopFilters({
   roNetTopBhLabel,
   onRefresh,
   busy,
-  refreshNote,
 }) {
   return (
     <div className="opm-toolbar">
@@ -1985,11 +1984,6 @@ function RoNetworkTopFilters({
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          {refreshNote && (
-            <span className="opm-pill" style={{ background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
-              {refreshNote}
-            </span>
-          )}
           <button type="button" onClick={onRefresh} disabled={busy}
             style={{ padding: '5px 14px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', fontSize: 11, fontFamily: 'var(--mono)', cursor: busy ? 'wait' : 'pointer', fontWeight: 600 }}>
             {busy ? '↻ Loading…' : '↻ Refresh'}
@@ -5047,6 +5041,7 @@ export default function StoreZabbixPage({
   const [problemAckBusy, setProblemAckBusy] = useState(null)
   const [roNetworkTop, setRoNetworkTop] = useState(null)
   const [roNetworkTopBusy, setRoNetworkTopBusy] = useState(false)
+  const roNetworkTopSeqRef = useRef(0)
   const [roNetTopRange, setRoNetTopRange] = useState('7d')
   const [roNetTopCustomFrom, setRoNetTopCustomFrom] = useState('')
   const [roNetTopCustomTo, setRoNetTopCustomTo] = useState('')
@@ -5277,18 +5272,19 @@ export default function StoreZabbixPage({
       qs.set('from', String(roNetTopCustomEpoch.from))
       qs.set('to', String(roNetTopCustomEpoch.to))
     }
-    setRoNetworkTop(null)
     setRoNetworkTopBusy(true)
+    const seq = ++roNetworkTopSeqRef.current
     try {
       const { data } = await api.get(`${apiBase}/ro-dashboard-network-top?${qs}`, { timeout: 240000 })
+      if (seq !== roNetworkTopSeqRef.current) return
       setRoNetworkTop(data)
     } catch (e) {
+      if (seq !== roNetworkTopSeqRef.current) return
       const { message, hint } = parseErr(e)
       setError(message)
       setErrorHint(hint)
-      setRoNetworkTop(null)
     } finally {
-      setRoNetworkTopBusy(false)
+      if (seq === roNetworkTopSeqRef.current) setRoNetworkTopBusy(false)
     }
   }, [
     apiBase, scopedHostGroup, dashboardVariant, parseErr,
@@ -6328,17 +6324,6 @@ export default function StoreZabbixPage({
     120_000,
     [netHealthGroup, netBizStart, netBizEnd, loadNetHealth],
     { enabled: dashboardVariant !== 'ro' && tab === 'netHealth' && !!config?.configured && config?.reachable !== false, skipImmediate: true },
-  )
-
-  useSmartPolling(
-    () => loadRoNetworkTop(),
-    300_000,
-    [loadRoNetworkTop],
-    {
-      enabled: dashboardVariant === 'ro' && tab === 'netHealth' && !!config?.configured && config?.reachable !== false
-        && !(roNetTopRange === 'custom' && (!roNetTopCustomEpoch?.from || !roNetTopCustomEpoch?.to)),
-      skipImmediate: true,
-    },
   )
 
   useEffect(() => {
@@ -7780,7 +7765,6 @@ export default function StoreZabbixPage({
             roNetTopBhLabel={roNetTopBhLabel}
             onRefresh={() => loadRoNetworkTop()}
             busy={roNetworkTopBusy}
-            refreshNote="Auto-refresh every 5 min"
           />
 
           {roNetworkTopBusy && !roNetworkTop && (
