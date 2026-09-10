@@ -1,4 +1,4 @@
-const RANGE_IDS = new Set(['24h', '7d', '14d', '30d', 'custom'])
+const RANGE_IDS = new Set(['12h', '24h', '7d', '14d', '30d', 'custom'])
 const WIDGET_IDS = new Set([
   'cpu', 'memory', 'uptime', 'systemUptime', 'latency', 'jitter',
   'maxLatency', 'maxJitter', 'maxGatewayLatency',

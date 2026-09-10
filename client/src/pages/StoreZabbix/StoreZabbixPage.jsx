@@ -48,6 +48,29 @@ const RO_DASHBOARD_BH_END = 21
 const RO_DASHBOARD_BH_DAYS = [0, 1, 2, 3, 4, 5, 6]
 const RO_DASHBOARD_DEFAULT_RANGE = '24h'
 
+const STORE_ZABBIX_RANGE_SEC = {
+  '12h': 12 * 3600,
+  '24h': 86400,
+  '7d': 7 * 86400,
+  '14d': 14 * 86400,
+  '30d': 30 * 86400,
+}
+
+const STORE_ZABBIX_RANGE_LABELS = {
+  '12h': 'Last 12 hours',
+  '24h': 'Last 24 hours',
+  '7d': 'Last 7 days',
+  '14d': 'Last 14 days',
+  '30d': 'Last 30 days',
+  custom: 'Custom',
+}
+
+function resolveStoreZabbixRangeWindow(rangeKey, nowSec = Math.floor(Date.now() / 1000)) {
+  const sec = STORE_ZABBIX_RANGE_SEC[rangeKey]
+  if (!sec) return { from: nowSec - STORE_ZABBIX_RANGE_SEC['24h'], to: nowSec }
+  return { from: nowSec - sec, to: nowSec }
+}
+
 function toDateInput(ts) {
   const d = new Date(Number(ts) * 1000)
   const pad = (n) => String(n).padStart(2, '0')
@@ -93,6 +116,7 @@ const ROP_GROUP_LABELS = {
 }
 const ROP_DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const ROP_RANGE_CHIPS = [
+  { id: '12h', label: '12h' },
   { id: '24h', label: '24h' },
   { id: '7d', label: '7d' },
   { id: '14d', label: '14d' },
@@ -1489,6 +1513,7 @@ function aggregateAgentLastConnected(hostMetricItems, staleAfterSec = CUSTOM_DAS
 const CUSTOM_DASH_DAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S']
 const CUSTOM_DASH_DAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const CUSTOM_DASH_RANGE_CHIPS = [
+  { id: '12h', label: '12h' },
   { id: '24h', label: '24h' },
   { id: '7d', label: '7d' },
   { id: '14d', label: '14d' },
@@ -3593,7 +3618,7 @@ function CustomDashboardPanel({
       const toStr = new Date(customEpoch.to * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
       return `${fromStr} – ${toStr}`
     }
-    const m = { '24h': 'Last 24 hours', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days' }
+    const m = STORE_ZABBIX_RANGE_LABELS
     return m[range] || range
   }, [range, customEpoch, isRoVariant, bhStart, bhEnd])
 
@@ -5186,7 +5211,7 @@ export default function StoreZabbixPage({
   const [reportGapMin, setReportGapMin] = useState(2)
   const [reportTopN, setReportTopN] = useState(20)
   /* Per-card range / BH overrides (default: inherit from ROP toolbar). */
-  const [reportRangeMode, setReportRangeMode] = useState('inherit') /* 'inherit' | '24h' | '7d' | '14d' | '30d' | 'custom' */
+  const [reportRangeMode, setReportRangeMode] = useState('inherit') /* 'inherit' | '12h' | '24h' | '7d' | '14d' | '30d' | 'custom' */
   const [reportCustomFrom, setReportCustomFrom] = useState('')
   const [reportCustomTo, setReportCustomTo] = useState('')
   const [reportBhMode, setReportBhMode] = useState('inherit') /* 'inherit' | 'custom' */
@@ -5211,7 +5236,7 @@ export default function StoreZabbixPage({
   const [customDashEventLimit, setCustomDashEventLimit] = useState(2000)
   /** Active widget for the detail panel: 'cpu' | 'memory' | 'uptime' | 'latency' | 'jitter' | 'maxJitter' | 'maxGatewayLatency' | 'internet' | 'usb' | 'appCrash' | null */
   const [customDashWidget, setCustomDashWidget] = useState(null)
-  /** Range chip: '24h' | '7d' | '14d' | '30d' | 'custom' */
+  /** Range chip: '12h' | '24h' | '7d' | '14d' | '30d' | 'custom' */
   const [customDashRange, setCustomDashRange] = useState(() => (dashboardVariant === 'ro' ? RO_DASHBOARD_DEFAULT_RANGE : '24h'))
   const [customDashCustomFrom, setCustomDashCustomFrom] = useState('')
   const [customDashCustomTo, setCustomDashCustomTo] = useState('')
@@ -5333,7 +5358,7 @@ export default function StoreZabbixPage({
       const to = new Date(ropCustomEpoch.to).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
       return `${from} – ${to}`
     }
-    const labels = { '24h': 'Last 24h', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days' }
+    const labels = STORE_ZABBIX_RANGE_LABELS
     return labels[ropRange] || ropRange
   }, [ropRange, ropCustomEpoch])
 
@@ -5822,9 +5847,9 @@ export default function StoreZabbixPage({
         toSec = Math.floor(new Date(toInput).getTime() / 1000)
       }
     } else {
-      const days = ({ '24h': 1, '7d': 7, '14d': 14, '30d': 30 })[effRange] || 7
-      toSec = Math.floor(Date.now() / 1000)
-      fromSec = toSec - days * 86400
+      const win = resolveStoreZabbixRangeWindow(effRange)
+      fromSec = win.from
+      toSec = win.to
     }
     if (!Number.isFinite(fromSec) || !Number.isFinite(toSec) || toSec <= fromSec) {
       throw Object.assign(new Error('Invalid range — pick a valid date window.'), { code: 'BAD_RANGE' })
@@ -6325,13 +6350,10 @@ export default function StoreZabbixPage({
 
   /** Resolves the active range to an [from, to] epoch tuple. */
   const customDashTimeWindow = useMemo(() => {
-    const now = Math.floor(Date.now() / 1000)
     if (customDashRange === 'custom' && customDashCustomEpoch?.from && customDashCustomEpoch?.to) {
       return { from: customDashCustomEpoch.from, to: customDashCustomEpoch.to }
     }
-    const dayMap = { '24h': 1, '7d': 7, '14d': 14, '30d': 30 }
-    const days = dayMap[customDashRange] || 1
-    return { from: now - days * 86400, to: now }
+    return resolveStoreZabbixRangeWindow(customDashRange)
   }, [customDashRange, customDashCustomEpoch])
 
   /* Custom Dashboard: when host selection or range changes, reload data */
@@ -6660,7 +6682,7 @@ export default function StoreZabbixPage({
       const toStr = new Date(roNetTopCustomEpoch.to * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
       return `${fromStr} – ${toStr}`
     }
-    const m = { '24h': 'Last 24 hours', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days' }
+    const m = STORE_ZABBIX_RANGE_LABELS
     return m[roNetTopRange] || roNetTopRange
   }, [roNetTopRange, roNetTopCustomEpoch, dashboardVariant, roNetTopBhStart, roNetTopBhEnd])
   const roNetTopBhLabel = useMemo(() => {
@@ -8436,21 +8458,14 @@ export default function StoreZabbixPage({
             setManualRopCodesSaving(false)
           }
         }
-        const rangeChips = [
-          { id: '24h', label: '24h' },
-          { id: '7d',  label: '7d' },
-          { id: '14d', label: '14d' },
-          { id: '30d', label: '30d' },
-          { id: 'custom', label: 'Custom' },
-        ]
+        const rangeChips = ROP_RANGE_CHIPS
         const rangeSummaryLabel = (() => {
           if (ropRange === 'custom' && ropCustomEpoch) {
             const from = new Date(ropCustomEpoch.from).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
             const to = new Date(ropCustomEpoch.to).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
             return `${from} – ${to}`
           }
-          const rangeDisplay = { '24h': 'Last 24h', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days', custom: 'Custom' }
-          return rangeDisplay[ropRange] || ropRange
+          return STORE_ZABBIX_RANGE_LABELS[ropRange] || ropRange
         })()
         const toggleBhDay = (d) => {
           const next = new Set(ropBhDays)
@@ -8536,7 +8551,7 @@ export default function StoreZabbixPage({
                       <button key={c.id} type="button"
                         className={`rop-segment-btn${ropRange === c.id ? ' active' : ''}`}
                         onClick={() => selectRopRange(c.id)}
-                        title={c.id === '24h' ? 'Last 24 hours' : c.id === '7d' ? 'Last 7 days' : c.id === '14d' ? 'Last 14 days' : c.id === '30d' ? 'Last 30 days' : 'Custom range'}>
+                        title={STORE_ZABBIX_RANGE_LABELS[c.id] || 'Custom range'}>
                         {c.label}
                       </button>
                     ))}
@@ -9638,7 +9653,7 @@ export default function StoreZabbixPage({
                         ? (dashboardVariant === 'ro'
                           ? `${reportCustomFrom} – ${reportCustomTo} · BH ${String(reportBhMode === 'inherit' ? ropBhStart : reportBhStart).padStart(2, '0')}:00–${String(reportBhMode === 'inherit' ? ropBhEnd : reportBhEnd).padStart(2, '0')}:00`
                           : `${reportCustomFrom} – ${reportCustomTo}`)
-                        : ({ '24h': 'Last 24h', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days', custom: 'Custom (set dates)' })[effRangeId])
+                        : ({ ...STORE_ZABBIX_RANGE_LABELS, custom: 'Custom (set dates)' })[effRangeId])
                   const effGroupScopeLabel = reportHostScopeMode === 'custom'
                     ? `Custom hosts (${reportSelectedStoreTags.length} selected)`
                     : `Current group (${reportHostOptions.length})`
@@ -9671,10 +9686,7 @@ export default function StoreZabbixPage({
                         <span style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Range:</span>
                         {[
                           { id: 'inherit', label: 'Inherit toolbar' },
-                          { id: '24h', label: '24h' },
-                          { id: '7d', label: '7d' },
-                          { id: '14d', label: '14d' },
-                          { id: '30d', label: '30d' },
+                          ...ROP_RANGE_CHIPS.filter((c) => c.id !== 'custom'),
                           { id: 'custom', label: 'Custom' },
                         ].map((c) => (
                           <button key={c.id} type="button"
@@ -10042,7 +10054,7 @@ export default function StoreZabbixPage({
             const t = new Date(customDashCustomEpoch.to * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
             return `${f} – ${t}`
           }
-          return ({ '24h': 'Last 24 hours', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days' })[r] || r
+          return STORE_ZABBIX_RANGE_LABELS[r] || r
         })()}
         bhEnabled={customDashBh.bhEnabled}
         onClose={() => setCustomDashRebootModalHost(null)}
@@ -10066,7 +10078,7 @@ export default function StoreZabbixPage({
             const t = new Date(customDashCustomEpoch.to * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
             return `${f} – ${t}`
           }
-          return ({ '24h': 'Last 24 hours', '7d': 'Last 7 days', '14d': 'Last 14 days', '30d': 'Last 30 days' })[r] || r
+          return STORE_ZABBIX_RANGE_LABELS[r] || r
         })()}
         onClose={() => setCustomDashCrashModalHost(null)}
       />
