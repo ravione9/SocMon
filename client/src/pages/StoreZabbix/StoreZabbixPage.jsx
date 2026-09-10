@@ -46,6 +46,7 @@ const RO_DASHBOARD_HIDDEN_TOPMON = new Set(['cpu', 'memory', 'disk', 'packetLoss
 const RO_DASHBOARD_BH_START = 12
 const RO_DASHBOARD_BH_END = 21
 const RO_DASHBOARD_BH_DAYS = [0, 1, 2, 3, 4, 5, 6]
+const RO_DASHBOARD_DEFAULT_RANGE = '24h'
 
 function toDateInput(ts) {
   const d = new Date(Number(ts) * 1000)
@@ -5119,7 +5120,7 @@ export default function StoreZabbixPage({
   const [roNetworkTop, setRoNetworkTop] = useState(null)
   const [roNetworkTopBusy, setRoNetworkTopBusy] = useState(false)
   const roNetworkTopSeqRef = useRef(0)
-  const [roNetTopRange, setRoNetTopRange] = useState('7d')
+  const [roNetTopRange, setRoNetTopRange] = useState(() => (dashboardVariant === 'ro' ? RO_DASHBOARD_DEFAULT_RANGE : '7d'))
   const [roNetTopCustomFrom, setRoNetTopCustomFrom] = useState('')
   const [roNetTopCustomTo, setRoNetTopCustomTo] = useState('')
   const [roNetTopCustomEpoch, setRoNetTopCustomEpoch] = useState(null)
@@ -5143,7 +5144,7 @@ export default function StoreZabbixPage({
   /* ── ROP Dashboard tab state ── */
   const [ropUptime, setRopUptime] = useState(null)
   const [ropUptimeBusy, setRopUptimeBusy] = useState(false)
-  const [ropRange, setRopRange] = useState('7d')
+  const [ropRange, setRopRange] = useState(() => (dashboardVariant === 'ro' ? RO_DASHBOARD_DEFAULT_RANGE : '7d'))
   const [ropCustomFrom, setRopCustomFrom] = useState('')
   const [ropCustomTo, setRopCustomTo] = useState('')
   const [ropCustomEpoch, setRopCustomEpoch] = useState(null)
@@ -5211,7 +5212,7 @@ export default function StoreZabbixPage({
   /** Active widget for the detail panel: 'cpu' | 'memory' | 'uptime' | 'latency' | 'jitter' | 'maxJitter' | 'maxGatewayLatency' | 'internet' | 'usb' | 'appCrash' | null */
   const [customDashWidget, setCustomDashWidget] = useState(null)
   /** Range chip: '24h' | '7d' | '14d' | '30d' | 'custom' */
-  const [customDashRange, setCustomDashRange] = useState(() => (dashboardVariant === 'ro' ? '24h' : '24h'))
+  const [customDashRange, setCustomDashRange] = useState(() => (dashboardVariant === 'ro' ? RO_DASHBOARD_DEFAULT_RANGE : '24h'))
   const [customDashCustomFrom, setCustomDashCustomFrom] = useState('')
   const [customDashCustomTo, setCustomDashCustomTo] = useState('')
   const [customDashCustomEpoch, setCustomDashCustomEpoch] = useState(null)
@@ -5223,7 +5224,11 @@ export default function StoreZabbixPage({
 
   useEffect(() => {
     if (dashboardVariant !== 'ro') return
-    setCustomDashRange('24h')
+    setCustomDashRange(RO_DASHBOARD_DEFAULT_RANGE)
+    setRoNetTopRange(RO_DASHBOARD_DEFAULT_RANGE)
+    setRopRange(RO_DASHBOARD_DEFAULT_RANGE)
+    setRoNetTopCustomEpoch(null)
+    setRopCustomEpoch(null)
     setRoNetTopBhStart(RO_DASHBOARD_BH_START)
     setRoNetTopBhEnd(RO_DASHBOARD_BH_END)
     setCustomDashBhStart(RO_DASHBOARD_BH_START)
@@ -6100,7 +6105,7 @@ export default function StoreZabbixPage({
       .then((prefs) => {
         if (cancelled || !prefs) return
         if (dashboardVariant === 'ro') {
-          setCustomDashRange('24h')
+          setCustomDashRange(RO_DASHBOARD_DEFAULT_RANGE)
         } else if (prefs.range) {
           setCustomDashRange(prefs.range)
         }
@@ -6205,7 +6210,7 @@ export default function StoreZabbixPage({
     if (!filter?.prefs) return
     const p = filter.prefs
     customDashPrefsSkipSaveRef.current = true
-    setCustomDashRange(dashboardVariant === 'ro' ? '24h' : (p.range || '24h'))
+    setCustomDashRange(dashboardVariant === 'ro' ? RO_DASHBOARD_DEFAULT_RANGE : (p.range || '24h'))
     if (p.customEpoch?.from && p.customEpoch?.to) {
       setCustomDashCustomEpoch({ from: p.customEpoch.from, to: p.customEpoch.to })
     } else {
@@ -8481,7 +8486,7 @@ export default function StoreZabbixPage({
         const selectRopRange = (id) => {
           setRopRange(id)
           if (id === 'custom') {
-            if (!ropCustomEpoch) seedCustomRange(7)
+            if (!ropCustomEpoch) seedCustomRange(dashboardVariant === 'ro' ? 1 : 7)
             else {
               setRopCustomFrom(dashboardVariant === 'ro' ? toRoDateInput(ropCustomEpoch.from) : ropCustomEpoch.from)
               setRopCustomTo(dashboardVariant === 'ro' ? toRoDateInput(ropCustomEpoch.to) : ropCustomEpoch.to)
@@ -9305,7 +9310,7 @@ export default function StoreZabbixPage({
         const selectRopRange = (id) => {
           setRopRange(id)
           if (id === 'custom') {
-            if (!ropCustomEpoch) seedCustomRange(7)
+            if (!ropCustomEpoch) seedCustomRange(dashboardVariant === 'ro' ? 1 : 7)
             else {
               setRopCustomFrom(dashboardVariant === 'ro' ? toRoDateInput(ropCustomEpoch.from) : ropCustomEpoch.from)
               setRopCustomTo(dashboardVariant === 'ro' ? toRoDateInput(ropCustomEpoch.to) : ropCustomEpoch.to)
