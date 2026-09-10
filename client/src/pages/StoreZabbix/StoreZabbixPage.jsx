@@ -5211,7 +5211,7 @@ export default function StoreZabbixPage({
   /** Active widget for the detail panel: 'cpu' | 'memory' | 'uptime' | 'latency' | 'jitter' | 'maxJitter' | 'maxGatewayLatency' | 'internet' | 'usb' | 'appCrash' | null */
   const [customDashWidget, setCustomDashWidget] = useState(null)
   /** Range chip: '24h' | '7d' | '14d' | '30d' | 'custom' */
-  const [customDashRange, setCustomDashRange] = useState('24h')
+  const [customDashRange, setCustomDashRange] = useState(() => (dashboardVariant === 'ro' ? '24h' : '24h'))
   const [customDashCustomFrom, setCustomDashCustomFrom] = useState('')
   const [customDashCustomTo, setCustomDashCustomTo] = useState('')
   const [customDashCustomEpoch, setCustomDashCustomEpoch] = useState(null)
@@ -5223,6 +5223,7 @@ export default function StoreZabbixPage({
 
   useEffect(() => {
     if (dashboardVariant !== 'ro') return
+    setCustomDashRange('24h')
     setRoNetTopBhStart(RO_DASHBOARD_BH_START)
     setRoNetTopBhEnd(RO_DASHBOARD_BH_END)
     setCustomDashBhStart(RO_DASHBOARD_BH_START)
@@ -6098,7 +6099,11 @@ export default function StoreZabbixPage({
     fetchCustomDashPrefs(customDashPrefsScopeKey)
       .then((prefs) => {
         if (cancelled || !prefs) return
-        if (prefs.range) setCustomDashRange(prefs.range)
+        if (dashboardVariant === 'ro') {
+          setCustomDashRange('24h')
+        } else if (prefs.range) {
+          setCustomDashRange(prefs.range)
+        }
         if (prefs.customEpoch?.from && prefs.customEpoch?.to) {
           setCustomDashCustomEpoch({ from: prefs.customEpoch.from, to: prefs.customEpoch.to })
           if (dashboardVariant === 'ro') {
@@ -6200,7 +6205,7 @@ export default function StoreZabbixPage({
     if (!filter?.prefs) return
     const p = filter.prefs
     customDashPrefsSkipSaveRef.current = true
-    setCustomDashRange(p.range || '24h')
+    setCustomDashRange(dashboardVariant === 'ro' ? '24h' : (p.range || '24h'))
     if (p.customEpoch?.from && p.customEpoch?.to) {
       setCustomDashCustomEpoch({ from: p.customEpoch.from, to: p.customEpoch.to })
     } else {
