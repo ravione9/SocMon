@@ -2814,7 +2814,7 @@ router.get('/rp-fleet-health', async (req, res) => {
       toSec = customToSec
     } else {
       const span = ({
-        '12h': 12 * 86_400,
+        '12h': 12 * 3600,
         '24h': 86_400,
         '1d': 86_400,
         'today': 86_400,
@@ -2862,7 +2862,7 @@ router.get('/rop-uptime', async (req, res) => {
       toMs = customToSec * 1000
     } else {
       const span = ({
-        '12h': 12 * 86_400_000,
+        '12h': 12 * 3_600_000,
         '24h': 86_400_000,
         '1d':  86_400_000,
         'today': 86_400_000,
@@ -2920,7 +2920,7 @@ router.get('/rop-store-disconnects', async (req, res) => {
       toMs = customToSec * 1000
     } else {
       const span = ({
-        '12h': 12 * 86_400_000,
+        '12h': 12 * 3_600_000,
         '24h': 86_400_000,
         '1d': 86_400_000,
         'today': 86_400_000,
@@ -2966,7 +2966,7 @@ router.get('/rop-disconnect-export', async (req, res) => {
       toMs = customToSec * 1000
     } else {
       const span = ({
-        '12h': 12 * 86_400_000,
+        '12h': 12 * 3_600_000,
         '24h': 86_400_000,
         '1d': 86_400_000,
         'today': 86_400_000,
@@ -3021,7 +3021,7 @@ router.get('/rop-store-disconnect-export', async (req, res) => {
       toMs = customToSec * 1000
     } else {
       const span = ({
-        '12h': 12 * 86_400_000,
+        '12h': 12 * 3_600_000,
         '24h': 86_400_000,
         '1d': 86_400_000,
         'today': 86_400_000,

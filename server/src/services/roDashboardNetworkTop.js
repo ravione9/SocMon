@@ -496,7 +496,7 @@ function parseRange(query, nowSec) {
     return { fromSec: customFromSec, toSec: customToSec, rangeLabel: 'custom' }
   }
   const span = ({
-    '12h': 12 * 86_400,
+    '12h': 12 * 3600,
     '24h': 86_400,
     '1d': 86_400,
     'today': 86_400,
