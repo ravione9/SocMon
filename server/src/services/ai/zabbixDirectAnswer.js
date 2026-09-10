@@ -346,6 +346,98 @@ function applySessionCpuMemoryToHosts(hosts, cpuMemoryHistory) {
   }
 }
 
+function avgHistoryPercentPoints(points) {
+  if (!Array.isArray(points) || !points.length) return null
+  const vals = points.map((p) => Number(p.percent)).filter(Number.isFinite)
+  if (!vals.length) return null
+  return Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10
+}
+
+/**
+ * When historyFrom/historyTo is set, replace live Zabbix lastvalue on hosts[] with
+ * session-window history so MCP/LLM consumers do not chart today's live poll.
+ */
+function promoteZabbixSessionHistoryToHosts(hosts, {
+  historyWindow,
+  cpuMemoryHistory,
+  latencyHistory,
+  jitterHistory,
+  gatewayLatencyHistory,
+  pingHistory,
+}) {
+  if (!historyWindow || !Array.isArray(hosts)) return
+  const cmByHost = Object.fromEntries(
+    (cpuMemoryHistory?.hosts || []).map((h) => [String(h.hostid), h]),
+  )
+  for (const host of hosts) {
+    const hid = String(host.hostid)
+    const cmRow = cmByHost[hid]
+    const lat = latencyHistory?.byHost?.[hid]
+    const jit = jitterHistory?.byHost?.[hid]
+    const gw = gatewayLatencyHistory?.byHost?.[hid]
+
+    if (cmRow?.cpu?.points?.length || host.cpuAtSession) {
+      const windowAvg = avgHistoryPercentPoints(cmRow?.cpu?.points)
+      const snap = host.cpuAtSession
+      host.cpu = {
+        percent: snap?.percent ?? windowAvg,
+        windowAvgPercent: windowAvg,
+        itemName: cmRow?.cpu?.itemName ?? host.cpu?.itemName,
+        itemid: cmRow?.cpu?.itemid ?? host.cpu?.itemid ?? null,
+        key: cmRow?.cpu?.key ?? host.cpu?.key ?? null,
+        polledAt: snap?.at ?? null,
+        source: 'zabbix_history',
+        pointCount: cmRow?.cpu?.pointCount ?? cmRow?.cpu?.points?.length ?? 0,
+        historySource: cmRow?.cpu?.source ?? null,
+      }
+    }
+
+    if (cmRow?.memory?.points?.length || host.memoryAtSession) {
+      const windowAvg = avgHistoryPercentPoints(cmRow?.memory?.points)
+      const snap = host.memoryAtSession
+      host.memory = {
+        percent: snap?.percent ?? windowAvg,
+        windowAvgPercent: windowAvg,
+        itemName: cmRow?.memory?.itemName ?? host.memory?.itemName,
+        itemid: cmRow?.memory?.itemid ?? host.memory?.itemid ?? null,
+        key: cmRow?.memory?.key ?? host.memory?.key ?? null,
+        polledAt: snap?.at ?? null,
+        source: 'zabbix_history',
+        pointCount: cmRow?.memory?.pointCount ?? cmRow?.memory?.points?.length ?? 0,
+        historySource: cmRow?.memory?.source ?? null,
+      }
+    }
+
+    if (lat || jit || host.pingAtSession || host.latencyAtSession || host.jitterAtSession) {
+      const latSnap = host.latencyAtSession
+      const jitSnap = host.jitterAtSession
+      const pingSnap = host.pingAtSession
+      host.ping = {
+        ms: latSnap?.avgMs ?? lat?.avgMs ?? host.ping?.ms ?? null,
+        minMs: latSnap?.minMs ?? lat?.minMs ?? null,
+        maxMs: latSnap?.maxMs ?? lat?.maxMs ?? null,
+        jitter: jitSnap?.avgMs ?? jit?.avgMs ?? host.ping?.jitter ?? null,
+        jitterMinMs: jitSnap?.minMs ?? jit?.minMs ?? null,
+        jitterMaxMs: jitSnap?.maxMs ?? jit?.maxMs ?? null,
+        gatewayMs: host.gatewayLatencyAtSession?.avgMs ?? gw?.avgMs ?? host.ping?.gatewayMs ?? null,
+        loss: pingSnap?.avgLossPct ?? host.ping?.loss ?? null,
+        reach: pingSnap?.availabilityPct ?? host.ping?.reach ?? null,
+        source: 'zabbix_history',
+        pointCount: latSnap?.pointCount ?? lat?.pointCount ?? null,
+        key: latSnap?.key ?? lat?.key ?? null,
+      }
+    }
+
+    const series = {}
+    if (cmRow?.cpu?.points?.length) series.cpu = cmRow.cpu.points
+    if (cmRow?.memory?.points?.length) series.memory = cmRow.memory.points
+    if (lat?.points?.length) series.latency = lat.points
+    if (jit?.points?.length) series.jitter = jit.points
+    if (gw?.points?.length) series.gatewayLatency = gw.points
+    if (Object.keys(series).length) host.historySeries = series
+  }
+}
+
 /** Zabbix net.if.in/out time-series (same window rules as cpuMemoryHistory). */
 export function wantsInterfaceHistory(question) {
   const q = String(question || '')
@@ -3610,8 +3702,10 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   // resulting item.get fan-out could exceed Claude Desktop's tool timeout.
   const hostFilter = ip || hostname || ''
   const resolvedQueryWindow = opts.queryWindow || resolveQueryWindow(userMessage, opts.queryContext, opts)
-  const includeInterfaceHistory = shouldIncludeInterfaceHistory(userMessage, opts)
-  const includeCpuMemoryHistory = shouldIncludeCpuMemoryHistory(userMessage, opts)
+  const absoluteHistoryWindow = hasQueryHistoryWindow(resolvedQueryWindow)
+  const storeSessionHistory = moduleId === 'storeZabbix' && absoluteHistoryWindow && Boolean(hostFilter)
+  const includeInterfaceHistory = storeSessionHistory || shouldIncludeInterfaceHistory(userMessage, opts)
+  const includeCpuMemoryHistory = storeSessionHistory || shouldIncludeCpuMemoryHistory(userMessage, opts)
   const includePing = wantsPingStatus(userMessage)
     || /\b(ping|icmp|latency|jitter|packet\s*loss|uptime|availability|drops?|disconnect|local\s*gateway|gateway\s*latency|custom\.gateway\.ms)\b/i.test(String(userMessage || ''))
     || (Boolean(hostFilter) && hasQueryHistoryWindow(resolvedQueryWindow))
@@ -3661,7 +3755,7 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   const cmByHost = data.cpuMemoryMetrics?.byHost || {}
 
   let storeAgentMetrics = null
-  if (moduleId === 'storeZabbix' && hostname && isInfluxStoreConfigured()) {
+  if (moduleId === 'storeZabbix' && hostname && isInfluxStoreConfigured() && !storeSessionHistory) {
     try {
       const stores = await fetchStoreSnapshot(10, '-1h')
       const store = stores.find(s => storeRecordMatchesHostname(s, hostname))
@@ -3681,30 +3775,20 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
   }
 
   const historyWindowForFetch = (
-    includeCpuMemoryHistory
+    storeSessionHistory
+    || includeCpuMemoryHistory
     || includeInterfaceHistory
-    || (includePing && hasQueryHistoryWindow(resolvedQueryWindow)
+    || (includePing && absoluteHistoryWindow
       && (hostFilter || (moduleId === 'storeZabbix' && /\b(fleet|RP\s*group|all\s*stores)\b/i.test(String(userMessage || '')))))
   )
     ? parseZabbixHistoryWindow(userMessage, { ...opts, queryWindow: resolvedQueryWindow })
     : null
-  const pastHistoricalQuery = isPastHistoricalWindow(historyWindowForFetch)
 
   const hosts = matched.map(h => {
     const hid = String(h.hostid)
     const zabbixCm = cmByHost[hid]
     const cpuMetric = includeCpuMemory ? formatCpuMemoryMetric(zabbixCm?.cpu) : undefined
     const memoryMetric = includeCpuMemory ? formatCpuMemoryMetric(zabbixCm?.memory) : undefined
-    if (pastHistoricalQuery) {
-      if (cpuMetric) {
-        cpuMetric.source = 'live_lastvalue'
-        cpuMetric.note = 'Current Zabbix poll — use cpuAtSession or cpuMemoryHistory.sessionSnapshot for the requested window.'
-      }
-      if (memoryMetric) {
-        memoryMetric.source = 'live_lastvalue'
-        memoryMetric.note = 'Current Zabbix poll — use memoryAtSession or cpuMemoryHistory.sessionSnapshot for the requested window.'
-      }
-    }
     return {
       hostid: h.hostid,
       name: h.name,
@@ -3909,18 +3993,31 @@ async function buildZabbixContextFromClient({ moduleId, envName, sourceLabel, mi
     }
   }
 
+  if (historyWindow) {
+    promoteZabbixSessionHistoryToHosts(hosts, {
+      historyWindow,
+      cpuMemoryHistory,
+      latencyHistory,
+      jitterHistory,
+      gatewayLatencyHistory,
+      pingHistory,
+    })
+  }
+
+  const sessionHistoryApplied = Boolean(historyWindow && storeSessionHistory)
+
   return {
     module: moduleId,
-    freshness: historyWindow?.from && historyWindow?.to
-      && historyWindow.to < Math.floor(Date.now() / 1000) - 3600
-      ? 'historical'
-      : 'live',
+    freshness: sessionHistoryApplied || isPastHistoricalWindow(historyWindow) ? 'historical' : 'live',
+    metricsSource: sessionHistoryApplied ? 'zabbix_history' : 'live_lastvalue',
     fetchedAt,
     configured: true,
     queryWindow: formatQueryWindowMeta(resolvedQueryWindow),
     source: `${sourceLabel} API (host.get + item.get net.if.*)`,
     note: moduleId === 'storeZabbix'
-      ? 'Session window data (use these for past sessions, NOT live hosts[].cpu/memory/ping which is current poll): hosts[].cpuAtSession / memoryAtSession (Zabbix CPU/RAM history.get) · hosts[].zabbixUptimeAtSession or uptimeAtSession (Zabbix uptime counter duration; this is the Store Zabbix Uptime graph) · hosts[].latencyAtSession (custom.ping.ms[8.8.8.8] avg/min/max) · hosts[].jitterAtSession (custom.ping.jitter[8.8.8.8] avg/min/max) · hosts[].gatewayLatencyAtSession (custom.gateway.ms avg/min/max) · hosts[].pingAtSession (agent.ping/icmpping availabilityPct + loss) · cpuMemoryHistory · interfaceHistory · uptimeHistory · latencyHistory · jitterHistory · gatewayLatencyHistory · pingHistory · disconnectEvents. storeAgentMetrics = Influx agent snapshot (alternate source).'
+      ? (sessionHistoryApplied
+        ? 'historyFrom/historyTo session window: hosts[].cpu/memory/ping and hosts[].historySeries are Zabbix history.get for the window (not live lastvalue). Also: cpuMemoryHistory · latencyHistory · jitterHistory · interfaceHistory · uptimeHistory · *AtSession fields · disconnectEvents.'
+        : 'Pass historyFrom + historyTo (unix sec) with a store hostname to get session history on hosts[] instead of live lastvalue. Session fields: cpuAtSession / memoryAtSession / latencyAtSession / jitterAtSession / pingAtSession · cpuMemoryHistory · latencyHistory · disconnectEvents.')
       : 'Live SNMP/interface metrics at send time. For past windows use cpuMemoryHistory.sessionSnapshot / cpuAtSession, uptimeHistory (device uptime counter duration), latencyHistory (custom.ping.ms[8.8.8.8] avg/min/max), jitterHistory (custom.ping.jitter[8.8.8.8] avg/min/max), gatewayLatencyHistory (custom.gateway.ms avg/min/max), and pingHistory (agent.ping/icmpping availability/loss). interfaceHistory provides historical net.if series when an absolute window or trend/history keywords are used.',
     version: data.version,
     hostFilter: data.hostFilter,
