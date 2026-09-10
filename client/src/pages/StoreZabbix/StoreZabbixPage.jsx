@@ -385,6 +385,14 @@ function buildAvailabilitySteps(points, fromTs, toTs, gapThresholdSec = 240) {
 }
 
 function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/api/zabbix', defaultRange, displayMode = 'value', valueScale = 1, bh }) {
+  /* Custom dashboard passes bh — custom range is date-only; times come from BH start/end. */
+  const useBhDateRange = Number.isFinite(Number(bh?.bhStart)) && Number.isFinite(Number(bh?.bhEnd))
+  const bhStart = Number(bh?.bhStart ?? 0)
+  const bhEnd = Number(bh?.bhEnd ?? 24)
+  const toCustomInput = useCallback((ts) => (
+    useBhDateRange ? toDateInput(ts) : toLocalInput(ts)
+  ), [useBhDateRange])
+
   /* When a defaultRange (epoch from/to) is supplied, the chart starts in custom mode
      using that window so it matches the parent dashboard's range selection. */
   const initialEpoch = useMemo(() => {
@@ -398,8 +406,8 @@ function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/
   const [data, setData] = useState(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState(null)
-  const [customFrom, setCustomFrom] = useState(initialEpoch ? toLocalInput(initialEpoch.from) : '')
-  const [customTo, setCustomTo] = useState(initialEpoch ? toLocalInput(initialEpoch.to) : '')
+  const [customFrom, setCustomFrom] = useState(initialEpoch ? toCustomInput(initialEpoch.from) : '')
+  const [customTo, setCustomTo] = useState(initialEpoch ? toCustomInput(initialEpoch.to) : '')
   const [customEpoch, setCustomEpoch] = useState(initialEpoch)
   const chartRef = useRef(null)
   /** focused = zoom to BH segment / data; full = entire selected range */
@@ -420,9 +428,9 @@ function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/
     if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) return
     setRange('custom')
     setCustomEpoch((prev) => (prev?.from === from && prev?.to === to ? prev : { from, to }))
-    setCustomFrom(toLocalInput(from))
-    setCustomTo(toLocalInput(to))
-  }, [defaultRange?.from, defaultRange?.to])
+    setCustomFrom(toCustomInput(from))
+    setCustomTo(toCustomInput(to))
+  }, [defaultRange?.from, defaultRange?.to, toCustomInput])
 
   const selectPreset = useCallback((key) => {
     setRange(key)
@@ -431,12 +439,21 @@ function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/
 
   const applyCustom = useCallback(() => {
     if (!customFrom || !customTo) return
-    const fromTs = Math.floor(new Date(customFrom).getTime() / 1000)
-    const toTs = Math.floor(new Date(customTo).getTime() / 1000)
-    if (isNaN(fromTs) || isNaN(toTs) || fromTs >= toTs) return
+    let fromTs
+    let toTs
+    if (useBhDateRange) {
+      const epoch = roCustomRangeEpoch(customFrom, customTo, bhStart, bhEnd)
+      if (!epoch) return
+      fromTs = epoch.from
+      toTs = epoch.to
+    } else {
+      fromTs = Math.floor(new Date(customFrom).getTime() / 1000)
+      toTs = Math.floor(new Date(customTo).getTime() / 1000)
+      if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || fromTs >= toTs) return
+    }
     setRange('custom')
     setCustomEpoch({ from: fromTs, to: toTs })
-  }, [customFrom, customTo])
+  }, [customFrom, customTo, useBhDateRange, bhStart, bhEnd])
 
   useEffect(() => {
     if (!itemId) return
@@ -452,8 +469,8 @@ function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/
       from = to - sec
     }
     if (range !== 'custom' && !customFrom) {
-      setCustomFrom(toLocalInput(from))
-      setCustomTo(toLocalInput(to))
+      setCustomFrom(toCustomInput(from))
+      setCustomTo(toCustomInput(to))
     }
     api.get(`${apiBase}/items/${encodeURIComponent(itemId)}/history?from=${from}&to=${to}&maxPoints=500`)
       .then(({ data: d }) => {
@@ -686,14 +703,14 @@ function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/
         </div>
         {/* Custom date range */}
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
-          <input type="datetime-local" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)}
+          <input type={useBhDateRange ? 'date' : 'datetime-local'} value={customFrom} onChange={(e) => setCustomFrom(e.target.value)}
             style={{
               padding: '3px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)',
               border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)',
               outline: 'none',
             }} />
           <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>to</span>
-          <input type="datetime-local" value={customTo} onChange={(e) => setCustomTo(e.target.value)}
+          <input type={useBhDateRange ? 'date' : 'datetime-local'} value={customTo} onChange={(e) => setCustomTo(e.target.value)}
             style={{
               padding: '3px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)',
               border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)',
@@ -708,6 +725,11 @@ function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/
             }}>
             Apply
           </button>
+          {useBhDateRange && (
+            <span className="opm-pill" style={{ background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
+              Uses BH {String(bhStart).padStart(2, '0')}:00–{String(bhEnd).padStart(2, '0')}:00
+            </span>
+          )}
           {range === 'custom' && <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: '#3b82f6', fontSize: 10 }}>Custom Range Active</span>}
         </div>
 
@@ -3807,20 +3829,18 @@ function CustomDashboardPanel({
         {range === 'custom' && (
           <div className="opm-toolbar-row" style={{ alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <span className="opm-toolbar-label">Custom</span>
-            <input type={isRoVariant ? 'date' : 'datetime-local'} value={customFrom} onChange={(e) => onCustomFrom(e.target.value)}
+            <input type="date" value={customFrom} onChange={(e) => onCustomFrom(e.target.value)}
               style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none' }} />
             <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>to</span>
-            <input type={isRoVariant ? 'date' : 'datetime-local'} value={customTo} onChange={(e) => onCustomTo(e.target.value)}
+            <input type="date" value={customTo} onChange={(e) => onCustomTo(e.target.value)}
               style={{ padding: '4px 8px', borderRadius: 5, fontSize: 11, fontFamily: 'var(--mono)', border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text)', outline: 'none' }} />
             <button type="button" onClick={onApplyCustomRange} disabled={!customFrom || !customTo}
               style={{ padding: '5px 14px', borderRadius: 5, fontSize: 11, fontWeight: 700, fontFamily: 'var(--mono)', border: 'none', background: 'var(--accent)', color: '#fff', cursor: customFrom && customTo ? 'pointer' : 'not-allowed', opacity: customFrom && customTo ? 1 : .4 }}>
               Apply
             </button>
-            {isRoVariant && (
-              <span className="opm-pill" style={{ background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
-                Uses BH {String(bhStart).padStart(2, '0')}:00–{String(bhEnd).padStart(2, '0')}:00
-              </span>
-            )}
+            <span className="opm-pill" style={{ background: 'rgba(100,116,139,.1)', color: 'var(--text3)', border: '1px solid var(--border)', fontSize: 10 }}>
+              Uses BH {String(bhStart).padStart(2, '0')}:00–{String(bhEnd).padStart(2, '0')}:00
+            </span>
             {customEpoch && <span className="opm-pill" style={{ background: 'rgba(59,130,246,.1)', color: 'var(--accent)', fontSize: 10 }}>Custom range active</span>}
           </div>
         )}
@@ -6136,15 +6156,13 @@ export default function StoreZabbixPage({
         }
         if (prefs.customEpoch?.from && prefs.customEpoch?.to) {
           setCustomDashCustomEpoch({ from: prefs.customEpoch.from, to: prefs.customEpoch.to })
-          if (dashboardVariant === 'ro') {
-            if (!prefs.customFrom) setCustomDashCustomFrom(toDateInput(prefs.customEpoch.from))
-            if (!prefs.customTo) setCustomDashCustomTo(toDateInput(prefs.customEpoch.to))
-          }
+          if (!prefs.customFrom) setCustomDashCustomFrom(toDateInput(prefs.customEpoch.from))
+          if (!prefs.customTo) setCustomDashCustomTo(toDateInput(prefs.customEpoch.to))
         } else {
           setCustomDashCustomEpoch(null)
         }
-        if (prefs.customFrom) setCustomDashCustomFrom(dashboardVariant === 'ro' ? toRoDateInput(prefs.customFrom) : prefs.customFrom)
-        if (prefs.customTo) setCustomDashCustomTo(dashboardVariant === 'ro' ? toRoDateInput(prefs.customTo) : prefs.customTo)
+        if (prefs.customFrom) setCustomDashCustomFrom(toRoDateInput(prefs.customFrom))
+        if (prefs.customTo) setCustomDashCustomTo(toRoDateInput(prefs.customTo))
         setCustomDashBhEnabled(dashboardVariant === 'ro' ? true : !!prefs.bhEnabled)
         if (dashboardVariant !== 'ro') {
           if (Number.isFinite(Number(prefs.bhStart))) setCustomDashBhStart(Number(prefs.bhStart))
@@ -6241,8 +6259,8 @@ export default function StoreZabbixPage({
     } else {
       setCustomDashCustomEpoch(null)
     }
-    setCustomDashCustomFrom(dashboardVariant === 'ro' ? toRoDateInput(p.customFrom || '') : (p.customFrom || ''))
-    setCustomDashCustomTo(dashboardVariant === 'ro' ? toRoDateInput(p.customTo || '') : (p.customTo || ''))
+    setCustomDashCustomFrom(toRoDateInput(p.customFrom || ''))
+    setCustomDashCustomTo(toRoDateInput(p.customTo || ''))
     setCustomDashBhEnabled(dashboardVariant === 'ro' ? true : !!p.bhEnabled)
     if (dashboardVariant !== 'ro') {
       if (Number.isFinite(Number(p.bhStart))) setCustomDashBhStart(Number(p.bhStart))
@@ -9966,20 +9984,12 @@ export default function StoreZabbixPage({
           customEpoch={customDashCustomEpoch}
           onApplyCustomRange={() => {
             if (!customDashCustomFrom || !customDashCustomTo) return
-            let from
-            let to
-            if (dashboardVariant === 'ro') {
-              const epoch = roCustomRangeEpoch(customDashCustomFrom, customDashCustomTo, RO_DASHBOARD_BH_START, RO_DASHBOARD_BH_END)
-              if (!epoch) return
-              from = epoch.from
-              to = epoch.to
-            } else {
-              from = Math.floor(new Date(customDashCustomFrom).getTime() / 1000)
-              to = Math.floor(new Date(customDashCustomTo).getTime() / 1000)
-              if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) return
-            }
+            const bhStart = dashboardVariant === 'ro' ? RO_DASHBOARD_BH_START : customDashBh.bhStart
+            const bhEnd = dashboardVariant === 'ro' ? RO_DASHBOARD_BH_END : customDashBh.bhEnd
+            const epoch = roCustomRangeEpoch(customDashCustomFrom, customDashCustomTo, bhStart, bhEnd)
+            if (!epoch) return
             setCustomDashRange('custom')
-            setCustomDashCustomEpoch({ from, to })
+            setCustomDashCustomEpoch({ from: epoch.from, to: epoch.to })
           }}
           timeWindow={customDashTimeWindow}
           /* BH */
