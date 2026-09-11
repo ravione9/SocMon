@@ -608,21 +608,51 @@ function historyKind(valueType) {
   return null
 }
 
-function downsamplePoints(points, maxPoints) {
+function downsamplePoints(points, maxPoints, { preserveExtrema = false } = {}) {
   if (!points?.length || points.length <= maxPoints) return points
-  const out = []
-  const step = points.length / maxPoints
-  for (let i = 0; i < maxPoints; i++) {
+  if (!preserveExtrema) {
+    const out = []
+    const step = points.length / maxPoints
+    for (let i = 0; i < maxPoints; i++) {
+      const start = Math.floor(i * step)
+      const end = Math.min(points.length, Math.floor((i + 1) * step))
+      const chunk = points.slice(start, end)
+      if (!chunk.length) continue
+      let sum = 0
+      for (const p of chunk) sum += Number(p.value)
+      const mid = chunk[Math.floor(chunk.length / 2)]
+      out.push({ clock: mid.clock, value: sum / chunk.length })
+    }
+    return out
+  }
+
+  /* Counter-safe downsample (system.uptime): keep first, last, min, max per bucket
+     so reboot dips and gap edges survive aggregation. */
+  const buckets = Math.max(1, Math.floor(maxPoints / 4))
+  const step = points.length / buckets
+  const picked = new Map()
+  const take = (p) => {
+    if (!p || !Number.isFinite(Number(p.clock))) return
+    const key = String(p.clock)
+    if (!picked.has(key)) picked.set(key, { clock: Number(p.clock), value: Number(p.value) })
+  }
+  for (let i = 0; i < buckets; i++) {
     const start = Math.floor(i * step)
     const end = Math.min(points.length, Math.floor((i + 1) * step))
     const chunk = points.slice(start, end)
     if (!chunk.length) continue
-    let sum = 0
-    for (const p of chunk) sum += Number(p.value)
-    const mid = chunk[Math.floor(chunk.length / 2)]
-    out.push({ clock: mid.clock, value: sum / chunk.length })
+    take(chunk[0])
+    take(chunk[chunk.length - 1])
+    let minP = chunk[0]
+    let maxP = chunk[0]
+    for (const p of chunk) {
+      if (Number(p.value) < Number(minP.value)) minP = p
+      if (Number(p.value) > Number(maxP.value)) maxP = p
+    }
+    take(minP)
+    take(maxP)
   }
-  return out
+  return [...picked.values()].sort((a, b) => a.clock - b.clock)
 }
 
 /** Single latest row from `item.get` metadata (enabled item with a last value). */
@@ -994,6 +1024,10 @@ router.get('/items/:itemId/history', async (req, res) => {
     const meta = (metaRows || [])[0]
     if (!meta) return res.status(404).json({ error: 'Item not found or no permission' })
 
+    const preserveExtrema = ['1', 'true', 'yes'].includes(String(req.query.preserveExtrema || '').toLowerCase())
+      || /uptime/i.test(String(meta.key_ || ''))
+      || /uptime/i.test(String(meta.name || ''))
+
     const hk = historyKind(meta.value_type)
     if (!hk) return res.json({
       item: { itemid: meta.itemid, name: meta.name, key: meta.key_, units: meta.units || '', valueType: Number(meta.value_type) },
@@ -1048,7 +1082,7 @@ router.get('/items/:itemId/history', async (req, res) => {
       }
     }
 
-    points = downsamplePoints(points, maxPoints)
+    points = downsamplePoints(points, maxPoints, { preserveExtrema })
 
     res.json({
       item: { itemid: meta.itemid, name: meta.name, key: meta.key_, units: meta.units || '', valueType: Number(meta.value_type) },

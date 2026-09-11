@@ -330,40 +330,85 @@ function toLocalInput(ts) {
  * "up vs down" chart — flat 100% while the host was reporting, drops to 0%
  * across reboots and data-outage windows.
  *
- * Heuristics:
+ * Heuristics (aligned with computeUptimeStats):
  *   - Continuous samples (no value drop, gap ≤ GAP_THRESHOLD_SEC) → up.
  *   - A drop in value → reboot. Down between the previous sample and the
  *     inferred boot time `bootAt = curClock - curValue`.
  *   - A gap > GAP_THRESHOLD_SEC = host wasn't reporting → counted as down.
  *   - Pre-range / post-range silence > GAP_THRESHOLD_SEC → also down.
+ *
+ * Points are clipped to [fromTs, toTs]. The last sample before fromTs is used
+ * only for carry-in state (so per-BH-day calls do not incorrectly paint green
+ * at day open when the host was still down).
  */
 function buildAvailabilitySteps(points, fromTs, toTs, gapThresholdSec = 240) {
   const out = []
-  const fromN = Number(fromTs), toN = Number(toTs)
+  const fromN = Number(fromTs)
+  const toN = Number(toTs)
   if (!Number.isFinite(fromN) || !Number.isFinite(toN) || toN <= fromN) return out
-  if (!points?.length) {
-    out.push({ clock: fromN, value: 0 })
-    out.push({ clock: toN, value: 0 })
+
+  const sorted = (points || [])
+    .map((p) => ({ clock: Number(p.clock), value: Number(p.value) }))
+    .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+    .sort((a, b) => a.clock - b.clock)
+
+  let before = null
+  const inRange = []
+  for (const p of sorted) {
+    if (p.clock < fromN) before = p
+    else if (p.clock <= toN) inRange.push(p)
+  }
+
+  if (!inRange.length) {
+    const recentBefore = before && (fromN - before.clock) <= gapThresholdSec
+    const v = recentBefore ? 100 : 0
+    out.push({ clock: fromN, value: v })
+    out.push({ clock: toN, value: v })
     return out
   }
-  if (points[0].clock - fromN > gapThresholdSec) {
+
+  const first = inRange[0]
+  const leadAgeAtStart = before ? (fromN - before.clock) : Infinity
+  let startDown = true
+  if (before && leadAgeAtStart <= gapThresholdSec) {
+    if (first.value + 5 < before.value) {
+      const bootAt = first.clock - first.value
+      startDown = !(Number.isFinite(bootAt) && bootAt < fromN)
+    } else {
+      startDown = false
+    }
+  } else if (!before && first.clock - fromN <= gapThresholdSec) {
+    startDown = false
+  } else if (first.clock - fromN > gapThresholdSec) {
+    startDown = true
+  } else {
+    startDown = false
+  }
+
+  if (startDown) {
     out.push({ clock: fromN, value: 0 })
-    out.push({ clock: points[0].clock - 1, value: 0 })
-    out.push({ clock: points[0].clock, value: 100 })
+    if (first.clock > fromN) out.push({ clock: first.clock - 1, value: 0 })
+    out.push({ clock: first.clock, value: 100 })
   } else {
     out.push({ clock: fromN, value: 100 })
-    out.push({ clock: points[0].clock, value: 100 })
+    out.push({ clock: first.clock, value: 100 })
   }
-  for (let i = 1; i < points.length; i++) {
-    const prev = points[i - 1]
-    const cur = points[i]
+
+  for (let i = 1; i < inRange.length; i++) {
+    const prev = inRange[i - 1]
+    const cur = inRange[i]
     const gap = cur.clock - prev.clock
-    if (cur.value < prev.value) {
-      const bootAt = Math.max(prev.clock + 1, cur.clock - cur.value)
+    if (cur.value + 5 < prev.value) {
+      const rawBoot = cur.clock - cur.value
+      const bootAt = Number.isFinite(rawBoot) && rawBoot > prev.clock
+        ? Math.min(cur.clock, rawBoot)
+        : prev.clock + 1
       out.push({ clock: prev.clock, value: 100 })
-      out.push({ clock: prev.clock + 1, value: 0 })
-      out.push({ clock: bootAt, value: 0 })
-      out.push({ clock: bootAt + 1, value: 100 })
+      if (bootAt > prev.clock + 1) {
+        out.push({ clock: prev.clock + 1, value: 0 })
+        out.push({ clock: bootAt, value: 0 })
+        if (bootAt < cur.clock) out.push({ clock: bootAt + 1, value: 100 })
+      }
       out.push({ clock: cur.clock, value: 100 })
     } else if (gap > gapThresholdSec) {
       out.push({ clock: prev.clock, value: 100 })
@@ -374,7 +419,8 @@ function buildAvailabilitySteps(points, fromTs, toTs, gapThresholdSec = 240) {
       out.push({ clock: cur.clock, value: 100 })
     }
   }
-  const last = points[points.length - 1]
+
+  const last = inRange[inRange.length - 1]
   if (toN - last.clock > gapThresholdSec) {
     out.push({ clock: last.clock + 1, value: 0 })
     out.push({ clock: toN, value: 0 })
@@ -410,13 +456,14 @@ function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/
   const [customTo, setCustomTo] = useState(initialEpoch ? toCustomInput(initialEpoch.to) : '')
   const [customEpoch, setCustomEpoch] = useState(initialEpoch)
   const chartRef = useRef(null)
-  /** focused = zoom to BH segment / data; full = entire selected range */
-  const [viewMode, setViewMode] = useState(() => (bh?.bhEnabled ? 'focused' : 'full'))
+  /** focused = zoom to BH segment / data; full = entire selected range.
+   * Availability charts default to full so multi-hour downtime is visible. */
+  const [viewMode, setViewMode] = useState(() => (displayMode === 'availability' ? 'full' : (bh?.bhEnabled ? 'focused' : 'full')))
   const [isZoomed, setIsZoomed] = useState(false)
 
   useEffect(() => {
-    setViewMode(bh?.bhEnabled ? 'focused' : 'full')
-  }, [bh?.bhEnabled, bh?.bhStart, bh?.bhEnd, bh?.bhDays])
+    setViewMode(displayMode === 'availability' ? 'full' : (bh?.bhEnabled ? 'focused' : 'full'))
+  }, [bh?.bhEnabled, bh?.bhStart, bh?.bhEnd, bh?.bhDays, displayMode])
 
   /* Keep this chart synchronized with the parent dashboard range.
      When the top-level selected range changes, force this chart to follow it
@@ -472,7 +519,14 @@ function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/
       setCustomFrom(toCustomInput(from))
       setCustomTo(toCustomInput(to))
     }
-    api.get(`${apiBase}/items/${encodeURIComponent(itemId)}/history?from=${from}&to=${to}&maxPoints=500`)
+    const maxPoints = displayMode === 'availability' ? 3000 : 500
+    const qs = new URLSearchParams({
+      from: String(from),
+      to: String(to),
+      maxPoints: String(maxPoints),
+    })
+    if (displayMode === 'availability') qs.set('preserveExtrema', '1')
+    api.get(`${apiBase}/items/${encodeURIComponent(itemId)}/history?${qs}`)
       .then(({ data: d }) => {
         if (cancelled) return
         setData(d)
@@ -483,7 +537,7 @@ function ItemHistoryChart({ itemId, itemName, itemUnits, chartOpts, apiBase = '/
       })
       .finally(() => { if (!cancelled) setBusy(false) })
     return () => { cancelled = true }
-  }, [itemId, range, customEpoch, apiBase])
+  }, [itemId, range, customEpoch, apiBase, displayMode])
 
   const isAvail = displayMode === 'availability'
 
@@ -1438,15 +1492,22 @@ function computeUptimeStats(points, fromTs, toTs, bh) {
   if (!points?.length) {
     return { rebootCount: 0, reboots: [], upSec: 0, totalSec, downSec: totalSec, uptimePct: totalSec > 0 ? 0 : null, lastReboot: null }
   }
+  const sorted = [...points]
+    .map((p) => ({ clock: Number(p.clock), value: Number(p.value) }))
+    .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
+    .sort((a, b) => a.clock - b.clock)
+  if (!sorted.length) {
+    return { rebootCount: 0, reboots: [], upSec: 0, totalSec, downSec: totalSec, uptimePct: totalSec > 0 ? 0 : null, lastReboot: null }
+  }
   const reboots = []
   let downSec = 0
-  if (points[0].clock - fromTs > GAP_THRESHOLD_SEC) {
-    downSec += bhClippedSpan(fromTs, points[0].clock, bh)
+  if (sorted[0].clock - fromTs > GAP_THRESHOLD_SEC) {
+    downSec += bhClippedSpan(fromTs, sorted[0].clock, bh)
   }
-  for (let i = 1; i < points.length; i++) {
-    const prev = points[i - 1], cur = points[i]
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1], cur = sorted[i]
     const gap = cur.clock - prev.clock
-    if (cur.value < prev.value) {
+    if (cur.value + 5 < prev.value) {
       const bootAt = cur.clock - cur.value
       const at = bootAt > prev.clock ? bootAt : cur.clock
       reboots.push({ at, downSec: at > prev.clock ? bhClippedSpan(prev.clock, at, bh) : 0 })
@@ -1455,8 +1516,8 @@ function computeUptimeStats(points, fromTs, toTs, bh) {
       downSec += bhClippedSpan(prev.clock, cur.clock, bh)
     }
   }
-  if (toTs - points[points.length - 1].clock > GAP_THRESHOLD_SEC) {
-    downSec += bhClippedSpan(points[points.length - 1].clock, toTs, bh)
+  if (toTs - sorted[sorted.length - 1].clock > GAP_THRESHOLD_SEC) {
+    downSec += bhClippedSpan(sorted[sorted.length - 1].clock, toTs, bh)
   }
   const upSec = Math.max(0, totalSec - downSec)
   const uptimePct = totalSec > 0 ? Math.max(0, Math.min(100, (upSec / totalSec) * 100)) : null
@@ -5542,7 +5603,7 @@ export default function StoreZabbixPage({
     try {
       const results = await Promise.all(pairs.map(async ({ hostid, itemid }) => {
         try {
-          const qs = new URLSearchParams({ from: String(Math.floor(fromTs)), to: String(Math.floor(toTs)), maxPoints: '1500' })
+          const qs = new URLSearchParams({ from: String(Math.floor(fromTs)), to: String(Math.floor(toTs)), maxPoints: '3000', preserveExtrema: '1' })
           const { data } = await api.get(`${apiBase}/items/${encodeURIComponent(itemid)}/history?${qs}`)
           const points = (data?.points || []).map((p) => ({ clock: Number(p.clock), value: Number(p.value) }))
             .filter((p) => Number.isFinite(p.clock) && Number.isFinite(p.value))
