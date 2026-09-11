@@ -897,7 +897,7 @@ export const API_DOCS_INTRO = {
     },
     {
       heading: 'Rate limits & timeouts',
-      body: '500 requests / 15 min per IP on /api/*. Store monitor overview and AI chat can take 30s–6min — use a long client timeout. CSV exports stream; do not expect JSON.',
+      body: '5000 requests / 15 min per IP on /api/*. Store monitor overview and AI chat can take 30s–6min — use a long client timeout. CSV exports stream; do not expect JSON.',
     },
     {
       heading: 'Page access map',

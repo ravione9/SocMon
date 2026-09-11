@@ -132,7 +132,7 @@ app.use(
   '/api/',
   rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 500,
+    max: 5000,
     validate: { xForwardedForHeader: false },
     skip: (req) => {
       const url = (req.originalUrl || req.url || '')
@@ -143,7 +143,7 @@ app.use(
         url.includes('idcs/export') ||
         url.includes('/email-sim/pub') ||
         // Internal monitoring dashboards make many parallel requests (per-group
-        // disconnect widgets, snapshot polls, etc). 500 req / 15 min was choking
+        // disconnect widgets, snapshot polls, etc). Previous 500 req / 15 min was choking
         // the Net Health tab.
         url.startsWith('/api/store-monitor') ||
         // MCP / agent runners verify JWT via meta on every connect and poll
