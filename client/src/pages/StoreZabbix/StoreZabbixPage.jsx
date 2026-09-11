@@ -6807,7 +6807,7 @@ export default function StoreZabbixPage({
     }
   }, [hostsExplorer, loadAllHosts, loadHostGraphs, loadHostItemsLatest, parseErr])
 
-  /** Ro dashboard: open a single host in the Custom Dashboard tab. */
+  /** Open a single host in the Custom Dashboard tab. */
   const goToCustomDash = useCallback((host) => {
     if (!host?.hostid) return
     setCustomDashWidget(null)
@@ -6824,6 +6824,69 @@ export default function StoreZabbixPage({
     }
     setTab('custom')
   }, [customDashHosts, customDashHostsBusy, hosts, loadCustomDashHosts, setTab])
+
+  /** Export currently filtered inventory rows as CSV (Excel-friendly UTF-8 BOM). */
+  const exportInventoryCsv = useCallback(() => {
+    const rows = filteredInventory || []
+    if (!rows.length) return
+    const esc = (v) => {
+      const s = v == null ? '' : String(v)
+      if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+      return s
+    }
+    const isRo = dashboardVariant === 'ro'
+    const headers = isRo
+      ? ['Status', 'Last Connected', 'Last Connected At', 'Connection', 'Store Type', 'Device Name', 'IP Address', 'Technical Name', 'Category', 'Monitoring']
+      : ['Status', 'Last Connected', 'Last Connected At', 'Device Name', 'IP Address', 'Technical Name', 'Category', 'Monitoring']
+    const lines = [headers.join(',')]
+    for (const h of rows) {
+      const clock = h.agentLastConnected
+      const age = clock ? relAge(clock) : ''
+      const lastConnected = age ? `${age} ago` : ''
+      const lastConnectedAt = clock ? fmtClock(clock) : ''
+      const profile = isRo ? getHostStoreProfile(h, customDashStoreByHost, customDashStoreManualCodes) : null
+      const cells = isRo
+        ? [
+            h.availability || '',
+            lastConnected,
+            lastConnectedAt,
+            profile?.connType || '',
+            profile?.storeType || '',
+            h.name || h.host || '',
+            h.ip || '',
+            h.host || '',
+            (h.groups || []).join('; '),
+            h.monitored ? 'Enabled' : 'Disabled',
+          ]
+        : [
+            h.availability || '',
+            lastConnected,
+            lastConnectedAt,
+            h.name || h.host || '',
+            h.ip || '',
+            h.host || '',
+            (h.groups || []).join('; '),
+            h.monitored ? 'Enabled' : 'Disabled',
+          ]
+      lines.push(cells.map(esc).join(','))
+    }
+    const stamp = new Date().toISOString().slice(0, 10)
+    const scope = (resolvedLockedGroup || lockedHostGroup || inventoryGroupFilter || 'all')
+      .replace(/[^\w.-]+/g, '_')
+      .slice(0, 40) || 'all'
+    const blob = new Blob(['\uFEFF', lines.join('\r\n')], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `Inventory_${scope}_${stamp}.csv`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }, [
+    filteredInventory, dashboardVariant, customDashStoreByHost, customDashStoreManualCodes,
+    resolvedLockedGroup, lockedHostGroup, inventoryGroupFilter,
+  ])
 
   /* Navigate to Snapshot tab with a group filter (no host preselected) */
   const goToGroup = useCallback((groupName) => {
@@ -7442,7 +7505,21 @@ export default function StoreZabbixPage({
             )}
           </div>
           <Widget title="Device Inventory" badge={`${filteredInventory.length}${(inventorySearch || inventoryGroupFilter || inventoryAvailFilter || inventoryStoreTypeFilter) && scopedInventoryHosts.length ? ` / ${scopedInventoryHosts.length}` : ''}`} badgeColor="green" noPad
-            actions={null}>
+            actions={
+              <button
+                type="button"
+                onClick={exportInventoryCsv}
+                disabled={!filteredInventory.length}
+                title={filteredInventory.length ? `Export ${filteredInventory.length} filtered rows as CSV` : 'No rows to export'}
+                style={{
+                  padding: '4px 12px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg3)',
+                  color: filteredInventory.length ? 'var(--text2)' : 'var(--text3)', fontSize: 11, fontFamily: 'var(--mono)',
+                  fontWeight: 600, cursor: filteredInventory.length ? 'pointer' : 'not-allowed', opacity: filteredInventory.length ? 1 : .5,
+                }}
+              >
+                ⬇ Export CSV
+              </button>
+            }>
             {hosts === null || tabBusy
               ? <div style={{ padding: 24, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}><span className="np-page-loading-dot" style={{ width: 14, height: 14 }} />Loading devices…</div>
               : <DataTable columns={hostCols} rows={filteredInventory} empty={(() => {
@@ -7455,7 +7532,7 @@ export default function StoreZabbixPage({
                     return `No devices${inventoryAvailFilter ? ` with status “${inventoryAvailFilter}”` : ''}${inventoryGroupFilter ? ` in group “${inventoryGroupFilter}”` : ''}${storeTypeLabel ? ` with store type “${storeTypeLabel}”` : ''}.`
                   }
                   return 'No monitored devices.'
-                })()} rowKey={(h) => h.hostid} onRowClick={(h) => goToHostGraphs(h)} />
+                })()} rowKey={(h) => h.hostid} onRowClick={(h) => (dashboardVariant === 'ro' ? goToCustomDash(h) : goToHostGraphs(h))} />
             }
           </Widget>
         </div>
