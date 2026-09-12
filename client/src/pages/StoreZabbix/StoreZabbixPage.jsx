@@ -41,7 +41,7 @@ import ZabbixAlertsPanel from './ZabbixAlertsPanel.jsx'
 
 const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'rop', 'reports', 'custom', 'alerts']
 const RO_DASHBOARD_HIDDEN_TABS = new Set(['problems', 'alerts', 'events', 'rop'])
-const RO_DASHBOARD_HIDDEN_TOPMON = new Set(['cpu', 'memory', 'disk', 'packetLoss'])
+const RO_DASHBOARD_HIDDEN_TOPMON = new Set(['disk', 'packetLoss'])
 /** Ro Dashboard — fixed business hours on every tab (12:00–21:00). */
 const RO_DASHBOARD_BH_START = 12
 const RO_DASHBOARD_BH_END = 21
