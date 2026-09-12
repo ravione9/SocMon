@@ -41,7 +41,9 @@ import ZabbixAlertsPanel from './ZabbixAlertsPanel.jsx'
 
 const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'rop', 'reports', 'custom', 'alerts']
 const RO_DASHBOARD_HIDDEN_TABS = new Set(['problems', 'alerts', 'events', 'rop'])
-const RO_DASHBOARD_HIDDEN_TOPMON = new Set(['disk', 'packetLoss'])
+const RO_DASHBOARD_HIDDEN_TOPMON = new Set(['disk', 'packetLoss', 'latency', 'jitter'])
+/** Ro Top Monitoring always shows these ranking widgets (ignore layout hide prefs). */
+const RO_DASHBOARD_TOPMON_FORCE = ['cpu', 'memory']
 /** Ro Dashboard — fixed business hours on every tab (12:00–21:00). */
 const RO_DASHBOARD_BH_START = 12
 const RO_DASHBOARD_BH_END = 21
@@ -7877,7 +7879,7 @@ export default function StoreZabbixPage({
             </div>
           </div>
 
-          <div className="topmon-dash-header">
+          <div className="topmon-dash-header" style={dashboardVariant === 'ro' ? { display: 'none' } : undefined}>
             <div>
               <h2>Performance Dashboard</h2>
               <p>
@@ -7919,11 +7921,136 @@ export default function StoreZabbixPage({
           {topUtil && (() => {
             const s = topUtil.summary || {}
             const d = topUtil.distributions || {}
-            const roTopMonHidden = dashboardVariant === 'ro' ? RO_DASHBOARD_HIDDEN_TOPMON : null
-            const visibleBuiltin = TOP_MON_BUILTIN.filter((w) => !hiddenTopWidgets.includes(w.id) && !roTopMonHidden?.has(w.id))
+            const isRoTop = dashboardVariant === 'ro'
+            const roTopMonHidden = isRoTop ? RO_DASHBOARD_HIDDEN_TOPMON : null
+            const visibleBuiltin = TOP_MON_BUILTIN.filter((w) => {
+              if (isRoTop && RO_DASHBOARD_TOPMON_FORCE.includes(w.id)) return true
+              if (hiddenTopWidgets.includes(w.id)) return false
+              if (roTopMonHidden?.has(w.id)) return false
+              return true
+            })
             const infraWidgets = visibleBuiltin.filter((w) => w.section === 'infra')
             const netWidgets = visibleBuiltin.filter((w) => w.section === 'network')
-            const goHost = (r) => goToHostGraphs({ hostid: r.hostid, host: r.host, name: r.name })
+            const goHost = (r) => (isRoTop
+              ? goToCustomDash({ hostid: r.hostid, host: r.host, name: r.name })
+              : goToHostGraphs({ hostid: r.hostid, host: r.host, name: r.name }))
+
+            /* ── Ro Dashboard: focused Top CPU / Memory view ── */
+            if (isRoTop) {
+              const cpuRows = topUtil.cpu || []
+              const memRows = topUtil.memory || []
+              const scopeHosts = s.monitoredHosts ?? 0
+              const withCpu = s.withCpu ?? 0
+              const withMem = s.withMemory ?? 0
+              return (
+                <>
+                  <div className="topmon-dash-header" style={{ marginTop: 0 }}>
+                    <div>
+                      <h2>Top resource utilization</h2>
+                      <p>
+                        Highest CPU and memory usage from hosts that report these sensors
+                        {resolvedLockedGroup || lockedHostGroup ? <> · Group: <strong style={{ color: 'var(--accent)' }}>{resolvedLockedGroup || lockedHostGroup}</strong></> : null}
+                        {topUtil?.sampledAt && <> · Refreshed {relAge(topUtil.sampledAt)} ago</>}
+                        {topUtil?.staleAfterSec ? <> · Fresh polls ≤{Math.round(topUtil.staleAfterSec / 60)}m</> : null}
+                      </p>
+                    </div>
+                    <div className="opm-toolbar-row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                      <span className="opm-toolbar-label">Show top</span>
+                      {[5, 10, 20].map((n) => (
+                        <button key={n} type="button" onClick={() => setTopLimit(n)}
+                          style={{ padding: '4px 12px', borderRadius: 6, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 700, border: topLimit === n ? '1px solid var(--accent)' : '1px solid var(--border)', background: topLimit === n ? 'rgba(59,130,246,.12)' : 'var(--bg3)', color: topLimit === n ? 'var(--accent)' : 'var(--text3)', cursor: 'pointer' }}>
+                          {n}
+                        </button>
+                      ))}
+                      <button type="button" onClick={() => loadTopUtil(topLimit)} disabled={topUtilBusy}
+                        style={{ padding: '5px 14px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg3)', color: 'var(--text2)', fontSize: 11, fontFamily: 'var(--mono)', cursor: topUtilBusy ? 'wait' : 'pointer', fontWeight: 600 }}>
+                        {topUtilBusy ? '↻ …' : '↻ Refresh'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="topmon-kpi-grid">
+                    <TopMonKpi
+                      icon="▦"
+                      label="Hosts in group"
+                      value={scopeHosts}
+                      sub="Monitored in this dashboard scope"
+                      color="#3b82f6"
+                      iconBg="rgba(59,130,246,.12)"
+                    />
+                    <TopMonKpi
+                      icon="⚡"
+                      label="Hosts with CPU data"
+                      value={withCpu}
+                      sub={scopeHosts ? `${Math.round((withCpu / scopeHosts) * 100)}% of group · sensor present` : 'CPU % items reporting'}
+                      color="#3b82f6"
+                      iconBg="rgba(59,130,246,.12)"
+                    />
+                    <TopMonKpi
+                      icon="◉"
+                      label="Hosts with memory data"
+                      value={withMem}
+                      sub={scopeHosts ? `${Math.round((withMem / scopeHosts) * 100)}% of group · sensor present` : 'Memory % items reporting'}
+                      color="#8b5cf6"
+                      iconBg="rgba(139,92,246,.12)"
+                    />
+                    <TopMonKpi
+                      icon="⚠"
+                      label="CPU ≥ 90%"
+                      value={s.cpuCritical ?? 0}
+                      sub={`${s.cpuHigh ?? 0} hosts at 75–90%`}
+                      color={(s.cpuCritical ?? 0) > 0 ? '#ef4444' : '#22c55e'}
+                      iconBg={(s.cpuCritical ?? 0) > 0 ? 'rgba(239,68,68,.12)' : 'rgba(34,197,94,.12)'}
+                    />
+                    <TopMonKpi
+                      icon="⚠"
+                      label="Memory ≥ 90%"
+                      value={s.memoryCritical ?? 0}
+                      sub={`${s.memoryHigh ?? 0} hosts at 75–90%`}
+                      color={(s.memoryCritical ?? 0) > 0 ? '#ef4444' : '#22c55e'}
+                      iconBg={(s.memoryCritical ?? 0) > 0 ? 'rgba(239,68,68,.12)' : 'rgba(34,197,94,.12)'}
+                    />
+                  </div>
+
+                  <p style={{ margin: '4px 0 0', fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', lineHeight: 1.5 }}>
+                    Rankings only include hosts with a live CPU/memory % item. Other devices in the group (no agent sensor) are counted in “Hosts in group” but not in the top lists.
+                  </p>
+
+                  <div className="topmon-widget-grid">
+                    <Widget
+                      title={`Top ${topLimit} CPU utilization`}
+                      badge={`${cpuRows.length} / ${withCpu}`}
+                      badgeColor="blue"
+                      noPad
+                      actions={<span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Highest % first · click row → Custom Dashboard</span>}
+                    >
+                      <TopMonRankTable
+                        rows={cpuRows}
+                        accent="#3b82f6"
+                        unitSuffix="%"
+                        emptyMsg={withCpu ? 'No CPU samples in this refresh window.' : 'No hosts in this group report CPU utilization %.'}
+                        onRowClick={goHost}
+                      />
+                    </Widget>
+                    <Widget
+                      title={`Top ${topLimit} memory utilization`}
+                      badge={`${memRows.length} / ${withMem}`}
+                      badgeColor="purple"
+                      noPad
+                      actions={<span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Highest % first · click row → Custom Dashboard</span>}
+                    >
+                      <TopMonRankTable
+                        rows={memRows}
+                        accent="#8b5cf6"
+                        unitSuffix="%"
+                        emptyMsg={withMem ? 'No memory samples in this refresh window.' : 'No hosts in this group report memory utilization %.'}
+                        onRowClick={goHost}
+                      />
+                    </Widget>
+                  </div>
+                </>
+              )
+            }
 
             return (
               <>
