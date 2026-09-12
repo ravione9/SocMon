@@ -7939,7 +7939,6 @@ export default function StoreZabbixPage({
             if (isRoTop) {
               const cpuRows = topUtil.cpu || []
               const memRows = topUtil.memory || []
-              const scopeHosts = s.monitoredHosts ?? 0
               const withCpu = s.withCpu ?? 0
               const withMem = s.withMemory ?? 0
               return (
@@ -7968,53 +7967,6 @@ export default function StoreZabbixPage({
                       </button>
                     </div>
                   </div>
-
-                  <div className="topmon-kpi-grid">
-                    <TopMonKpi
-                      icon="▦"
-                      label="Hosts in group"
-                      value={scopeHosts}
-                      sub="Monitored in this dashboard scope"
-                      color="#3b82f6"
-                      iconBg="rgba(59,130,246,.12)"
-                    />
-                    <TopMonKpi
-                      icon="⚡"
-                      label="Hosts with CPU data"
-                      value={withCpu}
-                      sub={scopeHosts ? `${Math.round((withCpu / scopeHosts) * 100)}% of group · sensor present` : 'CPU % items reporting'}
-                      color="#3b82f6"
-                      iconBg="rgba(59,130,246,.12)"
-                    />
-                    <TopMonKpi
-                      icon="◉"
-                      label="Hosts with memory data"
-                      value={withMem}
-                      sub={scopeHosts ? `${Math.round((withMem / scopeHosts) * 100)}% of group · sensor present` : 'Memory % items reporting'}
-                      color="#8b5cf6"
-                      iconBg="rgba(139,92,246,.12)"
-                    />
-                    <TopMonKpi
-                      icon="⚠"
-                      label="CPU ≥ 90%"
-                      value={s.cpuCritical ?? 0}
-                      sub={`${s.cpuHigh ?? 0} hosts at 75–90%`}
-                      color={(s.cpuCritical ?? 0) > 0 ? '#ef4444' : '#22c55e'}
-                      iconBg={(s.cpuCritical ?? 0) > 0 ? 'rgba(239,68,68,.12)' : 'rgba(34,197,94,.12)'}
-                    />
-                    <TopMonKpi
-                      icon="⚠"
-                      label="Memory ≥ 90%"
-                      value={s.memoryCritical ?? 0}
-                      sub={`${s.memoryHigh ?? 0} hosts at 75–90%`}
-                      color={(s.memoryCritical ?? 0) > 0 ? '#ef4444' : '#22c55e'}
-                      iconBg={(s.memoryCritical ?? 0) > 0 ? 'rgba(239,68,68,.12)' : 'rgba(34,197,94,.12)'}
-                    />
-                  </div>
-
-                  <p style={{ margin: '4px 0 0', fontSize: 11, color: 'var(--text3)', fontFamily: 'var(--mono)', lineHeight: 1.5 }}>
-                    Rankings only include hosts with a live CPU/memory % item. Other devices in the group (no agent sensor) are counted in “Hosts in group” but not in the top lists.
-                  </p>
 
                   <div className="topmon-widget-grid">
                     <Widget
