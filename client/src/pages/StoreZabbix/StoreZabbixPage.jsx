@@ -1302,6 +1302,66 @@ function pickCustomDashItem(items, metric) {
   return { ...best.item, _displayValue: display, _inverted: inverted }
 }
 
+/** Read vm.memory.size[*] bytes from a host's latest items list. */
+function extractMemorySizeBytesFromLatest(items) {
+  let totalBytes = null
+  let availableBytes = null
+  let usedBytes = null
+  for (const it of items || []) {
+    const m = String(it.key || '').match(/^vm\.memory\.size\[([^\]]+)\]/i)
+    if (!m) continue
+    if (String(it.units || '').includes('%')) continue
+    const raw = Number(it.value)
+    if (!Number.isFinite(raw) || raw < 0) continue
+    const u = String(it.units || '').trim().toUpperCase()
+    const mul = ({ B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4, PB: 1024 ** 5 })[u]
+    const bytes = mul ? raw * mul : raw
+    const mode = String(m[1] || '').trim().toLowerCase().replace(/^"|"$/g, '')
+    if (mode === 'total') totalBytes = bytes
+    else if (mode === 'used') usedBytes = bytes
+    else if (mode === 'available' || mode === 'free' || mode === 'availablecached') availableBytes = bytes
+  }
+  return { totalBytes, availableBytes, usedBytes }
+}
+
+/** Attach total/available/used memory bytes onto a custom-dashboard memory % item. */
+function enrichCustomDashMemoryItem(memoryItem, items, systemMemory) {
+  if (!memoryItem && !systemMemory) return memoryItem
+  let totalBytes = systemMemory?.totalBytes ?? null
+  let availableBytes = systemMemory?.availableBytes ?? null
+  let usedBytes = systemMemory?.usedBytes ?? null
+  if (totalBytes == null && availableBytes == null && usedBytes == null) {
+    const parsed = extractMemorySizeBytesFromLatest(items)
+    totalBytes = parsed.totalBytes
+    availableBytes = parsed.availableBytes
+    usedBytes = parsed.usedBytes
+  }
+  const pct = memoryItem != null ? Number(memoryItem._displayValue ?? memoryItem.value) : null
+  if (usedBytes == null && totalBytes != null && availableBytes != null) {
+    usedBytes = Math.max(0, totalBytes - availableBytes)
+  }
+  if (availableBytes == null && totalBytes != null && usedBytes != null) {
+    availableBytes = Math.max(0, totalBytes - usedBytes)
+  }
+  if (totalBytes == null && usedBytes != null && availableBytes != null) {
+    totalBytes = usedBytes + availableBytes
+  }
+  if (usedBytes == null && totalBytes != null && Number.isFinite(pct)) {
+    usedBytes = totalBytes * (pct / 100)
+  }
+  if (availableBytes == null && totalBytes != null && usedBytes != null) {
+    availableBytes = Math.max(0, totalBytes - usedBytes)
+  }
+  if (totalBytes == null && availableBytes == null && usedBytes == null) return memoryItem
+  const base = memoryItem || { key: 'vm.memory.size', name: 'System memory', units: '%', value: pct, _displayValue: pct }
+  return {
+    ...base,
+    totalBytes: totalBytes != null ? Math.round(totalBytes) : null,
+    availableBytes: availableBytes != null ? Math.round(availableBytes) : null,
+    usedBytes: usedBytes != null ? Math.round(usedBytes) : null,
+  }
+}
+
 /** Classify a single Zabbix event row for the custom dashboard.
  *  App-crash data is intentionally NOT classified here — it lives in InfluxDB
  *  and is fetched separately via /app-crashes. */
@@ -1941,7 +2001,11 @@ function TopUtilWidget({ rows, accent, unitSuffix = '%', emptyMsg = 'No data ava
         const used = fmtBytes(r.usedBytes)
         const total = fmtBytes(r.totalBytes)
         const free = fmtBytes(r.freeBytes)
-        const showSpace = showBytes && (used || total)
+        const available = fmtBytes(r.availableBytes)
+        const showSpace = showBytes && (used || total || available)
+        const primarySpace = available && total
+          ? { left: available, right: total, title: used ? `Used: ${used}` : (free ? `Free: ${free}` : undefined), leftLabel: 'Avail' }
+          : { left: used, right: total, title: free ? `Free: ${free}` : (available ? `Available: ${available}` : undefined), leftLabel: 'Used' }
         return (
           <div key={r.itemid || `${r.hostid}-${i}`} className="opm-row-hover"
             onClick={onRowClick ? () => onRowClick(r) : undefined}
@@ -1962,10 +2026,10 @@ function TopUtilWidget({ rows, accent, unitSuffix = '%', emptyMsg = 'No data ava
                 {showSpace && (
                   <>
                     {showMount && r.mount && <span style={{ opacity: .3 }}>·</span>}
-                    <span title={free ? `Free: ${free}` : undefined}>
-                      <span style={{ color: 'var(--text2)', fontWeight: 600 }}>{used || '—'}</span>
+                    <span title={primarySpace.title}>
+                      <span style={{ color: 'var(--text2)', fontWeight: 600 }}>{primarySpace.left || '—'}</span>
                       <span style={{ opacity: .55 }}> / </span>
-                      <span style={{ color: 'var(--text2)' }}>{total || '—'}</span>
+                      <span style={{ color: 'var(--text2)' }}>{primarySpace.right || '—'}</span>
                     </span>
                   </>
                 )}
@@ -2328,7 +2392,7 @@ function RoProblematicStoresTable({ rows, emptyMsg, storeByHost, storeManualCode
   )
 }
 
-function TopMonRankTable({ rows, accent, unitSuffix = '%', emptyMsg, onRowClick, showMount, showBytes, severityMode, storeByHost, storeManualCodes }) {
+function TopMonRankTable({ rows, accent, unitSuffix = '%', emptyMsg, onRowClick, showMount, showBytes, showMemoryBytes, severityMode, storeByHost, storeManualCodes }) {
   const showStoreProfile = storeByHost != null
   if (!rows?.length) {
     return (
@@ -2347,6 +2411,8 @@ function TopMonRankTable({ rows, accent, unitSuffix = '%', emptyMsg, onRowClick,
           {showMount && <th>Volume</th>}
           {showStoreProfile && <th style={{ width: 88 }}>Connection</th>}
           {showStoreProfile && <th style={{ width: 108 }}>Store Type</th>}
+          {showMemoryBytes && <th style={{ width: 88, textAlign: 'right' }}>Total</th>}
+          {showMemoryBytes && <th style={{ width: 88, textAlign: 'right' }}>Available</th>}
           <th style={{ width: 72 }}>Status</th>
           <th style={{ width: 140, textAlign: 'right' }}>Value</th>
         </tr>
@@ -2358,6 +2424,7 @@ function TopMonRankTable({ rows, accent, unitSuffix = '%', emptyMsg, onRowClick,
           const sev = topMonSeverity(barPct, rawVal, unitSuffix, severityMode)
           const used = fmtBytes(r.usedBytes)
           const total = fmtBytes(r.totalBytes)
+          const available = fmtBytes(r.availableBytes)
           const displayVal = r.value != null ? (rawVal >= 100 ? Math.round(rawVal) : rawVal.toFixed(1)) : barPct.toFixed(1)
           const { connType, storeType } = showStoreProfile
             ? getHostStoreProfile({ host: r.host, name: r.name }, storeByHost, storeManualCodes)
@@ -2369,7 +2436,7 @@ function TopMonRankTable({ rows, accent, unitSuffix = '%', emptyMsg, onRowClick,
               </td>
               <td>
                 <div style={{ color: 'var(--text)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 200 }}>{r.name || r.host}</div>
-                {showBytes && (used || total) && (
+                {showBytes && !showMemoryBytes && (used || total) && (
                   <div style={{ fontSize: 10, color: 'var(--text3)', marginTop: 2 }}>{used || '—'} / {total || '—'}</div>
                 )}
               </td>
@@ -2379,6 +2446,16 @@ function TopMonRankTable({ rows, accent, unitSuffix = '%', emptyMsg, onRowClick,
               )}
               {showStoreProfile && (
                 <td style={{ color: storeTypeColor(storeType), fontSize: 11, fontWeight: 600, fontFamily: 'var(--mono)' }}>{storeType || '—'}</td>
+              )}
+              {showMemoryBytes && (
+                <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text2)', fontWeight: 600 }}>
+                  {total || '—'}
+                </td>
+              )}
+              {showMemoryBytes && (
+                <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, color: '#22c55e', fontWeight: 600 }}>
+                  {available || '—'}
+                </td>
               )}
               <td>
                 <span className="topmon-sev-pill" style={{ color: sev.color, background: sev.bg, border: `1px solid ${sev.color}33` }}>{sev.label}</span>
@@ -2403,7 +2480,7 @@ const TOP_MON_STORAGE_PREFIX = 'netpulse-topMon-custom'
 const TOP_MON_HIDDEN_PREFIX = 'netpulse-topMon-hidden'
 const TOP_MON_BUILTIN = [
   { id: 'cpu', title: 'Top CPU Utilization', dataKey: 'cpu', accent: '#3b82f6', badgeColor: 'blue', unitSuffix: '%', emptyMsg: 'No CPU utilization items found.', section: 'infra' },
-  { id: 'memory', title: 'Top Memory Utilization', dataKey: 'memory', accent: '#8b5cf6', badgeColor: 'purple', unitSuffix: '%', emptyMsg: 'No memory utilization items found.', section: 'infra' },
+  { id: 'memory', title: 'Top Memory Utilization', dataKey: 'memory', accent: '#8b5cf6', badgeColor: 'purple', unitSuffix: '%', showMemoryBytes: true, emptyMsg: 'No memory utilization items found.', section: 'infra' },
   { id: 'disk', title: 'Top Disk Space Usage', dataKey: 'disk', accent: '#f59e0b', badgeColor: 'amber', unitSuffix: '%', showMount: true, showBytes: true, emptyMsg: 'No filesystem usage items found.', section: 'infra' },
   { id: 'packetLoss', title: 'Top Packet Loss', dataKey: 'packetLoss', accent: '#ef4444', badgeColor: 'red', unitSuffix: '%', emptyMsg: 'No packet loss sensors found.', section: 'network', useValue: true },
   { id: 'jitter', title: 'Top Jitter', dataKey: 'jitter', accent: '#a855f7', badgeColor: 'purple', unitSuffix: ' ms', emptyMsg: 'No jitter sensors found.', section: 'network', useValue: true, severityMode: 'jitter' },
@@ -3606,10 +3683,11 @@ function CustomDashboardPanel({
     return (selectedHosts || []).map((h) => {
       const data = latestByHost?.[String(h.hostid)]
       const items = data?.latest || []
+      const memory = enrichCustomDashMemoryItem(pickCustomDashItem(items, 'memory'), items, data?.systemMemory)
       return {
         host: h,
         cpu: pickCustomDashItem(items, 'cpu'),
-        memory: pickCustomDashItem(items, 'memory'),
+        memory,
         uptime: pickCustomDashItem(items, 'uptime'),
         latency: pickCustomDashItem(items, 'latency'),
         jitter: pickCustomDashItem(items, 'jitter'),
@@ -4761,6 +4839,18 @@ function CustomDashDetailPanel({
                         <div style={{ width: `${meterPct}%`, height: '100%', background: valueColor, transition: 'width .3s' }} />
                       </div>
                     </div>
+                  )}
+                  {widget === 'memory' && (
+                    <>
+                      <div style={{ width: 90, textAlign: 'right' }} title="Total system memory (vm.memory.size[total])">
+                        <div style={{ fontSize: 10, color: 'var(--text3)' }}>Total</div>
+                        <div style={{ fontWeight: 700, color: 'var(--text2)' }}>{fmtBytes(item?.totalBytes) || '—'}</div>
+                      </div>
+                      <div style={{ width: 90, textAlign: 'right' }} title="Available system memory (vm.memory.size[available])">
+                        <div style={{ fontSize: 10, color: 'var(--text3)' }}>Available</div>
+                        <div style={{ fontWeight: 700, color: '#22c55e' }}>{fmtBytes(item?.availableBytes) || '—'}</div>
+                      </div>
+                    </>
                   )}
                   {isRangeMaxMsWidget && (
                     <>
@@ -7941,14 +8031,14 @@ export default function StoreZabbixPage({
               const memRows = topUtil.memory || []
               const withCpu = s.withCpu ?? 0
               const withMem = s.withMemory ?? 0
+              const groupLabel = resolvedLockedGroup || lockedHostGroup || 'group'
               return (
                 <>
                   <div className="topmon-dash-header" style={{ marginTop: 0 }}>
                     <div>
                       <h2>Top resource utilization</h2>
                       <p>
-                        Highest CPU and memory usage from hosts that report these sensors
-                        {resolvedLockedGroup || lockedHostGroup ? <> · Group: <strong style={{ color: 'var(--accent)' }}>{resolvedLockedGroup || lockedHostGroup}</strong></> : null}
+                        Highest CPU and memory in {groupLabel}
                         {topUtil?.sampledAt && <> · Refreshed {relAge(topUtil.sampledAt)} ago</>}
                         {topUtil?.staleAfterSec ? <> · Fresh polls ≤{Math.round(topUtil.staleAfterSec / 60)}m</> : null}
                       </p>
@@ -7971,10 +8061,10 @@ export default function StoreZabbixPage({
                   <div className="topmon-widget-grid">
                     <Widget
                       title={`Top ${topLimit} CPU utilization`}
-                      badge={`${cpuRows.length} / ${withCpu}`}
+                      badge={String(cpuRows.length || topLimit)}
                       badgeColor="blue"
                       noPad
-                      actions={<span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Highest % first · click row → Custom Dashboard</span>}
+                      actions={<span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Highest % first · click → Custom Dashboard</span>}
                     >
                       <TopMonRankTable
                         rows={cpuRows}
@@ -7986,15 +8076,16 @@ export default function StoreZabbixPage({
                     </Widget>
                     <Widget
                       title={`Top ${topLimit} memory utilization`}
-                      badge={`${memRows.length} / ${withMem}`}
+                      badge={String(memRows.length || topLimit)}
                       badgeColor="purple"
                       noPad
-                      actions={<span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Highest % first · click row → Custom Dashboard</span>}
+                      actions={<span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Total & available RAM · click → Custom Dashboard</span>}
                     >
                       <TopMonRankTable
                         rows={memRows}
                         accent="#8b5cf6"
                         unitSuffix="%"
+                        showMemoryBytes
                         emptyMsg={withMem ? 'No memory samples in this refresh window.' : 'No hosts in this group report memory utilization %.'}
                         onRowClick={goHost}
                       />
@@ -8048,6 +8139,7 @@ export default function StoreZabbixPage({
                             emptyMsg={def.emptyMsg}
                             showMount={def.showMount}
                             showBytes={def.showBytes}
+                            showMemoryBytes={def.showMemoryBytes}
                             onRowClick={goHost}
                           />
                         </Widget>

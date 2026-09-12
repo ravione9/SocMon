@@ -698,6 +698,86 @@ function buildLatestRowsFromHostItems(metas) {
   return latest
 }
 
+function readItemBytes(it) {
+  const v = parseLooseNumber(it?.lastvalue ?? it?.value)
+  if (!Number.isFinite(v) || v < 0) return null
+  const u = String(it.units || '').trim().toUpperCase()
+  const mul = ({ B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4, PB: 1024 ** 5 })[u]
+  return mul ? v * mul : v
+}
+
+function formatBytesShort(n) {
+  if (n == null || !Number.isFinite(n)) return null
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  let v = Math.max(0, n)
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  const decimals = v >= 100 ? 0 : v >= 10 ? 1 : 2
+  return `${v.toFixed(decimals)} ${units[i]}`
+}
+
+/**
+ * Structured system memory summary from vm.memory.size[*] (+ optional util %).
+ * Exposed on GET /hosts/:hostId/items/latest as `systemMemory`.
+ */
+function buildSystemMemorySummary(metas) {
+  let totalBytes = null
+  let availableBytes = null
+  let usedBytes = null
+  let utilPercent = null
+  let utilKey = null
+  for (const it of metas || []) {
+    const key = String(it.key_ || it.key || '')
+    const sizeM = key.match(/^vm\.memory\.size\[([^\]]+)\]/i)
+    if (sizeM) {
+      const mode = String(sizeM[1] || '').trim().toLowerCase().replace(/^"|"$/g, '')
+      if (String(it.units || '').includes('%')) continue
+      const bytes = readItemBytes(it)
+      if (bytes == null) continue
+      if (mode === 'total') totalBytes = bytes
+      else if (mode === 'used') usedBytes = bytes
+      else if (mode === 'available' || mode === 'free' || mode === 'availablecached') availableBytes = bytes
+      continue
+    }
+    if (/^vm\.memory\.util|^vm\.memory\.utilization/i.test(key) || /^system\.memory\.util/i.test(key)) {
+      const u = String(it.units || '').trim()
+      const pct = parseLooseNumber(it.lastvalue ?? it.value)
+      if ((u === '%' || /%/.test(u)) && Number.isFinite(pct) && pct >= 0 && pct <= 100) {
+        utilPercent = Math.round(pct * 10) / 10
+        utilKey = key
+      }
+    }
+  }
+  if (usedBytes == null && totalBytes != null && availableBytes != null) {
+    usedBytes = Math.max(0, totalBytes - availableBytes)
+  }
+  if (availableBytes == null && totalBytes != null && usedBytes != null) {
+    availableBytes = Math.max(0, totalBytes - usedBytes)
+  }
+  if (totalBytes == null && usedBytes != null && availableBytes != null) {
+    totalBytes = usedBytes + availableBytes
+  }
+  if (usedBytes == null && totalBytes != null && utilPercent != null) {
+    usedBytes = totalBytes * (utilPercent / 100)
+  }
+  if (availableBytes == null && totalBytes != null && usedBytes != null) {
+    availableBytes = Math.max(0, totalBytes - usedBytes)
+  }
+  if (totalBytes == null && availableBytes == null && usedBytes == null) return null
+  const round = (n) => (n != null ? Math.round(n) : null)
+  return {
+    totalBytes: round(totalBytes),
+    availableBytes: round(availableBytes),
+    usedBytes: round(usedBytes),
+    totalLabel: formatBytesShort(totalBytes),
+    availableLabel: formatBytesShort(availableBytes),
+    usedLabel: formatBytesShort(usedBytes),
+    utilPercent,
+    utilKey,
+    source: 'vm.memory.size[total|available|used]',
+  }
+}
+
 async function graphGetDetail(graphids) {
   try {
     return await zabbixRpc('graph.get', {
@@ -757,14 +837,16 @@ router.get('/hosts/:hostId/items/latest', async (req, res) => {
     })
 
     const latest = buildLatestRowsFromHostItems(rows || [])
+    const systemMemory = buildSystemMemorySummary(rows || [])
     res.json({
       hostid: hostId,
       latest,
+      systemMemory,
       totalItems: (rows || []).length,
       withValue: latest.length,
       displayMode: 'latest',
       note:
-        'Built from monitored item last values — no Zabbix graph on this host (typical for some VMware / discovery hosts).',
+        'Built from monitored item last values — no Zabbix graph on this host (typical for some VMware / discovery hosts). systemMemory exposes vm.memory.size[total|available|used] when present.',
     })
   } catch (e) {
     return sendZabbixError(res, e)
@@ -1994,6 +2076,35 @@ router.get('/top-utilization', async (req, res) => {
       return it ? readBytes(it) : null
     }
 
+    /**
+     * Per-host memory byte items: total / used / available|free.
+     * Keys like vm.memory.size[total], vm.memory.size[available], vm.memory.size[used].
+     */
+    const memByteIndex = {}
+    for (const it of itemRows || []) {
+      const key = String(it.key_ || '')
+      const m = key.match(/^vm\.memory\.size\[([^\]]+)\]/i)
+      if (!m) continue
+      const mode = String(m[1] || '').trim().toLowerCase().replace(/^"|"$/g, '')
+      if (!['total', 'used', 'available', 'free', 'availablecached'].includes(mode)) continue
+      if (isPercentUnits(it.units)) continue
+      const hostid = String(it.hostid)
+      if (!hostid) continue
+      const bytes = readBytes(it)
+      if (bytes == null) continue
+      const norm = mode === 'availablecached' ? 'available' : mode === 'free' ? 'available' : mode
+      const k = `${hostid}|${norm}`
+      const clock = Number(it.lastclock) || 0
+      const prev = memByteIndex[k]
+      if (!prev || clock >= (prev.clock || 0)) {
+        memByteIndex[k] = { bytes, clock }
+      }
+    }
+
+    function lookupMemBytes(hostid, mode) {
+      return memByteIndex[`${hostid}|${mode}`]?.bytes ?? null
+    }
+
     /** For each metric, pick the best item per host (must report `%` units). */
     function pickPerHost(metric) {
       const patterns = TOP_METRIC_KEYS[metric]
@@ -2061,6 +2172,32 @@ router.get('/top-utilization', async (req, res) => {
           if (usedBytes != null) row.usedBytes = Math.round(usedBytes)
           if (totalBytes != null) row.totalBytes = Math.round(totalBytes)
           if (free != null) row.freeBytes = Math.round(free)
+        }
+        if (metric === 'memory') {
+          let totalBytes = lookupMemBytes(hid, 'total')
+          let usedBytes = lookupMemBytes(hid, 'used')
+          let availableBytes = lookupMemBytes(hid, 'available')
+          if (usedBytes == null && totalBytes != null && availableBytes != null) {
+            usedBytes = Math.max(0, totalBytes - availableBytes)
+          }
+          if (availableBytes == null && totalBytes != null && usedBytes != null) {
+            availableBytes = Math.max(0, totalBytes - usedBytes)
+          }
+          if (totalBytes == null && usedBytes != null && availableBytes != null) {
+            totalBytes = usedBytes + availableBytes
+          }
+          /* Derive from % when only total (or used) is known. */
+          if (usedBytes == null && totalBytes != null) usedBytes = totalBytes * (e.valuePct / 100)
+          if (availableBytes == null && totalBytes != null && usedBytes != null) {
+            availableBytes = Math.max(0, totalBytes - usedBytes)
+          }
+          if (totalBytes == null && usedBytes != null && e.valuePct > 0) {
+            totalBytes = usedBytes / (e.valuePct / 100)
+            if (availableBytes == null) availableBytes = Math.max(0, totalBytes - usedBytes)
+          }
+          if (usedBytes != null) row.usedBytes = Math.round(usedBytes)
+          if (totalBytes != null) row.totalBytes = Math.round(totalBytes)
+          if (availableBytes != null) row.availableBytes = Math.round(availableBytes)
         }
         out.push(row)
       }

@@ -1746,7 +1746,7 @@ export function formatContextForPrompt(context) {
     '- For zabbixInfra: use hosts[].ports for per-interface bandwidth. inRate/outRate are formatted; inBps/outBps are raw bytes/sec.',
     '- Rank or highlight busiest interfaces when the user asks about utilization — compute from inBps+outBps when helpful.',
     '- If hostFilter is an IP and hosts[] is empty, say no Zabbix host matched that SNMP/management IP.',
-    '- For storeZabbix: CPU/RAM can come from BOTH hosts[].cpu/memory (Zabbix) and storeAgentMetrics (Influx agent). Use cpuMemoryMetricsState.zabbix and cpuMemoryMetricsState.storeAgent; report each source separately when both exist.',
+    '- For storeZabbix: CPU/RAM can come from BOTH hosts[].cpu/memory (Zabbix) and storeAgentMetrics (Influx agent). Use cpuMemoryMetricsState.zabbix and cpuMemoryMetricsState.storeAgent; report each source separately when both exist. hosts[].memory may include totalBytes / availableBytes / usedBytes from vm.memory.size[*].',
     '- For storeZabbix/zabbixInfra fleet counts: availability.total is the full inventory; hosts[] may be capped (see hostsListTruncated, monitoredHostTotal, hostsReturned). Quote availability.total for "how many hosts" — not hosts.length.',
     '- For storeZabbix: disconnectEvents + activeDisconnectEvents are BH-filtered Mongo (ROP tab) and work even when Zabbix API is down. zabbixConfigured/zabbixError describe STORE_ZABBIX metrics only.',
     '- For storeZabbix with historyFrom/historyTo + hostname: hosts[].cpu/memory/ping and hosts[].historySeries are session-window Zabbix history (metricsSource=zabbix_history), not live lastvalue. Without history params, hosts[].cpu/memory/ping are live. latencyHistory / jitterHistory / cpuMemoryHistory hold full time series.',

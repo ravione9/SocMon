@@ -839,12 +839,91 @@ function storeRecordMatchesHostname(store, hostname) {
 
 function formatCpuMemoryMetric(metric) {
   if (!metric) return undefined
-  return {
+  const out = {
     percent: metric.percent,
     itemName: metric.itemName,
     itemid: metric.itemid || null,
     key: metric.key || null,
     polledAt: metric.clock ? formatPortalTimestamp(Number(metric.clock) * 1000) : null,
+  }
+  if (metric.totalBytes != null) out.totalBytes = metric.totalBytes
+  if (metric.availableBytes != null) out.availableBytes = metric.availableBytes
+  if (metric.usedBytes != null) out.usedBytes = metric.usedBytes
+  if (metric.totalLabel) out.totalLabel = metric.totalLabel
+  if (metric.availableLabel) out.availableLabel = metric.availableLabel
+  if (metric.usedLabel) out.usedLabel = metric.usedLabel
+  return out
+}
+
+/** Convert Zabbix memory byte lastvalue + units to bytes. */
+function readMemorySizeBytes(it) {
+  const v = parseFloat(it?.lastvalue)
+  if (!Number.isFinite(v) || v < 0) return null
+  const u = String(it.units || '').trim().toUpperCase()
+  const mul = ({ B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4, PB: 1024 ** 5 })[u]
+  return mul ? v * mul : v
+}
+
+function formatBytesLabel(n) {
+  if (n == null || !Number.isFinite(n)) return null
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  let v = Math.max(0, n)
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  const decimals = v >= 100 ? 0 : v >= 10 ? 1 : 2
+  return `${v.toFixed(decimals)} ${units[i]}`
+}
+
+/**
+ * Enrich a memory % metric with vm.memory.size[total|available|used] from the same host.
+ * Derives missing siblings when possible (total − available = used, etc.).
+ */
+function enrichMemoryMetricWithSizeBytes(memory, itemRows, hostid) {
+  if (!memory) return memory
+  let totalBytes = null
+  let availableBytes = null
+  let usedBytes = null
+  for (const it of itemRows || []) {
+    if (String(it.hostid) !== String(hostid)) continue
+    const m = String(it.key_ || '').match(/^vm\.memory\.size\[([^\]]+)\]/i)
+    if (!m) continue
+    const mode = String(m[1] || '').trim().toLowerCase().replace(/^"|"$/g, '')
+    if (!['total', 'used', 'available', 'free', 'availablecached'].includes(mode)) continue
+    if (String(it.units || '').includes('%')) continue
+    const bytes = readMemorySizeBytes(it)
+    if (bytes == null) continue
+    const norm = mode === 'availablecached' || mode === 'free' ? 'available' : mode
+    if (norm === 'total') totalBytes = bytes
+    else if (norm === 'available') availableBytes = bytes
+    else if (norm === 'used') usedBytes = bytes
+  }
+  if (usedBytes == null && totalBytes != null && availableBytes != null) {
+    usedBytes = Math.max(0, totalBytes - availableBytes)
+  }
+  if (availableBytes == null && totalBytes != null && usedBytes != null) {
+    availableBytes = Math.max(0, totalBytes - usedBytes)
+  }
+  if (totalBytes == null && usedBytes != null && availableBytes != null) {
+    totalBytes = usedBytes + availableBytes
+  }
+  if (usedBytes == null && totalBytes != null && memory.percent != null) {
+    usedBytes = totalBytes * (memory.percent / 100)
+  }
+  if (availableBytes == null && totalBytes != null && usedBytes != null) {
+    availableBytes = Math.max(0, totalBytes - usedBytes)
+  }
+  if (totalBytes == null && usedBytes != null && memory.percent > 0) {
+    totalBytes = usedBytes / (memory.percent / 100)
+    if (availableBytes == null) availableBytes = Math.max(0, totalBytes - usedBytes)
+  }
+  return {
+    ...memory,
+    totalBytes: totalBytes != null ? Math.round(totalBytes) : null,
+    availableBytes: availableBytes != null ? Math.round(availableBytes) : null,
+    usedBytes: usedBytes != null ? Math.round(usedBytes) : null,
+    totalLabel: formatBytesLabel(totalBytes),
+    availableLabel: formatBytesLabel(availableBytes),
+    usedLabel: formatBytesLabel(usedBytes),
   }
 }
 
@@ -1448,7 +1527,8 @@ async function fetchCpuMemoryMetrics(zabbixRpc, hostids) {
   const byHost = {}
   for (const hid of hostids) {
     const cpu = pickHostPctMetric(itemRows, hid, CPU_KEY_RES)
-    const memory = pickHostPctMetric(itemRows, hid, MEMORY_KEY_RES, MEMORY_INVERT_KEY_RE)
+    let memory = pickHostPctMetric(itemRows, hid, MEMORY_KEY_RES, MEMORY_INVERT_KEY_RE)
+    if (memory) memory = enrichMemoryMetricWithSizeBytes(memory, itemRows, hid)
     if (cpu || memory) byHost[hid] = { cpu, memory }
   }
   return { byHost }
@@ -3603,7 +3683,7 @@ function buildCpuMemoryMetricsState(data, matchedHosts, includeCpuMemory, storeA
 
   const zabbix = {
     available: zabbixAvailable,
-    source: 'Zabbix % utilization items (system.cpu.util / vm.memory.utilization)',
+    source: 'Zabbix % utilization + vm.memory.size[total|available|used] (hosts[].memory.totalBytes / availableBytes)',
     checkedHosts: hosts.length,
     hostsWithCpu,
     hostsWithMemory,

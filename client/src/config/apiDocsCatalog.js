@@ -783,7 +783,7 @@ export const API_DOC_ENDPOINTS = [
     method: 'GET',
     path: '/api/zabbix/hosts/{hostId}/items/latest',
     title: 'Host latest items',
-    description: 'Latest values for key items on one host.',
+    description: 'Latest item values for one host. Includes systemMemory (totalBytes / availableBytes / usedBytes) from vm.memory.size[*] when present.',
     pathParams: [{ name: 'hostId', placeholder: '12345', description: 'Zabbix hostid' }],
   }),
   ep({
@@ -805,6 +805,31 @@ export const API_DOC_ENDPOINTS = [
     queryParams: [
       { name: 'search', placeholder: 'RP4531', example: 'RP' },
       { name: 'limit', placeholder: '200', example: '100' },
+    ],
+  }),
+  ep({
+    id: 'store-zabbix-host-items',
+    groupId: 'store-zabbix',
+    pageKey: 'storeZabbix',
+    method: 'GET',
+    path: '/api/store-zabbix/hosts/{hostId}/items/latest',
+    title: 'Store host latest items + system memory',
+    description: 'Latest monitored items for a Store Zabbix host. Response.systemMemory exposes totalBytes, availableBytes, usedBytes (and labels) from vm.memory.size[total|available|used].',
+    pathParams: [{ name: 'hostId', placeholder: '14749', description: 'Store Zabbix hostid' }],
+    queryParams: [
+      { name: 'limit', placeholder: '250', example: '250' },
+    ],
+  }),
+  ep({
+    id: 'store-zabbix-top-utilization',
+    groupId: 'store-zabbix',
+    pageKey: 'storeZabbix',
+    method: 'GET',
+    path: '/api/store-zabbix/top-utilization',
+    title: 'Top utilization (CPU / memory / disk)',
+    description: 'Ranked hosts by utilization. Memory rows include totalBytes, availableBytes, usedBytes.',
+    queryParams: [
+      { name: 'limit', placeholder: '25', example: '25' },
     ],
   }),
 

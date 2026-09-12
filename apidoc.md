@@ -1094,7 +1094,7 @@ Active problems (triggers) from infra Zabbix.
 
 **Host latest items** · requires page `infra`
 
-Latest values for key items on one host.
+Latest values for key items on one host. Response includes `systemMemory` when `vm.memory.size[total|available|used]` items exist (`totalBytes`, `availableBytes`, `usedBytes` + human labels).
 
 
 | Path param | Description | Example |
@@ -1118,6 +1118,40 @@ Same shape as infra overview but STORE_ZABBIX_* env instance.
 |---|---|---|
 | `search` |  | RP |
 | `limit` |  | 100 |
+
+### GET `/api/store-zabbix/hosts/{hostId}/items/latest`
+
+**Store host latest items** · requires page `storeZabbix`
+
+Same as infra `/api/zabbix/hosts/{hostId}/items/latest` against STORE_ZABBIX. Includes structured `systemMemory`:
+
+```json
+{
+  "hostid": "14749",
+  "latest": [ { "itemid": "…", "key": "vm.memory.util", "value": 50.1, "units": "%" } ],
+  "systemMemory": {
+    "totalBytes": 17179869184,
+    "availableBytes": 8589934592,
+    "usedBytes": 8589934592,
+    "totalLabel": "16.00 GB",
+    "availableLabel": "8.00 GB",
+    "usedLabel": "8.00 GB",
+    "utilPercent": 50.1,
+    "source": "vm.memory.size[total|available|used]"
+  }
+}
+```
+
+### GET `/api/store-zabbix/top-utilization`
+
+**Top utilization** · requires page `storeZabbix`
+
+Top CPU / memory / disk / latency hosts. Memory rows include `totalBytes`, `availableBytes`, `usedBytes` from `vm.memory.size[*]`.
+
+
+| Query param | Description | Example |
+|---|---|---|
+| `limit` | Max rows per metric | 25 |
 
 ## Admin — users & devices (`pageKey: admin`)
 
