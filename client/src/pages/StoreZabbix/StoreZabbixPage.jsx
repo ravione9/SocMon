@@ -39,8 +39,10 @@ import { storeMatchesManualCode } from '../../config/manualRopSdwanStoreCodes.js
 import { parseManualStoreCodes } from '../../config/manualRopSdwanStoreCodes.js'
 import ZabbixAlertsPanel from './ZabbixAlertsPanel.jsx'
 
-const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'rop', 'reports', 'custom', 'alerts']
+const INFRA_TAB_IDS = ['overview', 'hosts', 'hostGraphs', 'topMon', 'problems', 'events', 'netHealth', 'storeSummary', 'rop', 'reports', 'custom', 'alerts']
 const RO_DASHBOARD_HIDDEN_TABS = new Set(['problems', 'alerts', 'events', 'rop'])
+/** Store Summary is Ro Dashboard only (full Store Zabbix keeps ROP Dashboard). */
+const FULL_DASHBOARD_HIDDEN_TABS = new Set(['storeSummary'])
 const RO_DASHBOARD_HIDDEN_TOPMON = new Set(['disk', 'packetLoss', 'latency', 'jitter'])
 /** Ro Top Monitoring always shows these ranking widgets (ignore layout hide prefs). */
 const RO_DASHBOARD_TOPMON_FORCE = ['cpu', 'memory']
@@ -49,6 +51,15 @@ const RO_DASHBOARD_BH_START = 12
 const RO_DASHBOARD_BH_END = 21
 const RO_DASHBOARD_BH_DAYS = [0, 1, 2, 3, 4, 5, 6]
 const RO_DASHBOARD_DEFAULT_RANGE = '24h'
+/** CEO Store Summary range chips (BH uptime needs multi-day windows). */
+const STORE_SUMMARY_RANGE_CHIPS = [
+  { id: '7d', label: '7d' },
+  { id: '14d', label: '14d' },
+  { id: '30d', label: '30d' },
+  { id: 'custom', label: 'Custom' },
+]
+const STORE_SUMMARY_TOP_N = 10
+const STORE_SUMMARY_HEATMAP_MAX = 50
 
 const STORE_ZABBIX_RANGE_SEC = {
   '12h': 12 * 3600,
@@ -1833,9 +1844,48 @@ const INLINE_CSS = `
 .rop-stat--warn .rop-stat-icon{background:rgba(234,179,8,.14);color:#b45309}
 .rop-stat--bad .rop-stat-icon{background:rgba(239,68,68,.12);color:#dc2626}
 .rop-status-dot{width:6px;height:6px;border-radius:50%;display:inline-block;flex-shrink:0}
+.ss-rank-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:1100px){.ss-rank-grid{grid-template-columns:1fr}}
+.ss-heat-wrap{overflow:auto;max-height:420px}
+.ss-heat-table{border-collapse:separate;border-spacing:2px;font-size:11px;min-width:100%}
+.ss-heat-table th{position:sticky;top:0;z-index:1;background:var(--bg3);padding:6px 4px;font-size:9px;font-family:var(--mono);color:var(--text3);font-weight:700;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+.ss-heat-table th.ss-heat-store{left:0;z-index:2;text-align:left;padding-left:10px;min-width:140px}
+.ss-heat-table td.ss-heat-store{position:sticky;left:0;background:var(--bg2);padding:4px 10px;font-weight:600;white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis;font-size:11px}
+.ss-heat-cell{width:32px;height:24px;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:9px;font-weight:700;cursor:default}
+.ss-rank-table{width:100%;border-collapse:collapse;font-size:12px}
+.ss-rank-table th{padding:8px 10px;text-align:left;font-size:10px;color:var(--text3);font-family:var(--mono);font-weight:700;text-transform:uppercase;letter-spacing:.04em;background:var(--bg3);border-bottom:1px solid var(--border);white-space:nowrap}
+.ss-rank-table td{padding:8px 10px;border-bottom:1px solid rgba(128,128,160,.06);vertical-align:middle}
+.ss-rank-table tr.ss-rank-row{cursor:pointer;transition:background .12s}
+.ss-rank-table tr.ss-rank-row:hover{background:rgba(59,130,246,.06)}
+.ss-rank-num{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:6px;font-size:10px;font-weight:800;font-family:var(--mono);background:var(--bg4);color:var(--text3)}
+.ss-rank-num.top3{color:#fff}
+.ss-spark{display:flex;gap:1px;height:16px;align-items:flex-end}
 `
 
 /* ─── Shared components ─── */
+function fmtRopMins(m) {
+  if (m == null || !Number.isFinite(m)) return '—'
+  if (m < 1) return '< 1 m'
+  if (m < 60) return `${Math.round(m)} m`
+  if (m < 1440) return `${(m / 60).toFixed(1)} h`
+  return `${(m / 1440).toFixed(1)} d`
+}
+
+function ropUptimeColor(p) {
+  if (p == null) return '#64748b'
+  if (p >= 99.9) return '#16a34a'
+  if (p >= 99.0) return '#65a30d'
+  if (p >= 95.0) return '#ca8a04'
+  if (p >= 90.0) return '#ea580c'
+  return '#dc2626'
+}
+
+function ropUptimePill(p) {
+  if (p == null) return { bg: 'rgba(100,116,139,.12)', color: '#94a3b8', border: 'var(--border)' }
+  const c = ropUptimeColor(p)
+  return { bg: `${c}22`, color: c, border: `${c}55` }
+}
+
 function Widget({ title, badge, badgeColor, children, noPad, actions, style: sx }) {
   return (
     <div className="opm-widget" style={{ animation: 'fadeIn .25s ease', ...sx }}>
@@ -5262,7 +5312,7 @@ export default function StoreZabbixPage({
   const allowedTabIds = useMemo(
     () => (dashboardVariant === 'ro'
       ? INFRA_TAB_IDS.filter((id) => !RO_DASHBOARD_HIDDEN_TABS.has(id))
-      : INFRA_TAB_IDS),
+      : INFRA_TAB_IDS.filter((id) => !FULL_DASHBOARD_HIDDEN_TABS.has(id))),
     [dashboardVariant],
   )
   const [tab, setTab] = useUrlTab('overview', allowedTabIds)
@@ -6285,10 +6335,10 @@ export default function StoreZabbixPage({
     return () => { c = true }
   }, [tab, config?.configured, eventLimit, parseErr, apiBase])
 
-  /* Custom Dashboard: load host list when tab opens (Ro overview preloads for host drill-down). */
+  /* Custom Dashboard: load host list when tab opens (Ro overview / Store Summary preloads for host drill-down). */
   useEffect(() => {
     if (!config?.configured) return
-    if (tab !== 'custom' && !(dashboardVariant === 'ro' && tab === 'overview')) return
+    if (tab !== 'custom' && !(dashboardVariant === 'ro' && (tab === 'overview' || tab === 'storeSummary'))) return
     if (customDashHosts === null && !customDashHostsBusy) loadCustomDashHosts()
   }, [tab, config?.configured, dashboardVariant, customDashHosts, customDashHostsBusy, loadCustomDashHosts])
 
@@ -6721,7 +6771,8 @@ export default function StoreZabbixPage({
   }, [ropDisconnectStore, ropRange, ropCustomEpoch, ropBhStart, ropBhEnd, ropBhDays, apiBase, parseErr])
 
   useEffect(() => {
-    if ((tab !== 'rop' && tab !== 'reports') || !config?.configured) return
+    if ((tab !== 'rop' && tab !== 'reports' && tab !== 'storeSummary') || !config?.configured) return
+    if (tab === 'storeSummary' && !STORE_SUMMARY_RANGE_CHIPS.some((c) => c.id === ropRange)) return
     if (ropRange === 'custom' && !ropCustomEpoch) return
     loadRopUptime({
       range: ropRange,
@@ -6734,8 +6785,15 @@ export default function StoreZabbixPage({
     })
   }, [tab, config?.configured, ropRange, ropCustomEpoch, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla, loadRopUptime])
 
+  /* Store Summary CEO view: prefer multi-day ranges (7d / 14d / 30d / custom). */
+  useEffect(() => {
+    if (tab !== 'storeSummary') return
+    if (!STORE_SUMMARY_RANGE_CHIPS.some((c) => c.id === ropRange)) setRopRange('7d')
+  }, [tab, ropRange])
+
   useSmartPolling(
     () => {
+      if (tab === 'storeSummary' && !STORE_SUMMARY_RANGE_CHIPS.some((c) => c.id === ropRange)) return Promise.resolve()
       if (ropRange === 'custom' && !ropCustomEpoch) return Promise.resolve()
       return loadRopUptime({
         range: ropRange,
@@ -6748,8 +6806,8 @@ export default function StoreZabbixPage({
       })
     },
     120_000,
-    [ropRange, ropCustomEpoch, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla, loadRopUptime],
-    { enabled: (tab === 'rop' || tab === 'reports') && !!config?.configured && config?.reachable !== false, skipImmediate: true },
+    [tab, ropRange, ropCustomEpoch, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla, loadRopUptime],
+    { enabled: (tab === 'rop' || tab === 'reports' || tab === 'storeSummary') && !!config?.configured && config?.reachable !== false, skipImmediate: true },
   )
 
   useEffect(() => {
@@ -6978,6 +7036,32 @@ export default function StoreZabbixPage({
     setTab('custom')
   }, [customDashHosts, customDashHostsBusy, hosts, loadCustomDashHosts, setTab])
 
+  /** Resolve a ROP / Store Summary row (hostname / storeTag) to a Zabbix host for Custom Dashboard. */
+  const goToCustomDashFromStore = useCallback(async (store) => {
+    if (!store) return
+    const keys = [store.hostname, store.storeTag, store.host, store.name]
+      .filter(Boolean)
+      .map((k) => String(k).toLowerCase())
+    if (!keys.length) return
+    const findMatch = (pools) => (pools || []).find((h) => {
+      const candidates = [h.name, h.host].filter(Boolean).map((x) => String(x).toLowerCase())
+      return candidates.some((c) => keys.some((k) => c === k || c.includes(k) || k.includes(c)))
+    })
+    let match = findMatch([...(customDashHosts || []), ...(hostsExplorer || []), ...(hosts || [])])
+    if (!match?.hostid && customDashHosts === null && !customDashHostsBusy) {
+      try {
+        const { data } = await api.get(`${apiBase}/hosts?limit=10000`)
+        let rows = data.hosts || []
+        if (lockedHostGroup) rows = rows.filter((h) => hostMatchesZabbixGroup(h, lockedHostGroup))
+        setCustomDashHosts(rows)
+        match = findMatch(rows)
+      } catch {
+        /* ignore — user can open Custom Dashboard manually */
+      }
+    }
+    if (match?.hostid) goToCustomDash(match)
+  }, [customDashHosts, customDashHostsBusy, hostsExplorer, hosts, goToCustomDash, apiBase, lockedHostGroup])
+
   /** Export currently filtered inventory rows as CSV (Excel-friendly UTF-8 BOM). */
   const exportInventoryCsv = useCallback(() => {
     const rows = filteredInventory || []
@@ -7142,15 +7226,22 @@ export default function StoreZabbixPage({
         if (dashboardVariant === 'ro') await loadRoNetworkTop()
         else await loadNetHealth(netHealthGroup, netBizStart, netBizEnd)
       }
-      if ((tab === 'rop' || tab === 'reports') && (ropRange !== 'custom' || ropCustomEpoch)) await loadRopUptime({
-        range: ropRange,
-        customEpoch: ropCustomEpoch,
-        groupKey: ropGroupKey,
-        bhStart: ropBhStart,
-        bhEnd: ropBhEnd,
-        bhDays: ropBhDays,
-        sla: ropSla,
-      })
+      if ((tab === 'rop' || tab === 'reports' || tab === 'storeSummary') && (ropRange !== 'custom' || ropCustomEpoch)) {
+        if (tab !== 'storeSummary' || STORE_SUMMARY_RANGE_CHIPS.some((c) => c.id === ropRange)) {
+          await loadRopUptime({
+            range: ropRange,
+            customEpoch: ropCustomEpoch,
+            groupKey: ropGroupKey,
+            bhStart: ropBhStart,
+            bhEnd: ropBhEnd,
+            bhDays: ropBhDays,
+            sla: ropSla,
+          })
+        }
+      }
+      if (tab === 'storeSummary' && customDashHosts === null && !customDashHostsBusy) {
+        loadCustomDashHosts().catch(() => {})
+      }
       if (tab === 'hostGraphs') { await loadAllHosts(); if (selectedHost?.hostid) { const g = await loadHostGraphs(selectedHost.hostid); if (!g.length) await loadHostItemsLatest(selectedHost.hostid); else setHostItemsLatest(null); if (selectedGraphId) { const d = await fetchGraphSeries(selectedGraphId, graphRange, graphDataMode); setGraphSeries(d) } } }
       if (tab === 'custom') {
         await loadCustomDashHosts()
@@ -7164,7 +7255,7 @@ export default function StoreZabbixPage({
       }
     } catch (e) { const r = parseErr(e); setError(r.message); setErrorHint(r.hint) }
     finally { setLoading(false) }
-  }, [tab, dashboardVariant, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries, loadTopUtil, topLimit, topMonGroup, refetchProblems, apiBase, urlEnvVar, loadNetHealth, loadRoNetworkTop, netHealthGroup, netBizStart, netBizEnd, loadRopUptime, ropRange, ropCustomEpoch, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla])
+  }, [tab, dashboardVariant, loadOverview, loadHosts, loadEvents, eventLimit, severityFilter, parseErr, selectedHost, selectedGraphId, graphRange, graphDataMode, loadAllHosts, loadHostGraphs, loadHostItemsLatest, fetchGraphSeries, loadTopUtil, topLimit, topMonGroup, refetchProblems, apiBase, urlEnvVar, loadNetHealth, loadRoNetworkTop, netHealthGroup, netBizStart, netBizEnd, loadRopUptime, ropRange, ropCustomEpoch, ropGroupKey, ropBhStart, ropBhEnd, ropBhDays, ropSla, customDashHosts, customDashHostsBusy, loadCustomDashHosts, customDashSelected, customDashEventLimit, customDashTimeWindow])
 
   /* ─── column definitions ─── */
   const hostCols = useMemo(() => [
@@ -7259,6 +7350,7 @@ export default function StoreZabbixPage({
     ...(dashboardVariant !== 'ro' ? [{ id: 'problems', label: 'Alarms', icon: '⚠', badge: overview?.activeProblems }] : []),
     ...(dashboardVariant !== 'ro' ? [{ id: 'events', label: 'Events', icon: '◉' }] : []),
     { id: 'netHealth', label: 'Network Health', icon: '📶' },
+    ...(dashboardVariant === 'ro' ? [{ id: 'storeSummary', label: 'Store Summary', icon: '◎', badge: ropUptime?.summary?.totalStores }] : []),
     ...(dashboardVariant !== 'ro' ? [{ id: 'rop', label: 'ROP Dashboard', icon: '🏪', badge: ropUptime?.summary?.totalStores }] : []),
     { id: 'reports', label: 'Reports', icon: '📊' },
     { id: 'custom', label: 'Custom Dashboard', icon: '🧩' },
@@ -8647,6 +8739,588 @@ export default function StoreZabbixPage({
                 </>
               )
             })()}
+          </div>
+        )
+      })()}
+
+      {/* ═══════════ STORE SUMMARY (CEO) — Ro Dashboard only ═══════════ */}
+      {configured && reachable && tab === 'storeSummary' && dashboardVariant === 'ro' && (() => {
+        const ru = ropUptime
+        const summary = ru?.summary || {
+          totalStores: 0, reportingStores: 0, avgUptimePct: null, slaTarget: ropSla,
+          storesAboveSla: 0, storesBelowSla: 0, storesCurrentlyOffline: 0,
+          totalDowntimeMin: 0, avgDowntimeMin: null, totalDisconnects: 0, mttrMin: null, bhMinutesPerStore: 0,
+        }
+        const days = ru?.days || []
+        const dailyTrend = (ru?.dailyTrend?.length ? ru.dailyTrend : (ru?.granularity === 'day' ? (ru?.trend || []) : []))
+        const trend = dailyTrend.length ? dailyTrend : (ru?.trend || [])
+        const perStore = ru?.perStore || []
+        const slaTarget = summary.slaTarget ?? ropSla
+        const slaMet = summary.avgUptimePct != null && summary.avgUptimePct >= slaTarget
+        const fmtMins = fmtRopMins
+        const uptimeColor = ropUptimeColor
+        const uptimePill = ropUptimePill
+        const bhLabel = `${String(RO_DASHBOARD_BH_START).padStart(2, '0')}:00–${String(RO_DASHBOARD_BH_END).padStart(2, '0')}:00`
+        const rangeLabel = (() => {
+          if (ropRange === 'custom' && ropCustomEpoch) {
+            const from = new Date(ropCustomEpoch.from).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+            const to = new Date(ropCustomEpoch.to).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+            return `${from} – ${to}`
+          }
+          return STORE_ZABBIX_RANGE_LABELS[ropRange] || ropRange
+        })()
+        const seedStoreSummaryCustom = (daysBack = 7) => {
+          const to = Math.floor(Date.now() / 1000)
+          const from = to - daysBack * 86400
+          const fromStr = toDateInput(from)
+          const toStr = toDateInput(to)
+          setRopCustomFrom(fromStr)
+          setRopCustomTo(toStr)
+          const epoch = roCustomRangeEpoch(fromStr, toStr, ropBhStart, ropBhEnd)
+          if (epoch) {
+            setRopCustomEpoch({
+              from: roCustomRangeDateTimeLocal(fromStr, ropBhStart),
+              to: roCustomRangeDateTimeLocal(toStr, ropBhEnd),
+            })
+          }
+        }
+        const selectStoreSummaryRange = (id) => {
+          setRopRange(id)
+          if (id === 'custom') {
+            if (!ropCustomEpoch) seedStoreSummaryCustom(7)
+            else {
+              setRopCustomFrom(toRoDateInput(ropCustomEpoch.from))
+              setRopCustomTo(toRoDateInput(ropCustomEpoch.to))
+            }
+          } else {
+            setRopCustomEpoch(null)
+          }
+        }
+        const applyStoreSummaryCustomRange = () => {
+          if (!ropCustomFrom || !ropCustomTo) return
+          const epoch = roCustomRangeEpoch(ropCustomFrom, ropCustomTo, ropBhStart, ropBhEnd)
+          if (!epoch) return
+          setRopCustomEpoch({
+            from: roCustomRangeDateTimeLocal(ropCustomFrom, ropBhStart),
+            to: roCustomRangeDateTimeLocal(ropCustomTo, ropBhEnd),
+          })
+        }
+        const storeSummaryCustomValid = !!roCustomRangeEpoch(ropCustomFrom, ropCustomTo, ropBhStart, ropBhEnd)
+
+        const withPct = perStore.filter((s) => s.uptimePct != null)
+        const topUptime = [...withPct].sort((a, b) => b.uptimePct - a.uptimePct).slice(0, STORE_SUMMARY_TOP_N)
+        const topDowntime = (ru?.topOffenders?.length
+          ? ru.topOffenders
+          : [...withPct].sort((a, b) => a.uptimePct - b.uptimePct)
+        ).slice(0, STORE_SUMMARY_TOP_N)
+
+        const heatRows = (ru?.heatmap?.length
+          ? ru.heatmap
+          : [...withPct].sort((a, b) => a.uptimePct - b.uptimePct)
+        ).slice(0, STORE_SUMMARY_HEATMAP_MAX)
+
+        const renderRankTable = (rows, mode) => (
+          <table className="ss-rank-table">
+            <thead>
+              <tr>
+                <th style={{ width: 36 }}>#</th>
+                <th>Store</th>
+                <th style={{ textAlign: 'right' }}>Uptime</th>
+                <th style={{ textAlign: 'right' }}>Downtime</th>
+                <th style={{ textAlign: 'right' }}>Disconnects</th>
+                <th style={{ width: 72 }}>Trend</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!rows.length && (
+                <tr>
+                  <td colSpan={6} style={{ padding: 28, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                    No store data for this window.
+                  </td>
+                </tr>
+              )}
+              {rows.map((s, i) => {
+                const pill = uptimePill(s.uptimePct)
+                const accent = mode === 'up' ? '#16a34a' : '#dc2626'
+                return (
+                  <tr
+                    key={s.storeTag || `${s.hostname}-${i}`}
+                    className="ss-rank-row"
+                    onClick={() => goToCustomDashFromStore(s)}
+                    title="Open in Custom Dashboard"
+                  >
+                    <td>
+                      <span
+                        className={`ss-rank-num ${i < 3 ? 'top3' : ''}`}
+                        style={i < 3 ? { background: accent } : undefined}
+                      >
+                        {i + 1}
+                      </span>
+                    </td>
+                    <td>
+                      <div style={{ fontWeight: 600, color: 'var(--accent)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 180 }}>
+                        {s.hostname || s.storeTag}
+                      </div>
+                      <div style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>{s.storeTag}</div>
+                    </td>
+                    <td style={{ textAlign: 'right' }}>
+                      <span className="opm-pill" style={{ background: pill.bg, color: pill.color, border: `1px solid ${pill.border}`, fontFamily: 'var(--mono)', fontWeight: 700, fontSize: 11 }}>
+                        {s.uptimePct != null ? `${s.uptimePct.toFixed(2)}%` : '—'}
+                      </span>
+                    </td>
+                    <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', color: (s.bizDownMin || 0) > 0 ? '#f59e0b' : 'var(--text3)', fontSize: 11 }}>
+                      {fmtMins(s.bizDownMin)}
+                    </td>
+                    <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text2)' }}>
+                      {s.disconnects ?? 0}
+                    </td>
+                    <td>
+                      {s.dailyUptimePcts?.length > 0 ? (
+                        <div className="ss-spark">
+                          {s.dailyUptimePcts.map((p, di) => {
+                            const c = uptimeColor(p)
+                            const h = p == null ? 3 : Math.max(2, Math.round((p / 100) * 16))
+                            return (
+                              <div
+                                key={di}
+                                title={`${days[di]?.label || `Day ${di + 1}`}: ${p != null ? `${p.toFixed(2)}%` : '—'}`}
+                                style={{ width: 4, height: h, background: c, opacity: p == null ? 0.25 : 1, borderRadius: 1 }}
+                              />
+                            )
+                          })}
+                        </div>
+                      ) : (
+                        <span style={{ color: 'var(--text3)' }}>—</span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        )
+
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div className="topmon-dash-header" style={{ marginTop: 0 }}>
+              <div>
+                <h2>Store Summary</h2>
+                <p>
+                  Executive BH availability · {bhLabel} local · {rangeLabel}
+                  {ru?.rangeToIso ? <> · Data through {new Date(ru.rangeToIso).toLocaleString()}</> : null}
+                </p>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end' }}>
+                <div className="opm-toolbar-row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span className="opm-toolbar-label">Range</span>
+                  {STORE_SUMMARY_RANGE_CHIPS.map((c) => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => selectStoreSummaryRange(c.id)}
+                      className={`rop-segment-btn${ropRange === c.id ? ' active' : ''}`}
+                      title={STORE_ZABBIX_RANGE_LABELS[c.id] || 'Custom range'}
+                      style={{ padding: '4px 12px', borderRadius: 6, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 700 }}
+                    >
+                      {c.label}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => loadRopUptime({
+                      range: ropRange,
+                      customEpoch: ropCustomEpoch,
+                      groupKey: ropGroupKey,
+                      bhStart: ropBhStart,
+                      bhEnd: ropBhEnd,
+                      bhDays: ropBhDays,
+                      sla: ropSla,
+                    })}
+                    disabled={ropUptimeBusy || (ropRange === 'custom' && !ropCustomEpoch)}
+                    style={{
+                      padding: '5px 14px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg3)',
+                      color: 'var(--text2)', fontSize: 11, fontFamily: 'var(--mono)',
+                      cursor: (ropUptimeBusy || (ropRange === 'custom' && !ropCustomEpoch)) ? 'wait' : 'pointer', fontWeight: 600,
+                    }}
+                  >
+                    {ropUptimeBusy ? '↻ …' : '↻ Refresh'}
+                  </button>
+                </div>
+                {ropRange === 'custom' && (
+                  <div className="opm-toolbar-row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <span className="opm-toolbar-label">Custom</span>
+                    <input
+                      type="date"
+                      value={ropCustomFrom}
+                      onChange={(e) => setRopCustomFrom(e.target.value)}
+                      className="rop-control rop-control--datetime"
+                    />
+                    <span style={{ fontSize: 10, color: 'var(--text3)' }}>–</span>
+                    <input
+                      type="date"
+                      value={ropCustomTo}
+                      onChange={(e) => setRopCustomTo(e.target.value)}
+                      className="rop-control rop-control--datetime"
+                    />
+                    <button
+                      type="button"
+                      onClick={applyStoreSummaryCustomRange}
+                      disabled={!storeSummaryCustomValid}
+                      className="rop-action-btn"
+                    >
+                      Apply
+                    </button>
+                    <span className="rop-meta" style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>
+                      Uses BH {bhLabel}
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {ropUptimeBusy && !ru && (
+              <div style={{ padding: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 13 }}>
+                <span className="np-page-loading-dot" /> Computing business-hours uptime…
+              </div>
+            )}
+
+            {ru && (
+              <>
+                {(() => {
+                  const offlineTone = summary.storesCurrentlyOffline > 0 ? 'bad' : 'ok'
+                  const belowSlaTone = summary.storesBelowSla > 0 ? 'warn' : 'ok'
+                  const downtimeTone = (summary.avgDowntimeMin || 0) > 60 ? 'warn' : 'ok'
+                  const disconnectAvg = summary.totalStores
+                    ? summary.totalDisconnects / Math.max(summary.totalStores, 1)
+                    : 0
+                  const discTone = disconnectAvg > 2 ? 'warn' : 'ok'
+                  const slaDelta = summary.avgUptimePct != null
+                    ? (summary.avgUptimePct - slaTarget)
+                    : null
+                  return (
+                    <div className="rop-kpi-grid">
+                      <div className="rop-hero">
+                        <div className="rop-hero-main">
+                          <div className="rop-hero-label">
+                            Fleet BH availability
+                            {summary.bhMinutesPerStore > 0 ? ` · ${(summary.bhMinutesPerStore / 60).toFixed(1)}h window` : ''}
+                          </div>
+                          <div className="rop-hero-headline">
+                            <span className="rop-hero-value" style={{ color: uptimeColor(summary.avgUptimePct) }}>
+                              {summary.avgUptimePct != null ? summary.avgUptimePct.toFixed(2) : '—'}
+                            </span>
+                            <span className="rop-hero-unit">%</span>
+                          </div>
+                        </div>
+                        <div className="rop-hero-side">
+                          <div className="rop-hero-bar">
+                            <div className="rop-hero-bar-fill" style={{
+                              width: `${Math.max(0, Math.min(100, summary.avgUptimePct ?? 0))}%`,
+                              background: slaMet
+                                ? 'linear-gradient(90deg,#22c55e,#16a34a)'
+                                : 'linear-gradient(90deg,#f97316,#dc2626)',
+                            }} />
+                            <div className="rop-hero-bar-target" style={{ left: `${slaTarget}%` }} title={`SLA target ${slaTarget}%`} />
+                          </div>
+                          <div className="rop-hero-foot">
+                            <span>
+                              <span className="rop-status-dot" style={{ background: slaMet ? '#16a34a' : '#dc2626', marginRight: 4 }} />
+                              <strong style={{ color: slaMet ? '#16a34a' : '#dc2626' }}>{slaMet ? 'Meeting SLA' : 'Below SLA'}</strong>
+                              {slaDelta != null && (
+                                <span style={{ marginLeft: 4, color: 'var(--text3)' }}>
+                                  ({slaDelta >= 0 ? '+' : ''}{slaDelta.toFixed(2)} pts)
+                                </span>
+                              )}
+                            </span>
+                            <span>
+                              <strong>{summary.reportingStores}</strong>/{summary.totalStores} stores
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className={`rop-stat rop-stat--${belowSlaTone}`}>
+                        <div className="rop-stat-head">
+                          <span className="rop-stat-label">Below SLA</span>
+                          <span className="rop-stat-icon">⚠</span>
+                        </div>
+                        <div className="rop-stat-value">{summary.storesBelowSla}</div>
+                        <div className={`rop-stat-foot ${summary.storesBelowSla > 0 ? 'rop-stat-foot--warn' : 'rop-stat-foot--ok'}`}>
+                          {summary.storesAboveSla} above {slaTarget}%
+                        </div>
+                      </div>
+
+                      <div className={`rop-stat rop-stat--${offlineTone}`}>
+                        <div className="rop-stat-head">
+                          <span className="rop-stat-label">Offline now</span>
+                          <span className="rop-stat-icon">●</span>
+                        </div>
+                        <div className="rop-stat-value">{summary.storesCurrentlyOffline}</div>
+                        <div className={`rop-stat-foot ${summary.storesCurrentlyOffline > 0 ? 'rop-stat-foot--bad' : 'rop-stat-foot--ok'}`}>
+                          {summary.storesCurrentlyOffline > 0
+                            ? `${((summary.storesCurrentlyOffline / Math.max(summary.totalStores, 1)) * 100).toFixed(1)}% of fleet`
+                            : 'All online'}
+                        </div>
+                      </div>
+
+                      <div className={`rop-stat rop-stat--${downtimeTone}`}>
+                        <div className="rop-stat-head">
+                          <span className="rop-stat-label">Avg downtime</span>
+                          <span className="rop-stat-icon">⏱</span>
+                        </div>
+                        <div className="rop-stat-value">{fmtMins(summary.avgDowntimeMin)}</div>
+                        <div className="rop-stat-foot">per store · BH</div>
+                      </div>
+
+                      <div className={`rop-stat rop-stat--${discTone}`}>
+                        <div className="rop-stat-head">
+                          <span className="rop-stat-label">Disconnects</span>
+                          <span className="rop-stat-icon">↯</span>
+                        </div>
+                        <div className="rop-stat-value">{(summary.totalDisconnects || 0).toLocaleString()}</div>
+                        <div className="rop-stat-foot">
+                          {summary.totalStores ? `${disconnectAvg.toFixed(2)}/store` : '—'}
+                        </div>
+                      </div>
+
+                      <div className="rop-stat">
+                        <div className="rop-stat-head">
+                          <span className="rop-stat-label">MTTR</span>
+                          <span className="rop-stat-icon">↺</span>
+                        </div>
+                        <div className="rop-stat-value">
+                          {summary.mttrMin != null ? fmtMins(summary.mttrMin) : '—'}
+                        </div>
+                        <div className="rop-stat-foot">mean time to recover</div>
+                      </div>
+                    </div>
+                  )
+                })()}
+
+                {trend.length > 0 && (() => {
+                  const pts = trend.map((t) => t.avgUptimePct)
+                  const labels = trend.map((t) => t.displayLabel ?? (t.label || '').slice(5))
+                  const validPts = pts.filter((p) => p != null)
+                  const minPct = validPts.length ? Math.min(slaTarget - 1, ...validPts) : slaTarget - 1
+                  const yMin = Math.max(0, Math.floor((minPct - 0.5) * 10) / 10)
+                  const showAsBar = trend.length <= 3
+                  const ChartComp = showAsBar ? Bar : Line
+                  const data = {
+                    labels,
+                    datasets: showAsBar
+                      ? [
+                          {
+                            type: 'bar',
+                            label: 'BH uptime %',
+                            data: pts,
+                            backgroundColor: pts.map((p) => (p == null ? 'rgba(148,163,184,.25)' : `${uptimeColor(p)}cc`)),
+                            borderColor: pts.map((p) => (p == null ? 'rgba(148,163,184,.4)' : uptimeColor(p))),
+                            borderWidth: 1,
+                            borderRadius: 4,
+                            maxBarThickness: 36,
+                          },
+                          {
+                            type: 'line',
+                            label: `SLA ${slaTarget}%`,
+                            data: trend.map(() => slaTarget),
+                            borderColor: 'rgba(239,68,68,.85)',
+                            borderDash: [6, 4],
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            fill: false,
+                            tension: 0,
+                          },
+                        ]
+                      : [
+                          {
+                            label: 'BH uptime %',
+                            data: pts,
+                            borderColor: '#0f766e',
+                            backgroundColor: 'rgba(15,118,110,.10)',
+                            fill: true,
+                            tension: 0.35,
+                            spanGaps: true,
+                            pointRadius: 4,
+                            pointHoverRadius: 6,
+                            pointBackgroundColor: pts.map((p) => uptimeColor(p)),
+                            pointBorderColor: '#fff',
+                            pointBorderWidth: 1,
+                            borderWidth: 2.5,
+                          },
+                          {
+                            label: `SLA ${slaTarget}%`,
+                            data: trend.map(() => slaTarget),
+                            borderColor: 'rgba(239,68,68,.85)',
+                            borderDash: [6, 4],
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            fill: false,
+                            tension: 0,
+                          },
+                        ],
+                  }
+                  const opts = {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                      legend: {
+                        display: true,
+                        position: 'top',
+                        labels: { color: 'var(--text3)', font: { family: 'var(--mono)', size: 11 }, usePointStyle: true, boxWidth: 8 },
+                      },
+                      tooltip: {
+                        backgroundColor: 'rgba(15,17,23,.95)',
+                        borderColor: 'rgba(15,118,110,.35)',
+                        borderWidth: 1,
+                        cornerRadius: 8,
+                        callbacks: {
+                          label: (ctx) => {
+                            const point = trend[ctx.dataIndex]
+                            if (ctx.dataset.label?.startsWith('SLA')) return ` ${ctx.dataset.label}`
+                            return [
+                              ` Uptime: ${point?.avgUptimePct != null ? `${point.avgUptimePct.toFixed(2)}%` : '—'}`,
+                              ` Downtime: ${fmtMins(point?.totalDowntimeMin)}`,
+                              point?.totalDisconnects != null ? ` Disconnects: ${point.totalDisconnects}` : null,
+                              point?.storesImpacted != null ? ` Stores impacted: ${point.storesImpacted}` : null,
+                            ].filter(Boolean)
+                          },
+                        },
+                      },
+                    },
+                    scales: {
+                      x: {
+                        ticks: { color: 'var(--text3)', font: { family: 'var(--mono)', size: 10 }, autoSkip: true, maxRotation: 0 },
+                        grid: { display: false },
+                      },
+                      y: {
+                        min: yMin,
+                        max: 100,
+                        ticks: { color: 'var(--text3)', font: { family: 'var(--mono)', size: 10 }, callback: (v) => `${v}%` },
+                        grid: { color: 'rgba(128,128,160,.06)' },
+                      },
+                    },
+                  }
+                  return (
+                    <Widget
+                      title="Day-wise fleet uptime"
+                      badge={`${trend.length} day${trend.length === 1 ? '' : 's'}`}
+                      badgeColor="blue"
+                      noPad
+                      actions={
+                        <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                          Business hours only · SLA {slaTarget}%
+                        </span>
+                      }
+                    >
+                      <div style={{ height: 260, padding: '12px 16px 16px' }}>
+                        <ChartComp data={data} options={opts} />
+                      </div>
+                    </Widget>
+                  )
+                })()}
+
+                <div className="ss-rank-grid">
+                  <Widget
+                    title={`Top ${STORE_SUMMARY_TOP_N} uptime stores`}
+                    badge={topUptime.length}
+                    badgeColor="green"
+                    noPad
+                    actions={<span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Best BH availability · click → Custom Dashboard</span>}
+                  >
+                    {renderRankTable(topUptime, 'up')}
+                  </Widget>
+                  <Widget
+                    title={`Top ${STORE_SUMMARY_TOP_N} downtime stores`}
+                    badge={topDowntime.length}
+                    badgeColor="red"
+                    noPad
+                    actions={<span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>Lowest BH availability · click → Custom Dashboard</span>}
+                  >
+                    {renderRankTable(topDowntime, 'down')}
+                  </Widget>
+                </div>
+
+                <Widget
+                  title="Day-wise store uptime"
+                  badge={`${heatRows.length} stores`}
+                  badgeColor="amber"
+                  noPad
+                  actions={
+                    <span style={{ fontSize: 10, color: 'var(--text3)', fontFamily: 'var(--mono)' }}>
+                      Worst first · capped at {STORE_SUMMARY_HEATMAP_MAX} · cell = BH uptime %
+                    </span>
+                  }
+                >
+                  {!heatRows.length || !days.length ? (
+                    <div style={{ padding: 28, textAlign: 'center', color: 'var(--text3)', fontFamily: 'var(--mono)', fontSize: 12 }}>
+                      No day-wise uptime samples in this range.
+                    </div>
+                  ) : (
+                    <div className="ss-heat-wrap">
+                      <table className="ss-heat-table">
+                        <thead>
+                          <tr>
+                            <th className="ss-heat-store">Store</th>
+                            {days.map((d) => (
+                              <th key={d.dayMs || d.label}>{d.label || '—'}</th>
+                            ))}
+                            <th>Total</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {heatRows.map((s) => {
+                            const daily = s.days
+                              ? days.map((d) => {
+                                  const hit = (s.days || []).find((x) => x.dayMs === d.dayMs)
+                                  return hit?.uptimePct
+                                })
+                              : (s.dailyUptimePcts || [])
+                            const pill = uptimePill(s.uptimePct)
+                            return (
+                              <tr key={s.storeTag || s.hostname}>
+                                <td
+                                  className="ss-heat-store"
+                                  style={{ color: 'var(--accent)', cursor: 'pointer' }}
+                                  title="Open in Custom Dashboard"
+                                  onClick={() => goToCustomDashFromStore(s)}
+                                >
+                                  {s.hostname || s.storeTag}
+                                </td>
+                                {days.map((d, di) => {
+                                  const p = daily[di]
+                                  const c = uptimeColor(p)
+                                  return (
+                                    <td key={d.dayMs || di} style={{ textAlign: 'center', padding: 2 }}>
+                                      <span
+                                        className="ss-heat-cell"
+                                        style={{
+                                          background: p == null ? 'var(--bg4)' : `${c}22`,
+                                          color: p == null ? 'var(--text3)' : c,
+                                          border: `1px solid ${p == null ? 'var(--border)' : `${c}44`}`,
+                                        }}
+                                        title={`${s.hostname || s.storeTag} · ${d.label}: ${p != null ? `${p.toFixed(2)}%` : '—'}`}
+                                      >
+                                        {p != null ? (p >= 99.95 ? '100' : p.toFixed(0)) : '·'}
+                                      </span>
+                                    </td>
+                                  )
+                                })}
+                                <td style={{ textAlign: 'right', padding: '4px 10px', whiteSpace: 'nowrap' }}>
+                                  <span className="opm-pill" style={{ background: pill.bg, color: pill.color, border: `1px solid ${pill.border}`, fontFamily: 'var(--mono)', fontWeight: 700, fontSize: 10 }}>
+                                    {s.uptimePct != null ? `${s.uptimePct.toFixed(2)}%` : '—'}
+                                  </span>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </Widget>
+              </>
+            )}
           </div>
         )
       })()}
