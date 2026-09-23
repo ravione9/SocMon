@@ -516,7 +516,7 @@ Streaming URLs skip gzip (`isStreamingExportUrl` in `server/src/index.js`).
 3. Prefer **`POST /api/ai/chat`** or direct GETs over UI scraping.
 4. Add `authenticate` to open routers (`logs`, `sentinel`, `zabbix`, `stats`, `users`) if the API is internet-facing.
 5. Trust **fast-path** and **context JSON** over model memory for counts and hostnames.
-6. Rate limit: 1000 req / minute per account on `/api/*` (JWT user id; public proxy/export paths skipped).
+6. Rate limit: 1000 req / 2 minutes per account on `/api/*` (unlocks within 2 min; JWT user id; public proxy/export paths skipped).
 
 ---
 

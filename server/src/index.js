@@ -151,13 +151,15 @@ function apiRateLimitKey(req) {
 app.use(
   '/api/',
   rateLimit({
-    windowMs: 60 * 1000,
+    windowMs: 2 * 60 * 1000,
     max: 1000,
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: apiRateLimitKey,
     validate: { xForwardedForHeader: false },
-    message: { error: 'Too many requests — limit is 1000 requests per minute per account' },
+    message: {
+      error: 'Too many requests — limit is 1000 requests per 2 minutes per account. Try again in up to 2 minutes.',
+    },
     skip: (req) => {
       const url = (req.originalUrl || req.url || '')
       const path = req.path || ''

@@ -48,7 +48,7 @@ GET endpoints support query strings — use the Query parameters section on each
 
 ## Rate limits & timeouts
 
-1000 requests / minute per account (JWT user id; agent key or IP when unauthenticated) on /api/*. Store monitor overview and AI chat can take 30s–6min — use a long client timeout. CSV exports stream; do not expect JSON.
+1000 requests / 2 minutes per account (JWT user id; agent key or IP when unauthenticated) on /api/* — unlocks within 2 minutes after the limit is hit. Store monitor overview and AI chat can take 30s–6min — use a long client timeout. CSV exports stream; do not expect JSON.
 
 ## Page access map
 
