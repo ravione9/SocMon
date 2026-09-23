@@ -922,7 +922,7 @@ export const API_DOCS_INTRO = {
     },
     {
       heading: 'Rate limits & timeouts',
-      body: '1000 requests / 2 minutes per account (JWT user id; agent key or IP when unauthenticated) on /api/* — unlocks within 2 minutes after the limit is hit. Store monitor overview and AI chat can take 30s–6min — use a long client timeout. CSV exports stream; do not expect JSON.',
+      body: '1000 requests / minute per account (JWT user id; agent key or IP when unauthenticated) on /api/* — unlocks within 1 minute after the limit is hit. Store monitor overview and AI chat can take 30s–6min — use a long client timeout. CSV exports stream; do not expect JSON.',
     },
     {
       heading: 'Page access map',
