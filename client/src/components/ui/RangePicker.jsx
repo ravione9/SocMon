@@ -26,6 +26,14 @@ function fillTextOnAccent(accent) {
   return typeof accent === 'string' && accent.includes('var(') ? 'var(--on-accent)' : '#ffffff'
 }
 
+function seedLastHours(hours = 24) {
+  const n = new Date()
+  return {
+    to: toLocalDT(n),
+    from: toLocalDT(new Date(n.getTime() - hours * 3600000)),
+  }
+}
+
 export default function RangePicker({ range, onChange, accentColor }) {
   const accent = accentColor || C.accent
   const fillFg = fillTextOnAccent(accent)
@@ -50,14 +58,33 @@ export default function RangePicker({ range, onChange, accentColor }) {
       setMode('custom')
       setFromVal(toLocalDT(new Date(range.from)))
       setToVal(toLocalDT(new Date(range.to)))
+    } else {
+      setMode('preset')
     }
   }, [open, range])
 
+  function enterCustomMode(seedHours = 24) {
+    setMode('custom')
+    if (range?.type === 'custom' && range.from && range.to) {
+      setFromVal(toLocalDT(new Date(range.from)))
+      setToVal(toLocalDT(new Date(range.to)))
+      return
+    }
+    if (!fromVal || !toVal) {
+      const seeded = seedLastHours(seedHours)
+      setFromVal(seeded.from)
+      setToVal(seeded.to)
+    }
+  }
+
   function applyCustom() {
     if (!fromVal || !toVal) return
-    const from = new Date(fromVal).toISOString()
-    const to   = new Date(toVal).toISOString()
-    onChange({ type:'custom', from, to, label: fromVal.slice(0,16) + ' to ' + toVal.slice(0,16) })
+    const fromMs = new Date(fromVal).getTime()
+    const toMs = new Date(toVal).getTime()
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs >= toMs) return
+    const from = new Date(fromMs).toISOString()
+    const to   = new Date(toMs).toISOString()
+    onChange({ type:'custom', from, to, label: fromVal.slice(0,16) + ' → ' + toVal.slice(0,16) })
     setOpen(false)
   }
 
@@ -93,7 +120,7 @@ export default function RangePicker({ range, onChange, accentColor }) {
         }}>
           <div style={{ display:'flex', gap:4, marginBottom:14, background:C.bg3, borderRadius:8, padding:3 }}>
             {[{ id:'preset', label:'Presets' }, { id:'custom', label:'Custom' }].map(m => (
-              <button key={m.id} type="button" onClick={()=>setMode(m.id)} style={{
+              <button key={m.id} type="button" onClick={() => (m.id === 'custom' ? enterCustomMode(24) : setMode('preset'))} style={{
                 flex:1, padding:'5px 0', borderRadius:6, border:'none',
                 background: mode===m.id ? accent : 'transparent',
                 color: mode===m.id ? fillFg : C.text3,
@@ -105,16 +132,32 @@ export default function RangePicker({ range, onChange, accentColor }) {
           {mode==='preset' && (
             <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:6 }}>
               {PRESETS.map(p => (
-                <button key={p.value} onClick={()=>{ onChange({ type:'preset', value:p.value, label:p.label }); setOpen(false) }}
+                <button key={p.value} type="button" onClick={()=>{ onChange({ type:'preset', value:p.value, label:p.label }); setOpen(false) }}
                   style={{
                     padding:'7px 0', borderRadius:7,
-                    border:'1px solid ' + (range && range.value===p.value ? accent : C.border),
-                    background: range && range.value===p.value ? accent+'20' : C.bg3,
-                    color: range && range.value===p.value ? accent : C.text2,
+                    border:'1px solid ' + (!isCustom && range && range.value===p.value ? accent : C.border),
+                    background: !isCustom && range && range.value===p.value ? accent+'20' : C.bg3,
+                    color: !isCustom && range && range.value===p.value ? accent : C.text2,
                     fontSize:11, fontFamily:'var(--mono)', cursor:'pointer',
-                    fontWeight: range && range.value===p.value ? 700 : 400,
+                    fontWeight: !isCustom && range && range.value===p.value ? 700 : 400,
                   }}>{p.label}</button>
               ))}
+              <button
+                type="button"
+                onClick={() => enterCustomMode(24)}
+                title="Pick an exact from / to window"
+                style={{
+                  gridColumn: 'span 4',
+                  padding:'8px 0', borderRadius:7,
+                  border:'1px solid ' + (isCustom ? accent : C.border),
+                  background: isCustom ? accent+'20' : C.bg3,
+                  color: isCustom ? accent : C.text2,
+                  fontSize:11, fontFamily:'var(--mono)', cursor:'pointer',
+                  fontWeight: isCustom ? 700 : 600,
+                }}
+              >
+                Custom range…
+              </button>
             </div>
           )}
 
@@ -131,17 +174,18 @@ export default function RangePicker({ range, onChange, accentColor }) {
                   style={{ width:'100%', padding:'8px 10px', background:C.bg3, border:'1px solid '+C.border, borderRadius:7, color:C.text, fontSize:12, fontFamily:'var(--mono)', outline:'none', colorScheme:'dark' }} />
               </div>
               <div style={{ display:'flex', gap:6 }}>
-                <button onClick={()=>{ const n=new Date(); setToVal(toLocalDT(n)); setFromVal(toLocalDT(new Date(n-3600000))) }}
+                <button type="button" onClick={()=>{ const s=seedLastHours(1); setFromVal(s.from); setToVal(s.to) }}
                   style={{ flex:1, padding:'6px', borderRadius:6, border:'1px solid '+C.border, background:C.bg3, color:C.text3, fontSize:10, fontFamily:'var(--mono)', cursor:'pointer' }}>Last 1h</button>
-                <button onClick={()=>{ const n=new Date(); setToVal(toLocalDT(n)); setFromVal(toLocalDT(new Date(n-86400000))) }}
+                <button type="button" onClick={()=>{ const s=seedLastHours(24); setFromVal(s.from); setToVal(s.to) }}
                   style={{ flex:1, padding:'6px', borderRadius:6, border:'1px solid '+C.border, background:C.bg3, color:C.text3, fontSize:10, fontFamily:'var(--mono)', cursor:'pointer' }}>Last 24h</button>
-                <button onClick={()=>{ const n=new Date(); setToVal(toLocalDT(n)); setFromVal(toLocalDT(new Date(n-604800000))) }}
+                <button type="button" onClick={()=>{ const s=seedLastHours(24*7); setFromVal(s.from); setToVal(s.to) }}
                   style={{ flex:1, padding:'6px', borderRadius:6, border:'1px solid '+C.border, background:C.bg3, color:C.text3, fontSize:10, fontFamily:'var(--mono)', cursor:'pointer' }}>Last 7d</button>
               </div>
-              <button onClick={applyCustom} style={{
+              <button type="button" onClick={applyCustom} disabled={!fromVal || !toVal} style={{
                 padding:'8px', borderRadius:7, border:'none',
                 background:accent, color:fillFg,
-                fontSize:12, fontFamily:'var(--mono)', cursor:'pointer', fontWeight:600,
+                fontSize:12, fontFamily:'var(--mono)', cursor: fromVal && toVal ? 'pointer' : 'not-allowed', fontWeight:600,
+                opacity: fromVal && toVal ? 1 : 0.45,
               }}>Apply Range</button>
             </div>
           )}

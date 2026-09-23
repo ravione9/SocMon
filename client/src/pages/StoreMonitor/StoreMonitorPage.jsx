@@ -1073,6 +1073,11 @@ export default function StoreMonitorPage() {
   const [probHist, setProbHist] = useState(null)
   const [probHistLoading, setProbHistLoading] = useState(false)
   const [probHistRange, setProbHistRange] = useState('24h')
+  const [probHistCustomFrom, setProbHistCustomFrom] = useState(() => {
+    const n = new Date()
+    return toLocalInput(new Date(n.getTime() - 24 * 3600 * 1000))
+  })
+  const [probHistCustomTo, setProbHistCustomTo] = useState(() => toLocalInput(new Date()))
   const [probHistSeverity, setProbHistSeverity] = useState('')
   const [probHistSearch, setProbHistSearch] = useState('')
   const [probHistPage, setProbHistPage] = useState(1)
@@ -1278,7 +1283,19 @@ export default function StoreMonitorPage() {
   const loadProbHist = useCallback(async (page = 1) => {
     setProbHistLoading(true)
     try {
-      const params = { range: probHistRange, page, limit: 200 }
+      const params = { page, limit: 200 }
+      if (probHistRange === 'custom') {
+        const fromSec = fromLocalInput(probHistCustomFrom)
+        const toSec = fromLocalInput(probHistCustomTo)
+        if (!fromSec || !toSec || fromSec >= toSec) {
+          setProbHist(null)
+          return
+        }
+        params.from = fromSec
+        params.to = toSec
+      } else {
+        params.range = probHistRange
+      }
       if (probHistSeverity) params.severity = probHistSeverity
       if (probHistStatus)   params.status   = probHistStatus
       if (probHistSearch.trim()) params.q = probHistSearch.trim()
@@ -1287,7 +1304,7 @@ export default function StoreMonitorPage() {
       setProbHistPage(page)
     } catch { setProbHist(null) }
     finally { setProbHistLoading(false) }
-  }, [probHistRange, probHistSeverity, probHistSearch])
+  }, [probHistRange, probHistCustomFrom, probHistCustomTo, probHistSeverity, probHistStatus, probHistSearch])
 
   useEffect(() => {
     if (tab === 'probHist') loadProbHist(1)
@@ -5589,6 +5606,7 @@ export default function StoreMonitorPage() {
           { key: '24h', label: '24 Hours' },
           { key: '7d',  label: '7 Days' },
           { key: '30d', label: '30 Days' },
+          { key: 'custom', label: 'Custom…' },
         ]
         const snapStatus = probHist?.snapshotStatus
         return (
@@ -5597,9 +5615,44 @@ export default function StoreMonitorPage() {
             <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center', marginBottom:12,
               padding:'8px 12px', background:'var(--bg2)', border:'1px solid var(--border)', borderRadius:'var(--sm-r-lg)' }}>
               <span style={{ fontSize:11, color:'var(--text3)', fontFamily:'var(--mono)', flexShrink:0 }}>Range:</span>
-              <select className="sm-select" value={probHistRange} onChange={(e) => setProbHistRange(e.target.value)}>
+              <select className="sm-select" value={probHistRange} onChange={(e) => {
+                const v = e.target.value
+                setProbHistRange(v)
+                if (v === 'custom' && (!probHistCustomFrom || !probHistCustomTo)) {
+                  const n = new Date()
+                  setProbHistCustomFrom(toLocalInput(new Date(n.getTime() - 24 * 3600 * 1000)))
+                  setProbHistCustomTo(toLocalInput(n))
+                }
+              }}>
                 {PHRANGES.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
               </select>
+              {probHistRange === 'custom' && (
+                <>
+                  <input
+                    type="datetime-local"
+                    className="sm-input"
+                    style={{ fontSize: 11, padding: '4px 8px' }}
+                    value={probHistCustomFrom}
+                    onChange={(e) => setProbHistCustomFrom(e.target.value)}
+                  />
+                  <span style={{ fontSize: 10, color: 'var(--text3)' }}>→</span>
+                  <input
+                    type="datetime-local"
+                    className="sm-input"
+                    style={{ fontSize: 11, padding: '4px 8px' }}
+                    value={probHistCustomTo}
+                    onChange={(e) => setProbHistCustomTo(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="sm-btn sm-sm primary"
+                    disabled={!probHistCustomFrom || !probHistCustomTo || probHistLoading}
+                    onClick={() => loadProbHist(1)}
+                  >
+                    Apply
+                  </button>
+                </>
+              )}
               <select className="sm-select" value={probHistSeverity} onChange={(e) => setProbHistSeverity(e.target.value)}>
                 <option value=''>All severities</option>
                 <option value='critical'>Critical</option>

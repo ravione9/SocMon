@@ -713,16 +713,16 @@ router.post('/reports/group-disconnect-daily', async (req, res, next) => {
 router.get('/problem-history', async (req, res, next) => {
   try {
     const RANGE_MAP = { '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800, '30d': 30 * 86400 }
-    const rangeSec = RANGE_MAP[String(req.query.range || '24h')] ?? 86400
-
     let fromDate, toDate
     if (req.query.from) {
       fromDate = new Date(parseInt(String(req.query.from), 10) * 1000)
       toDate   = req.query.to ? new Date(parseInt(String(req.query.to), 10) * 1000) : new Date()
     } else {
+      const rangeSecPreset = RANGE_MAP[String(req.query.range || '24h')] ?? 86400
       toDate   = new Date()
-      fromDate = new Date(toDate.getTime() - rangeSec * 1000)
+      fromDate = new Date(toDate.getTime() - rangeSecPreset * 1000)
     }
+    const rangeSec = Math.max(60, Math.floor((toDate.getTime() - fromDate.getTime()) / 1000) || 86400)
 
     const statusFilter = String(req.query.status || '')
     // Match records that were active at any point in the requested window:

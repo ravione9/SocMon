@@ -1,6 +1,8 @@
 import dotenv from 'dotenv'
 import { dirname, resolve } from 'path'
 import { fileURLToPath } from 'url'
+import crypto from 'crypto'
+import jwt from 'jsonwebtoken'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 // Repo root .env then server/.env so local dev works whether vars live in project root or server/
@@ -128,28 +130,42 @@ app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 /** Tracking pixels/clicks — avoid JWT and keep modest throughput separate from bulk API limits. */
 app.use('/api/email-sim/pub', emailSimPublicRoutes)
+
+/** Rate-limit bucket: authenticated account when JWT/agent key present, else client IP. */
+function apiRateLimitKey(req) {
+  const auth = String(req.headers.authorization || '')
+  const bearer = auth.startsWith('Bearer ') ? auth.slice(7).trim() : ''
+  if (bearer && process.env.JWT_SECRET) {
+    try {
+      const decoded = jwt.verify(bearer, process.env.JWT_SECRET)
+      if (decoded?.id) return `user:${decoded.id}`
+    } catch {
+      /* invalid/expired — fall through to IP (auth middleware will 401) */
+    }
+  }
+  const agentKey = String(req.headers['x-netpulse-agent-key'] || '').trim()
+  if (agentKey) return `agent:${crypto.createHash('sha256').update(agentKey).digest('hex').slice(0, 24)}`
+  return `ip:${req.ip || req.socket?.remoteAddress || 'unknown'}`
+}
+
 app.use(
   '/api/',
   rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 5000,
+    windowMs: 60 * 1000,
+    max: 1000,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: apiRateLimitKey,
     validate: { xForwardedForHeader: false },
+    message: { error: 'Too many requests — limit is 1000 requests per minute per account' },
     skip: (req) => {
       const url = (req.originalUrl || req.url || '')
       const path = req.path || ''
       return (
-        req.path.startsWith('/web-mgmt/p/') ||
-        req.path.startsWith('/solarwinds/p/') ||
+        path.startsWith('/web-mgmt/p/') ||
+        path.startsWith('/solarwinds/p/') ||
         url.includes('idcs/export') ||
-        url.includes('/email-sim/pub') ||
-        // Internal monitoring dashboards make many parallel requests (per-group
-        // disconnect widgets, snapshot polls, etc). Previous 500 req / 15 min was choking
-        // the Net Health tab.
-        url.startsWith('/api/store-monitor') ||
-        // MCP / agent runners verify JWT via meta on every connect and poll
-        // modules on refresh — must not count against the bulk API cap (429 → 401).
-        path.startsWith('/agent/') ||
-        url.includes('/api/agent/')
+        url.includes('/email-sim/pub')
       )
     },
   }),
