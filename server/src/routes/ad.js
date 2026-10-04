@@ -16,6 +16,7 @@ import {
   probeAdConnectivity,
   testAdUserBindCredentials,
   listAdUsers,
+  resolveAdUserByIdentity,
   listAdGroups,
   listAdComputers,
   listAdOus,
@@ -246,13 +247,44 @@ function clampLimit(v, def, max) {
 router.get('/users', requireAdReady, async (req, res) => {
   try {
     const search = String(req.query.search || '').slice(0, 100)
-    const limit = clampLimit(req.query.limit, 500, 5000)
     const parentDn = String(req.query.parentDn || '').trim()
-    const data = await listAdUsers({ search, limit, parentDn })
+    const status = String(req.query.status || '').trim()
+    // Locked / status-filtered LDAP queries are narrow — allow a high ceiling (no 500 browse cap).
+    const statusFiltered = Boolean(status)
+    const limit = clampLimit(req.query.limit, statusFiltered ? 15000 : 500, statusFiltered ? 50000 : 5000)
+    const data = await listAdUsers({ search, limit, parentDn, status })
     res.json({ ok: true, ...data, baseDn: undefined })
   } catch (e) {
     if (e.code === 'AD_DN_INVALID' || e.code === 'AD_DN_OUT_OF_BASE') {
       return res.status(400).json({ ok: false, code: e.code, error: e.message })
+    }
+    sendAdError(res, e)
+  }
+})
+
+/** Resolve one user by exact email / UPN / samAccountName. */
+router.get('/users/resolve', requireAdReady, async (req, res) => {
+  try {
+    const q = String(req.query.q || req.query.email || req.query.mail || req.query.upn || '').trim()
+    if (!q) {
+      return res.status(400).json({
+        ok: false,
+        code: 'AD_IDENTITY_REQUIRED',
+        error: 'Query parameter q (email, UPN, or samAccountName) is required.',
+      })
+    }
+    const user = await resolveAdUserByIdentity(q)
+    res.json({ ok: true, user })
+  } catch (e) {
+    const code = e.code || 'AD_QUERY_FAILED'
+    if (code === 'AD_IDENTITY_REQUIRED') {
+      return res.status(400).json({ ok: false, code, error: e.message })
+    }
+    if (code === 'AD_USER_NOT_FOUND') {
+      return res.status(404).json({ ok: false, code, error: e.message })
+    }
+    if (code === 'AD_USER_AMBIGUOUS') {
+      return res.status(409).json({ ok: false, code, error: e.message })
     }
     sendAdError(res, e)
   }
@@ -346,16 +378,30 @@ router.post('/users/modify', requireAdReady, requireAdWrites, async (req, res) =
 })
 
 router.post('/users/account', requireAdReady, requireAdWrites, async (req, res) => {
-  const dn = String(req.body?.dn || '').trim()
+  let dn = String(req.body?.dn || '').trim()
+  const identity = String(
+    req.body?.email || req.body?.mail || req.body?.upn || req.body?.identity || '',
+  ).trim()
   const unlock = req.body?.unlock === true
   const disabled = typeof req.body?.disabled === 'boolean' ? req.body.disabled : undefined
   const mustChangePassword = req.body?.mustChangePassword === true
   const dontExpirePassword =
     typeof req.body?.dontExpirePassword === 'boolean' ? req.body.dontExpirePassword : undefined
-  const flagSnapshot = { unlock, disabled, mustChangePassword, dontExpirePassword }
+  const flagSnapshot = { unlock, disabled, mustChangePassword, dontExpirePassword, identity: identity || undefined }
   try {
+    if (!dn && identity) {
+      const resolved = await resolveAdUserByIdentity(identity)
+      dn = resolved.dn
+      flagSnapshot.resolvedFrom = identity
+      flagSnapshot.mail = resolved.mail || undefined
+      flagSnapshot.upn = resolved.upn || undefined
+    }
     if (!dn) {
-      return res.status(400).json({ ok: false, code: 'AD_BODY_INVALID', error: 'dn is required.' })
+      return res.status(400).json({
+        ok: false,
+        code: 'AD_BODY_INVALID',
+        error: 'dn is required, or provide email / mail / upn / identity to resolve the account.',
+      })
     }
     await setAdUserAccountFlags({ dn, unlock, disabled, mustChangePassword, dontExpirePassword })
     logAdAudit(req, {
@@ -364,12 +410,24 @@ router.post('/users/account', requireAdReady, requireAdWrites, async (req, res) 
       target: { kind: 'user', dn },
       details: flagSnapshot,
     })
-    res.json({ ok: true })
+    res.json({ ok: true, dn })
   } catch (e) {
+    const code = e.code || ''
+    if (code === 'AD_USER_NOT_FOUND' || code === 'AD_USER_AMBIGUOUS' || code === 'AD_IDENTITY_REQUIRED') {
+      logAdAudit(req, {
+        action: 'AD_USER_ACCOUNT_FLAGS',
+        status: 'FAILED',
+        target: { kind: 'user', dn: dn || identity || null },
+        details: { ...flagSnapshot, error: e.message },
+        errorCode: code,
+      })
+      const status = code === 'AD_USER_NOT_FOUND' ? 404 : code === 'AD_USER_AMBIGUOUS' ? 409 : 400
+      return res.status(status).json({ ok: false, code, error: e.message })
+    }
     logAdAudit(req, {
       action: 'AD_USER_ACCOUNT_FLAGS',
       status: 'FAILED',
-      target: { kind: 'user', dn },
+      target: { kind: 'user', dn: dn || null },
       details: { ...flagSnapshot, error: e.message },
       errorCode: e.code,
     })

@@ -11,6 +11,7 @@ import {
   listAdGroups,
   listAdComputers,
   listAdOus,
+  setAdUserAccount,
 } from '../api/ad'
 import {
   idcsCx,
@@ -293,14 +294,49 @@ function TableShell({ columns, loading, empty, children, count, truncated }) {
   )
 }
 
+/** Status filters that LDAP can apply server-side (avoids 500-cap browse + client filter). */
+const SERVER_STATUS_FILTERS = new Set([
+  'locked',
+  'lockedOrBadPwd',
+  'disabled',
+  'enabled',
+  'pwdExpired',
+  'pwdNoExpiry',
+])
+
 const USER_STATUS_FILTERS = [
   { id: 'all', label: 'All statuses', test: () => true },
   { id: 'enabled', label: 'Enabled only', test: (u) => !u.disabled },
   { id: 'disabled', label: 'Disabled only', test: (u) => u.disabled },
-  { id: 'locked', label: 'Locked', test: (u) => u.locked },
+  { id: 'locked', label: 'Locked (lockout)', test: (u) => u.locked },
+  { id: 'lockedOrBadPwd', label: 'Locked / bad pwd', test: (u) => u.locked || (u.badPwdCount || 0) >= 1 },
   { id: 'pwdExpired', label: 'Password expired', test: (u) => u.passwordExpired },
   { id: 'pwdNoExpiry', label: 'Password never expires', test: (u) => u.dontExpirePassword },
 ]
+
+async function unlockUsersSequentially(dns, { concurrency = 6 } = {}) {
+  const results = { ok: 0, fail: 0, errors: [] }
+  let i = 0
+  async function worker() {
+    while (i < dns.length) {
+      const idx = i++
+      const dn = dns[idx]
+      try {
+        await setAdUserAccount({ dn, unlock: true })
+        results.ok++
+      } catch (e) {
+        results.fail++
+        results.errors.push({
+          dn,
+          error: e.response?.data?.error || e.message || 'Unlock failed',
+        })
+      }
+    }
+  }
+  const n = Math.max(1, Math.min(concurrency, dns.length || 1))
+  await Promise.all(Array.from({ length: n }, () => worker()))
+  return results
+}
 
 function csvCell(v) {
   if (v == null) return ''
@@ -335,6 +371,12 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
   /** Fixed-position portal menu — absolute dropdown is clipped by TableShell overflow-hidden / overflow-x-auto */
   const [userRowMenu, setUserRowMenu] = useState(null)
   const [allOus, setAllOus] = useState([])
+  const [selectedDns, setSelectedDns] = useState(() => new Set())
+  const [unlockBusy, setUnlockBusy] = useState(false)
+  const [unlockNotice, setUnlockNotice] = useState(null)
+  const [emailUnlock, setEmailUnlock] = useState('')
+  const [emailUnlockBusy, setEmailUnlockBusy] = useState(false)
+  const [refreshTick, setRefreshTick] = useState(0)
 
   useEffect(() => {
     setStatusFilter(statusFilterDefault || 'all')
@@ -346,37 +388,47 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
       .catch(() => {})
   }, [])
 
-  // Use a higher limit when scoped to a single OU so we never miss users
-  // (the unscoped browse stays at 500 to keep the DC happy on huge domains).
-  const effectiveLimit = ouFilter === 'all' ? 500 : 5000
+  const serverStatus = SERVER_STATUS_FILTERS.has(statusFilter) ? statusFilter : ''
+  // Status-filtered LDAP queries are narrow — no 500 browse cap. Unscoped "all" stays modest.
+  const effectiveLimit = serverStatus ? 50000 : ouFilter === 'all' ? 500 : 5000
   const effectiveParent = ouFilter === 'all' ? '' : ouFilter
 
+  const loadUsers = useCallback(() => {
+    const params = {
+      search: debounced,
+      limit: effectiveLimit,
+      parentDn: effectiveParent,
+    }
+    if (serverStatus) params.status = serverStatus
+    return listAdUsers(params).then((r) => ({
+      users: r.users || [],
+      total: r.total || 0,
+      truncated: !!r.truncated,
+      searchBase: r.searchBase || '',
+    }))
+  }, [debounced, effectiveLimit, effectiveParent, serverStatus])
+
   const refreshUserTable = useCallback(() => {
-    listAdUsers({ search: debounced, limit: effectiveLimit, parentDn: effectiveParent })
-      .then((r) =>
-        setData({
-          users: r.users || [],
-          total: r.total || 0,
-          truncated: !!r.truncated,
-          searchBase: r.searchBase || '',
-        }),
-      )
+    loadUsers()
+      .then((next) => {
+        setData(next)
+        setSelectedDns((prev) => {
+          const valid = new Set((next.users || []).map((u) => u.dn))
+          return new Set([...prev].filter((dn) => valid.has(dn)))
+        })
+      })
       .catch(() => {})
-  }, [debounced, effectiveLimit, effectiveParent])
+  }, [loadUsers])
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setErr('')
-    listAdUsers({ search: debounced, limit: effectiveLimit, parentDn: effectiveParent })
-      .then((r) => {
+    setSelectedDns(new Set())
+    loadUsers()
+      .then((next) => {
         if (cancelled) return
-        setData({
-          users: r.users || [],
-          total: r.total || 0,
-          truncated: !!r.truncated,
-          searchBase: r.searchBase || '',
-        })
+        setData(next)
       })
       .catch((e) => {
         if (cancelled) return
@@ -387,7 +439,7 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
     return () => {
       cancelled = true
     }
-  }, [debounced, effectiveLimit, effectiveParent])
+  }, [loadUsers, refreshTick])
 
   useEffect(() => {
     if (!userRowMenu) return
@@ -415,7 +467,9 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
   }, [allOus])
 
   const filtered = useMemo(() => {
+    // Server already applied status when SERVER_STATUS_FILTERS — keep a light client pass for safety.
     const sFilter = USER_STATUS_FILTERS.find((f) => f.id === statusFilter) || USER_STATUS_FILTERS[0]
+    if (SERVER_STATUS_FILTERS.has(statusFilter)) return data.users
     return data.users.filter((u) => sFilter.test(u))
   }, [data.users, statusFilter])
 
@@ -424,10 +478,78 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
     return shortOu(ouFilter) || ouFilter
   }, [ouFilter])
 
+  const allVisibleSelected = filtered.length > 0 && filtered.every((u) => selectedDns.has(u.dn))
+  const selectedCount = selectedDns.size
+
+  const toggleSelect = (dn) => {
+    setSelectedDns((prev) => {
+      const next = new Set(prev)
+      if (next.has(dn)) next.delete(dn)
+      else next.add(dn)
+      return next
+    })
+  }
+
+  const toggleSelectAllVisible = () => {
+    setSelectedDns((prev) => {
+      if (filtered.every((u) => prev.has(u.dn))) return new Set()
+      return new Set(filtered.map((u) => u.dn))
+    })
+  }
+
+  const runUnlockDns = async (dns, label) => {
+    if (!dns.length) return
+    setUnlockBusy(true)
+    setUnlockNotice(null)
+    try {
+      const results = await unlockUsersSequentially(dns)
+      setUnlockNotice({
+        type: results.fail ? 'warn' : 'success',
+        text: `${label}: unlocked ${results.ok}${results.fail ? `, failed ${results.fail}` : ''}.`,
+        errors: results.errors.slice(0, 5),
+      })
+      setSelectedDns(new Set())
+      setRefreshTick((n) => n + 1)
+    } catch (e) {
+      setUnlockNotice({
+        type: 'error',
+        text: e.response?.data?.error || e.message || 'Unlock failed',
+      })
+    } finally {
+      setUnlockBusy(false)
+    }
+  }
+
+  const unlockSelected = () => runUnlockDns([...selectedDns], 'Selected')
+
+  const unlockByEmail = async () => {
+    const identity = emailUnlock.trim()
+    if (!identity) return
+    setEmailUnlockBusy(true)
+    setUnlockNotice(null)
+    try {
+      const r = await setAdUserAccount({ email: identity, unlock: true })
+      setUnlockNotice({
+        type: 'success',
+        text: `Unlocked ${identity}${r?.dn ? ` (${r.dn})` : ''}.`,
+      })
+      setEmailUnlock('')
+      setRefreshTick((n) => n + 1)
+    } catch (e) {
+      const d = e.response?.data
+      setUnlockNotice({
+        type: 'error',
+        text: `${d?.code ? `[${d.code}] ` : ''}${d?.error || e.message || 'Unlock failed'}`,
+      })
+    } finally {
+      setEmailUnlockBusy(false)
+    }
+  }
+
   const exportCsv = () => {
     const headers = [
       'Display name', 'samAccountName', 'UPN', 'Email', 'OU', 'Disabled', 'Locked',
-      'Pwd Expired', 'Pwd Never Expires', 'Bad Pwd Count', 'Group Count',
+      'Pwd Expired', 'Pwd Never Expires', 'Bad Pwd Count', 'Lockout Time', 'Group Count',
       'Last Logon', 'Pwd Last Set', 'Created', 'DN',
     ]
     const rows = [headers]
@@ -443,6 +565,7 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
         u.passwordExpired ? 'yes' : 'no',
         u.dontExpirePassword ? 'yes' : 'no',
         u.badPwdCount ?? 0,
+        u.lockoutTime || '',
         u.groupCount ?? 0,
         u.lastLogon || '',
         u.pwdLastSet || '',
@@ -467,8 +590,43 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
       initialTab: opts.initialTab,
     })
 
+  const noticeStyle =
+    unlockNotice?.type === 'success'
+      ? { background: 'color-mix(in srgb, var(--green) 12%, var(--bg3))', color: 'var(--green)' }
+      : unlockNotice?.type === 'warn'
+        ? { background: 'color-mix(in srgb, var(--amber) 14%, var(--bg3))', color: 'var(--amber)' }
+        : { background: 'color-mix(in srgb, var(--red) 12%, var(--bg3))', color: 'var(--red)' }
+
   return (
     <div className="space-y-3">
+      <div
+        className={`rounded-xl border px-4 py-3 flex flex-wrap items-end gap-2 ${idcsCx.border} ${idcsCx.bg2}`}
+      >
+        <div className="flex-1 min-w-[16rem]">
+          <div className={`text-[10px] font-bold uppercase tracking-wide mb-1 ${idcsCx.text3}`}>
+            Unlock by email / UPN
+          </div>
+          <input
+            type="text"
+            placeholder="user@lenskart.in or samAccountName"
+            value={emailUnlock}
+            onChange={(e) => setEmailUnlock(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') unlockByEmail()
+            }}
+            className={idcsInputClass('w-full')}
+          />
+        </div>
+        <button
+          type="button"
+          onClick={unlockByEmail}
+          disabled={emailUnlockBusy || !emailUnlock.trim()}
+          className={`text-sm ${idcsBtnPrimary()}`}
+        >
+          {emailUnlockBusy ? 'Unlocking…' : 'Unlock account'}
+        </button>
+      </div>
+
       <div className="flex flex-wrap items-center gap-2">
         <input
           type="search"
@@ -511,7 +669,7 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
         )}
         <button
           type="button"
-          onClick={() => setSearch((s) => s + '')}
+          onClick={() => setRefreshTick((n) => n + 1)}
           className={`text-sm ${idcsBtnGhost()}`}
           disabled={loading}
         >
@@ -534,11 +692,58 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
           New user
         </button>
       </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={unlockSelected}
+          disabled={unlockBusy || selectedCount === 0}
+          className={`text-sm ${idcsBtnPrimary()}`}
+          title="Clear lockoutTime for selected accounts"
+        >
+          {unlockBusy ? 'Unlocking…' : `Unlock selected (${selectedCount})`}
+        </button>
+        {selectedCount > 0 && (
+          <button
+            type="button"
+            onClick={() => setSelectedDns(new Set())}
+            className={`text-xs ${idcsBtnGhost()}`}
+          >
+            Clear selection
+          </button>
+        )}
+        {(statusFilter === 'locked' || statusFilter === 'lockedOrBadPwd') && (
+          <span className={`text-xs ${idcsCx.text3}`}>
+            LDAP filter applied on the DC — not limited to the first 500 domain users.
+          </span>
+        )}
+      </div>
+
+      {unlockNotice && (
+        <div
+          className={`text-sm rounded-lg px-4 py-3 border whitespace-pre-wrap ${idcsCx.border}`}
+          style={noticeStyle}
+        >
+          <div>{unlockNotice.text}</div>
+          {unlockNotice.errors?.length > 0 && (
+            <ul className="mt-1 text-xs opacity-90 list-disc pl-4">
+              {unlockNotice.errors.map((e) => (
+                <li key={e.dn}>{e.error}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
       <div className={`text-xs flex flex-wrap items-center gap-x-2 gap-y-1 ${idcsCx.text3}`}>
         <span>
-          Showing <span className={idcsCx.text}>{filtered.length}</span> of{' '}
-          <span className={idcsCx.text}>{data.users.length}</span>{' '}
-          {ouFilter === 'all' ? 'loaded' : `under ${selectedOuLabel}`}
+          Showing <span className={idcsCx.text}>{filtered.length}</span>
+          {serverStatus ? ' matching accounts' : (
+            <>
+              {' '}of <span className={idcsCx.text}>{data.users.length}</span>{' '}
+              {ouFilter === 'all' ? 'loaded' : `under ${selectedOuLabel}`}
+            </>
+          )}
         </span>
         {typeof domainUsersTotal === 'number' && (
           <span className={idcsCx.text3}>
@@ -548,7 +753,7 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
         )}
         {data.truncated && (
           <span style={{ color: 'var(--amber)' }}>
-            · server result capped at {effectiveLimit} — narrow your search
+            · result truncated at {effectiveLimit.toLocaleString()} — narrow search or OU
           </span>
         )}
       </div>
@@ -561,7 +766,7 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
         </div>
       )}
       <TableShell
-        columns={['Name', 'Logon', 'OU', 'Status', 'Groups', 'Last logon', '']}
+        columns={['', 'Name', 'Logon', 'OU', 'Status', 'Bad pwd', 'Last logon', '']}
         loading={loading}
         count={filtered.length}
         truncated={data.truncated}
@@ -575,17 +780,36 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
               : null
         }
       >
-        {filtered.map((u) => {
-          const moveFor = () =>
-            setMoveTarget({
-              dn: u.dn,
-              preview: { displayName: u.displayName, samAccountName: u.samAccountName },
-            })
-          return (
+        {filtered.length > 0 && (
+          <tr className={`${idcsCx.bg3}`}>
+            <td className="px-3 py-2">
+              <input
+                type="checkbox"
+                checked={allVisibleSelected}
+                onChange={toggleSelectAllVisible}
+                title="Select all visible"
+                aria-label="Select all visible users"
+              />
+            </td>
+            <td colSpan={7} className={`px-2 py-2 text-xs ${idcsCx.text3}`}>
+              Select rows to unlock in bulk
+            </td>
+          </tr>
+        )}
+        {filtered.map((u) => (
             <tr
               key={u.dn}
               className="hover:bg-[color-mix(in_srgb,var(--accent)_6%,var(--bg2))]"
             >
+              <td className="px-3 py-2">
+                <input
+                  type="checkbox"
+                  checked={selectedDns.has(u.dn)}
+                  onChange={() => toggleSelect(u.dn)}
+                  onClick={(e) => e.stopPropagation()}
+                  aria-label={`Select ${u.samAccountName || u.displayName || u.dn}`}
+                />
+              </td>
               <td
                 className={`px-4 py-2 cursor-pointer`}
                 onClick={() => openDetail(u)}
@@ -606,16 +830,31 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
                   <StatusPill tone="green">Enabled</StatusPill>
                 )}
                 {u.locked && <StatusPill tone="amber">Locked</StatusPill>}
+                {!u.locked && (u.badPwdCount || 0) >= 1 && <StatusPill tone="amber">Bad pwd</StatusPill>}
                 {u.passwordExpired && <StatusPill tone="amber">Pwd Expired</StatusPill>}
                 {u.dontExpirePassword && <StatusPill tone="muted">No Expiry</StatusPill>}
               </td>
               <td className={`px-4 py-2 text-xs ${idcsCx.text2} cursor-pointer`} onClick={() => openDetail(u)}>
-                {u.groupCount}
+                {u.badPwdCount ?? 0}
               </td>
               <td className={`px-4 py-2 text-xs ${idcsCx.text3} cursor-pointer`} onClick={() => openDetail(u)}>
                 {fmtDate(u.lastLogon)}
               </td>
-              <td className="px-2 py-2 text-right">
+              <td className="px-2 py-2 text-right whitespace-nowrap">
+                {u.locked && (
+                  <button
+                    type="button"
+                    className={`text-xs px-2 py-1 mr-1 rounded border ${idcsCx.border} ${idcsCx.text2} hover:bg-[color-mix(in_srgb,var(--accent)_8%,var(--bg3))]`}
+                    disabled={unlockBusy}
+                    title="Clear account lockout"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      runUnlockDns([u.dn], u.mail || u.samAccountName || 'User')
+                    }}
+                  >
+                    Unlock
+                  </button>
+                )}
                 <button
                   type="button"
                   className={`text-xs px-2 py-1 rounded border ${idcsCx.border} ${idcsCx.text2} hover:bg-[color-mix(in_srgb,var(--accent)_8%,var(--bg3))]`}
@@ -633,8 +872,7 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
                 </button>
               </td>
             </tr>
-          )
-        })}
+          ))}
       </TableShell>
       {userRowMenu &&
         createPortal(
@@ -654,6 +892,20 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
               }}
               onClick={(e) => e.stopPropagation()}
             >
+              {userRowMenu.user?.locked && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    const rowUser = userRowMenu.user
+                    setUserRowMenu(null)
+                    runUnlockDns([rowUser.dn], rowUser.mail || rowUser.samAccountName || 'User')
+                  }}
+                  className={`block w-full text-left px-3 py-2 text-xs ${idcsCx.text2} hover:bg-[color-mix(in_srgb,var(--accent)_10%,var(--bg3))]`}
+                >
+                  Unlock account
+                </button>
+              )}
               <button
                 type="button"
                 role="menuitem"
@@ -1450,11 +1702,13 @@ function OverviewPanel({
           sub={
             !credentialsConfigured && configured
               ? 'Service account required'
-              : 'Click to filter locked accounts'
+              : 'Click to open locked / bad-pwd users (select & unlock)'
           }
           accent="var(--red)"
           onClick={
-            configured && credentialsConfigured ? () => onJump('users', { filter: 'locked' }) : undefined
+            configured && credentialsConfigured
+              ? () => onJump('users', { filter: 'lockedOrBadPwd' })
+              : undefined
           }
         />
         <StatTile

@@ -22,8 +22,13 @@ export const diagnoseAd = () =>
 export const testAdUserBind = (body) =>
   api.post(`${BASE}/test-user-bind`, body).then((r) => r.data)
 
+/** @param {{ search?: string, limit?: number, parentDn?: string, status?: string }} [params] */
 export const listAdUsers = (params = {}) =>
   api.get(`${BASE}/users`, { params }).then((r) => r.data)
+
+/** Exact match on email / UPN / samAccountName */
+export const resolveAdUser = (q) =>
+  api.get(`${BASE}/users/resolve`, { params: { q } }).then((r) => r.data)
 
 /** @param {{ dn: string }} params — dn should be the LDAP distinguished name */
 export const getAdUserDetail = (params) =>
@@ -35,6 +40,7 @@ export const resetAdUserPassword = (body) =>
 export const modifyAdUser = (body) =>
   api.post(`${BASE}/users/modify`, body).then((r) => r.data)
 
+/** Account flags. Pass `dn`, or `email` / `mail` / `upn` / `identity` to resolve then act. */
 export const setAdUserAccount = (body) =>
   api.post(`${BASE}/users/account`, body).then((r) => r.data)
 

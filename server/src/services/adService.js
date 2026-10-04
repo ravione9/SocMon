@@ -661,12 +661,57 @@ async function withAdClient(fn) {
   }
 }
 
-export async function listAdUsers({ search = '', limit = 500, parentDn = '' } = {}) {
+/** LDAP clause fragments for GET /users?status=… (server-side; avoids loading 500 random users then filtering). */
+const USER_LIST_STATUS_LDAP = {
+  locked: '(lockoutTime>=1)',
+  lockedOrBadPwd: '(|(lockoutTime>=1)(badPwdCount>=1))',
+  disabled: '(userAccountControl:1.2.840.113556.1.4.803:=2)',
+  enabled: '(!(userAccountControl:1.2.840.113556.1.4.803:=2))',
+  pwdNoExpiry: '(userAccountControl:1.2.840.113556.1.4.803:=65536)',
+  pwdExpired: '(userAccountControl:1.2.840.113556.1.4.803:=8388608)',
+}
+
+function mapAdUserListEntry(entry) {
+  const o = entryToObject(entry)
+  const uac = uacFlags(o.userAccountControl)
+  const lockoutFt = parseBigIntAttr(o.lockoutTime)
+  const locked = Boolean(lockoutFt && lockoutFt !== 0n)
+  const memberOf = Array.isArray(o.memberOf) ? o.memberOf : o.memberOf ? [o.memberOf] : []
+  return {
+    dn: o.dn,
+    samAccountName: o.samAccountName || null,
+    displayName: o.displayName || o.cn || null,
+    givenName: o.givenName || null,
+    sn: o.sn || null,
+    mail: o.mail || null,
+    upn: o.userPrincipalName || null,
+    department: o.department || null,
+    title: o.title || null,
+    phone: o.telephoneNumber || null,
+    mobile: o.mobile || null,
+    ou: parentDnFromDn(o.dn),
+    disabled: uac.disabled || false,
+    locked,
+    dontExpirePassword: uac.dontExpirePassword || false,
+    passwordExpired: uac.passwordExpired || false,
+    badPwdCount: o.badPwdCount ? Number(o.badPwdCount) : 0,
+    lockoutTime: fileTimeToIso(o.lockoutTime),
+    lastLogon: latestLogonIso(o.lastLogon, o.lastLogonTimestamp),
+    pwdLastSet: fileTimeToIso(o.pwdLastSet),
+    whenCreated: o.whenCreated || null,
+    whenChanged: o.whenChanged || null,
+    groupCount: memberOf.length,
+  }
+}
+
+export async function listAdUsers({ search = '', limit = 500, parentDn = '', status = '' } = {}) {
   const safe = escapeLdapFilter(search.trim())
   const where = safe
     ? `(|(samAccountName=*${safe}*)(cn=*${safe}*)(displayName=*${safe}*)(mail=*${safe}*)(userPrincipalName=*${safe}*)(sn=*${safe}*)(givenName=*${safe}*))`
     : ''
-  const filter = `(&(objectCategory=person)(objectClass=user)${where})`
+  const statusKey = String(status || '').trim()
+  const statusClause = USER_LIST_STATUS_LDAP[statusKey] || ''
+  const filter = `(&(objectCategory=person)(objectClass=user)${statusClause}${where})`
   const attrs = [
     'samAccountName', 'cn', 'displayName', 'givenName', 'sn',
     'mail', 'userPrincipalName', 'department', 'title', 'telephoneNumber', 'mobile',
@@ -682,38 +727,53 @@ export async function listAdUsers({ search = '', limit = 500, parentDn = '' } = 
       searchBase = parent
     }
     const { rows, truncated } = await searchEntriesPaged(client, searchBase, filter, attrs, { limit })
-    const users = rows.map((entry) => {
-      const o = entryToObject(entry)
-      const uac = uacFlags(o.userAccountControl)
-      const lockoutFt = parseBigIntAttr(o.lockoutTime)
-      const locked = Boolean(lockoutFt && lockoutFt !== 0n)
-      const memberOf = Array.isArray(o.memberOf) ? o.memberOf : o.memberOf ? [o.memberOf] : []
-      return {
-        dn: o.dn,
-        samAccountName: o.samAccountName || null,
-        displayName: o.displayName || o.cn || null,
-        givenName: o.givenName || null,
-        sn: o.sn || null,
-        mail: o.mail || null,
-        upn: o.userPrincipalName || null,
-        department: o.department || null,
-        title: o.title || null,
-        phone: o.telephoneNumber || null,
-        mobile: o.mobile || null,
-        ou: parentDnFromDn(o.dn),
-        disabled: uac.disabled || false,
-        locked,
-        dontExpirePassword: uac.dontExpirePassword || false,
-        passwordExpired: uac.passwordExpired || false,
-        badPwdCount: o.badPwdCount ? Number(o.badPwdCount) : 0,
-        lastLogon: latestLogonIso(o.lastLogon, o.lastLogonTimestamp),
-        pwdLastSet: fileTimeToIso(o.pwdLastSet),
-        whenCreated: o.whenCreated || null,
-        whenChanged: o.whenChanged || null,
-        groupCount: memberOf.length,
-      }
+    const users = rows.map(mapAdUserListEntry)
+    return { users, total: users.length, truncated, baseDn, searchBase, status: statusKey || null }
+  })
+}
+
+/**
+ * Resolve a single user by exact mail, UPN, or sAMAccountName (for unlock-by-email).
+ * @returns {{ dn: string, mail: string|null, upn: string|null, samAccountName: string|null, displayName: string|null, locked: boolean }}
+ */
+export async function resolveAdUserByIdentity(identityRaw) {
+  const identity = String(identityRaw || '').trim()
+  if (!identity || /\x00/.test(identity)) {
+    throw Object.assign(new Error('Email, UPN, or samAccountName is required.'), {
+      code: 'AD_IDENTITY_REQUIRED',
     })
-    return { users, total: users.length, truncated, baseDn, searchBase }
+  }
+  const safe = escapeLdapFilter(identity)
+  const filter =
+    `(&(objectCategory=person)(objectClass=user)(|(mail=${safe})(userPrincipalName=${safe})(samAccountName=${safe})))`
+  const attrs = [
+    'samAccountName', 'displayName', 'cn', 'mail', 'userPrincipalName',
+    'userAccountControl', 'lockoutTime', 'badPwdCount', 'distinguishedName',
+  ]
+  return withAdClient(async (client, baseDn) => {
+    const { rows } = await searchEntriesPaged(client, baseDn, filter, attrs, { limit: 5 })
+    if (!rows.length) {
+      throw Object.assign(new Error(`No AD user matches "${identity}".`), {
+        code: 'AD_USER_NOT_FOUND',
+      })
+    }
+    if (rows.length > 1) {
+      throw Object.assign(
+        new Error(`Multiple AD users match "${identity}". Use the exact DN or a unique email/UPN.`),
+        { code: 'AD_USER_AMBIGUOUS' },
+      )
+    }
+    const u = mapAdUserListEntry(rows[0])
+    return {
+      dn: u.dn,
+      mail: u.mail,
+      upn: u.upn,
+      samAccountName: u.samAccountName,
+      displayName: u.displayName,
+      locked: u.locked,
+      disabled: u.disabled,
+      badPwdCount: u.badPwdCount,
+    }
   })
 }
 
