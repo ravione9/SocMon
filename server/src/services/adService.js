@@ -590,35 +590,115 @@ function uacFlags(uacRaw) {
  * Paged sub-tree search returning normalized entries.
  * @param {import('ldapjs').Client} client
  */
+function isLdapSizeLimitError(e) {
+  if (!e) return false
+  const code = e.code ?? e.status ?? e.name
+  if (code === 4 || code === '4' || code === 'SizeLimitExceededError') return true
+  return /size\s*limit/i.test(String(e.message || e.name || ''))
+}
+
+/**
+ * Paged LDAP search that STOPS once `limit` rows are collected.
+ * Previous implementation kept walking the rest of the domain after the cap
+ * (36k+ users → 30s+ client timeouts). Uses sizeLimit + pagePause halt.
+ */
 async function searchEntriesPaged(client, baseDn, filter, attributes, { limit = 1000 } = {}) {
-  const pageSize = Math.min(
-    Math.max(parseInt(String(process.env.AD_STATS_PAGE_SIZE || '500'), 10) || 500, 50),
-    2000,
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 1000, 50000))
+  const configuredPage = Math.max(parseInt(String(process.env.AD_STATS_PAGE_SIZE || '250'), 10) || 250, 50)
+  const pageSize = Math.min(configuredPage, 500, safeLimit)
+  const timeLimit = Math.min(
+    Math.max(parseInt(String(process.env.AD_SEARCH_TIME_LIMIT_SEC || '45'), 10) || 45, 10),
+    120,
   )
   const rows = []
   let truncated = false
+
   await new Promise((resolve, reject) => {
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+    const fail = (e) => {
+      if (settled) return
+      if (isLdapSizeLimitError(e)) {
+        truncated = true
+        return finish()
+      }
+      settled = true
+      reject(e)
+    }
+
     client.search(
       baseDn,
       {
         scope: 'sub',
         filter,
         attributes,
-        timeLimit: parseInt(String(process.env.AD_SEARCH_TIME_LIMIT_SEC || '180'), 10) || 180,
-        paged: { pageSize },
+        sizeLimit: safeLimit,
+        timeLimit,
+        paged: { pageSize, pagePause: true },
       },
       (err, res) => {
-        if (err) return reject(err)
+        if (err) return fail(err)
+
+        const stopPaging = () => {
+          truncated = true
+          try {
+            if (typeof res.destroy === 'function') res.destroy()
+          } catch {
+            /* ignore */
+          }
+          finish()
+        }
+
         res.on('searchEntry', (msg) => {
-          if (rows.length >= limit) { truncated = true; return }
+          if (settled) return
+          if (rows.length >= safeLimit) {
+            stopPaging()
+            return
+          }
           rows.push(msg)
+          if (rows.length >= safeLimit) stopPaging()
         })
-        res.on('error', reject)
-        res.on('end', () => resolve())
-        res.on('pageError', reject)
+
+        res.on('page', (_result, cb) => {
+          if (settled) return
+          if (rows.length >= safeLimit) {
+            truncated = true
+            // Do not request another page.
+            try {
+              if (typeof res.destroy === 'function') res.destroy()
+            } catch {
+              /* ignore */
+            }
+            finish()
+            return
+          }
+          if (typeof cb === 'function') cb()
+        })
+
+        res.on('error', (e) => {
+          // destroy()/early abort can surface as a socket error after we already finished.
+          if (settled) return
+          if (truncated && rows.length >= safeLimit) return finish()
+          fail(e)
+        })
+        res.on('pageError', (e) => {
+          if (settled) return
+          if (truncated && rows.length >= safeLimit) return finish()
+          fail(e)
+        })
+        res.on('end', finish)
       },
     )
   })
+
+  if (rows.length > safeLimit) {
+    truncated = true
+    rows.length = safeLimit
+  }
   return { rows, truncated }
 }
 
@@ -704,20 +784,26 @@ function mapAdUserListEntry(entry) {
   }
 }
 
+/** Indexed-friendly user search clause (ANR + prefix). Avoid leading-wildcard OR of many attrs. */
+function buildUserSearchClause(search) {
+  const q = String(search || '').trim()
+  if (!q) return ''
+  const safe = escapeLdapFilter(q)
+  // anr = Ambiguous Name Resolution (AD indexed). Prefix matches on logon/mail attrs.
+  return `(|(anr=${safe})(samAccountName=${safe}*)(mail=${safe}*)(userPrincipalName=${safe}*))`
+}
+
 export async function listAdUsers({ search = '', limit = 500, parentDn = '', status = '' } = {}) {
-  const safe = escapeLdapFilter(search.trim())
-  const where = safe
-    ? `(|(samAccountName=*${safe}*)(cn=*${safe}*)(displayName=*${safe}*)(mail=*${safe}*)(userPrincipalName=*${safe}*)(sn=*${safe}*)(givenName=*${safe}*))`
-    : ''
+  const where = buildUserSearchClause(search)
   const statusKey = String(status || '').trim()
   const statusClause = USER_LIST_STATUS_LDAP[statusKey] || ''
   const filter = `(&(objectCategory=person)(objectClass=user)${statusClause}${where})`
+  // Lean attribute set — skip memberOf / lastLogon (non-replicated) for list speed.
   const attrs = [
-    'samAccountName', 'cn', 'displayName', 'givenName', 'sn',
-    'mail', 'userPrincipalName', 'department', 'title', 'telephoneNumber', 'mobile',
-    'userAccountControl', 'lockoutTime', 'badPwdCount', 'pwdLastSet',
-    'lastLogon', 'lastLogonTimestamp', 'whenCreated', 'whenChanged',
-    'memberOf',
+    'samAccountName', 'cn', 'displayName',
+    'mail', 'userPrincipalName',
+    'userAccountControl', 'lockoutTime', 'badPwdCount',
+    'lastLogonTimestamp', 'pwdLastSet',
   ]
   return withAdClient(async (client, baseDn) => {
     let searchBase = baseDn
@@ -727,7 +813,12 @@ export async function listAdUsers({ search = '', limit = 500, parentDn = '', sta
       searchBase = parent
     }
     const { rows, truncated } = await searchEntriesPaged(client, searchBase, filter, attrs, { limit })
-    const users = rows.map(mapAdUserListEntry)
+    const users = rows.map((entry) => {
+      const u = mapAdUserListEntry(entry)
+      // List view no longer loads memberOf — keep field for UI compatibility.
+      u.groupCount = null
+      return u
+    })
     return { users, total: users.length, truncated, baseDn, searchBase, status: statusKey || null }
   })
 }

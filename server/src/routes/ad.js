@@ -251,7 +251,11 @@ router.get('/users', requireAdReady, async (req, res) => {
     const status = String(req.query.status || '').trim()
     // Locked / status-filtered LDAP queries are narrow — allow a high ceiling (no 500 browse cap).
     const statusFiltered = Boolean(status)
-    const limit = clampLimit(req.query.limit, statusFiltered ? 15000 : 500, statusFiltered ? 50000 : 5000)
+    const limit = clampLimit(
+      req.query.limit,
+      statusFiltered ? 5000 : 300,
+      statusFiltered ? 15000 : 2000,
+    )
     const data = await listAdUsers({ search, limit, parentDn, status })
     res.json({ ok: true, ...data, baseDn: undefined })
   } catch (e) {

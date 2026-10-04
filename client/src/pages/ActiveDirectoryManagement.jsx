@@ -359,7 +359,7 @@ function downloadCsv(filename, rows) {
 
 function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersTotal = null }) {
   const [search, setSearch] = useState('')
-  const debounced = useDebounced(search)
+  const debounced = useDebounced(search, 250)
   const [data, setData] = useState({ users: [], total: 0, truncated: false, searchBase: '' })
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
@@ -389,13 +389,26 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
   }, [])
 
   const serverStatus = SERVER_STATUS_FILTERS.has(statusFilter) ? statusFilter : ''
-  // Status-filtered LDAP queries are narrow — no 500 browse cap. Unscoped "all" stays modest.
-  const effectiveLimit = serverStatus ? 50000 : ouFilter === 'all' ? 500 : 5000
   const effectiveParent = ouFilter === 'all' ? '' : ouFilter
+  const searchQ = String(debounced || '').trim()
+  // Fast path: never browse 36k users with empty filters. Require search, status, or OU.
+  const canQuery =
+    Boolean(serverStatus) ||
+    Boolean(effectiveParent) ||
+    searchQ.length >= 2
+  // Locked/status filters are narrow; keep a high but practical ceiling.
+  const effectiveLimit = serverStatus
+    ? (statusFilter === 'locked' || statusFilter === 'lockedOrBadPwd' ? 5000 : 8000)
+    : searchQ
+      ? 300
+      : 500
 
   const loadUsers = useCallback(() => {
+    if (!canQuery) {
+      return Promise.resolve({ users: [], total: 0, truncated: false, searchBase: '', skipped: true })
+    }
     const params = {
-      search: debounced,
+      search: searchQ,
       limit: effectiveLimit,
       parentDn: effectiveParent,
     }
@@ -405,8 +418,9 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
       total: r.total || 0,
       truncated: !!r.truncated,
       searchBase: r.searchBase || '',
+      skipped: false,
     }))
-  }, [debounced, effectiveLimit, effectiveParent, serverStatus])
+  }, [canQuery, searchQ, effectiveLimit, effectiveParent, serverStatus])
 
   const refreshUserTable = useCallback(() => {
     loadUsers()
@@ -422,9 +436,14 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
     setErr('')
     setSelectedDns(new Set())
+    if (!canQuery) {
+      setLoading(false)
+      setData({ users: [], total: 0, truncated: false, searchBase: '' })
+      return undefined
+    }
+    setLoading(true)
     loadUsers()
       .then((next) => {
         if (cancelled) return
@@ -439,7 +458,7 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
     return () => {
       cancelled = true
     }
-  }, [loadUsers, refreshTick])
+  }, [loadUsers, refreshTick, canQuery])
 
   useEffect(() => {
     if (!userRowMenu) return
@@ -714,7 +733,12 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
         )}
         {(statusFilter === 'locked' || statusFilter === 'lockedOrBadPwd') && (
           <span className={`text-xs ${idcsCx.text3}`}>
-            LDAP filter applied on the DC — not limited to the first 500 domain users.
+            Server-side locked filter · stops after results (no full-domain scan).
+          </span>
+        )}
+        {!canQuery && (
+          <span className={`text-xs ${idcsCx.text3}`}>
+            Type ≥2 characters to search, or choose Locked / bad pwd (or an OU).
           </span>
         )}
       </div>
@@ -773,11 +797,11 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
         empty={
           err
             ? 'Failed to load — see error above.'
-            : !loading && filtered.length === 0
-              ? data.users.length === 0
+            : !loading && !canQuery
+              ? 'Search (≥2 chars), pick Locked / bad pwd, or select an OU to load users.'
+              : !loading && filtered.length === 0
                 ? 'No matching users.'
-                : 'No users match the filter.'
-              : null
+                : null
         }
       >
         {filtered.length > 0 && (

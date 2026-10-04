@@ -18,6 +18,9 @@ api.interceptors.request.use(config => {
     config.timeout = 300000
   } else if (reqUrl.includes('/api/ai')) {
     config.timeout = 360000
+  } else if (reqUrl.includes('/api/ad')) {
+    /* AD LDAP list/search — kept short; server aborts after sizeLimit. */
+    config.timeout = 60000
   }
   return config
 })
