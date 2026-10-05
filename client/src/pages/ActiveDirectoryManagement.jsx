@@ -338,6 +338,45 @@ async function unlockUsersSequentially(dns, { concurrency = 6 } = {}) {
   return results
 }
 
+/** Split pasted emails / UPNs / samAccountNames (newline, comma, semicolon, space). */
+function parseUnlockIdentities(raw) {
+  const seen = new Set()
+  const out = []
+  for (const part of String(raw || '').split(/[\s,;]+/)) {
+    const id = part.trim().replace(/^['"<]+|['">]+$/g, '')
+    if (!id) continue
+    const key = id.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(id)
+  }
+  return out
+}
+
+async function unlockUsersByIdentity(identities, { concurrency = 6 } = {}) {
+  const results = { ok: 0, fail: 0, skipped: 0, errors: [] }
+  let i = 0
+  async function worker() {
+    while (i < identities.length) {
+      const idx = i++
+      const identity = identities[idx]
+      try {
+        await setAdUserAccount({ email: identity, unlock: true })
+        results.ok++
+      } catch (e) {
+        results.fail++
+        results.errors.push({
+          dn: identity,
+          error: `${identity}: ${e.response?.data?.error || e.message || 'Unlock failed'}`,
+        })
+      }
+    }
+  }
+  const n = Math.max(1, Math.min(concurrency, identities.length || 1))
+  await Promise.all(Array.from({ length: n }, () => worker()))
+  return results
+}
+
 function csvCell(v) {
   if (v == null) return ''
   const s = String(v)
@@ -541,18 +580,21 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
 
   const unlockSelected = () => runUnlockDns([...selectedDns], 'Selected')
 
+  const pastedIdentities = useMemo(() => parseUnlockIdentities(emailUnlock), [emailUnlock])
+
   const unlockByEmail = async () => {
-    const identity = emailUnlock.trim()
-    if (!identity) return
+    const identities = parseUnlockIdentities(emailUnlock)
+    if (!identities.length) return
     setEmailUnlockBusy(true)
     setUnlockNotice(null)
     try {
-      const r = await setAdUserAccount({ email: identity, unlock: true })
+      const results = await unlockUsersByIdentity(identities)
       setUnlockNotice({
-        type: 'success',
-        text: `Unlocked ${identity}${r?.dn ? ` (${r.dn})` : ''}.`,
+        type: results.fail && !results.ok ? 'error' : results.fail ? 'warn' : 'success',
+        text: `Pasted list: unlocked ${results.ok} of ${identities.length}${results.fail ? `, failed ${results.fail}` : ''}.`,
+        errors: results.errors.slice(0, 20),
       })
-      setEmailUnlock('')
+      if (results.ok) setEmailUnlock('')
       setRefreshTick((n) => n + 1)
     } catch (e) {
       const d = e.response?.data
@@ -623,26 +665,32 @@ function UsersPanel({ statusFilterDefault = 'all', domainFqdn = '', domainUsersT
       >
         <div className="flex-1 min-w-[16rem]">
           <div className={`text-[10px] font-bold uppercase tracking-wide mb-1 ${idcsCx.text3}`}>
-            Unlock by email / UPN
+            Bulk unlock by email / UPN
           </div>
-          <input
-            type="text"
-            placeholder="user@lenskart.in or samAccountName"
+          <textarea
+            rows={4}
+            placeholder={'Paste emails, one per line (or comma-separated)\nuser1@lenskart.in\nuser2@lenskart.in'}
             value={emailUnlock}
             onChange={(e) => setEmailUnlock(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') unlockByEmail()
-            }}
-            className={idcsInputClass('w-full')}
+            className={`${idcsInputClass('w-full')} font-mono text-xs min-h-[5.5rem] resize-y`}
           />
+          <div className={`mt-1 text-[11px] ${idcsCx.text3}`}>
+            {pastedIdentities.length
+              ? `${pastedIdentities.length} unique ${pastedIdentities.length === 1 ? 'account' : 'accounts'} ready`
+              : 'Newlines, commas, or spaces are fine. Also accepts UPN or samAccountName.'}
+          </div>
         </div>
         <button
           type="button"
           onClick={unlockByEmail}
-          disabled={emailUnlockBusy || !emailUnlock.trim()}
+          disabled={emailUnlockBusy || pastedIdentities.length === 0}
           className={`text-sm ${idcsBtnPrimary()}`}
         >
-          {emailUnlockBusy ? 'Unlocking…' : 'Unlock account'}
+          {emailUnlockBusy
+            ? `Unlocking ${pastedIdentities.length}…`
+            : pastedIdentities.length > 1
+              ? `Unlock ${pastedIdentities.length} accounts`
+              : 'Unlock account'}
         </button>
       </div>
 
